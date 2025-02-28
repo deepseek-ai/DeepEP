@@ -36,12 +36,13 @@ After compiling the software, you need to install the appropriate packages based
 For instance, using Ubuntu 22.04 and CUDA 12.3 as an example:
 
 ```bash
-cd packages
+pushd packages
 CUDA=/path/to/cuda ./build-deb-packages.sh
 sudo dpkg -i gdrdrv-dkms_2.4.4_amd64.Ubuntu22_04.deb \
              libgdrapi_2.4.4_amd64.Ubuntu22_04.deb \
              gdrcopy-tests_2.4.4_amd64.Ubuntu22_04+cuda12.3.deb \
              gdrcopy_2.4.4_amd64.Ubuntu22_04.deb
+popd
 sudo ./insmod.sh  # Load kernel modules on the bare-metal system
 ```
 
