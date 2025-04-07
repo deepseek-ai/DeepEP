@@ -36,6 +36,11 @@ void clean_low_latency_buffer(int* clean_0, int num_clean_int_0,
                   clean_0, num_clean_int_0, clean_1, num_clean_int_1);
 }
 
+/*
+kNumWarpGroups = 3
+kNumWarpsPerGroup = 10 
+const auto num_sms = cell_div(num_experts, kNumWarpGroups);
+*/
 template <bool kUseFP8, int kNumWarpGroups, int kNumWarpsPerGroup, int kHidden>
 __global__ __launch_bounds__(kNumWarpGroups * kNumWarpsPerGroup * 32, 1) void
 dispatch(void* packed_recv_x, float* packed_recv_x_scales,
@@ -55,8 +60,8 @@ dispatch(void* packed_recv_x, float* packed_recv_x_scales,
     const auto num_warps = kNumWarpGroups * kNumWarpsPerGroup;
     const auto num_local_experts = num_experts / num_ranks;
     const auto warp_group_id = warp_id / kNumWarpsPerGroup;
-    const auto sub_warp_id = warp_id % kNumWarpsPerGroup;
-    const auto responsible_expert_idx = sm_id * kNumWarpGroups + warp_group_id;
+    const auto sub_warp_id = warp_id % kNumWarpsPerGroup; // 每个warpgroup内的warp id
+    const auto responsible_expert_idx = sm_id * kNumWarpGroups + warp_group_id; // 一个warp group 负责处理一个expert
 
     // FP8 staffs
     constexpr int kNumPerChannels = 128;
@@ -88,7 +93,8 @@ dispatch(void* packed_recv_x, float* packed_recv_x_scales,
         EP_STATIC_ASSERT(kNumElemsPerRead * 32 % kNumPerChannels == 0, "Invalid vectorization");
         const auto num_threads = (num_warps - 1) * 32;
         const size_t hidden_bf16_int4 = kHidden / kNumElemsPerRead;
-
+        
+        // 1个block处理一行token hiddenstates
         for (int token_idx = sm_id; token_idx < num_tokens; token_idx += num_sms) {
             const auto x_int4 = reinterpret_cast<const int4*>(x) + token_idx * hidden_bf16_int4;
             const auto rdma_x_src_idx = reinterpret_cast<int*>(reinterpret_cast<uint8_t*>(rdma_x) + token_idx * num_bytes_per_msg);
@@ -137,7 +143,10 @@ dispatch(void* packed_recv_x, float* packed_recv_x_scales,
                 }
             }
             asm volatile("bar.sync 1, %0;" :: "r"(num_threads));
-
+            
+            /*
+            rdma_recv_x buffer应该长 [num_local_experts, num_ranks, max_dispatch_tokens * hidden_states]
+            */
             // Issue IBGDA sends
             if (dst_expert_idx >= 0) {
                 int slot_idx = lane_id == 0 ? atomicAdd(atomic_counter_per_expert + dst_expert_idx, 1) : 0;
@@ -160,7 +169,7 @@ dispatch(void* packed_recv_x, float* packed_recv_x_scales,
 
                 // Increase counter after finishing
                 __syncwarp();
-                lane_id == 0 ? atomic_add_release_global(atomic_finish_counter_per_expert + dst_expert_idx, 1) : 0;
+                lane_id == 0 ? atomic_add_release_global(atomic_finish_counter_per_expert + dst_expert_idx, 1) : 0; // 每次send完一个token都会atomicadd 1， 那么总的就是add token数量
             }
         }
     } else if (warp_id == num_warps - 1) {
@@ -170,6 +179,7 @@ dispatch(void* packed_recv_x, float* packed_recv_x_scales,
             EP_DEVICE_ASSERT(ibgda_get_state()->num_rc_per_pe == num_local_experts);
 
             // The first SM is also responsible for cleaning the next buffer
+            // 这里用了ping pong buffer ^=1 来交替
             #pragma unroll
             for (int i = lane_id; i < num_next_clean_int; i += 32)
                 next_clean[i] = 0;
@@ -182,10 +192,12 @@ dispatch(void* packed_recv_x, float* packed_recv_x_scales,
         }
 
         // This SM should be responsible for some destination experts, read `topk_idx` for them
+        // 一个warpgroup负责一个expert，那么1个block就负责 numwarpgroup 个expert
         int expert_count[kNumWarpGroups] = {0};
         const auto expert_begin_idx = sm_id * kNumWarpGroups;
         const auto expert_end_idx = min(expert_begin_idx + kNumWarpGroups, num_experts);
 
+        // 计算当前block所负责的expert，需要发送多少个token
         // Per lane count
         #pragma unroll 8
         for (int i = lane_id; i < num_tokens * num_topk; i += 32) {
@@ -208,13 +220,14 @@ dispatch(void* packed_recv_x, float* packed_recv_x_scales,
 
     // Issue count sends
     if (responsible_expert_idx < num_experts and sub_warp_id == 0 and lane_id == 0) {
-        const auto dst_rank = responsible_expert_idx / num_local_experts;
-        const auto dst_expert_local_idx = responsible_expert_idx % num_local_experts;
-        const auto num_tokens_sent = shared_num_tokens_sent_per_expert[responsible_expert_idx - sm_id * kNumWarpGroups];
+        const auto dst_rank = responsible_expert_idx / num_local_experts; // 对端rank id
+        const auto dst_expert_local_idx = responsible_expert_idx % num_local_experts; // 对端expert id
+        const auto num_tokens_sent = shared_num_tokens_sent_per_expert[responsible_expert_idx - sm_id * kNumWarpGroups]; // responsible_expert_idx = sm_id * kNumWarpGroups + warp_group_id 所以其实是warp_group_id
 
         // Wait local sends issued and send expert counts
-        while (ld_acquire_global(atomic_finish_counter_per_expert + responsible_expert_idx) != FINISHED_SUM_TAG * 2);
+        while (ld_acquire_global(atomic_finish_counter_per_expert + responsible_expert_idx) != FINISHED_SUM_TAG * 2); // 前面两次atomic add了 sum_tag, sum_tag - tokens, tokens 所以总数就应该是 sum_tag * 2
         if (dst_rank != rank) {
+            // 告诉远端rank需要接受多少token数
             nvshmemi_ibgda_amo_nonfetch_add(rdma_recv_count + dst_expert_local_idx * num_ranks + rank, -num_tokens_sent - 1, dst_rank, dst_expert_local_idx);
         } else {
             st_na_release(rdma_recv_count + dst_expert_local_idx * num_ranks + rank, -num_tokens_sent - 1);
