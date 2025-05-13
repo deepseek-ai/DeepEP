@@ -303,12 +303,12 @@ class Buffer:
             return (recv_x, recv_x_scales) if x_scales is not None else recv_x, recv_topk_idx, recv_topk_weights, num_recv_tokens_per_expert_list, handle, EventOverlap(event)
 
     # noinspection PyTypeChecker
-    def combine(self, x: torch.Tensor, handle: Tuple,
+    def combine(self, x: Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]], handle: Tuple,
                 topk_weights: Optional[torch.Tensor] = None,
                 config: Optional[Config] = None,
                 previous_event: Optional[EventOverlap] = None, async_finish: bool = False,
                 allocate_on_comm_stream: bool = False) -> \
-            Tuple[torch.Tensor, Optional[torch.Tensor], EventOverlap]:
+            Tuple[Union[Tuple[torch.Tensor, torch.Tensor], torch.Tensor], Optional[torch.Tensor], EventOverlap]:
         """
         Combine (reduce) tokens (addition **without** weights) from different ranks, both intranode and internode
             settings are supported.
@@ -317,7 +317,10 @@ class Buffer:
             index should be visible via RDMA.
 
         Arguments:
-            x: `[num_tokens, hidden]` with `torch.bfloat16`, the tokens to send for reducing to its original ranks.
+            x: `torch.Tensor` or tuple of `torch.Tensor`, for the first type, the shape must be `[num_tokens, hidden]`,
+                and type must be `torch.bfloat16`; for the second type, the first element of the tuple must be shaped as
+                `[num_tokens, hidden]` with type `torch.float8_e4m3fn`, the second must be `[num_tokens, hidden // 128]`
+                 (requiring divisible) with type `torch.float`.
             handle: a must-set communication handle, you can obtain this from the dispatch function.
             topk_weights: `[num_tokens, num_topk]` with `torch.float`, the tokens' top-k weights for reducing to its original ranks.
             config: the performance tuning config.
@@ -326,7 +329,8 @@ class Buffer:
             allocate_on_comm_stream: control whether all the allocated tensors' ownership to be on the communication stream.
 
         Returns:
-            recv_x: the reduced token from its dispatched ranks.
+            recv_x: the reduced token from its dispatched ranks, the same type and tuple as the input `x`, but the number of tokens equals to the
+                reduced token count.
             recv_topk_weights: the reduced top-k weights from its dispatch ranks.
             event: the event after executing the kernel (valid only if `async_finish` is set).
         """
@@ -341,11 +345,12 @@ class Buffer:
         rank_prefix_matrix, _, channel_prefix_matrix, src_idx, is_recv_token_in_rank, send_head = handle
 
         # Launch the kernel
-        recv_x, recv_topk_weights, event = self.runtime.intranode_combine(
-            x, topk_weights,
+        x, x_scales = x if isinstance(x, tuple) else (x, None)
+        recv_x, recv_x_scales, recv_topk_weights, event = self.runtime.intranode_combine(
+            x, x_scales, topk_weights,
             src_idx, rank_prefix_matrix, channel_prefix_matrix, send_head, config,
             getattr(previous_event, 'event', None), async_finish, allocate_on_comm_stream)
-        return recv_x, recv_topk_weights, EventOverlap(event)
+        return (recv_x, recv_x_scales) if x_scales is not None else recv_x, recv_topk_weights, EventOverlap(event)
 
     # noinspection PyTypeChecker
     def internode_dispatch(self, x: Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]],

@@ -54,10 +54,10 @@ void cached_notify_combine(void** buffer_ptrs, int* send_head, int num_channels,
                            int** task_fifo_ptrs, int head, int rank, int num_ranks, cudaStream_t stream);
 
 void combine(cudaDataType_t type,
-             void* recv_x, float* recv_topk_weights,
-             const void* x, const float* topk_weights,
+             void* recv_x, float* recv_x_scales, float* recv_topk_weights,
+             const void* x, const float* x_scales, const float* topk_weights,
              const int* src_idx, const int* rank_prefix_matrix, const int* channel_prefix_matrix,
-             int* send_head, int num_tokens, int num_recv_tokens, int hidden, int num_topk,
+             int* send_head, int num_tokens, int num_recv_tokens, int hidden, int num_topk, int num_scales,
              void** buffer_ptrs, int rank, int num_ranks,
              cudaStream_t stream, int num_sms,
              int num_max_send_tokens, int num_recv_buffer_tokens);

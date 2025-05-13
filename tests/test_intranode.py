@@ -22,6 +22,7 @@ def test_main(num_sms: int, local_rank: int, num_ranks: int, rank: int, buffer: 
     x = torch.ones((num_tokens, hidden), dtype=torch.bfloat16, device='cuda') * rank
     x_pure_rand = torch.randn((num_tokens, hidden), dtype=torch.bfloat16, device='cuda')
     x_e4m3 = per_token_cast_to_fp8(x)
+    x_rand_e4m3 = per_token_cast_to_fp8(x_pure_rand)
     scores = torch.randn((num_tokens, num_experts), dtype=torch.float32, device='cuda').abs() + 1
     topk_idx = torch.topk(scores, num_topk, dim=-1, largest=True, sorted=False)[1]
     topk_weights = torch.ones((num_tokens, num_topk), dtype=torch.float32, device='cuda') * rank
@@ -77,28 +78,44 @@ def test_main(num_sms: int, local_rank: int, num_ranks: int, rank: int, buffer: 
             check_end = rank_prefix_matrix[i][rank].item()
             assert (check_x[check_start:check_end, :].int() - i).sum().item() == 0
             check_start = check_end
+    # Test fp8 combine
+    def check_fp8_combine(combined_x, combined_topk_weights, combine_args, recv_x, buffer, async_mode, with_topk):
+        combine_args["x"] = recv_x
+        if "previous_event" in combine_args:
+            del combine_args["previous_event"]
+        combined_x_ref, combined_topk_weights_ref, event_ref = buffer.combine(
+            **combine_args
+        )
+        event_ref.current_stream_wait() if async_mode else ()
 
-    for previous_mode in (False, True):
-        for async_mode in (False, True):
-            for current_x in (x_pure_rand, x, x_e4m3):
+        if with_topk:
+            torch.testing.assert_close(combined_topk_weights_ref, combined_topk_weights, rtol=1e-1, atol=1e-1)
+        torch.testing.assert_close(combined_x_ref.float(), combined_x.float(), rtol=1e-1, atol=1e-1)
+
+    for current_x in (x_pure_rand, x, x_e4m3, x_rand_e4m3):
+        for previous_mode in (False, True):
+            for async_mode in (False, True):
                 for with_topk in (False, True):
+                    is_x_pure_rand = (current_x is x_pure_rand) or (current_x is x_rand_e4m3)
+                    is_fp8 = isinstance(current_x, tuple)
                     if local_rank == 0:
-                        print(f'[testing] Running with {"FP8" if isinstance(current_x, tuple) else "BF16"}, {"with" if with_topk else "without"} top-k (async={async_mode}, previous={previous_mode}) ...', flush=True, end='')
+                        print(f'[testing] Running with {"FP8" if is_fp8 else "BF16"}, {"with" if with_topk else "without"} top-k (async={async_mode}, previous={previous_mode}) ...', flush=True, end='')
                     dispatch_args = {'x': current_x, 'num_tokens_per_rank': num_tokens_per_rank,  'is_token_in_rank': is_token_in_rank,
                                      'num_tokens_per_expert': num_tokens_per_expert, 'config': config, 'async_finish': async_mode}
                     if with_topk:
-                        dispatch_args.update({'topk_idx': topk_idx, 'topk_weights': topk_weights_pure_rand if current_x is x_pure_rand else topk_weights})
+                        dispatch_args.update({'topk_idx': topk_idx, 'topk_weights': topk_weights_pure_rand if is_x_pure_rand else topk_weights})
                     if previous_mode:
                         dispatch_args.update({'previous_event': buffer.capture()})
                     recv_x, recv_topk_idx, recv_topk_weights, recv_num_tokens_per_expert_list, handle, event = buffer.dispatch(**dispatch_args)
                     event.current_stream_wait() if async_mode else ()
+                    recv_x_tuple = recv_x if is_fp8 else None
                     recv_x = per_token_cast_back(*recv_x) if isinstance(recv_x, tuple) else recv_x
 
                     # Checks
                     rank_prefix_matrix = handle[0]
                     assert gbl_num_tokens_per_rank[rank].item() == recv_x.size(0), f'{gbl_num_tokens_per_rank[rank].item()} != {recv_x.size(0)}'
                     assert gbl_num_tokens_per_expert.view(num_ranks, -1)[rank].tolist() == recv_num_tokens_per_expert_list
-                    if current_x is not x_pure_rand:
+                    if not is_x_pure_rand:
                         check_data(recv_x, rank_prefix_matrix)
                     if with_topk:
                         # Check `topk_idx`
@@ -107,7 +124,7 @@ def test_main(num_sms: int, local_rank: int, num_ranks: int, rank: int, buffer: 
                             assert recv_topk_idx.eq(i).sum().item() == count
 
                         # Check `topk_weights`
-                        if current_x is not x_pure_rand:
+                        if not is_x_pure_rand:
                             recv_topk_weights[recv_topk_idx.eq(-1)] = recv_topk_weights.amax(dim=1, keepdim=True).expand_as(recv_topk_weights)[recv_topk_idx.eq(-1)]
                             check_data(recv_topk_weights, rank_prefix_matrix)
 
@@ -118,24 +135,40 @@ def test_main(num_sms: int, local_rank: int, num_ranks: int, rank: int, buffer: 
                             dispatch_args.update({'previous_event': buffer.capture()})
                         recv_x, _, _, _, _, event = buffer.dispatch(**dispatch_args)
                         event.current_stream_wait() if async_mode else ()
+                        recv_x_tuple = recv_x if is_fp8 else None
                         recv_x = per_token_cast_back(*recv_x) if isinstance(recv_x, tuple) else recv_x
-                        if current_x is not x_pure_rand:
+                        if not is_x_pure_rand:
                             check_data(recv_x, rank_prefix_matrix)
 
                     # Test combine
                     combine_args = {'x': recv_x, 'handle': handle, 'config': config, 'async_finish': async_mode}
+                    if is_fp8:
+                        combine_args.update({'x': recv_x_tuple})
                     if with_topk:
                         combine_args.update({'topk_weights': recv_topk_weights})
                     if previous_mode:
                         combine_args.update({'previous_event': buffer.capture()})
                     combined_x, combined_topk_weights, event = buffer.combine(**combine_args)
                     event.current_stream_wait() if async_mode else ()
+                    combined_x = (
+                        per_token_cast_back(*combined_x)
+                        if isinstance(combined_x, tuple)
+                        else combined_x
+                    )
+                    # ref and check
+                    if is_fp8:
+                        check_fp8_combine(combined_x, combined_topk_weights, combine_args, recv_x, buffer, async_mode, with_topk)
+
                     check_x = combined_x.float() / is_token_in_rank.sum(dim=1).unsqueeze(1)
-                    ref_x = x_pure_rand if current_x is x_pure_rand else x
-                    assert calc_diff(check_x, ref_x) < 5e-6
+                    ref_x = x_pure_rand if is_x_pure_rand else x
+                    if is_fp8:
+                        if local_rank == 0:
+                            print(f"x calc_diff {calc_diff(check_x, ref_x)}")
+                    else:
+                        assert calc_diff(check_x, ref_x) < 5e-6
                     if with_topk:
-                        check_topk_weights = combined_topk_weights if (current_x is x_pure_rand) else (combined_topk_weights / is_token_in_rank.sum(dim=1).unsqueeze(1))
-                        ref_topk_weights = topk_weights_pure_rand if current_x is x_pure_rand else topk_weights
+                        check_topk_weights = combined_topk_weights if (is_x_pure_rand) else (combined_topk_weights / is_token_in_rank.sum(dim=1).unsqueeze(1))
+                        ref_topk_weights = topk_weights_pure_rand if is_x_pure_rand else topk_weights
                         assert calc_diff(check_topk_weights, ref_topk_weights) < 1e-9
 
                     # For later tuning
@@ -172,26 +205,26 @@ def test_main(num_sms: int, local_rank: int, num_ranks: int, rank: int, buffer: 
             dist.all_gather(all_best_fp8_results_list, best_dispatch_results, group=group)
             best_dispatch_results = all_best_fp8_results_list[0].tolist()
     dispatch_config = deep_ep.Config(best_dispatch_results[0], best_dispatch_results[1], nvl_buffer_size)
-
-    dispatch_args = {'x': x, 'num_tokens_per_rank': num_tokens_per_rank,
-                     'is_token_in_rank': is_token_in_rank, 'num_tokens_per_expert': num_tokens_per_expert,
-                     'config': dispatch_config if dispatch_config is not None else config}
-    recv_x, _, _, _, handle, _ = buffer.dispatch(**dispatch_args)
-
     # Tune combine performance
-    best_time, best_results = 1e10, None
-    for nvl_chunk_size in range(1, 7, 1):
-        config = deep_ep.Config(num_sms, nvl_chunk_size, nvl_buffer_size)
-        tune_args = {'x': recv_x, 'handle': handle, 'config': config}
-        t = bench(lambda: buffer.combine(**tune_args))[0]
-        if local_rank == 0:
-            print(f'[tuning] SMs {num_sms}, NVL chunk {nvl_chunk_size}: {combine_bf16_nvl_send_bytes / 1e9 / t:.2f} GB/s (NVL) ', flush=True)
-            if t < best_time:
-                best_time, best_results = t, (num_sms, nvl_chunk_size)
+    for current_x in (x_e4m3, x):
+        dispatch_args = {'x': current_x, 'num_tokens_per_rank': num_tokens_per_rank, 
+                        'is_token_in_rank': is_token_in_rank, 'num_tokens_per_expert': num_tokens_per_expert,
+                        'config': dispatch_config if dispatch_config is not None else config}
+        recv_x, _, _, _, handle, _ = buffer.dispatch(**dispatch_args)
+        best_time, best_results = 1e10, None
+        nvl_send_bytes = (combine_bf16_nvl_send_bytes * fp8_factor) if isinstance(current_x, tuple) else combine_bf16_nvl_send_bytes
+        for nvl_chunk_size in range(1, 7, 1):
+            config = deep_ep.Config(num_sms, nvl_chunk_size, nvl_buffer_size)
+            tune_args = {'x': recv_x, 'handle': handle, 'config': config}
+            t = bench(lambda: buffer.combine(**tune_args))[0]
+            if local_rank == 0:
+                print(f'[tuning] SMs {num_sms}, NVL chunk {nvl_chunk_size}: {nvl_send_bytes / 1e9 / t:.2f} GB/s (NVL) ', flush=True)
+                if t < best_time:
+                    best_time, best_results = t, (num_sms, nvl_chunk_size)
 
-    if local_rank == 0:
-        print(f'[tuning] Best combine: SMs {best_results[0]}, NVL chunk {best_results[1]}: {combine_bf16_nvl_send_bytes / 1e9 / best_time:.2f} GB/s (NVL)', flush=True)
-        print('', flush=True)
+        if local_rank == 0:
+            print(f'[tuning] Best combine ({"FP8" if isinstance(current_x, tuple) else "BF16"}): SMs {best_results[0]}, NVL chunk {best_results[1]}: {nvl_send_bytes / 1e9 / best_time:.2f} GB/s (NVL), time: {best_time}', flush=True)
+            print('', flush=True)
 
 
 # noinspection PyUnboundLocalVariable

@@ -534,10 +534,10 @@ void cached_notify_combine(void** buffer_ptrs, int* send_head, int num_channels,
 
 template<typename dtype_t, int kNumRanks, int kNumThreads>
 __global__ void __launch_bounds__(kNumThreads, 1)
-combine(dtype_t* recv_x, float* recv_topk_weights,
-        const dtype_t* x, const float* topk_weights,
+combine(dtype_t* recv_x, float* recv_x_scales, float* recv_topk_weights,
+        const dtype_t* x, const float* x_scales, const float* topk_weights,
         const int* src_idx, const int* rank_prefix_matrix, const int* channel_prefix_matrix,
-        int* send_head, int num_tokens, int num_recv_tokens, int hidden, int num_topk,
+        int* send_head, int num_tokens, int num_recv_tokens, int hidden, int num_topk, int num_scales,
         void **buffer_ptrs, int rank,
         int num_max_send_tokens, int num_recv_buffer_tokens) {
     const auto num_sms = static_cast<int>(gridDim.x);
@@ -552,6 +552,7 @@ combine(dtype_t* recv_x, float* recv_topk_weights,
     int hidden_int4 = hidden * sizeof(dtype_t) / sizeof(int4);
     auto x_int4 = reinterpret_cast<const int4*>(x);
     auto recv_int4 = reinterpret_cast<int4*>(recv_x);
+    constexpr bool is_fp8 = std::is_same<dtype_t, __nv_fp8_e4m3>::value;
 
     if (is_sender) {
         // Workers for sending
@@ -580,6 +581,7 @@ combine(dtype_t* recv_x, float* recv_topk_weights,
         auto channel_x_buffers = Buffer<int4>(ptr, num_channels_total * num_recv_buffer_tokens * hidden_int4, channel_rank_offset * num_recv_buffer_tokens * hidden_int4);
         auto channel_src_idx_buffers = Buffer<int>(ptr, num_channels_total * num_recv_buffer_tokens, channel_rank_offset * num_recv_buffer_tokens);
         auto channel_topk_weights_buffers = Buffer<float>(ptr, num_channels_total * num_recv_buffer_tokens * num_topk, channel_rank_offset * num_recv_buffer_tokens * num_topk);
+        auto channel_x_scales_buffers = Buffer<float>(ptr, num_channels_total * num_recv_buffer_tokens * num_scales, channel_rank_offset * num_recv_buffer_tokens * num_scales);
 
         // Get tasks
         // NOTES: `channel_offset` is already shifted
@@ -627,6 +629,11 @@ combine(dtype_t* recv_x, float* recv_topk_weights,
                 // Send `topk_weights`
                 if (num_topk > 0 and send_lane_id < num_topk)
                     channel_topk_weights_buffers[dst_slot_idx * num_topk + send_lane_id] = __ldg(topk_weights + (token_idx + i) * num_topk + send_lane_id);
+                
+                // Copy `x_scales`
+                #pragma unroll
+                for (int j = send_lane_id; j < num_scales; j += 32)
+                    channel_x_scales_buffers[dst_slot_idx * num_scales + j] = __ldg(x_scales + (token_idx + i) * num_scales + j);
             }
             token_idx += num_round_tokens;
             current_channel_tail_idx += num_round_tokens;
@@ -642,6 +649,7 @@ combine(dtype_t* recv_x, float* recv_topk_weights,
         constexpr int num_recv_warps = kNumThreads / 32;
         const auto recv_warp_id = thread_id / 32;
         const auto recv_lane_id = thread_id % 32;
+        constexpr int num_threads_in_quant_group = 128 / kDtypePerInt4;
         EP_DEVICE_ASSERT(kNumRanks <= 32 and kNumThreads > 32);
         EP_DEVICE_ASSERT(thread_id >= 0 and kNumThreads % 32 == 0);
 
@@ -689,6 +697,8 @@ combine(dtype_t* recv_x, float* recv_topk_weights,
             // All lanes will use data buffer, but only rank lane will use `head/tail/src_idx`
             Buffer<int4> channel_x_buffers[kNumRanks];
             Buffer<float> channel_topk_weights_buffers[kNumRanks];
+            Buffer<float> channel_x_scales_buffers[kNumRanks];
+
 
             // Calculate pointers by the specific layout
             #pragma unroll
@@ -706,6 +716,9 @@ combine(dtype_t* recv_x, float* recv_topk_weights,
 
                 // `topk_weights_buffers`: kNumChannels * kNumRanks * num_recv_buffer_tokens * num_topk * sizeof(float)
                 channel_topk_weights_buffers[i] = Buffer<float>(ptr, num_channels_total * num_recv_buffer_tokens * num_topk, channel_rank_offset * num_recv_buffer_tokens * num_topk);
+
+                // `x_scales_buffers`: kNumChannels * kNumRanks * num_recv_buffer_tokens * num_scales * sizeof(float)
+                channel_x_scales_buffers[i] = Buffer<float>(ptr, num_channels_total * num_recv_buffer_tokens * num_scales, channel_rank_offset * num_recv_buffer_tokens * num_scales);
             }
 
             // The same tokens as the dispatch process
@@ -740,32 +753,68 @@ combine(dtype_t* recv_x, float* recv_topk_weights,
                     }
                 }
 
-                // Reduce data
+                // Reduce data 
                 #pragma unroll
                 for (int i = recv_lane_id; i < hidden_int4; i += 32) {
                     // Read buffers
                     int4 recv_value_int4[kNumRanks];
+                    float recv_scales[kNumRanks] = {0};
+                    int scale_idx = (i * kDtypePerInt4) / 128;
                     #pragma unroll
-                    for (int j = 0; j < num_topk_ranks; ++ j)
+                    for (int j = 0; j < num_topk_ranks; ++ j){
                         recv_value_int4[j] = ld_nc_global(channel_x_buffers[topk_ranks[j]].buffer() + slot_indices[j] * hidden_int4 + i);
+                        if (is_fp8)
+                            recv_scales[j] = ld_nc_global(channel_x_scales_buffers[topk_ranks[j]].buffer() + slot_indices[j] * num_scales + scale_idx);
+                    }
+                        
 
                     // Reduce all-to-all results
                     float values[kDtypePerInt4] = {0};
                     #pragma unroll
                     for (int j = 0; j < num_topk_ranks; ++ j) {
                         auto recv_value_dtypes = reinterpret_cast<const dtype_t*>(&recv_value_int4[j]);
-                        #pragma unroll
-                        for (int k = 0; k < kDtypePerInt4; ++ k)
-                            values[k] += static_cast<float>(recv_value_dtypes[k]);
+                        if (is_fp8){
+                            float scale = recv_scales[j];
+                            #pragma unroll
+                            for (int k = 0; k < kDtypePerInt4; ++ k)
+                                values[k] += static_cast<float>(recv_value_dtypes[k]) * scale;
+                        } else {
+                            #pragma unroll
+                            for (int k = 0; k < kDtypePerInt4; ++ k)
+                                values[k] += static_cast<float>(recv_value_dtypes[k]);
+                        }
                     }
-
-                    // Cast back to `dtype_t` and write
                     int4 out_int4;
                     auto out_dtypes = reinterpret_cast<dtype_t*>(&out_int4);
-                    #pragma unroll
-                    for (int j = 0; j < kDtypePerInt4; ++ j)
-                        out_dtypes[j] = static_cast<dtype_t>(values[j]);
-                    recv_int4[token_idx * hidden_int4 + i] = out_int4;
+                    if (is_fp8){
+                        // quant
+                        float max_val = 1e-15;
+                        for (int k = 0; k < kDtypePerInt4; k++) {
+                            max_val = fmaxf(max_val, fabsf(values[k]));
+                        }
+                        __syncwarp();
+                        for (int offset = num_threads_in_quant_group / 2; offset > 0; offset >>= 1) {
+                            float shuffled_val = __shfl_down_sync(0xFFFFFFFF, max_val, offset, num_threads_in_quant_group);
+                            max_val = fmaxf(max_val, shuffled_val);
+                        }
+                        max_val = __shfl_sync(0xFFFFFFFF, max_val, 0, num_threads_in_quant_group);
+                        float scale = fdividef(max_val, 448.0);
+                        float mul = fdividef(1, scale);
+                        // Quant and cast back to `dtype_t` and write
+                        #pragma unroll
+                        for (int j = 0; j < kDtypePerInt4; ++ j)
+                            out_dtypes[j] = static_cast<dtype_t>(values[j] * mul);
+                        recv_int4[token_idx * hidden_int4 + i] = out_int4;
+                        if ((i * kDtypePerInt4) % 128 == 0)
+                            recv_x_scales[token_idx * num_scales + scale_idx] = scale;
+                    } else {
+                        // Cast back to `dtype_t` and write
+                        #pragma unroll
+                        for (int j = 0; j < kDtypePerInt4; ++ j)
+                            out_dtypes[j] = static_cast<dtype_t>(values[j]);
+                        recv_int4[token_idx * hidden_int4 + i] = out_int4;
+                    }
+                    
                 }
 
                 // Reduce `topk_weights`
@@ -791,10 +840,10 @@ combine(dtype_t* recv_x, float* recv_topk_weights,
 }
 
 void combine(cudaDataType_t type,
-             void* recv_x, float* recv_topk_weights,
-             const void* x, const float* topk_weights,
+             void* recv_x, float* recv_x_scales, float* recv_topk_weights,
+             const void* x, const float* x_scales, const float* topk_weights,
              const int* src_idx, const int* rank_prefix_matrix, const int* channel_prefix_matrix,
-             int* send_head, int num_tokens, int num_recv_tokens, int hidden, int num_topk,
+             int* send_head, int num_tokens, int num_recv_tokens, int hidden, int num_topk, int num_scales,
              void** buffer_ptrs, int rank, int num_ranks,
              cudaStream_t stream, int num_sms,
              int num_max_send_tokens, int num_recv_buffer_tokens) {
@@ -802,10 +851,10 @@ void combine(cudaDataType_t type,
 
 #define COMBINE_LAUNCH_CASE(dtype, ranks) \
     LAUNCH_KERNEL(&cfg, (combine<dtype, ranks, kNumThreads>), \
-        reinterpret_cast<dtype*>(recv_x), recv_topk_weights, \
-        reinterpret_cast<const dtype*>(x), topk_weights,   \
+        reinterpret_cast<dtype*>(recv_x), recv_x_scales, recv_topk_weights, \
+        reinterpret_cast<const dtype*>(x), x_scales, topk_weights,   \
         src_idx, rank_prefix_matrix, channel_prefix_matrix, \
-        send_head, num_tokens, num_recv_tokens, hidden, num_topk, \
+        send_head, num_tokens, num_recv_tokens, hidden, num_topk, num_scales, \
         buffer_ptrs, rank, \
         num_max_send_tokens, num_recv_buffer_tokens); \
     break

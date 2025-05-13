@@ -48,6 +48,7 @@
     switch (type) { \
         case CUDA_R_16BF: case_macro(nv_bfloat16); \
         case CUDA_R_32F:  case_macro(float); \
+        case CUDA_R_8F_E4M3:  case_macro(__nv_fp8_e4m3); \
         default: EP_HOST_ASSERT(false && "Unsupported type"); \
     } while (false)
 

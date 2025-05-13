@@ -503,8 +503,8 @@ Buffer::intranode_dispatch(const torch::Tensor& x, const std::optional<torch::Te
     return {recv_x, recv_x_scales, recv_topk_idx, recv_topk_weights, num_recv_tokens_per_expert_list, rank_prefix_matrix, channel_prefix_matrix, recv_channel_prefix_matrix, recv_src_idx, send_head, event};
 }
 
-std::tuple<torch::Tensor, std::optional<torch::Tensor>, std::optional<EventHandle>>
-Buffer::intranode_combine(const torch::Tensor& x, const std::optional<torch::Tensor>& topk_weights,
+std::tuple<torch::Tensor, std::optional<torch::Tensor>, std::optional<torch::Tensor>, std::optional<EventHandle>>
+Buffer::intranode_combine(const torch::Tensor& x, const std::optional<torch::Tensor>& x_scales, const std::optional<torch::Tensor>& topk_weights,
                           const torch::Tensor& src_idx, const torch::Tensor& rank_prefix_matrix, const torch::Tensor& channel_prefix_matrix,
                           const torch::Tensor& send_head, const Config& config, std::optional<EventHandle>& previous_event, bool async, bool allocate_on_comm_stream) {
     EP_HOST_ASSERT(x.dim() == 2 and x.is_contiguous());
@@ -525,6 +525,18 @@ Buffer::intranode_combine(const torch::Tensor& x, const std::optional<torch::Ten
     EP_HOST_ASSERT(channel_prefix_matrix.size(0) == num_ranks and channel_prefix_matrix.size(1) == num_channels);
     EP_HOST_ASSERT((hidden * x.element_size()) % sizeof(int4) == 0);
 
+    // FP8 scales checks
+    float* x_scales_ptr = nullptr;
+    int num_scales = 0;
+    if (x_scales.has_value()) {
+        EP_HOST_ASSERT(x.element_size() == 1);
+        EP_HOST_ASSERT(x_scales->scalar_type() == torch::kFloat32);
+        EP_HOST_ASSERT(x_scales->dim() > 0 and x_scales->dim() < 3 and x_scales->is_contiguous());
+        EP_HOST_ASSERT(x_scales->size(0) == num_tokens);
+        num_scales = x_scales->dim() == 1 ? 1 : static_cast<int>(x_scales->size(1));
+        x_scales_ptr = x_scales->data_ptr<float>();
+    }
+
     // Allocate all tensors on comm stream if set
     // NOTES: do not allocate tensors upfront!
     auto compute_stream = at::cuda::getCurrentCUDAStream();
@@ -544,6 +556,7 @@ Buffer::intranode_combine(const torch::Tensor& x, const std::optional<torch::Ten
     auto recv_topk_weights = std::optional<torch::Tensor>();
     float* topk_weights_ptr = nullptr;
     float* recv_topk_weights_ptr = nullptr;
+    float* recv_x_scales_ptr = nullptr;
     if (topk_weights.has_value()) {
         EP_HOST_ASSERT(topk_weights->dim() == 2 and topk_weights->is_contiguous());
         EP_HOST_ASSERT(topk_weights->size(0) == num_tokens);
@@ -566,16 +579,24 @@ Buffer::intranode_combine(const torch::Tensor& x, const std::optional<torch::Ten
 
     // Combine data
     auto recv_x = torch::empty({num_recv_tokens, hidden}, x.options());
+    auto recv_x_scales = std::optional<torch::Tensor>();
+    if (x_scales.has_value()) {
+        recv_x_scales = x_scales->dim() == 1 ?
+                        torch::empty({num_recv_tokens}, x_scales->options()) :
+                        torch::empty({num_recv_tokens, num_scales}, x_scales->options());
+        recv_x_scales_ptr = recv_x_scales->data_ptr<float>();
+    }
     EP_HOST_ASSERT(num_channels * num_ranks * sizeof(int) * 2 +                                                      // Queue head and tail
                    num_channels * num_ranks * config.num_max_nvl_chunked_recv_tokens * hidden * x.element_size() +    // Data buffer
                    num_channels * num_ranks * config.num_max_nvl_chunked_recv_tokens * sizeof(int) +                  // Source index buffer
-                   num_channels * num_ranks * config.num_max_nvl_chunked_recv_tokens * num_topk * sizeof(float)       // Top-k weight buffer
+                   num_channels * num_ranks * config.num_max_nvl_chunked_recv_tokens * num_topk * sizeof(float) +     // Top-k weight buffer
+                   num_channels * num_ranks * config.num_max_nvl_chunked_recv_tokens * sizeof(float) * num_scales     // FP8 scale buffer
                    <= num_nvl_bytes);
     intranode::combine(at::cuda::ScalarTypeToCudaDataType(x.scalar_type()),
-                       recv_x.data_ptr(), recv_topk_weights_ptr,
-                       x.data_ptr(), topk_weights_ptr,
+                       recv_x.data_ptr(), recv_x_scales_ptr, recv_topk_weights_ptr,
+                       x.data_ptr(), x_scales_ptr, topk_weights_ptr,
                        src_idx.data_ptr<int>(), rank_prefix_matrix.data_ptr<int>(), channel_prefix_matrix.data_ptr<int>(),
-                       send_head.data_ptr<int>(), num_tokens, num_recv_tokens, hidden, num_topk,
+                       send_head.data_ptr<int>(), num_tokens, num_recv_tokens, hidden, num_topk, num_scales,
                        buffer_ptrs_gpu, rank, num_ranks,
                        comm_stream, config.num_sms,
                        config.num_max_nvl_chunked_send_tokens, config.num_max_nvl_chunked_recv_tokens);
@@ -589,7 +610,7 @@ Buffer::intranode_combine(const torch::Tensor& x, const std::optional<torch::Ten
             if (allocate_on_comm_stream)
                 t.record_stream(compute_stream);
         }
-        for (auto& to: {topk_weights, recv_topk_weights}) {
+        for (auto& to: {x_scales, topk_weights, recv_topk_weights, recv_x_scales}) {
             to.has_value() ? to->record_stream(comm_stream) : void();
             if (allocate_on_comm_stream)
                 to.has_value() ? to->record_stream(compute_stream) : void();
@@ -602,7 +623,7 @@ Buffer::intranode_combine(const torch::Tensor& x, const std::optional<torch::Ten
     if (allocate_on_comm_stream)
         at::cuda::setCurrentCUDAStream(compute_stream);
 
-    return {recv_x, recv_topk_weights, event};
+    return {recv_x, recv_x_scales, recv_topk_weights, event};
 }
 
 std::tuple<torch::Tensor, std::optional<torch::Tensor>, std::optional<torch::Tensor>, std::optional<torch::Tensor>, std::vector<int>, torch::Tensor, torch::Tensor, std::optional<torch::Tensor>, torch::Tensor, std::optional<torch::Tensor>, torch::Tensor, std::optional<torch::Tensor>, std::optional<torch::Tensor>, std::optional<torch::Tensor>, std::optional<EventHandle>>
