@@ -193,8 +193,8 @@ __forceinline__ __device__ int translate_dst_rdma_rank(const int dst_rdma_rank, 
 }
 
 template <bool kLowLatencyMode>
-__forceinline__ __device__ void nvshmem_barrier_with_same_gpu_idx(const nvshmem_team_t& rdma_team) {
-    kLowLatencyMode ? void(nvshmem_barrier(rdma_team)) : nvshmem_barrier_all();
+__forceinline__ __device__ void nvshmem_sync_with_same_gpu_idx(const nvshmem_team_t& rdma_team) {
+    kLowLatencyMode ? void(nvshmem_sync(rdma_team)) : nvshmem_sync_all();
 }
 
 template <bool kLowLatencyMode, int kNumRDMARanks>
@@ -223,7 +223,7 @@ notify_dispatch(const int* num_tokens_per_rank, int* moe_recv_counter_mapped, in
         EP_DEVICE_ASSERT(num_warps > 1);
         EP_DEVICE_ASSERT(kNumRDMARanks <= num_threads);
         if (thread_id == 32)
-            nvshmem_barrier_with_same_gpu_idx<kLowLatencyMode>(rdma_team);
+            nvshmem_sync_with_same_gpu_idx<kLowLatencyMode>(rdma_team);
         barrier_device<NUM_MAX_NVL_PEERS>(task_fifo_ptrs, head, nvl_rank);
         move_fifo_slots<NUM_MAX_NVL_PEERS>(head);
         __syncthreads();
@@ -252,14 +252,25 @@ notify_dispatch(const int* num_tokens_per_rank, int* moe_recv_counter_mapped, in
         // Issue send
         // TODO: more light fence or barrier or signaling
         // TODO: overlap EP barrier and NVL cleaning
-        if (thread_id < kNumRDMARanks) {
-            nvshmem_int_put_nbi(rdma_recv_num_tokens_mixed.recv_buffer(rdma_rank), rdma_recv_num_tokens_mixed.send_buffer(thread_id),
-                                NUM_MAX_NVL_PEERS + num_rdma_experts + 1,
-                                translate_dst_rdma_rank<kLowLatencyMode>(thread_id, nvl_rank));
+        for (int i = 0; i < kNumRDMARanks; ++i) {
+            if (i != rdma_rank) {
+                nvshmemi_ibgda_put_nbi_warp<true>(reinterpret_cast<uint64_t>(rdma_recv_num_tokens_mixed.recv_buffer(rdma_rank)), 
+                                                reinterpret_cast<uint64_t>(rdma_recv_num_tokens_mixed.send_buffer(i)),
+                                                (NUM_MAX_NVL_PEERS + num_rdma_experts + 1) * sizeof(int),
+                                                translate_dst_rdma_rank<kLowLatencyMode>(i, nvl_rank), 0, lane_id, 0);
+            } else { 
+                UNROLLED_WARP_COPY(1, lane_id, NUM_MAX_NVL_PEERS + num_rdma_experts + 1, 
+                                    rdma_recv_num_tokens_mixed.recv_buffer(rdma_rank), 
+                                    rdma_recv_num_tokens_mixed.send_buffer(i), 
+                                    ld_volatile_global, st_na_global);
+            }
         }
+        if (thread_id < kNumRDMARanks and thread_id != rdma_rank)
+            nvshmemi_ibgda_quiet(translate_dst_rdma_rank<kLowLatencyMode>(thread_id, nvl_rank), 0);
+
         __syncthreads();
         if (thread_id == 0)
-            nvshmem_barrier_with_same_gpu_idx<kLowLatencyMode>(rdma_team);
+            nvshmem_sync_with_same_gpu_idx<kLowLatencyMode>(rdma_team);
         __syncthreads();
 
         // NVL buffers
@@ -345,7 +356,7 @@ notify_dispatch(const int* num_tokens_per_rank, int* moe_recv_counter_mapped, in
         // Finally barrier
         __syncthreads();
         if (thread_id == 32)
-            nvshmem_barrier_with_same_gpu_idx<kLowLatencyMode>(rdma_team);
+            nvshmem_sync_with_same_gpu_idx<kLowLatencyMode>(rdma_team);
         barrier_device<NUM_MAX_NVL_PEERS>(task_fifo_ptrs, head, nvl_rank);
         move_fifo_slots<NUM_MAX_NVL_PEERS>(head);
     } else {
@@ -701,7 +712,14 @@ dispatch(int4* recv_x, float* recv_x_scales, int64_t* recv_topk_idx, float* recv
 
         // Iterate all RDMA ranks
         int last_issued_tail = 0;
+        auto start_time = clock64();
         while (__any_sync(0xffffffff, num_tokens_to_send > 0)) {
+            // Timeout check
+            if (clock64() - start_time > NUM_TIMEOUT_CYCLES and lane_id < kNumRDMARanks) {
+                printf("DeepEP RDMA sender coordinator timeout, channel: %d, IB: %d, nvl %d, dst IB: %d, tail %d, num_tokens_to_send %d\n",
+                       channel_id, rdma_rank, nvl_rank, lane_id, last_issued_tail, num_tokens_to_send);
+                trap();
+            }
             for (int i = 0, synced_num_tokens_to_send; i < kNumRDMARanks; ++ i) {
                 // To mitigate incast congestion, shuffle the starting index of target rank for different ranks and channels
                 int dst_rdma_rank = (i + channel_id + rdma_rank) % kNumRDMARanks;
@@ -1103,7 +1121,7 @@ __global__ void cached_notify(const int rdma_clean_offset, const int rdma_num_in
     if (sm_id == 0) {
         // Barrier for RDMA
         if (thread_id == 0)
-            nvshmem_barrier_with_same_gpu_idx<kLowLatencyMode>(rdma_team);
+            nvshmem_sync_with_same_gpu_idx<kLowLatencyMode>(rdma_team);
         __syncthreads();
 
         // Clean
@@ -1111,12 +1129,11 @@ __global__ void cached_notify(const int rdma_clean_offset, const int rdma_num_in
         #pragma unroll
         for (int i = thread_id; i < rdma_num_int_clean; i += num_threads)
             rdma_buffer_ptr_int[rdma_clean_offset + i] = 0;
-        nvshmem_fence();
         __syncthreads();
 
         // Barrier again
         if (thread_id == 0)
-            nvshmem_barrier_with_same_gpu_idx<kLowLatencyMode>(rdma_team);
+            nvshmem_sync_with_same_gpu_idx<kLowLatencyMode>(rdma_team);
     } else if (sm_id == 1) {
         // Barrier for NVL
         barrier_device<NUM_MAX_NVL_PEERS>(task_fifo_ptrs, head, nvl_rank);

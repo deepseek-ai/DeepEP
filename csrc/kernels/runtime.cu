@@ -58,12 +58,6 @@ int init(const std::vector<uint8_t> &root_unique_id_val, int rank, int num_ranks
         EP_HOST_ASSERT(cpu_rdma_team != NVSHMEM_TEAM_INVALID);
     }
 
-    // TODO: we still use `nvshmem_barrier` under IBRC mode, which should be switch to IBGDA mode later
-    nvshmemi_device_host_state_t* dev_state_ptr = nullptr;
-    CUDA_CHECK(cudaGetSymbolAddress(reinterpret_cast<void**>(&dev_state_ptr), nvshmemi_device_state_d));
-
-    bool ibgda_is_initialized = false;
-    CUDA_CHECK(cudaMemcpy(&dev_state_ptr->ibgda_is_initialized, &ibgda_is_initialized, sizeof(bool), cudaMemcpyHostToDevice));
     nvshmem_barrier_all();
     return nvshmem_my_pe();
 }

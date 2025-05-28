@@ -413,8 +413,7 @@ __device__ static __forceinline__ void ibgda_write_amo_add_wqe(
 
 __device__ __forceinline__ void nvshmemi_ibgda_amo_nonfetch_add(void *rptr, const int& value, int pe, int qp_id, bool is_local_copy = false) {
     if (is_local_copy) {
-        // Fallback to NVSHMEM legacy API 
-        nvshmemx_signal_op(static_cast<uint64_t*>(rptr), value, NVSHMEM_SIGNAL_ADD, pe);
+        atomicAdd(static_cast<unsigned long long*>(rptr), value);
     } else {
         nvshmemi_ibgda_device_qp_t *qp = ibgda_get_rc(pe, qp_id);
 
@@ -444,6 +443,53 @@ __device__ __forceinline__ uint64_t nvshmemi_get_p2p_ptr(const uint64_t& ptr, co
 
     // NVLink P2P is enabled
     return peer_base + (ptr - reinterpret_cast<uint64_t>(nvshmemi_device_state_d.heap_base));
+}
+
+// This is a simplified version of NVSHMEM's `ibgda_poll_cq`. 
+// Note that this implementation does not guarantee thread safety,
+// so we must ensure that no other threads are concurrently using the same QP.
+__device__ static __forceinline__ int 
+ibgda_poll_cq(nvshmemi_ibgda_device_cq_t *cq, uint64_t idx) {
+    int status = 0;
+    struct mlx5_cqe64 *cqe64 = (struct mlx5_cqe64 *)cq->cqe;
+
+    const uint32_t ncqes = cq->ncqes;
+
+    uint16_t wqe_counter;
+    uint16_t new_wqe_counter;
+
+    memory_fence_cta();
+
+    do {
+        new_wqe_counter = ld_na_relaxed(&cqe64->wqe_counter);
+        new_wqe_counter = HtoBE16(new_wqe_counter);
+        wqe_counter = new_wqe_counter;
+    }
+    // NOTE: This while loop is part of do while above.
+    // wqe_counter is the HW consumer index. However, we always maintain index
+    // + 1 in SW. To be able to compare with idx, we need to use wqe_counter +
+    // 1. Because wqe_counter is uint16_t, it may wraparound. Still we know for
+    // sure that if idx - wqe_counter - 1 < ncqes, wqe_counter + 1 is less than
+    // idx, and thus we need to wait. We don't need to wait when idx ==
+    // wqe_counter + 1. That's why we use - (uint16_t)2 here to make this case
+    // wraparound.
+    // Example:
+    // if idx = 10, we wait until wqe_counter = 9, idx - wqe_counter - 2 = 65535 > ncqes.
+    while (((uint16_t)((uint16_t)idx - wqe_counter - (uint16_t)2) < ncqes));
+
+    *cq->cons_idx = idx;
+    // Prevent reordering of this function and subsequent instructions
+    memory_fence_cta();
+
+    return status;
+}
+
+// Wait until wqe `idx - 1` is completed.
+__device__ static __forceinline__ void
+nvshmemi_ibgda_quiet(int dst_pe, int qp_id) {
+    auto qp = ibgda_get_rc(dst_pe, qp_id);
+    uint64_t prod_idx = ld_na_relaxed(qp->tx_wq.prod_idx);
+    ibgda_poll_cq(qp->tx_wq.cq, prod_idx);
 }
 
 } // namespace deep_ep
