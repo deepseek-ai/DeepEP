@@ -163,7 +163,7 @@ class Buffer:
 
         config_map = {
             2: Config(Buffer.num_sms, 16, 256, 6, 128),
-            4: Config(Buffer.num_sms, 16, 256, 6, 128),
+            4: Config(Buffer.num_sms, 8, 256, 6, 128),
             8: Config(Buffer.num_sms, 6, 256, 6, 128),
             16: Config(Buffer.num_sms, 16, 288, 20, 128),
             24: Config(Buffer.num_sms, 8, 288, 32, 128),
@@ -191,7 +191,7 @@ class Buffer:
         config_map = {
             2: Config(Buffer.num_sms, 6, 256, 6, 128),
             4: Config(Buffer.num_sms, 6, 256, 6, 128),
-            8: Config(Buffer.num_sms, 6, 256, 6, 128),
+            8: Config(Buffer.num_sms, 4, 256, 6, 128),
             16: Config(Buffer.num_sms, 2, 288, 28, 128),
             24: Config(Buffer.num_sms, 1, 288, 20, 128),
             32: Config(Buffer.num_sms, 1, 288, 20, 128),
