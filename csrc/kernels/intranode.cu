@@ -597,12 +597,14 @@ combine(dtype_t* recv_x, float* recv_topk_weights,
     if (is_sender) {
         // Workers for sending
         // Several warps are responsible for a single rank
-        constexpr int num_send_warps = kNumThreads / 32;
-        constexpr int num_send_warps_per_rank = num_send_warps / kNumRanks;
+        constexpr int num_send_warps_per_rank = (kNumThreads / 32) / kNumRanks;
+        constexpr int num_send_warps = num_send_warps_per_rank * kNumRanks;
         const auto num_threads_per_rank = num_send_warps_per_rank * 32;
         const auto send_thread_id = thread_id;
+        const auto send_warp_id = send_thread_id / 32;
         const auto send_rank_id = thread_id / num_threads_per_rank;
-        const auto send_warp_id_in_rank = send_thread_id % num_threads_per_rank / 32;
+        const auto send_warp_id_in_rank = send_warp_id % num_send_warps_per_rank;
+        EP_STATIC_ASSERT(num_send_warps * 32 == kNumThreads, "Invalid warp count");
 
         // Calculate pointers by the specific layout
         auto ptr = reinterpret_cast<void*>(reinterpret_cast<int8_t*>(buffer_ptrs[send_rank_id]));
@@ -785,7 +787,7 @@ combine(dtype_t* recv_x, float* recv_topk_weights,
                 __syncwarp();
 
                 // Reduce data with pipeline
-                constexpr int kNumStages = 16;
+                constexpr int kNumStages = 8;
                 EP_STATIC_ASSERT(kNumStages * 32 * sizeof(int4) <= kNumTMABytesPerWarp, "Invalid count");
                 #pragma unroll
                 for (int i = lane_id; i < hidden_int4; i += 32) {
@@ -865,8 +867,8 @@ void combine(cudaDataType_t type,
              void** buffer_ptrs, int rank, int num_ranks,
              cudaStream_t stream, int num_sms,
              int num_max_send_tokens, int num_recv_buffer_tokens) {
-    constexpr int kNumThreads = 512;
-    constexpr int kNumTMABytesPerWarp = 8192;
+    constexpr int kNumThreads = 768;
+    constexpr int kNumTMABytesPerWarp = 4096;
     constexpr int smem_size = kNumTMABytesPerWarp * (kNumThreads / 32);
 
 #define COMBINE_LAUNCH_CASE(dtype, ranks) { \
