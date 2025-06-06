@@ -186,7 +186,7 @@ def test_main(num_sms: int, local_rank: int, num_ranks: int, rank: int, buffer: 
 
     # Tune combine performance
     best_time, best_results = 1e10, None
-    for nvl_chunk_size in tuple(range(1, 7, 1)) + (0, ):
+    for nvl_chunk_size in tuple(range(1, 17, 1)) + (0, ):
         if nvl_chunk_size > 0:
             config = deep_ep.Config(num_sms, nvl_chunk_size, nvl_buffer_size)
         else:
