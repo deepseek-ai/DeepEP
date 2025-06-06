@@ -338,10 +338,6 @@ dispatch(int4* recv_x, float* recv_x_scales, int* recv_src_idx, int64_t* recv_to
                 chunk_token_idx ++, token_idx ++;
             }
 
-            // Wait TMA to be finished
-            if (lane_id == 0)
-                tma_store_wait();
-
             // Move tail index
             // NOTES: here all warps should share the same new tail
             asm volatile("bar.sync %0, %1;" :: "r"(responsible_rank), "r"(num_threads_per_rank));
