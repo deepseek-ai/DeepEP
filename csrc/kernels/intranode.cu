@@ -234,15 +234,16 @@ dispatch(int4* recv_x, float* recv_x_scales, int* recv_src_idx, int64_t* recv_to
 
     // TMA stuffs
     extern __shared__ __align__(1024) uint8_t smem_buffer[];
-    auto hidden_bytes = hidden_int4 * static_cast<int>(sizeof(int4));
+    auto half_hidden_int4 = hidden_int4 / 2;
+    auto half_hidden_bytes = half_hidden_int4 * static_cast<int>(sizeof(int4));
     auto tma_buffer = smem_buffer + (thread_id / 32) * kNumTMABytesPerWarp;
-    auto tma_mbarrier = reinterpret_cast<uint64_t*>(tma_buffer + hidden_bytes);
+    auto tma_mbarrier = reinterpret_cast<uint64_t*>(tma_buffer + half_hidden_bytes);
     uint32_t tma_phase = 0;
     if (lane_id == 0) {
         mbarrier_init(tma_mbarrier, 1);
         fence_view_async_shared();
         fence_barrier_init();
-        EP_DEVICE_ASSERT(hidden_bytes + sizeof(uint64_t) <= kNumTMABytesPerWarp);
+        EP_DEVICE_ASSERT(hidden_int4 % 2 == 0 and half_hidden_bytes + sizeof(uint64_t) <= kNumTMABytesPerWarp);
     }
     __syncwarp();
 
@@ -307,12 +308,13 @@ dispatch(int4* recv_x, float* recv_x_scales, int* recv_src_idx, int64_t* recv_to
                     // Copy data
                     auto shifted_channel_x_buffers = channel_x_buffers.buffer() + dst_slot_idx * hidden_int4;
                     auto shifted_x = x + token_idx * hidden_int4;
-                    if (lane_id == 0) {
+                    #pragma unroll
+                    for (int i = 0; i < 2; ++ i) if (lane_id == 0) {
                         tma_store_wait();
-                        tma_load_1d(tma_buffer, shifted_x, tma_mbarrier, hidden_bytes);
-                        mbarrier_arrive_and_expect_tx(tma_mbarrier, hidden_bytes);
+                        tma_load_1d(tma_buffer, shifted_x + i * half_hidden_int4, tma_mbarrier, half_hidden_bytes);
+                        mbarrier_arrive_and_expect_tx(tma_mbarrier, half_hidden_bytes);
                         mbarrier_wait(tma_mbarrier, tma_phase);
-                        tma_store_1d(tma_buffer, shifted_channel_x_buffers, hidden_bytes);
+                        tma_store_1d(tma_buffer, shifted_channel_x_buffers + i * half_hidden_int4, half_hidden_bytes);
                     }
                     __syncwarp();
 
@@ -415,12 +417,13 @@ dispatch(int4* recv_x, float* recv_x_scales, int* recv_src_idx, int64_t* recv_to
                 int token_idx_in_buffer = (cached_channel_head_idx + chunk_idx) % num_recv_buffer_tokens;
                 auto shifted_buffer_x_int4 = channel_x_buffers.buffer() + token_idx_in_buffer * hidden_int4;
                 auto shifted_recv_x_int4 = recv_x + static_cast<int64_t>(total_offset + chunk_idx) * hidden_int4;
-                if (lane_id == 0) {
+                #pragma unroll
+                for (int i = 0; i < 2; ++ i) if (lane_id == 0) {
                     tma_store_wait();
-                    tma_load_1d(tma_buffer, shifted_buffer_x_int4, tma_mbarrier, hidden_bytes);
-                    mbarrier_arrive_and_expect_tx(tma_mbarrier, hidden_bytes);
+                    tma_load_1d(tma_buffer, shifted_buffer_x_int4 + i * half_hidden_int4, tma_mbarrier, half_hidden_bytes);
+                    mbarrier_arrive_and_expect_tx(tma_mbarrier, half_hidden_bytes);
                     mbarrier_wait(tma_mbarrier, tma_phase);
-                    tma_store_1d(tma_buffer, shifted_recv_x_int4, hidden_bytes, false);
+                    tma_store_1d(tma_buffer, shifted_recv_x_int4 + i * half_hidden_int4, half_hidden_bytes, false);
                 }
                 __syncwarp();
             }
@@ -473,8 +476,8 @@ void dispatch(void* recv_x, float* recv_x_scales, int* recv_src_idx, int64_t* re
               int num_tokens, int hidden_int4, int num_topk, int num_experts, int num_scales,
               void** buffer_ptrs, int rank, int num_ranks,
               cudaStream_t stream, int num_sms, int num_max_send_tokens, int num_recv_buffer_tokens) {
-    constexpr int kNumThreads = 256;
-    constexpr int kNumTMABytesPerWarp = 16384;
+    constexpr int kNumThreads = 768;
+    constexpr int kNumTMABytesPerWarp = 8192;
     constexpr int smem_size = kNumTMABytesPerWarp * (kNumThreads / 32);
 
 #define DISPATCH_LAUNCH_CASE(ranks) { \
