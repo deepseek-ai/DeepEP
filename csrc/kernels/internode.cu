@@ -694,6 +694,7 @@ dispatch(int4* recv_x, float* recv_x_scales, int64_t* recv_topk_idx, float* recv
         // Update last token tail
         if (last_rdma_tail_idx >= 0)
             st_release_cta(const_cast<const int*>(rdma_send_channel_tail + lane_id), last_rdma_tail_idx + 1);
+        __syncwarp(); 
 
         // Release sequential lock
         lane_id == 0 ? (rdma_send_next_token_idx += 1) : 0;
