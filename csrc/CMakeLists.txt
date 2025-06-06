@@ -9,7 +9,10 @@ set(CUDA_SEPARABLE_COMPILATION ON)
 list(APPEND CUDA_NVCC_FLAGS "-O3")
 list(APPEND CUDA_NVCC_FLAGS "--ptxas-options=--verbose,--register-usage-level=10,--warn-on-local-memory-usage")
 
-set(TORCH_CUDA_ARCH_LIST "9.0")
+set(USE_SYSTEM_NVTX on)
+set(CUDA_ARCH_LIST "9.0" CACHE STRING "List of CUDA architectures to compile")
+set(TORCH_CUDA_ARCH_LIST "${CUDA_ARCH_LIST}")
+
 find_package(CUDAToolkit REQUIRED)
 find_package(pybind11 REQUIRED)
 find_package(Torch REQUIRED)
@@ -19,9 +22,8 @@ add_library(nvshmem ALIAS nvshmem::nvshmem)
 add_library(nvshmem_host ALIAS nvshmem::nvshmem_host)
 add_library(nvshmem_device ALIAS nvshmem::nvshmem_device)
 
-# Seems bugs with CMake, NVCC 12 and C++ 17
 set(CMAKE_CXX_STANDARD 17)
-set(CMAKE_CUDA_STANDARD 14)
+set(CMAKE_CUDA_STANDARD 17)
 
 include_directories(${CUDA_TOOLKIT_ROOT_DIR}/include ${TORCH_INCLUDE_DIRS} ${PYTHON_INCLUDE_DIRS} ${NVSHMEM_INCLUDE_DIR})
 link_directories(${TORCH_INSTALL_PREFIX}/lib ${CUDA_TOOLKIT_ROOT_DIR}/lib ${NVSHMEM_LIB_DIR})
