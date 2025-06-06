@@ -153,14 +153,20 @@ def test_main(num_sms: int, local_rank: int, num_ranks: int, rank: int, buffer: 
     for current_x in (x_e4m3, x):
         best_time, best_results = 1e10, None
         nvl_recv_bytes = (dispatch_bf16_nvl_recv_bytes * fp8_factor) if isinstance(current_x, tuple) else dispatch_bf16_nvl_recv_bytes
-        for nvl_chunk_size in range(4, 33, 2):
-            config = deep_ep.Config(num_sms, nvl_chunk_size, nvl_buffer_size)
+        for nvl_chunk_size in tuple(range(4, 33, 2)) + (0, ):
+            if nvl_chunk_size > 0:
+                config = deep_ep.Config(num_sms, nvl_chunk_size, nvl_buffer_size)
+            else:
+                # Test default config as well
+                deep_ep.Buffer.set_num_sms(num_sms)
+                config = deep_ep.Buffer.get_dispatch_config(num_ranks)
             tune_args = {'x': current_x, 'handle': handle, 'config': config}
             t = bench(lambda: buffer.dispatch(**tune_args))[0]
-            if t < best_time:
+            if t < best_time and nvl_chunk_size > 0:
                 best_time, best_results = t, (num_sms, nvl_chunk_size)
             if local_rank == 0:
-                print(f'[tuning] SMs {num_sms}, NVL chunk {nvl_chunk_size}: {nvl_recv_bytes / 1e9 / t:.2f} GB/s (NVL) ', flush=True)
+                print(f'[tuning] SMs {num_sms}, NVL chunk {nvl_chunk_size if nvl_chunk_size else "default"}: '
+                      f'{nvl_recv_bytes / 1e9 / t:.2f} GB/s (NVL) ', flush=True)
         if local_rank == 0:
             print(f'[tuning] Best dispatch ({"FP8" if isinstance(current_x, tuple) else "BF16"}): SMs {best_results[0]}, NVL chunk {best_results[1]}, {nvl_recv_bytes / 1e9 / best_time:.2f} GB/s (NVL)', flush=True)
             print('', flush=True)
@@ -180,13 +186,19 @@ def test_main(num_sms: int, local_rank: int, num_ranks: int, rank: int, buffer: 
 
     # Tune combine performance
     best_time, best_results = 1e10, None
-    for nvl_chunk_size in range(1, 7, 1):
-        config = deep_ep.Config(num_sms, nvl_chunk_size, nvl_buffer_size)
+    for nvl_chunk_size in tuple(range(1, 7, 1)) + (0, ):
+        if nvl_chunk_size > 0:
+            config = deep_ep.Config(num_sms, nvl_chunk_size, nvl_buffer_size)
+        else:
+            # Test default config as well
+            deep_ep.Buffer.set_num_sms(num_sms)
+            config = deep_ep.Buffer.get_combine_config(num_ranks)
         tune_args = {'x': recv_x, 'handle': handle, 'config': config}
         t = bench(lambda: buffer.combine(**tune_args))[0]
         if local_rank == 0:
-            print(f'[tuning] SMs {num_sms}, NVL chunk {nvl_chunk_size}: {combine_bf16_nvl_send_bytes / 1e9 / t:.2f} GB/s (NVL) ', flush=True)
-            if t < best_time:
+            print(f'[tuning] SMs {num_sms}, NVL chunk {nvl_chunk_size if nvl_chunk_size else "default"}: '
+                  f'{combine_bf16_nvl_send_bytes / 1e9 / t:.2f} GB/s (NVL) ', flush=True)
+            if t < best_time and nvl_chunk_size > 0:
                 best_time, best_results = t, (num_sms, nvl_chunk_size)
 
     if local_rank == 0:
