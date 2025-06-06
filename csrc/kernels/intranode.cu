@@ -308,15 +308,7 @@ dispatch(int4* recv_x, float* recv_x_scales, int* recv_src_idx, int64_t* recv_to
                     // Copy data
                     auto shifted_channel_x_buffers = channel_x_buffers.buffer() + dst_slot_idx * hidden_int4;
                     auto shifted_x = x + token_idx * hidden_int4;
-                    #pragma unroll
-                    for (int i = 0; i < 2; ++ i) if (lane_id == 0) {
-                        tma_store_wait();
-                        tma_load_1d(tma_buffer, shifted_x + i * half_hidden_int4, tma_mbarrier, half_hidden_bytes);
-                        mbarrier_arrive_and_expect_tx(tma_mbarrier, half_hidden_bytes);
-                        mbarrier_wait(tma_mbarrier, tma_phase);
-                        tma_store_1d(tma_buffer, shifted_channel_x_buffers + i * half_hidden_int4, half_hidden_bytes);
-                    }
-                    __syncwarp();
+                    UNROLLED_WARP_COPY(5, lane_id, hidden_int4, shifted_channel_x_buffers, shifted_x, __ldg, st_na_global);
 
                     // Copy source index
                     if (lane_id == 0)
