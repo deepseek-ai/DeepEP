@@ -443,6 +443,19 @@ class Buffer:
             async_finish, allocate_on_comm_stream)
         return combined_x, combined_topk_weights, EventOverlap(event)
 
+    def get_low_latency_usage_flag(self):
+        """
+        Return a host-side integer flag, which indicates the stages of low-latency kernels.
+        The initial value is 0, the low-latency dispatch will add 1 before communication, the low-latency combine
+            will add 1 after communication.
+        This is useful when there is no two-batch overlap, and you want to overlap H2D/D2H transfer with attention layers.
+
+        Returns:
+            flag: the host-side integer flag pointer. The value is in `int`, but returns a `uint64_t` pointer. Please
+                `reinterpret_cast` the returned value into `int*`.
+        """
+        return self.runtime.get_low_latency_usage_flag()
+
     def clean_low_latency_buffer(self, num_max_dispatch_tokens_per_rank: int, hidden: int, num_experts: int) -> None:
         """
         As low-latency kernels require part of the buffer to be zero-initialized, so it is vital to clean the buffer
