@@ -71,7 +71,7 @@ private:
     volatile int* moe_recv_rdma_counter = nullptr;
     int* moe_recv_rdma_counter_mapped = nullptr;
 
-    // Host-side low-latency kernels usages
+    // Host-side low-latency kernels' usages
     volatile int* low_latency_usage_flag = nullptr;
     int* low_latency_usage_flag_mapped = nullptr;
 
