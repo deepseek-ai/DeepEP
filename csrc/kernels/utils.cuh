@@ -398,14 +398,14 @@ __forceinline__ __device__ int get_lane_id() {
 
 template <int kNumRanks>
 __forceinline__ __device__ void
-barrier_block(int **task_fifo_ptrs, int head, int rank, int tag = 0) {
+barrier_block(int** barrier_signal_ptrs, int rank) {
     auto thread_id = static_cast<int>(threadIdx.x);
 
     // Add self-ranks, sub other ranks
     if (thread_id < kNumRanks) {
-        atomicAdd_system(task_fifo_ptrs[rank] + head + thread_id, FINISHED_SUM_TAG);
+        atomicAdd_system(barrier_signal_ptrs[rank] + thread_id, FINISHED_SUM_TAG);
         memory_fence();
-        atomicSub_system(task_fifo_ptrs[thread_id] + head + rank, FINISHED_SUM_TAG);
+        atomicSub_system(barrier_signal_ptrs[thread_id] + rank, FINISHED_SUM_TAG);
     }
     __syncwarp();
     EP_DEVICE_ASSERT(kNumRanks <= blockDim.x and __activemask() == 0xffffffff);
@@ -413,12 +413,12 @@ barrier_block(int **task_fifo_ptrs, int head, int rank, int tag = 0) {
     // Check timeout
     auto start_time = clock64();
     while (true) {
-        auto value = thread_id < kNumRanks ? ld_volatile_global(task_fifo_ptrs[rank] + head + thread_id) : 0;
+        auto value = thread_id < kNumRanks ? ld_volatile_global(barrier_signal_ptrs[rank] + thread_id) : 0;
         if (__all_sync(0xffffffff, value <= 0))
             break;
 
         if (clock64() - start_time > NUM_TIMEOUT_CYCLES and get_lane_id() == 0) {
-            printf("DeepEP timeout check failed: %d (rank = %d, thread=%d)\n", tag, rank, thread_id);
+            printf("DeepEP timeout check failed: rank = %d, thread = %d)\n", rank, thread_id);
             trap();
         }
     }

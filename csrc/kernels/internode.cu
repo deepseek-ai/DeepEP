@@ -208,7 +208,7 @@ notify_dispatch(const int* num_tokens_per_rank, int* moe_recv_counter_mapped, in
                 int* rdma_channel_prefix_matrix, int* recv_rdma_rank_prefix_sum,
                 int* gbl_channel_prefix_matrix, int* recv_gbl_rank_prefix_sum,
                 void* rdma_buffer_ptr,
-                void** buffer_ptrs, int** task_fifo_ptrs, int head, int rank,
+                void** buffer_ptrs, int** barrier_signal_ptrs, int rank,
                 const nvshmem_team_t rdma_team) {
     auto sm_id = static_cast<int>(blockIdx.x);
     auto thread_id = static_cast<int>(threadIdx.x), warp_id = thread_id / 32, lane_id = get_lane_id();
@@ -224,7 +224,7 @@ notify_dispatch(const int* num_tokens_per_rank, int* moe_recv_counter_mapped, in
         EP_DEVICE_ASSERT(kNumRDMARanks <= num_threads);
         if (thread_id == 32)
             nvshmem_sync_with_same_gpu_idx<kLowLatencyMode>(rdma_team);
-        barrier_block<NUM_MAX_NVL_PEERS>(task_fifo_ptrs, head, nvl_rank);
+        barrier_block<NUM_MAX_NVL_PEERS>(barrier_signal_ptrs, nvl_rank);
 
         // Send numbers of tokens per rank/expert to RDMA ranks
         auto rdma_buffer_ptr_int = reinterpret_cast<int*>(rdma_buffer_ptr);
@@ -326,7 +326,7 @@ notify_dispatch(const int* num_tokens_per_rank, int* moe_recv_counter_mapped, in
         }
         memory_fence();
         __syncthreads();
-        barrier_block<NUM_MAX_NVL_PEERS>(task_fifo_ptrs, head, nvl_rank);
+        barrier_block<NUM_MAX_NVL_PEERS>(barrier_signal_ptrs, nvl_rank);
 
         // Reduce number of tokens per rank/expert
         EP_DEVICE_ASSERT(num_nvl_experts <= num_threads);
@@ -355,7 +355,7 @@ notify_dispatch(const int* num_tokens_per_rank, int* moe_recv_counter_mapped, in
         __syncthreads();
         if (thread_id == 32)
             nvshmem_sync_with_same_gpu_idx<kLowLatencyMode>(rdma_team);
-        barrier_block<NUM_MAX_NVL_PEERS>(task_fifo_ptrs, head, nvl_rank);
+        barrier_block<NUM_MAX_NVL_PEERS>(barrier_signal_ptrs, nvl_rank);
     } else {
         // Calculate meta data
         int dst_rdma_rank = sm_id - 1;
@@ -418,7 +418,7 @@ void notify_dispatch(const int* num_tokens_per_rank, int* moe_recv_counter_mappe
                      int* gbl_channel_prefix_matrix, int* recv_gbl_rank_prefix_sum,
                      void* rdma_buffer_ptr, int num_max_rdma_chunked_recv_tokens,
                      void** buffer_ptrs, int num_max_nvl_chunked_recv_tokens,
-                     int** task_fifo_ptrs, int head, int rank,
+                     int** barrier_signal_ptrs, int rank,
                      cudaStream_t stream, int64_t num_rdma_bytes, int64_t num_nvl_bytes,
                      bool low_latency_mode) {
 #define NOTIFY_DISPATCH_LAUNCH_CASE(num_rdma_ranks) { \
@@ -434,7 +434,7 @@ void notify_dispatch(const int* num_tokens_per_rank, int* moe_recv_counter_mappe
                   rdma_channel_prefix_matrix, recv_rdma_rank_prefix_sum, \
                   gbl_channel_prefix_matrix, recv_gbl_rank_prefix_sum, \
                   rdma_buffer_ptr, \
-                  buffer_ptrs, task_fifo_ptrs, head, rank, \
+                  buffer_ptrs, barrier_signal_ptrs, rank, \
                   cpu_rdma_team); } break
 
     constexpr int kNumThreads = 512;
@@ -1102,7 +1102,7 @@ __global__ void cached_notify(const int rdma_clean_offset, const int rdma_num_in
                               int* combined_rdma_head, int num_combined_tokens, int num_channels,
                               const int* rdma_channel_prefix_matrix, const int* rdma_rank_prefix_sum, int* combined_nvl_head,
                               void* rdma_buffer_ptr,
-                              void** buffer_ptrs, int** task_fifo_ptrs, int head, int rank, int num_ranks,
+                              void** buffer_ptrs, int** barrier_signal_ptrs, int rank, int num_ranks,
                               bool is_cached_dispatch, const nvshmem_team_t rdma_team) {
     auto sm_id = static_cast<int>(blockIdx.x);
     auto thread_id = static_cast<int>(threadIdx.x);
@@ -1133,7 +1133,7 @@ __global__ void cached_notify(const int rdma_clean_offset, const int rdma_num_in
             nvshmem_sync_with_same_gpu_idx<kLowLatencyMode>(rdma_team);
     } else if (sm_id == 1) {
         // Barrier for NVL
-        barrier_block<NUM_MAX_NVL_PEERS>(task_fifo_ptrs, head, nvl_rank);
+        barrier_block<NUM_MAX_NVL_PEERS>(barrier_signal_ptrs, nvl_rank);
 
         // Clean
         auto nvl_buffer_ptr_int = reinterpret_cast<int*>(buffer_ptrs[nvl_rank]);
@@ -1144,7 +1144,7 @@ __global__ void cached_notify(const int rdma_clean_offset, const int rdma_num_in
         __syncthreads();
 
         // Barrier again
-        barrier_block<NUM_MAX_NVL_PEERS>(task_fifo_ptrs, head, nvl_rank);
+        barrier_block<NUM_MAX_NVL_PEERS>(barrier_signal_ptrs, nvl_rank);
     } else if (sm_id == 2) {
         if (is_cached_dispatch)
             return;
@@ -1205,7 +1205,7 @@ void cached_notify(int hidden_int4, int num_scales, int num_topk_idx, int num_to
                    const int* rdma_channel_prefix_matrix, const int* rdma_rank_prefix_sum, int* combined_nvl_head,
                    void* rdma_buffer_ptr, int num_max_rdma_chunked_recv_tokens,
                    void** buffer_ptrs, int num_max_nvl_chunked_recv_tokens,
-                   int** task_fifo_ptrs, int head, int rank, cudaStream_t stream,
+                   int** barrier_signal_ptrs, int rank, cudaStream_t stream,
                    int64_t num_rdma_bytes, int64_t num_nvl_bytes,
                    bool is_cached_dispatch, bool low_latency_mode) {
     const int num_threads = std::max(128, 32 * num_channels);
@@ -1229,7 +1229,7 @@ void cached_notify(int hidden_int4, int num_scales, int num_topk_idx, int num_to
                   combined_rdma_head, num_combined_tokens, num_channels,
                   rdma_channel_prefix_matrix, rdma_rank_prefix_sum, combined_nvl_head,
                   rdma_buffer_ptr,
-                  buffer_ptrs, task_fifo_ptrs, head, rank, num_ranks,
+                  buffer_ptrs, barrier_signal_ptrs, rank, num_ranks,
                   is_cached_dispatch, cpu_rdma_team);
 }
 

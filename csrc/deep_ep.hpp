@@ -51,10 +51,9 @@ private:
     // After IPC/NVSHMEM synchronization, this flag will be true
     bool available = false;
 
-    // Task fifo
-    int head = 0;
-    int* task_fifo_ptrs[NUM_MAX_NVL_PEERS] = {nullptr};
-    int** task_fifo_ptrs_gpu = nullptr;
+    // Barrier signals
+    int* barrier_signal_ptrs[NUM_MAX_NVL_PEERS] = {nullptr};
+    int** barrier_signal_ptrs_gpu = nullptr;
 
     // Workspace
     void* workspace = nullptr;

@@ -164,7 +164,7 @@ void ibgda_submit_requests(nvshmemi_ibgda_device_qp_t *qp, uint64_t base_wqe_idx
 
 __device__ static __forceinline__ void
 ibgda_write_rdma_write_inl_wqe(nvshmemi_ibgda_device_qp_t *qp, const uint32_t *val, uint64_t raddr,
-                               __be32 rkey, uint16_t wqe_idx, void **out_wqes, uint32_t imm) {
+                               __be32 rkey, uint16_t wqe_idx, void** out_wqes, uint32_t imm) {
     ibgda_ctrl_seg_t ctrl_seg;
     struct mlx5_wqe_raddr_seg raddr_seg;
     struct mlx5_wqe_inl_data_seg inl_seg;
@@ -277,7 +277,7 @@ nvshmemi_ibgda_rma_p(int *rptr, const int value, int dst_pe, int qp_id, uint32_t
 __device__ static __forceinline__ void
 ibgda_write_rdma_write_wqe(nvshmemi_ibgda_device_qp_t *qp, uint64_t laddr, __be32 lkey,
                            uint64_t raddr, __be32 rkey, uint32_t bytes, uint16_t wqe_idx,
-                           void **out_wqes) {
+                           void** out_wqes) {
     ibgda_ctrl_seg_t ctrl_seg;
     struct mlx5_wqe_raddr_seg raddr_seg;
     struct mlx5_wqe_data_seg data_seg;
@@ -373,7 +373,7 @@ nvshmemi_ibgda_put_nbi_warp(uint64_t req_rptr, uint64_t req_lptr, size_t bytes, 
 __device__ static __forceinline__ void ibgda_write_amo_add_wqe(
         nvshmemi_ibgda_device_qp_t *qp, const int &value,
         uint64_t laddr, __be32 lkey, uint64_t raddr, __be32 rkey,
-        uint16_t wqe_idx, void **out_wqes) {
+        uint16_t wqe_idx, void** out_wqes) {
     ibgda_ctrl_seg_t ctrl_seg = {0};
     struct mlx5_wqe_raddr_seg raddr_seg;
     struct mlx5_wqe_atomic_seg atomic_seg_1;

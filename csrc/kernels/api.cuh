@@ -7,7 +7,7 @@ namespace deep_ep {
 // Intranode runtime
 namespace intranode {
 
-void barrier(int **task_fifo_ptrs, int head, int rank, int num_ranks, cudaStream_t stream);
+void barrier(int** barrier_signal_ptrs, int rank, int num_ranks, cudaStream_t stream);
 
 } // namespace intranode
 
@@ -35,11 +35,11 @@ void notify_dispatch(const int* num_tokens_per_rank, int* moe_recv_counter_mappe
                      const int* num_tokens_per_expert, int* moe_recv_expert_counter_mapped, int num_experts,
                      int num_tokens, const bool* is_token_in_rank, int* channel_prefix_matrix,
                      int* rank_prefix_matrix_copy, int num_memset_int, int expert_alignment,
-                     void** buffer_ptrs, int **task_fifo_ptrs, int head, int rank,
+                     void** buffer_ptrs, int** barrier_signal_ptrs, int rank,
                      cudaStream_t stream, int num_sms);
 
 void cached_notify_dispatch(const int* rank_prefix_matrix, int num_memset_int,
-                            void** buffer_ptrs, int **task_fifo_ptrs, int head, int rank, int num_ranks,
+                            void** buffer_ptrs, int** barrier_signal_ptrs, int rank, int num_ranks,
                             cudaStream_t stream);
 
 void dispatch(void* recv_x, float* recv_x_scales, int* recv_src_idx, int64_t* recv_topk_idx, float* recv_topk_weights, int* recv_channel_offset,
@@ -51,7 +51,7 @@ void dispatch(void* recv_x, float* recv_x_scales, int* recv_src_idx, int64_t* re
               int num_max_send_tokens, int num_recv_buffer_tokens);
 
 void cached_notify_combine(void** buffer_ptrs, int* send_head, int num_channels, int num_recv_tokens, int num_memset_int,
-                           int** task_fifo_ptrs, int head, int rank, int num_ranks, cudaStream_t stream);
+                           int** barrier_signal_ptrs, int rank, int num_ranks, cudaStream_t stream);
 
 void combine(cudaDataType_t type,
              void* recv_x, float* recv_topk_weights,
@@ -84,7 +84,7 @@ void notify_dispatch(const int* num_tokens_per_rank, int* moe_recv_counter_mappe
                      int* gbl_channel_prefix_matrix, int* recv_gbl_rank_prefix_sum,
                      void* rdma_buffer_ptr, int num_max_rdma_chunked_recv_tokens,
                      void** buffer_ptrs, int num_max_nvl_chunked_recv_tokens,
-                     int** task_fifo_ptrs, int head, int rank,
+                     int** barrier_signal_ptrs, int rank,
                      cudaStream_t stream, int64_t num_rdma_bytes, int64_t num_nvl_bytes,
                      bool low_latency_mode);
 
@@ -106,7 +106,7 @@ void cached_notify(int hidden_int4, int num_scales, int num_topk_idx, int num_to
                    const int* rdma_channel_prefix_matrix, const int* rdma_rank_prefix_sum, int* combined_nvl_head,
                    void* rdma_buffer_ptr, int num_max_rdma_chunked_recv_tokens,
                    void** buffer_ptrs, int num_max_nvl_chunked_recv_tokens,
-                   int** task_fifo_ptrs, int head, int rank, cudaStream_t stream,
+                   int** barrier_signal_ptrs, int rank, cudaStream_t stream,
                    int64_t num_rdma_bytes, int64_t num_nvl_bytes,
                    bool is_cached_dispatch, bool low_latency_mode);
 
