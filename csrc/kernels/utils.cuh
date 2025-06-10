@@ -407,8 +407,7 @@ barrier_block(int** barrier_signal_ptrs, int rank) {
         memory_fence();
         atomicSub_system(barrier_signal_ptrs[thread_id] + rank, FINISHED_SUM_TAG);
     }
-    __syncwarp();
-    EP_DEVICE_ASSERT(kNumRanks <= blockDim.x and __activemask() == 0xffffffff);
+    EP_DEVICE_ASSERT(kNumRanks <= blockDim.x);
 
     // Check timeout
     auto start_time = clock64();

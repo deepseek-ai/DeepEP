@@ -22,7 +22,7 @@ __global__ void clean_low_latency_buffer(int* clean_0, int num_clean_int_0,
     for (int i = thread_id; i < num_clean_int_1; i += kNumThreads)
         clean_1[i] = 0;
 
-    // Barrier after cleaning (make sure low-latency mode work fine)
+    // Barrier after cleaning (make sure the low-latency mode works fine)
     nvshmemx_barrier_all_block();
 }
 
