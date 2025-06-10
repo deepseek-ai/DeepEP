@@ -20,8 +20,8 @@ Buffer::Buffer(int rank, int num_ranks, int64_t num_nvl_bytes, int64_t num_rdma_
         comm_stream(at::cuda::getStreamFromPool(true)) {
     // Metadata memory
     int64_t barrier_signal_bytes = NUM_MAX_NVL_PEERS * sizeof(int);
-    int64_t buffer_ptr_bytes = sizeof(void*) * NUM_MAX_NVL_PEERS;
-    int64_t barrier_signal_ptr_bytes = sizeof(int*) * NUM_MAX_NVL_PEERS;
+    int64_t buffer_ptr_bytes = NUM_MAX_NVL_PEERS * sizeof(void*);
+    int64_t barrier_signal_ptr_bytes = NUM_MAX_NVL_PEERS * sizeof(int*);
 
     // Common checks
     EP_HOST_ASSERT(num_nvl_bytes % NUM_BUFFER_ALIGNMENT_BYTES == 0 and (num_nvl_bytes <= std::numeric_limits<int>::max() or num_rdma_bytes == 0));
