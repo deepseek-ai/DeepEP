@@ -21,9 +21,7 @@ notify_dispatch(const int* num_tokens_per_rank, int* moe_recv_counter_mapped,
 
     if (sm_id == 0) {
         // Barrier first
-        barrier_device<kNumRanks>(task_fifo_ptrs, head, rank);
-        move_fifo_slots<kNumRanks>(head);
-        __syncthreads();
+        barrier_block<kNumRanks>(task_fifo_ptrs, head, rank);
 
         int *per_rank_buffer, *per_expert_buffer;
         if (thread_id < kNumRanks) {
@@ -46,9 +44,7 @@ notify_dispatch(const int* num_tokens_per_rank, int* moe_recv_counter_mapped,
         __syncthreads();
 
         // Wait for all ranks to be finished
-        barrier_device<kNumRanks>(task_fifo_ptrs, head, rank);
-        move_fifo_slots<kNumRanks>(head);
-        __syncthreads();
+        barrier_block<kNumRanks>(task_fifo_ptrs, head, rank);
 
         // Sum per-rank counts and return to CPU
         // Also pre-compute the prefix sum for data sending
@@ -86,7 +82,7 @@ notify_dispatch(const int* num_tokens_per_rank, int* moe_recv_counter_mapped,
         // Barrier
         memory_fence();
         __syncthreads();
-        barrier_device<kNumRanks>(task_fifo_ptrs, head, rank);
+        barrier_block<kNumRanks>(task_fifo_ptrs, head, rank);
     } else {
         int dst_rank = sm_id - 1;
         for (int channel_id = warp_id; channel_id < num_channels; channel_id += num_warps) {
@@ -141,9 +137,7 @@ __global__ void
 cached_notify_dispatch(const int* rank_prefix_matrix, int num_memset_int,
                        void** buffer_ptrs, int** task_fifo_ptrs, int head, int rank) {
     // A simplified version for cached handles
-    barrier_device<kNumRanks>(task_fifo_ptrs, head, rank);
-    move_fifo_slots<kNumRanks>(head);
-    __syncthreads();
+    barrier_block<kNumRanks>(task_fifo_ptrs, head, rank);
 
     // Copy and clean
     auto thread_id = static_cast<int>(threadIdx.x), num_threads = static_cast<int>(blockDim.x);
@@ -158,7 +152,7 @@ cached_notify_dispatch(const int* rank_prefix_matrix, int num_memset_int,
     __syncthreads();
 
     // Barrier after cleaning
-    barrier_device<kNumRanks>(task_fifo_ptrs, head, rank);
+    barrier_block<kNumRanks>(task_fifo_ptrs, head, rank);
 }
 
 void cached_notify_dispatch(const int* rank_prefix_matrix, int num_memset_int,
@@ -495,9 +489,7 @@ cached_notify_combine(void** buffer_ptrs, int* send_head, int num_channels, int 
     const auto sm_id = static_cast<int>(blockIdx.x);
     if (sm_id == 0) {
         // Barrier before cleaning
-        barrier_device<kNumRanks>(task_fifo_ptrs, head, rank);
-        move_fifo_slots<kNumRanks>(head);
-        __syncthreads();
+        barrier_block<kNumRanks>(task_fifo_ptrs, head, rank);
 
         // Clean
         auto thread_id = static_cast<int>(threadIdx.x), num_threads = static_cast<int>(blockDim.x);
@@ -509,7 +501,7 @@ cached_notify_combine(void** buffer_ptrs, int* send_head, int num_channels, int 
         __syncthreads();
 
         // Barrier after cleaning
-        barrier_device<kNumRanks>(task_fifo_ptrs, head, rank);
+        barrier_block<kNumRanks>(task_fifo_ptrs, head, rank);
     } else {
         const auto channel_id = sm_id - 1;
         const auto thread_id = static_cast<int>(threadIdx.x);

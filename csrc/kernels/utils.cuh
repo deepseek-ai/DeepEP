@@ -397,43 +397,32 @@ __forceinline__ __device__ int get_lane_id() {
 }
 
 template <int kNumRanks>
-__forceinline__ __device__ void move_fifo_slots(int &head) {
-    head = (head + kNumRanks) % NUM_MAX_FIFO_SLOTS;
-}
-
-template <int kNumRanks>
-__device__ __forceinline__ bool not_finished(int *task, int expected) {
-    auto result = false;
-    auto lane_id = threadIdx.x % 32;
-    if (lane_id < kNumRanks)
-        result = ld_volatile_global(task + lane_id) != expected;
-    return __any_sync(0xffffffff, result);
-}
-
-template <int kNumRanks>
 __forceinline__ __device__ void
-timeout_check(int **task_fifo_ptrs, int head, int rank, int expected, int tag = 0) {
-    auto start_time = clock64();
-    while (not_finished<kNumRanks>(task_fifo_ptrs[rank] + head, expected)) {
-        if (clock64() - start_time > NUM_TIMEOUT_CYCLES and threadIdx.x == 0) {
-            printf("DeepEP timeout check failed: %d (rank = %d)\n", tag, rank);
-            trap();
-        }
-    }
-}
-
-template <int kNumRanks>
-__forceinline__ __device__ void
-barrier_device(int **task_fifo_ptrs, int head, int rank, int tag = 0) {
+barrier_block(int **task_fifo_ptrs, int head, int rank, int tag = 0) {
     auto thread_id = static_cast<int>(threadIdx.x);
-    EP_DEVICE_ASSERT(kNumRanks <= 32);
 
+    // Add self-ranks, sub other ranks
     if (thread_id < kNumRanks) {
         atomicAdd_system(task_fifo_ptrs[rank] + head + thread_id, FINISHED_SUM_TAG);
         memory_fence();
         atomicSub_system(task_fifo_ptrs[thread_id] + head + rank, FINISHED_SUM_TAG);
     }
-    timeout_check<kNumRanks>(task_fifo_ptrs, head, rank, 0, tag);
+    __syncwarp();
+    EP_DEVICE_ASSERT(kNumRanks <= blockDim.x and __activemask() == 0xffffffff);
+
+    // Check timeout
+    auto start_time = clock64();
+    while (true) {
+        auto value = thread_id < kNumRanks ? ld_volatile_global(task_fifo_ptrs[rank] + head + thread_id) : 0;
+        if (__all_sync(0xffffffff, value <= 0))
+            break;
+
+        if (clock64() - start_time > NUM_TIMEOUT_CYCLES and get_lane_id() == 0) {
+            printf("DeepEP timeout check failed: %d (rank = %d, thread=%d)\n", tag, rank, thread_id);
+            trap();
+        }
+    }
+    __syncthreads();
 }
 
 } // namespace deep_ep

@@ -224,9 +224,7 @@ notify_dispatch(const int* num_tokens_per_rank, int* moe_recv_counter_mapped, in
         EP_DEVICE_ASSERT(kNumRDMARanks <= num_threads);
         if (thread_id == 32)
             nvshmem_sync_with_same_gpu_idx<kLowLatencyMode>(rdma_team);
-        barrier_device<NUM_MAX_NVL_PEERS>(task_fifo_ptrs, head, nvl_rank);
-        move_fifo_slots<NUM_MAX_NVL_PEERS>(head);
-        __syncthreads();
+        barrier_block<NUM_MAX_NVL_PEERS>(task_fifo_ptrs, head, nvl_rank);
 
         // Send numbers of tokens per rank/expert to RDMA ranks
         auto rdma_buffer_ptr_int = reinterpret_cast<int*>(rdma_buffer_ptr);
@@ -328,9 +326,7 @@ notify_dispatch(const int* num_tokens_per_rank, int* moe_recv_counter_mapped, in
         }
         memory_fence();
         __syncthreads();
-        barrier_device<NUM_MAX_NVL_PEERS>(task_fifo_ptrs, head, nvl_rank);
-        move_fifo_slots<NUM_MAX_NVL_PEERS>(head);
-        __syncthreads();
+        barrier_block<NUM_MAX_NVL_PEERS>(task_fifo_ptrs, head, nvl_rank);
 
         // Reduce number of tokens per rank/expert
         EP_DEVICE_ASSERT(num_nvl_experts <= num_threads);
@@ -359,8 +355,7 @@ notify_dispatch(const int* num_tokens_per_rank, int* moe_recv_counter_mapped, in
         __syncthreads();
         if (thread_id == 32)
             nvshmem_sync_with_same_gpu_idx<kLowLatencyMode>(rdma_team);
-        barrier_device<NUM_MAX_NVL_PEERS>(task_fifo_ptrs, head, nvl_rank);
-        move_fifo_slots<NUM_MAX_NVL_PEERS>(head);
+        barrier_block<NUM_MAX_NVL_PEERS>(task_fifo_ptrs, head, nvl_rank);
     } else {
         // Calculate meta data
         int dst_rdma_rank = sm_id - 1;
@@ -1138,9 +1133,7 @@ __global__ void cached_notify(const int rdma_clean_offset, const int rdma_num_in
             nvshmem_sync_with_same_gpu_idx<kLowLatencyMode>(rdma_team);
     } else if (sm_id == 1) {
         // Barrier for NVL
-        barrier_device<NUM_MAX_NVL_PEERS>(task_fifo_ptrs, head, nvl_rank);
-        move_fifo_slots<NUM_MAX_NVL_PEERS>(head);
-        __syncthreads();
+        barrier_block<NUM_MAX_NVL_PEERS>(task_fifo_ptrs, head, nvl_rank);
 
         // Clean
         auto nvl_buffer_ptr_int = reinterpret_cast<int*>(buffer_ptrs[nvl_rank]);
@@ -1151,8 +1144,7 @@ __global__ void cached_notify(const int rdma_clean_offset, const int rdma_num_in
         __syncthreads();
 
         // Barrier again
-        barrier_device<NUM_MAX_NVL_PEERS>(task_fifo_ptrs, head, nvl_rank);
-        move_fifo_slots<NUM_MAX_NVL_PEERS>(head);
+        barrier_block<NUM_MAX_NVL_PEERS>(task_fifo_ptrs, head, nvl_rank);
     } else if (sm_id == 2) {
         if (is_cached_dispatch)
             return;

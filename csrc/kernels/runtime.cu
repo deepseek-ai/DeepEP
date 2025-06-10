@@ -13,7 +13,7 @@ namespace intranode {
 
 template<int kNumRanks>
 __global__ void barrier(int** task_fifo_ptrs, int head, int rank) {
-    barrier_device<kNumRanks>(task_fifo_ptrs, head, rank);
+    barrier_block<kNumRanks>(task_fifo_ptrs, head, rank);
 }
 
 void barrier(int** task_fifo_ptrs, int head, int rank, int num_ranks, cudaStream_t stream) {

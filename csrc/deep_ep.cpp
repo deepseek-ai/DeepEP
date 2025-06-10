@@ -92,7 +92,6 @@ Buffer::~Buffer() noexcept(false) {
     if (num_nvl_bytes > 0) {
         // Barrier
         intranode::barrier(task_fifo_ptrs_gpu, head, nvl_rank, num_nvl_ranks, comm_stream);
-        move_fifo_slots();
         CUDA_CHECK(cudaDeviceSynchronize());
 
         // Close remote IPC
@@ -119,10 +118,6 @@ Buffer::~Buffer() noexcept(false) {
 
     // Free chunked mode staffs
     CUDA_CHECK(cudaFreeHost(const_cast<int*>(moe_recv_expert_counter)));
-}
-
-void Buffer::move_fifo_slots(int num_slots) {
-    head = (head + num_ranks * num_slots) % NUM_MAX_FIFO_SLOTS;
 }
 
 bool Buffer::is_available() const {
@@ -397,7 +392,6 @@ Buffer::intranode_dispatch(const torch::Tensor& x, const std::optional<torch::Te
         intranode::cached_notify_dispatch(rank_prefix_matrix.data_ptr<int>(), num_memset_int,
                                           buffer_ptrs_gpu, task_fifo_ptrs_gpu, head, rank, num_ranks,
                                           comm_stream);
-        move_fifo_slots(2);
     } else {
         rank_prefix_matrix = torch::empty({num_ranks, num_ranks}, dtype(torch::kInt32).device(torch::kCUDA));
         channel_prefix_matrix = torch::empty({num_ranks, num_channels}, dtype(torch::kInt32).device(torch::kCUDA));
@@ -418,7 +412,6 @@ Buffer::intranode_dispatch(const torch::Tensor& x, const std::optional<torch::Te
                                    num_memset_int, expert_alignment,
                                    buffer_ptrs_gpu, task_fifo_ptrs_gpu, head, rank,
                                    comm_stream, num_channels);
-        move_fifo_slots(3);
 
         // Synchronize total received tokens and tokens per expert
         auto start_time = std::chrono::high_resolution_clock::now();
@@ -567,9 +560,6 @@ Buffer::intranode_combine(const torch::Tensor& x, const std::optional<torch::Ten
                                      num_channels, num_recv_tokens, num_channels * num_ranks * 2,
                                      task_fifo_ptrs_gpu, head, rank, num_ranks,
                                      comm_stream);
-
-    // NOTES: this function uses two FIFO slots (barrier before and after)
-    move_fifo_slots(2);
 
     // Combine data
     auto recv_x = torch::empty({num_recv_tokens, hidden}, x.options());
@@ -749,7 +739,6 @@ Buffer::internode_dispatch(const torch::Tensor& x, const std::optional<torch::Te
                                  task_fifo_ptrs_gpu, head, rank, comm_stream,
                                  config.get_rdma_buffer_size_hint(hidden_int4 * sizeof(int4), num_ranks),
                                  num_nvl_bytes, true, low_latency_mode);
-        move_fifo_slots(2);
     } else {
         rdma_channel_prefix_matrix = torch::empty({num_rdma_ranks, num_channels}, dtype(torch::kInt32).device(torch::kCUDA));
         recv_rdma_rank_prefix_sum = torch::empty({num_rdma_ranks}, dtype(torch::kInt32).device(torch::kCUDA));
@@ -772,7 +761,6 @@ Buffer::internode_dispatch(const torch::Tensor& x, const std::optional<torch::Te
                                    task_fifo_ptrs_gpu, head, rank, comm_stream,
                                    config.get_rdma_buffer_size_hint(hidden_int4 * sizeof(int4), num_ranks),
                                    num_nvl_bytes, low_latency_mode);
-        move_fifo_slots(3);
 
         // Synchronize total received tokens and tokens per expert
         auto start_time = std::chrono::high_resolution_clock::now();
@@ -961,7 +949,6 @@ Buffer::internode_combine(const torch::Tensor& x, const std::optional<torch::Ten
                              task_fifo_ptrs_gpu, head, rank, comm_stream,
                              config.get_rdma_buffer_size_hint(hidden_int4 * sizeof(int4), num_ranks),
                              num_nvl_bytes, false, low_latency_mode);
-    move_fifo_slots(2);
 
     // Launch data combine
     auto combined_x = torch::empty({num_combined_tokens, hidden}, x.options());
