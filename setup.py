@@ -43,7 +43,7 @@ if __name__ == '__main__':
         # Disable internode and low-latency kernels
         assert disable_nvshmem
 
-        # Disable LD/ST tricks
+        # Disable LD/ST tricks, as some CUDA version does not support `.L1::no_allocate`
         assert int(os.getenv('DISABLE_AGGRESSIVE_PTX_INSTRS', 1)) == 1
         os.environ['DISABLE_AGGRESSIVE_PTX_INSTRS'] = '1'
     else:
