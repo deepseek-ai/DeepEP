@@ -266,6 +266,9 @@ __device__  __forceinline__ void st_na_global(const int4 *ptr, const int4& value
             ::"l"(ptr), "r"(value.x), "r"(value.y), "r"(value.z), "r"(value.w));
 }
 
+// TMA PTX instructions
+#ifndef DISABLE_SM90_FEATURES
+
 __device__ __forceinline__ void fence_view_async_shared() {
     asm volatile("fence.proxy.async.shared::cta; \n" :: );
 }
@@ -326,6 +329,8 @@ template <int N = 0>
 __device__ __forceinline__ void tma_store_wait() {
     asm volatile("cp.async.bulk.wait_group.read %0;" :: "n"(N) : "memory");
 }
+
+#endif
 
 template <typename dtype_t>
 __host__ __device__ dtype_t cell_div(dtype_t a, dtype_t b) {
