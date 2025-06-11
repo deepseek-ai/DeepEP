@@ -72,6 +72,7 @@ def check_nvlink_connections(group: dist.ProcessGroup):
     """
     # Check NVLink connection
     # NOTES: some A100 PCIE GPUs only have pairwise NVLink connection, so that we can only use EP2
+    # TODO: check all cases, all local-node GPUs in the group should be connected via NVLink
     if 'PCIE' in torch.cuda.get_device_name():
         assert group.size() <= 2, 'PCIe GPUs only have pairwise NVLink connections'
 
