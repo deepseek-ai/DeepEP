@@ -106,6 +106,10 @@ class Buffer:
         assert self.runtime.is_available()
 
     @staticmethod
+    def is_sm90_compiled():
+        return deep_ep_cpp.is_sm90_compiled()
+
+    @staticmethod
     def set_num_sms(new_num_sms: int) -> None:
         """
         Set the number of SMs to use in high-throughput kernels.

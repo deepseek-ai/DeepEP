@@ -1263,6 +1263,14 @@ Buffer::get_next_low_latency_combine_buffer(int num_max_dispatch_tokens_per_rank
 #endif
 }
 
+bool is_sm90_compiled() {
+#ifndef DISABLE_SM90_FEATURES
+    return true;
+#else
+    return false;
+#endif
+}
+
 } // namespace deep_ep
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
@@ -1302,4 +1310,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         .def("low_latency_dispatch", &deep_ep::Buffer::low_latency_dispatch)
         .def("low_latency_combine", &deep_ep::Buffer::low_latency_combine)
         .def("get_next_low_latency_combine_buffer", &deep_ep::Buffer::get_next_low_latency_combine_buffer);
+
+    m.def("is_sm90_compiled", deep_ep::is_sm90_compiled);
 }
