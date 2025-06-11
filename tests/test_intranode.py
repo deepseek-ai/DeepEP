@@ -188,8 +188,8 @@ def test_main(num_sms: int, local_rank: int, num_ranks: int, rank: int, buffer: 
             print(f'[tuning] Best dispatch ({"FP8" if isinstance(current_x, tuple) else "BF16"}): SMs {best_results[0]}, NVL chunk {best_results[1]}, {nvl_recv_bytes / 1e9 / best_time:.2f} GB/s (NVL)', flush=True)
             print('', flush=True)
 
-        if isinstance(current_x, tuple):
-            # Gather FP8 the best config from rank 0
+        # Gather the best config from rank 0 and the first test setting
+        if best_dispatch_results is None:
             best_dispatch_results = torch.tensor([best_results[0], best_results[1]], dtype=torch.int32, device='cuda')
             all_best_fp8_results_list = [torch.zeros_like(best_dispatch_results) for _ in range(torch.distributed.get_world_size())]
             dist.all_gather(all_best_fp8_results_list, best_dispatch_results, group=group)
@@ -251,5 +251,5 @@ def test_loop(local_rank: int, num_local_ranks: int):
 
 
 if __name__ == '__main__':
-    num_processes = 8
+    num_processes = 2
     torch.multiprocessing.spawn(test_loop, args=(num_processes, ), nprocs=num_processes)
