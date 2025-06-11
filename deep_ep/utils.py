@@ -86,7 +86,7 @@ def check_nvlink_connections(group: dist.ProcessGroup):
         physical_device_indices = [0, ] * group.size()
         dist.all_gather_object(physical_device_indices, physical_device_idx, group)
 
-        # Check whether they are all connected
+        # Check whether they are all connected via NVLink
         # Reference: https://github.com/vllm-project/vllm/blob/b8e809a057765c574726a6077fd124db5077ce1f/vllm/platforms/cuda.py#L438
         handles = [pynvml.nvmlDeviceGetHandleByIndex(i) for i in physical_device_indices]
         for i, handle in enumerate(handles):
