@@ -1,4 +1,7 @@
+import os
+import subprocess
 import torch
+import torch.distributed as dist
 from typing import Any, Optional, Tuple
 
 # noinspection PyUnresolvedReferences
@@ -58,3 +61,28 @@ class EventOverlap:
         """
         if self.event is not None:
             self.event.current_stream_wait()
+
+
+def check_nvlink_connections(group: dist.ProcessGroup):
+    """
+    Check NVLink connection between every pair of GPUs.
+
+    Arguments:
+        group: the communication group.
+    """
+    # Check NVLink connection
+    # NOTES: some A100 PCIE GPUs only have pairwise NVLink connection, so that we can only use EP2
+    if 'PCIE' in torch.cuda.get_device_name():
+        assert group.size() <= 2, 'No NVLink connection between all GPUs'
+        devices = os.environ.get('CUDA_VISIBLE_DEVICES', '0,1,2,3,4,5,6,7').strip(',').split(',')
+        physical_device_idx = int(devices[torch.cuda.current_device()])
+        physical_device_indices = [0, ] * group.size()
+        dist.all_gather_object(physical_device_indices, physical_device_idx, group)
+
+        # Get connection matrix from `nvidia-smi`
+        lines = subprocess.check_output(['nvidia-smi', 'topo', '-p2p', 'n']).decode('utf-8').split('\n')
+        for line in lines:
+            if line.lstrip().startswith(f'GPU{physical_device_idx}') and 'X' in line:
+                status = line.strip().lstrip(f'GPU{physical_device_idx}').split()
+                for dst_gpu_rank in physical_device_indices:
+                    assert status[dst_gpu_rank] in ('X', 'OK'), f'No NVLink connection between GPU {physical_device_idx} and GPU {dst_gpu_rank}'
