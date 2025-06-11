@@ -37,11 +37,24 @@
 #undef __CUDA_NO_BFLOAT162_OPERATORS__
 #endif
 
-#include <cuda_bf16.h>
+#ifndef DISABLE_SM90_FEATURES
 #include <cuda_fp8.h>
+#else
+// Ampere does not support FP8 features
+#define __NV_E4M3 0
+#define __NV_E5M2 1
+typedef int __nv_fp8_interpretation_t;
+typedef int __nv_fp8x4_e4m3;
+typedef uint8_t __nv_fp8_storage_t;
+#endif
+
+#include <cuda_bf16.h>
 #include <cuda_runtime.h>
+
+#ifndef DISABLE_NVSHMEM
 #include <nvshmem.h>
 #include <nvshmemx.h>
 #include <infiniband/mlx5dv.h>
 #include <non_abi/device/threadgroup/nvshmemi_common_device_defines.cuh>
 #include <device_host_transport/nvshmem_common_ibgda.h>
+#endif

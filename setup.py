@@ -22,7 +22,11 @@ if __name__ == '__main__':
     nvcc_dlink = []
     extra_link_args = []
 
-    if not disable_nvshmem:
+    # NVSHMEM flags
+    if disable_nvshmem:
+        cxx_flags.append('-DDISABLE_NVSHMEM')
+        nvcc_flags.append('-DDISABLE_NVSHMEM')
+    else:
         sources.extend(['csrc/kernels/internode.cu', 'csrc/kernels/internode_ll.cu'])
         include_dirs.extend([f'{nvshmem_dir}/include'])
         library_dirs.extend([f'{nvshmem_dir}/lib'])
