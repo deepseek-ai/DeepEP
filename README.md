@@ -286,11 +286,14 @@ For two-micro-batch overlapping, you can refer to the following figure. With our
 
 - [x] AR support
 - [x] Refactor low-latency mode AR code
-- [ ] A100 support (intranode only)
+- [x] A100 support (intranode only)
 - [x] Support BF16 for the low-latency dispatch kernel
 - [x] Support NVLink protocol for intranode low-latency kernels
 - [ ] TMA copy instead of LD/ST
-- [ ] SM-free normal kernels and refactors
+  - [x] Intranode kernels
+  - [ ] Internode kernels
+  - [ ] Low-latency kernels
+- [ ] SM-free kernels and refactors
 
 ## Notices
 
