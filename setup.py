@@ -86,7 +86,7 @@ if __name__ == '__main__':
 
     setuptools.setup(
         name='deep_ep',
-        version='1.0.0' + revision,
+        version='1.1.0' + revision,
         packages=setuptools.find_packages(
             include=['deep_ep']
         ),
