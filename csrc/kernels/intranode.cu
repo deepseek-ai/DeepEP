@@ -473,12 +473,13 @@ void dispatch(void* recv_x, float* recv_x_scales, int* recv_src_idx, int64_t* re
               cudaStream_t stream, int num_sms, int num_max_send_tokens, int num_recv_buffer_tokens) {
     constexpr int kNumThreads = 768;
     constexpr int kNumTMABytesPerWarp = 8192;
+#ifndef DISABLE_NVSHMEM
     constexpr int smem_size = kNumTMABytesPerWarp * (kNumThreads / 32);
+#endif
 
 #define DISPATCH_LAUNCH_CASE(ranks) { \
     auto kernel = dispatch<ranks, kNumThreads, kNumTMABytesPerWarp>; \
-    EP_HOST_ASSERT(cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size) == cudaSuccess); \
-    cfg.dynamicSmemBytes = smem_size; \
+    SET_SHARED_MEMORY_FOR_TMA(kernel); \
     LAUNCH_KERNEL(&cfg, kernel, \
         reinterpret_cast<int4*>(recv_x), recv_x_scales, recv_src_idx, recv_topk_idx, recv_topk_weights, recv_channel_offset, \
         send_head, reinterpret_cast<const int4*>(x), x_scales, topk_idx, topk_weights, \
@@ -866,12 +867,13 @@ void combine(cudaDataType_t type,
              int num_max_send_tokens, int num_recv_buffer_tokens) {
     constexpr int kNumThreads = 768;
     constexpr int kNumTMABytesPerWarp = 4096;
+#ifndef DISABLE_NVSHMEM
     constexpr int smem_size = kNumTMABytesPerWarp * (kNumThreads / 32);
+#endif
 
 #define COMBINE_LAUNCH_CASE(dtype, ranks) { \
     auto kernel = combine<dtype, ranks, kNumThreads, kNumTMABytesPerWarp>; \
-    EP_HOST_ASSERT(cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size) == cudaSuccess); \
-    cfg.dynamicSmemBytes = smem_size; \
+    SET_SHARED_MEMORY_FOR_TMA(kernel); \
     LAUNCH_KERNEL(&cfg, kernel, \
         reinterpret_cast<dtype*>(recv_x), recv_topk_weights, \
         reinterpret_cast<const dtype*>(x), topk_weights,   \

@@ -37,6 +37,16 @@ do { \
 #endif
 #endif
 
+#ifndef SET_SHARED_MEMORY_FOR_TMA
+#ifndef DISABLE_SM90_FEATURES
+#define SET_SHARED_MEMORY_FOR_TMA(kernel) \
+EP_HOST_ASSERT(cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size) == cudaSuccess); \
+cfg.dynamicSmemBytes = smem_size;
+#else
+#define SET_SHARED_MEMORY_FOR_TMA(kernel) void()
+#endif
+#endif
+
 #define SWITCH_RANKS(case_macro) \
     switch (num_ranks) { \
         case 2: case_macro(2); \
