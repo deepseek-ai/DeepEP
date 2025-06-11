@@ -63,8 +63,9 @@ if __name__ == '__main__':
     extra_compile_args = {
         'cxx': cxx_flags,
         'nvcc': nvcc_flags,
-        'nvcc_dlink': nvcc_dlink
     }
+    if len(nvcc_dlink) > 0:
+        extra_compile_args['nvcc_dlink'] = nvcc_dlink
 
     # Summary
     print(f'Build summary:')
