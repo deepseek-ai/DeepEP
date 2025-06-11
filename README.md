@@ -162,6 +162,7 @@ def dispatch_forward(x: Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]],
                                     allocate_on_comm_stream=previous_event is not None)
     # Do MoE dispatch
     # NOTES: the CPU will wait for GPU's signal to arrive, so this is not compatible with CUDA graph
+    # Unless you specify `num_worst_tokens`, but this flag is for intranode only
     # For more advanced usages, please refer to the docs of the `dispatch` function
     recv_x, recv_topk_idx, recv_topk_weights, num_recv_tokens_per_expert_list, handle, event = \
         _buffer.dispatch(x, topk_idx=topk_idx, topk_weights=topk_weights,
