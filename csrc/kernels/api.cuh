@@ -37,7 +37,7 @@ void get_dispatch_layout(const int64_t* topk_idx,
                          int num_tokens, int num_topk, int num_ranks, int num_experts,
                          cudaStream_t stream);
 
-}
+} // namespace layout
 
 // Intranode kernels
 namespace intranode {
