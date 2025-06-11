@@ -96,3 +96,6 @@ def check_nvlink_connections(group: dist.ProcessGroup):
                 status = pynvml.nvmlDeviceGetP2PStatus(handle, peer_handle, pynvml.NVML_P2P_CAPS_INDEX_NVLINK)
                 assert status == pynvml.NVML_P2P_STATUS_OK,\
                     f'GPU {physical_device_indices[i]} and GPU {physical_device_indices[j]} are not connected via NVLink'
+
+        # Close NVML
+        pynvml.nvmlShutdown()
