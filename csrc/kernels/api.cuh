@@ -28,6 +28,17 @@ void finalize();
 
 } // namespace internode
 
+// Layout kernels
+namespace layout {
+
+void get_dispatch_layout(const int64_t* topk_idx,
+                         int* num_tokens_per_rank, int* num_tokens_per_rdma_rank,
+                         int* num_tokens_per_expert, bool* is_token_in_rank,
+                         int num_tokens, int num_topk, int num_ranks, int num_experts,
+                         cudaStream_t stream);
+
+}
+
 // Intranode kernels
 namespace intranode {
 
@@ -68,12 +79,6 @@ void combine(cudaDataType_t type,
 namespace internode {
 
 int get_source_meta_bytes();
-
-void get_dispatch_layout(const int64_t* topk_idx,
-                         int* num_tokens_per_rank, int* num_tokens_per_rdma_rank,
-                         int* num_tokens_per_expert, bool* is_token_in_rank,
-                         int num_tokens, int num_topk, int num_ranks, int num_experts,
-                         cudaStream_t stream);
 
 void notify_dispatch(const int* num_tokens_per_rank, int* moe_recv_counter_mapped, int num_ranks,
                      const int* num_tokens_per_rdma_rank, int* moe_recv_rdma_counter_mapped,

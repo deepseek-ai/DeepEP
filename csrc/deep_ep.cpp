@@ -256,13 +256,13 @@ Buffer::get_dispatch_layout(const torch::Tensor& topk_idx, int num_experts,
     if (is_internode_available())
         num_tokens_per_rdma_rank = torch::empty({num_rdma_ranks}, dtype(torch::kInt32).device(torch::kCUDA));
 
-    internode::get_dispatch_layout(topk_idx.data_ptr<int64_t>(),
-                                   num_tokens_per_rank.data_ptr<int>(),
-                                   num_tokens_per_rdma_rank.has_value() ? num_tokens_per_rdma_rank.value().data_ptr<int>() : nullptr,
-                                   num_tokens_per_expert.data_ptr<int>(),
-                                   is_token_in_rank.data_ptr<bool>(),
-                                   num_tokens, num_topk, num_ranks, num_experts,
-                                   comm_stream);
+    layout::get_dispatch_layout(topk_idx.data_ptr<int64_t>(),
+                                num_tokens_per_rank.data_ptr<int>(),
+                                num_tokens_per_rdma_rank.has_value() ? num_tokens_per_rdma_rank.value().data_ptr<int>() : nullptr,
+                                num_tokens_per_expert.data_ptr<int>(),
+                                is_token_in_rank.data_ptr<bool>(),
+                                num_tokens, num_topk, num_ranks, num_experts,
+                                comm_stream);
 
     // Wait streams
     std::optional<EventHandle> event;
