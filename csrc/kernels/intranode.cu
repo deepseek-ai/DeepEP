@@ -379,7 +379,7 @@ dispatch(int4* recv_x, float* recv_x_scales, int* recv_src_idx, int64_t* recv_to
         while (num_tokens_to_recv > 0) {
             // NOTES: unlike the sender, the receiver must ensure that the tail indices hold by different warps are the same
             while (recv_thread_id_in_rank == 0) {
-                cached_channel_tail_idx = ld_acquire_sys_global(channel_tail_idx.buffer());;
+                cached_channel_tail_idx = ld_acquire_sys_global(channel_tail_idx.buffer());
 
                 // Ready to copy
                 if (cached_channel_head_idx != cached_channel_tail_idx) {
