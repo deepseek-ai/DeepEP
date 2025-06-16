@@ -6,13 +6,13 @@
 namespace deep_ep {
 
 template <typename dtype_t>
-dtype_t cell_div(dtype_t a, dtype_t b) {
+dtype_t ceil_div(dtype_t a, dtype_t b) {
     return (a + b - 1) / b;
 }
 
 template <typename dtype_t>
 dtype_t align(dtype_t a, dtype_t b) {
-    return cell_div<dtype_t>(a, b) * b;
+    return ceil_div<dtype_t>(a, b) * b;
 }
 
 struct Config {
