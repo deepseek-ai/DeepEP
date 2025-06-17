@@ -382,7 +382,7 @@ LAUNCH_KERNEL(&cfg, dispatch_func, \
 #undef DISPATCH_LAUNCH_CASE
 }
 
-template <int kHidden, int kNumMaxTopk>
+template <bool kUseLogFMT, int kHidden, int kNumMaxTopk>
 __global__ __launch_bounds__(1024, 1) void
 combine(void* combined_x,
         void* rdma_recv_x, int* rdma_recv_flag, void* rdma_send_x,
@@ -545,6 +545,7 @@ void combine(void* combined_x,
              int* next_clean, int num_next_clean_int,
              int num_combined_tokens, int hidden, int num_max_dispatch_tokens_per_rank,
              int num_topk, int num_experts, int rank, int num_ranks,
+             bool use_logfmt,
              void* workspace, int num_device_sms,
              cudaStream_t stream, int phases, bool zero_copy) {
     constexpr int kNumMaxTopk = 9;
@@ -561,7 +562,9 @@ void combine(void* combined_x,
     EP_HOST_ASSERT(num_topk <= kNumMaxTopk);
 
 #define COMBINE_LAUNCH_CASE(hidden) { \
-auto combine_func = combine<hidden, kNumMaxTopk>; \
+auto combine_func = use_logfmt ? \
+    combine<true, hidden, kNumMaxTopk> : \
+    combine<false, hidden, kNumMaxTopk>; \
 LAUNCH_KERNEL(&cfg, combine_func, \
               combined_x, \
               rdma_recv_x, rdma_recv_flag, rdma_send_x, \
