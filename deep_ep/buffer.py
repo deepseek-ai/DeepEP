@@ -557,7 +557,7 @@ class Buffer:
             topk_weights: `[num_combined_tokens, num_topk]` with `torch.float`, the expert weights selected by the dispatched
                 tokens. The received tokens will be reduced with the weights in this tensor.
             handle: the communication handle given by the `dispatch` function.
-            use_logfmt: whether to use an internal "LogFMT with dynamic per-64-channel cast" format.
+            use_logfmt: whether to use an internal "LogFMT with dynamic per-64-channel cast" format (10 bits).
             zero_copy: whether the tensor is already copied into the RDMA buffer, should be cooperative
                 with `get_next_low_latency_combine_buffer`.
             async_finish: the current stream will not wait for the communication kernels to be finished if set.
