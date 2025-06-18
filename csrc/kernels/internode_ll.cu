@@ -472,7 +472,7 @@ combine(void* combined_x,
                     // Simulated cast
                     if constexpr (kUseLogFMT) {
                         constexpr float kThreshold = 2;
-                        constexpr float kMinClip = 22.1807097779182499013514278f; // lg(2 ^ (2 ^ 5))
+                        constexpr float kMinClip = 22.1807097779182499013514278f; // `== log(2 ^ (2 ^ 5))`
                         constexpr int kNumBits = 10;
                         constexpr int kNumValues = 1 << (kNumBits - 1);
                         EP_STATIC_ASSERT(kHidden % (kNumElemsPerInt4 * 32) == 0 and kNumElemsPerInt4 == 8, "Invalid hidden");
