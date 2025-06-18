@@ -113,6 +113,8 @@ dispatch(void* packed_recv_x, void* packed_recv_x_scales,
                 auto int4_value = __ldg(x_int4 + i);
 
                 if constexpr (kUseFP8) {
+                    EP_STATIC_ASSERT(kHidden % (32 * kNumElemsPerRead) == 0, "Invalid hidden");
+
                     // Calculate local amax
                     auto bf16_values = reinterpret_cast<nv_bfloat16*>(&int4_value);
                     float fp32_values[kNumElemsPerRead];
@@ -456,15 +458,73 @@ combine(void* combined_x,
             const auto buf_ptr = reinterpret_cast<int64_t>(rdma_send_x_vec_row);
             const auto dst_ptr = reinterpret_cast<uint64_t>(rdma_recv_x) + (global_expert_idx * num_max_dispatch_tokens_per_rank + src_idx) * num_bytes_per_slot;
             const auto dst_p2p_ptr = nvshmemi_get_p2p_ptr(dst_ptr, rank, dst_rank);
-            if (dst_p2p_ptr == 0) {
-                const auto buf_int4_ptr = reinterpret_cast<int4*>(buf_ptr);
-                if (not zero_copy)
-                    UNROLLED_WARP_COPY(7, lane_id, hidden_bf16_int4, buf_int4_ptr, x_int4, ld_nc_global, st_na_global);
-                nvshmemi_ibgda_put_nbi_warp(dst_ptr, buf_ptr, hidden * sizeof(nv_bfloat16), dst_rank, local_expert_idx, lane_id, token_idx - offset);
-            } else {
-                const auto dst_int4_ptr = reinterpret_cast<int4*>(dst_p2p_ptr);
-                UNROLLED_WARP_COPY(7, lane_id, hidden_bf16_int4, dst_int4_ptr, x_int4, ld_nc_global, st_na_global);
+
+            if (not zero_copy or dst_p2p_ptr != 0) {
+                // Read from `cpy_src_int4_ptr` and copy into `cpy_dst_int4_ptr`
+                const auto cpy_src_int4_ptr = zero_copy ? reinterpret_cast<int4*>(buf_ptr) : x_int4;
+                const auto cpy_dst_int4_ptr = dst_p2p_ptr == 0 ? reinterpret_cast<int4*>(buf_ptr) : reinterpret_cast<int4*>(dst_p2p_ptr);
+                #pragma unroll
+                for (int i = lane_id; i < hidden_bf16_int4; i += 32) {
+                    // Read
+                    auto int4_value = ld_nc_global(cpy_src_int4_ptr + i);
+                    auto bf16_values = reinterpret_cast<nv_bfloat16*>(&int4_value);
+
+                    // Simulated cast
+                    if constexpr (kUseLogFMT) {
+                        constexpr float kThreshold = 2;
+                        constexpr float kMinClip = 22.1807097779182499013514278f; // lg(2 ^ (2 ^ 5))
+                        constexpr int kNumBits = 10;
+                        constexpr int kNumValues = 1 << (kNumBits - 1);
+                        EP_STATIC_ASSERT(kHidden % (kNumElemsPerInt4 * 32) == 0 and kNumElemsPerInt4 == 8, "Invalid hidden");
+
+                        // Local log amax
+                        float log_abs_values[kNumElemsPerInt4], log_amax, log_amin, amax;
+                        #pragma unroll
+                        for (int j = 0; j < kNumElemsPerInt4; ++ j) {
+                            auto value = static_cast<float>(bf16_values[j]);
+                            log_abs_values[j] = logf(fabsf(value));
+                            amax = j == 0 ? value : fmaxf(amax, fabsf(value));
+                            log_amax = j == 0 ? log_abs_values[j] : fmaxf(log_amax, log_abs_values[j]);
+                            log_amin = j == 0 ? log_abs_values[j] : fminf(log_amin, log_abs_values[j]);
+                        }
+
+                        // Reduce per 64 channels
+                        log_amax = quarter_warp_reduce_max(log_amax);
+                        log_amin = fmaxf(quarter_warp_reduce_min(log_amin), log_amax - kMinClip);
+
+                        // Use LogFMT only with `amax <= kThreshold` (maybe not all quarter-warps)
+                        if (amax <= kThreshold) {
+                            const auto step = (log_amax - log_amin) / static_cast<float>(kNumValues - 2);
+                            const auto rounding = logf((1.0f + expf(step)) / 2.0f) / step + 1.0f;
+
+                            // Transform
+                            auto transform = [=](const float& value, const float& log_abs_value) -> nv_bfloat16 {
+                                if (log_amin == log_amax or value == 0)
+                                    return value;
+
+                                const auto encoded = floorf(fmaxf((log_abs_value - log_amin) / step + rounding, 0));
+                                if (encoded == 0)
+                                    return 0;
+
+                                const auto decoded = expf((encoded - 1) * step + log_amin);
+                                return value < 0 ? -decoded : decoded;
+                            };
+                            #pragma unroll
+                            for (int j = 0; j < kNumElemsPerInt4; ++ j)
+                                bf16_values[j] = transform(bf16_values[j], log_abs_values[j]);
+                        }
+                        __syncwarp();
+                    }
+
+                    // Store
+                    st_na_global(cpy_dst_int4_ptr + i, int4_value);
+                }
             }
+
+            // Issue RDMA
+            // NOTES: for zero-copy mode, we assume the data is already in the send buffer
+            if (dst_p2p_ptr == 0)
+                nvshmemi_ibgda_put_nbi_warp(dst_ptr, buf_ptr, hidden * sizeof(nv_bfloat16), dst_rank, local_expert_idx, lane_id, token_idx - offset);
         }
 
         // Put the finishing flag
@@ -560,6 +620,9 @@ void combine(void* combined_x,
     auto atomic_clean_flag = static_cast<int*>(workspace);
     EP_HOST_ASSERT(sizeof(int) <= NUM_WORKSPACE_BYTES);
     EP_HOST_ASSERT(num_topk <= kNumMaxTopk);
+
+    // Online cast cannot use zero-copy
+    EP_HOST_ASSERT(not (zero_copy and use_logfmt));
 
 #define COMBINE_LAUNCH_CASE(hidden) { \
 auto combine_func = use_logfmt ? \
