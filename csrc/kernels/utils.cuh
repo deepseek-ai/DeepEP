@@ -366,7 +366,7 @@ __device__ __forceinline__ void unpack2(const dtype_b_t& packed, dtype_a_t& x, d
 }
 
 template <typename dtype_t>
-__device__ __forceinline__ dtype_t broadcast(dtype_t& ptr, int src_lane_idx) {
+__device__ __forceinline__ dtype_t broadcast(dtype_t ptr, int src_lane_idx) {
     EP_STATIC_ASSERT(sizeof(dtype_t) % sizeof(int) == 0, "");
     auto send_int_values = reinterpret_cast<int*>(&ptr);
     int recv_int_values[sizeof(dtype_t) / sizeof(int)];

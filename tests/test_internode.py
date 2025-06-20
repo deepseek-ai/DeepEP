@@ -220,7 +220,7 @@ def test_main(num_sms: int, local_rank: int, num_local_ranks: int, num_ranks: in
 def test_loop(local_rank: int, num_local_ranks: int):
     num_nodes = int(os.getenv('WORLD_SIZE', 1))
     rank, num_ranks, group = init_dist(local_rank, num_local_ranks)
-    test_ll_compatibility = True
+    test_ll_compatibility = os.getenv('EP_TEST_LL_COMPATIBILITY', False)
     if test_ll_compatibility:
         ll_num_tokens, ll_hidden, ll_num_experts, ll_num_topk = 16, 5120, 256, 9
 

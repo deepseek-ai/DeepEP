@@ -2,6 +2,7 @@
 
 #include "configs.cuh"
 #include "exception.cuh"
+#include "utils.cuh"
 
 namespace deep_ep {
 
@@ -17,12 +18,12 @@ public:
 
     __device__ __forceinline__ Buffer(void* &gbl_ptr, int num_elems, int offset = 0) {
         total_bytes = num_elems * sizeof(dtype_t);
-        ptr = reinterpret_cast<uint8_t*>(gbl_ptr) + offset * sizeof(dtype_t);
-        gbl_ptr = reinterpret_cast<uint8_t*>(gbl_ptr) + total_bytes;
+        ptr = static_cast<uint8_t*>(gbl_ptr) + offset * sizeof(dtype_t);
+        gbl_ptr = static_cast<uint8_t*>(gbl_ptr) + total_bytes;
     }
 
     __device__ __forceinline__ Buffer advance_also(void* &gbl_ptr) {
-        gbl_ptr = reinterpret_cast<uint8_t*>(gbl_ptr) + total_bytes;
+        gbl_ptr = static_cast<uint8_t*>(gbl_ptr) + total_bytes;
         return *this;
     }
 
@@ -45,26 +46,27 @@ public:
     int total_bytes;
 
     __device__ __forceinline__ AsymBuffer(void* &gbl_ptr, int num_elems, int num_ranks,
-                                          int sm_id = 0, int num_sms = 1, int offset = 0) {
+                                          int channel_id = 0, int num_channels = 1, int offset = 0) {
         EP_STATIC_ASSERT(kNumRanks == 1, "");
         num_bytes = num_elems * sizeof(dtype_t);
 
         int per_channel_bytes = num_bytes * num_ranks;
-        total_bytes = per_channel_bytes * num_sms;
-        ptrs[0] = reinterpret_cast<uint8_t*>(gbl_ptr) + per_channel_bytes * sm_id + num_bytes * offset;
-        gbl_ptr = reinterpret_cast<uint8_t*>(gbl_ptr) + total_bytes;
+        total_bytes = per_channel_bytes * num_channels;
+        ptrs[0] = static_cast<uint8_t*>(gbl_ptr) + per_channel_bytes * channel_id + num_bytes * offset;
+        gbl_ptr = static_cast<uint8_t*>(gbl_ptr) + total_bytes;
     }
 
     __device__ __forceinline__ AsymBuffer(void** gbl_ptrs, int num_elems, int num_ranks,
-                                          int sm_id = 0, int num_sms = 1, int offset = 0) {
+                                          int channel_id = 0, int num_channels = 1, int offset = 0) {
+        // TODO: use UR as much as possible
         EP_STATIC_ASSERT(kNumRanks > 1, "");
         num_bytes = num_elems * sizeof(dtype_t);
 
         int per_channel_bytes = num_bytes * num_ranks;
-        total_bytes = per_channel_bytes * num_sms;
+        total_bytes = per_channel_bytes * num_channels;
         for (int i = 0; i < kNumRanks; ++ i) {
-            ptrs[i] = reinterpret_cast<uint8_t*>(gbl_ptrs[i]) + per_channel_bytes * sm_id + num_bytes * offset;
-            gbl_ptrs[i] = reinterpret_cast<uint8_t*>(gbl_ptrs[i]) + total_bytes;
+            ptrs[i] = static_cast<uint8_t*>(gbl_ptrs[i]) + per_channel_bytes * channel_id + num_bytes * offset;
+            gbl_ptrs[i] = static_cast<uint8_t*>(gbl_ptrs[i]) + total_bytes;
         }
     }
 
@@ -75,25 +77,32 @@ public:
     }
 
     __device__ __forceinline__ AsymBuffer advance_also(void* &gbl_ptr) {
-        gbl_ptr = reinterpret_cast<uint8_t*>(gbl_ptr) + total_bytes;
+        gbl_ptr = static_cast<uint8_t*>(gbl_ptr) + total_bytes;
         return *this;
     }
 
     template<int kNumAlsoRanks>
     __device__ __forceinline__ AsymBuffer advance_also(void** gbl_ptrs) {
         for (int i = 0; i < kNumAlsoRanks; ++ i)
-            gbl_ptrs[i] = reinterpret_cast<uint8_t*>(gbl_ptrs[i]) + total_bytes;
+            gbl_ptrs[i] = static_cast<uint8_t*>(gbl_ptrs[i]) + total_bytes;
         return *this;
     }
 
-    __device__ __forceinline__ dtype_t* buffer(int idx = 0) {
+    __device__ __forceinline__ dtype_t* buffer(const int& idx = 0) {
         EP_STATIC_ASSERT(kNumRanks == 1, "`buffer` is only available for single rank case");
         return reinterpret_cast<dtype_t*>(ptrs[0] + num_bytes * idx);
     }
 
-    __device__ __forceinline__ dtype_t* buffer_by(int rank_idx, int idx = 0) {
+    __device__ __forceinline__ dtype_t* buffer_by(int rank_idx, const int& idx = 0) {
         EP_STATIC_ASSERT(kNumRanks > 1, "`buffer` is only available for single rank case");
         return reinterpret_cast<dtype_t*>(ptrs[rank_idx] + num_bytes * idx);
+    }
+
+    __device__ __forceinline__ dtype_t* buffer_by_sync(int rank_idx, const int& idx = 0) {
+        // Different lanes store different pointers
+        // NOTES: this function requires the whole warp
+        EP_STATIC_ASSERT(kNumRanks == 1, "Invalid number of ranks");
+        return broadcast(reinterpret_cast<dtype_t*>(ptrs[0] + num_bytes * idx), rank_idx);
     }
 };
 
@@ -114,9 +123,9 @@ public:
 
         int per_channel_bytes = num_bytes * num_ranks;
         total_bytes = per_channel_bytes * num_sms * (static_cast<int>(kDecoupled) + 1);
-        send_ptr = reinterpret_cast<uint8_t*>(gbl_ptr) + per_channel_bytes * sm_id;
-        recv_ptr = reinterpret_cast<uint8_t*>(gbl_ptr) + per_channel_bytes * (sm_id + num_sms);
-        gbl_ptr = reinterpret_cast<uint8_t*>(gbl_ptr) + total_bytes;
+        send_ptr = static_cast<uint8_t*>(gbl_ptr) + per_channel_bytes * sm_id;
+        recv_ptr = static_cast<uint8_t*>(gbl_ptr) + per_channel_bytes * (sm_id + num_sms);
+        gbl_ptr = static_cast<uint8_t*>(gbl_ptr) + total_bytes;
     }
 
     __device__ __forceinline__ dtype_t* send_buffer(int idx = 0) {
