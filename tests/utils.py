@@ -80,7 +80,7 @@ def create_grouped_scores(scores: torch.Tensor, group_idx: torch.Tensor, num_gro
     return (scores * mask).view(num_tokens, num_experts)
 
 
-def bench(fn, num_warmups: int = 20, num_tests: int = 30, post_fn=None):
+def bench(fn, num_warmups: int = 50, num_tests: int = 50, post_fn=None):
     # Flush L2 cache with 256 MB data
     torch.cuda.synchronize()
     cache = torch.empty(int(256e6 // 4), dtype=torch.int, device='cuda')
