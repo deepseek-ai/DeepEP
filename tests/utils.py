@@ -1,4 +1,8 @@
 import inspect
+import json
+import tempfile
+from pathlib import Path
+
 import numpy as np
 import os
 import sys
@@ -152,7 +156,8 @@ class suppress_stdout_stderr:
 
 
 def bench_kineto(fn, kernel_names, num_tests: int = 30, suppress_kineto_output: bool = False,
-                 trace_path: Optional[str] = None, barrier_comm_profiling: bool = False):
+                 trace_path: Optional[str] = None, barrier_comm_profiling: bool = False,
+                 duplicate_name_period: Optional[int] = None):
     # Profile
     suppress = suppress_stdout_stderr if suppress_kineto_output else empty_suppress
     with suppress():
@@ -194,8 +199,30 @@ def bench_kineto(fn, kernel_names, num_tests: int = 30, suppress_kineto_output: 
                         kernel_times.append(float(time_str.replace(unit, '')) / scale)
                         break
                 break
-    return tuple(kernel_times) if is_tupled else kernel_times[0]
 
+    if duplicate_name_period is None:
+        return tuple(kernel_times) if is_tupled else kernel_times[0]
+    else:
+        detail_times = extract_detail_times_from_prof(prof, kernel_names=kernel_names, duplicate_name_period=duplicate_name_period)
+        return tuple(kernel_times) + (detail_times,)
+
+
+def extract_detail_times_from_prof(prof, kernel_names, duplicate_name_period: int):
+    with tempfile.NamedTemporaryFile(suffix=".json") as tmp:
+        prof.export_chrome_trace(tmp.name)
+        profile_data = json.loads(Path(tmp.name).read_text())
+
+    ans = {}
+    for kernel_name in kernel_names:
+        name_matcher = f'::{kernel_name}<'
+        events = [e for e in profile_data["traceEvents"] if name_matcher in e["name"]]
+        events = sorted(events, key=lambda e: e["ts"])
+        durations = [e["dur"] / 1e6 for e in events]
+        ans[kernel_name] = [list_mean(durations[i::duplicate_name_period]) for i in range(duplicate_name_period)]
+    return ans
+
+def list_mean(xs):
+    return sum(xs) / len(xs)
 
 def hash_tensor(t: torch.Tensor):
     return t.view(torch.int64).sum().item()
