@@ -335,7 +335,8 @@ def forward_layer_overlap(
     # # ------------------------------------
 
     # print(f'hi call current_stream_wait', flush=True)
-    combine_event.current_stream_wait()
+    assert combine_event.event is None
+    # combine_event.current_stream_wait()
 
     # hack
     # print(f'hi call sync', flush=True)
