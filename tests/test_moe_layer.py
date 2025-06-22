@@ -329,7 +329,7 @@ def forward_layer_overlap(
         4: 119, 48: 120, # with the "specially treat first expert"
     }[num_ranks]
 
-    src_signals = (
+    down_output_signals = (
         torch.tensor([actual_deepgemm_num_sms] + [0] * (num_local_experts - 1), dtype=torch.uint32, device="cpu")
         .to(down_input.device, non_blocking=True)
     )
@@ -356,16 +356,16 @@ def forward_layer_overlap(
             #         expected_m,
             #         recipe=(1, 128, 128),
             #     )
-            #     buffer.runtime.notify_src_signals(src_signals, local_expert_idx)
+            #     buffer.runtime.notify_src_signals(down_output_signals, local_expert_idx)
 
             # print("hi call fp8_m_grouped_gemm_nt_masked", flush=True)
             # deepgemm_out = deep_gemm.fp8_m_grouped_gemm_nt_masked(
             #     down_input_fp8, w2_weight_fp8, down_output, masked_m, expected_m, recipe=(1, 128, 128),
-            #     d_signals=src_signals,
+            #     d_signals=down_output_signals,
             # )
             # actual_deepgemm_num_sms = deepgemm_out["num_sms"]
 
-            expert_slice = slice(1, num_experts)
+            expert_slice = slice(1, num_local_experts)
             deepgemm_out = deep_gemm.fp8_m_grouped_gemm_nt_masked(
                 _pick_expert_fp8(down_input_fp8, expert_slice),
                 _pick_expert_fp8(w2_weight_fp8, expert_slice),
@@ -373,7 +373,7 @@ def forward_layer_overlap(
                 masked_m[expert_slice],
                 expected_m,
                 recipe=(1, 128, 128),
-                d_signals=src_signals[expert_slice],
+                d_signals=down_output_signals[expert_slice],
             )
             assert deepgemm_out["num_sms"] == actual_deepgemm_num_sms, f"{deepgemm_out=} {actual_deepgemm_num_sms=}"
 
@@ -386,7 +386,7 @@ def forward_layer_overlap(
         down_output, topk_idx, topk_weights, comm_handle,
         return_recv_hook=True,
         # async_finish=True, # NOTE
-        src_signals=src_signals,
+        src_signals=down_output_signals,
         src_signal_expect_value=src_signal_expect_value,
     )
 
@@ -400,7 +400,7 @@ def forward_layer_overlap(
     # raise Exception
     # # ------------------------------------
 
-    # print(f'hi after a while {src_signals=}', flush=True)
+    # print(f'hi after a while {down_output_signals=}', flush=True)
 
     assert combine_event.event is None
     # combine_event.current_stream_wait()
@@ -416,7 +416,7 @@ def forward_layer_overlap(
     # print(f'hi END', flush=True)
 
     if 0:
-        assert torch.all(src_signals == src_signal_expect_value), f"{src_signals=} {src_signal_expect_value=}"
+        assert torch.all(down_output_signals == src_signal_expect_value), f"{down_output_signals=} {src_signal_expect_value=}"
 
     print(f"hi forward_layer_overlap {combined_x=}")
     return combined_x
