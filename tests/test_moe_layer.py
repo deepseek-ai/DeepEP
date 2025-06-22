@@ -279,9 +279,13 @@ def forward_layer_overlap(
         b = torch.randn((1000,))
         a += b
 
+    print(f'hi call sync', flush=True)
+    torch.cuda.synchronize()
+
     # NOTE need to change according to DeepEP src code
-    deepep_num_sms = 32
-    deepgemm_num_sms = torch.cuda.get_device_properties(device='cuda').multi_processor_count - deepep_num_sms
+    # deepep_num_sms = 32
+    # deepgemm_num_sms = torch.cuda.get_device_properties(device='cuda').multi_processor_count - deepep_num_sms
+    deepgemm_num_sms = 64 # TODO temp
 
     for local_expert_idx in range(num_local_experts):
         print(f'hi call gemm {local_expert_idx=}', flush=True)
