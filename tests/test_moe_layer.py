@@ -70,6 +70,7 @@ def test_main(num_tokens: int, hidden: int, num_experts: int, num_topk: int,
             num_experts=num_experts,
             num_local_experts=num_local_experts,
             hack_stream=hack_stream,
+            num_ranks=num_ranks,
         )
 
     for fn_mode in [
@@ -143,6 +144,7 @@ def forward_layer_naive(
     num_experts,
     num_local_experts,
     hack_stream,
+    num_ranks,
 ):
     down_input, down_input_scale, comm_handle, expected_m, masked_m, num_groups, m = (
         forward_layer_naive_first_half(
@@ -284,6 +286,7 @@ def forward_layer_overlap(
         num_experts,
         num_local_experts,
         hack_stream,
+        num_ranks,
 ):
     # # ------------------------------------
     # print("hi prepare deepgemm_kwargs")
@@ -309,7 +312,11 @@ def forward_layer_overlap(
     # NOTE need to change according to DeepEP src code
     deepep_num_sms = 32
     deepgemm_num_sms_upper_bound = torch.cuda.get_device_properties(device='cuda').multi_processor_count - deepep_num_sms
-    actual_deepgemm_num_sms = 116
+    actual_deepgemm_num_sms = {
+        # temp hardcoded
+        4: 120,
+        48: 116,
+    }[num_ranks]
 
     src_signals = torch.zeros(num_local_experts, dtype=torch.uint32, device=down_input.device)
     src_signals[0] = actual_deepgemm_num_sms
