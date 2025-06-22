@@ -264,6 +264,14 @@ def forward_layer_overlap(
 
     src_signals = torch.zeros(num_local_experts, dtype=torch.uint32, device=down_input.device)
 
+    print('hi call low_latency_combine', flush=True)
+    combined_x, combine_event, combine_hook = buffer.low_latency_combine(
+        down_output, topk_idx, topk_weights, comm_handle,
+        return_recv_hook=True,
+        async_finish=True, # NOTE
+        src_signals=src_signals,
+    )
+
     for local_expert_idx in range(num_local_experts):
         print(f'hi call gemm {local_expert_idx=}', flush=True)
         deep_gemm.fp8_m_grouped_gemm_nt_masked(
@@ -276,15 +284,6 @@ def forward_layer_overlap(
         )
         print(f'hi call notify_src_signals {local_expert_idx=}', flush=True)
         buffer.runtime.notify_src_signals(src_signals, local_expert_idx)
-
-    # TODO wrong order
-    print('hi call low_latency_combine', flush=True)
-    combined_x, combine_event, combine_hook = buffer.low_latency_combine(
-        down_output, topk_idx, topk_weights, comm_handle,
-        return_recv_hook=True,
-        async_finish=True, # NOTE
-        src_signals=src_signals,
-    )
 
     print(f'hi call current_stream_wait', flush=True)
     combine_event.current_stream_wait()
