@@ -465,18 +465,18 @@ combine(void* combined_x,
             int offset, num_tokens_to_send;
             unpack2(layout, num_tokens_to_send, offset);
 
-            if (threadIdx.x == 0) { printf("combine sm_id=%d local_expert_idx=%d before-wait\n", sm_id, local_expert_idx); }
+//             if (threadIdx.x == 0) { printf("combine sm_id=%d local_expert_idx=%d before-wait\n", sm_id, local_expert_idx); }
             if (src_signals != nullptr) {
               if (threadIdx.x == 0) {
-                if (threadIdx.x == 0) { printf("combine sm_id=%d local_expert_idx=%d before-call-wait-signal\n", sm_id, local_expert_idx); }
+//                 if (threadIdx.x == 0) { printf("combine sm_id=%d local_expert_idx=%d before-call-wait-signal\n", sm_id, local_expert_idx); }
                 wait_signal(src_signals + local_expert_idx);
-                if (threadIdx.x == 0) { printf("combine sm_id=%d local_expert_idx=%d after-call-wait-signal\n", sm_id, local_expert_idx); }
+//                 if (threadIdx.x == 0) { printf("combine sm_id=%d local_expert_idx=%d after-call-wait-signal\n", sm_id, local_expert_idx); }
               }
 
               // TODO original code uses NamedBarrier, better than this?
               __syncthreads();
             }
-            if (threadIdx.x == 0) { printf("combine sm_id=%d local_expert_idx=%d after-wait\n", sm_id, local_expert_idx); }
+//             if (threadIdx.x == 0) { printf("combine sm_id=%d local_expert_idx=%d after-wait\n", sm_id, local_expert_idx); }
 
             // Issue IBGDA send
 //             for (int token_idx = offset + sub_warp_id; token_idx < offset + num_tokens_to_send; token_idx += num_warps_per_group) {
@@ -512,10 +512,10 @@ combine(void* combined_x,
                 }
             }
 
-            if (threadIdx.x == 0) { printf("combine sm_id=%d local_expert_idx=%d after-copy\n", sm_id, local_expert_idx); }
+//             if (threadIdx.x == 0) { printf("combine sm_id=%d local_expert_idx=%d after-copy\n", sm_id, local_expert_idx); }
         }
 
-    if (threadIdx.x == 0) { printf("combine sm_id=%d end-send\n", sm_id); }
+//     if (threadIdx.x == 0) { printf("combine sm_id=%d end-send\n", sm_id); }
 
 // NOTE MOVED
 //         // Put the finishing flag
