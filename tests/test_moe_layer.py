@@ -267,15 +267,15 @@ def forward_layer_overlap(
         num_experts,
         num_local_experts,
 ):
-    # ------------------------------------
-    print("hi prepare deepgemm_kwargs")
-    num_groups, m, k, n = 6, 1024, 2048, 7168
-    a, b, d, ref_d = deepgemm_generate_grouped_masked(num_groups, m, k, n)
-    masked_m = torch.ones((num_groups, ), device='cuda', dtype=torch.int) * m
-    expected_m = min(int(masked_m.float().mean()) + 1, m)
-    deepgemm_kwargs = dict(a=a, b=b, d=d, masked_m=masked_m, expected_m=expected_m)
-    deepgemm_stream = torch.cuda.Stream()
-    # ------------------------------------
+    # # ------------------------------------
+    # print("hi prepare deepgemm_kwargs")
+    # num_groups, m, k, n = 6, 1024, 2048, 7168
+    # a, b, d, ref_d = deepgemm_generate_grouped_masked(num_groups, m, k, n)
+    # masked_m = torch.ones((num_groups, ), device='cuda', dtype=torch.int) * m
+    # expected_m = min(int(masked_m.float().mean()) + 1, m)
+    # deepgemm_kwargs = dict(a=a, b=b, d=d, masked_m=masked_m, expected_m=expected_m)
+    # deepgemm_stream = torch.cuda.Stream()
+    # # ------------------------------------
 
     down_input, down_input_scale, comm_handle, expected_m, masked_m, num_groups, m = (
         forward_layer_naive_first_half(
@@ -290,32 +290,11 @@ def forward_layer_overlap(
 
     src_signals = torch.zeros(num_local_experts, dtype=torch.uint32, device=down_input.device)
 
-    print('hi call low_latency_combine', flush=True)
-    combined_x, combine_event, combine_hook = buffer.low_latency_combine(
-        down_output, topk_idx, topk_weights, comm_handle,
-        return_recv_hook=True,
-        async_finish=True, # NOTE
-        src_signals=src_signals,
-    )
-
-    # ------------------------------------
-    deepgemm_num_sms = 30  # very small
-    with torch.cuda.stream(deepgemm_stream):
-        with configure_deep_gemm_num_sms(deepgemm_num_sms):
-            for _ in range(20):
-                print("hi call fp8_m_grouped_gemm_nt_masked")
-                deep_gemm.fp8_m_grouped_gemm_nt_masked(**deepgemm_kwargs)
-    # ------------------------------------
-
-    raise Exception
-
     # NOTE need to change according to DeepEP src code
     # deepep_num_sms = 32
     # deepgemm_num_sms = torch.cuda.get_device_properties(device='cuda').multi_processor_count - deepep_num_sms
     deepgemm_num_sms = 64 # TODO temp
-
     hack_stream = torch.cuda.Stream()
-
     for local_expert_idx in range(num_local_experts):
         print(f'hi call gemm {local_expert_idx=}', flush=True)
         with torch.cuda.stream(hack_stream):
@@ -328,9 +307,26 @@ def forward_layer_overlap(
                     expected_m,
                     recipe=(1, 128, 128),
                 )
-
         print(f'hi call notify_src_signals {local_expert_idx=}', flush=True)
         buffer.runtime.notify_src_signals(src_signals, local_expert_idx)
+
+    print('hi call low_latency_combine', flush=True)
+    combined_x, combine_event, combine_hook = buffer.low_latency_combine(
+        down_output, topk_idx, topk_weights, comm_handle,
+        return_recv_hook=True,
+        async_finish=True, # NOTE
+        src_signals=src_signals,
+    )
+
+    # # ------------------------------------
+    # deepgemm_num_sms = 30  # very small
+    # with torch.cuda.stream(deepgemm_stream):
+    #     with configure_deep_gemm_num_sms(deepgemm_num_sms):
+    #         for _ in range(20):
+    #             print("hi call fp8_m_grouped_gemm_nt_masked")
+    #             deep_gemm.fp8_m_grouped_gemm_nt_masked(**deepgemm_kwargs)
+    # raise Exception
+    # # ------------------------------------
 
     print(f'hi call current_stream_wait', flush=True)
     combine_event.current_stream_wait()
