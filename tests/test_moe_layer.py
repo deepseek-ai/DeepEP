@@ -273,16 +273,12 @@ def forward_layer_overlap(
         src_signals=src_signals,
     )
 
-    a = torch.randn((1000,))
-    for i in range(100):
-        print(f'hi call randn and addition', flush=True)
-        b = torch.randn((1000,))
-        a += b
-
+    # TODO temp
     for local_expert_idx in range(num_local_experts):
         print(f'hi call notify_src_signals {local_expert_idx=}', flush=True)
         buffer.runtime.notify_src_signals(src_signals, local_expert_idx)
 
+    # TODO temp
     print(f'hi call sync', flush=True)
     torch.cuda.synchronize()
 

@@ -465,6 +465,7 @@ combine(void* combined_x,
             int offset, num_tokens_to_send;
             unpack2(layout, num_tokens_to_send, offset);
 
+            if (threadIdx.x == 0) { printf("combine sm_id=%d local_expert_idx=%d before-wait\n", sm_id, local_expert_idx); }
             if (src_signals != nullptr) {
               if (threadIdx.x == 0) {
                 wait_signal(src_signals + local_expert_idx);
@@ -473,6 +474,7 @@ combine(void* combined_x,
               // TODO original code uses NamedBarrier, better than this?
               __syncthreads();
             }
+            if (threadIdx.x == 0) { printf("combine sm_id=%d local_expert_idx=%d after-wait\n", sm_id, local_expert_idx); }
 
             // Issue IBGDA send
 //             for (int token_idx = offset + sub_warp_id; token_idx < offset + num_tokens_to_send; token_idx += num_warps_per_group) {
@@ -507,7 +509,11 @@ combine(void* combined_x,
                     UNROLLED_WARP_COPY(7, lane_id, hidden_bf16_int4, dst_int4_ptr, x_int4, ld_nc_global, st_na_global);
                 }
             }
+
+            if (threadIdx.x == 0) { printf("combine sm_id=%d local_expert_idx=%d after-copy\n", sm_id, local_expert_idx); }
         }
+
+    if (threadIdx.x == 0) { printf("combine sm_id=%d end-send\n", sm_id); }
 
 // NOTE MOVED
 //         // Put the finishing flag
