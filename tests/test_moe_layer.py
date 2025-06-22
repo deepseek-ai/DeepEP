@@ -36,11 +36,7 @@ def test_main(num_tokens: int, hidden: int, num_experts: int, num_topk: int,
 
     print(f"[{rank}] test_main prepare data", flush=True)
     # ref: DeepGEMM - generate_grouped_masked
-    # x = torch.randn((num_tokens, hidden), device='cuda', dtype=torch.bfloat16)
-    # TODO
-    # TODO temp
-    # TODO
-    x = torch.zeros((num_tokens, hidden), device='cuda', dtype=torch.bfloat16)
+    x = torch.randn((num_tokens, hidden), device='cuda', dtype=torch.bfloat16)
     scores = torch.randn((num_tokens, num_experts), dtype=torch.float32, device='cuda').abs() + 1
     topk_idx = torch.topk(scores, num_topk, dim=-1, largest=True, sorted=True)[1]
     topk_weights = torch.randn((num_tokens, num_topk), dtype=torch.float32, device='cuda').abs()
