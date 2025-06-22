@@ -303,6 +303,7 @@ def forward_layer_overlap(
                 expected_m,
                 recipe=(1, 128, 128),
             )
+
         print(f'hi call notify_src_signals {local_expert_idx=}', flush=True)
         buffer.runtime.notify_src_signals(src_signals, local_expert_idx)
 
