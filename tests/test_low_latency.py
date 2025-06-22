@@ -136,15 +136,17 @@ def test_main(num_tokens: int, hidden: int, num_experts: int, num_topk: int,
         masked_m = torch.ones((num_groups, ), device='cuda', dtype=torch.int) * m
         expected_m = min(int(masked_m.float().mean()) + 1, m)
         deepgemm_kwargs = dict(a=a, b=b, d=d, masked_m=masked_m, expected_m=expected_m)
+        deepgemm_stream = torch.cuda.Stream()
 
     # noinspection PyShadowingNames
     def test_func(zero_copy: bool, return_recv_hook: bool):
         if hack_concurrent_deepgemm:
             import deep_gemm
             deepgemm_num_sms = 30  # very small
-            with configure_deep_gemm_num_sms(deepgemm_num_sms):
-                for _ in range(20):
-                    deep_gemm.fp8_m_grouped_gemm_nt_masked(**deepgemm_kwargs)
+            with torch.cuda.stream(deepgemm_stream):
+                with configure_deep_gemm_num_sms(deepgemm_num_sms):
+                    for _ in range(20):
+                        deep_gemm.fp8_m_grouped_gemm_nt_masked(**deepgemm_kwargs)
 
         recv_x, recv_count, handle, event, hook = \
             buffer.low_latency_dispatch(x, topk_idx, num_tokens, num_experts,
