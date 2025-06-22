@@ -1,7 +1,9 @@
 import json
 import os
 import random
+import time
 from contextlib import contextmanager
+from pathlib import Path
 from typing import Tuple
 
 import torch
@@ -187,11 +189,19 @@ def test_main(num_tokens: int, hidden: int, num_experts: int, num_topk: int,
         if hack_skip_no_hook and not return_recv_hook:
             continue
 
+        hack_save_trace = bool(int(os.environ.get("DEEPEP_HACK_SAVE_TRACE", "0")))
+        if hack_save_trace and rank == 0:
+            trace_path = str(Path("/data/numa0/tom/temp_sglang_server2local/") / f"{time.time()}-TP-{rank}.trace.json.gz")
+            print(f"{trace_path=}")
+        else:
+            trace_path = None
+
         group.barrier()
         bench_output = bench_kineto(partial(test_func, zero_copy=True, return_recv_hook=return_recv_hook),
                                              kernel_names=('dispatch', 'combine'),
                                              barrier_comm_profiling=bool(int(os.getenv("DEEPEP_BARRIER_COMM_PROFILING", "1"))),
-                                             suppress_kineto_output=True, duplicate_name_period=2 if return_recv_hook else None)
+                                             suppress_kineto_output=True, duplicate_name_period=2 if return_recv_hook else None,
+                                             trace_path=trace_path)
         if not return_recv_hook:
             dispatch_t, combine_t = bench_output
             data = dict(

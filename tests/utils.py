@@ -159,7 +159,7 @@ class suppress_stdout_stderr:
 
 def bench_kineto(fn, kernel_names, num_tests: int = 30, suppress_kineto_output: bool = False,
                  trace_path: Optional[str] = None, barrier_comm_profiling: bool = False,
-                 duplicate_name_period: Optional[int] = None, enable_cuda_profiler: bool = False):
+                 duplicate_name_period: Optional[int] = None):
     # Profile
     suppress = suppress_stdout_stderr if suppress_kineto_output else empty_suppress
     with suppress():
