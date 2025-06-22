@@ -73,8 +73,8 @@ def test_main(num_tokens: int, hidden: int, num_experts: int, num_topk: int,
         )
 
     for fn_mode in [
-        'naive', # TODO
-        # 'overlap',
+        # 'naive', # TODO
+        'overlap',
     ]:
         if rank == 0:
             trace_path = str(Path("/data/numa0/tom/temp_sglang_server2local/") / f"{time.time()}-TP-{rank}.trace.json.gz")
@@ -318,19 +318,22 @@ def forward_layer_overlap(
 
     hack_stream.wait_stream(torch.cuda.current_stream())
     with torch.cuda.stream(hack_stream):
-        for local_expert_idx in range(num_local_experts):
-            # print(f'hi call gemm {local_expert_idx=}', flush=True)
-            with configure_deep_gemm_num_sms(deepgemm_num_sms):
-                deep_gemm.fp8_m_grouped_gemm_nt_masked(
-                    _pick_expert_fp8(down_input_fp8, local_expert_idx=local_expert_idx),
-                    _pick_expert_fp8(w2_weight_fp8, local_expert_idx=local_expert_idx),
-                    _pick_expert(down_output, local_expert_idx=local_expert_idx),
-                    masked_m[local_expert_idx:local_expert_idx+1],
-                    expected_m,
-                    recipe=(1, 128, 128),
-                )
-            # print(f'hi call notify_src_signals {local_expert_idx=}', flush=True)
-            buffer.runtime.notify_src_signals(src_signals, local_expert_idx)
+        with configure_deep_gemm_num_sms(deepgemm_num_sms):
+            # for local_expert_idx in range(num_local_experts):
+            #     deep_gemm.fp8_m_grouped_gemm_nt_masked(
+            #         _pick_expert_fp8(down_input_fp8, local_expert_idx=local_expert_idx),
+            #         _pick_expert_fp8(w2_weight_fp8, local_expert_idx=local_expert_idx),
+            #         _pick_expert(down_output, local_expert_idx=local_expert_idx),
+            #         masked_m[local_expert_idx:local_expert_idx+1],
+            #         expected_m,
+            #         recipe=(1, 128, 128),
+            #     )
+            #     buffer.runtime.notify_src_signals(src_signals, local_expert_idx)
+
+            deep_gemm.fp8_m_grouped_gemm_nt_masked(
+                down_input_fp8, w2_weight_fp8, down_output, masked_m, expected_m, recipe=(1, 128, 128),
+                d_signals=src_signals,
+            )
 
     # print('hi call low_latency_combine', flush=True)
     combined_x, combine_event, combine_hook = buffer.low_latency_combine(
