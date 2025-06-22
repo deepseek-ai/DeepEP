@@ -143,7 +143,7 @@ def test_main(num_tokens: int, hidden: int, num_experts: int, num_topk: int,
             import deep_gemm
             deepgemm_num_sms = 30  # very small
             with configure_deep_gemm_num_sms(deepgemm_num_sms):
-                for _ in range(10):
+                for _ in range(20):
                     deep_gemm.fp8_m_grouped_gemm_nt_masked(**deepgemm_kwargs)
 
         recv_x, recv_count, handle, event, hook = \
