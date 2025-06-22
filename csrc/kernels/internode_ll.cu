@@ -397,7 +397,7 @@ LAUNCH_KERNEL(&cfg, dispatch_func, \
 // }
 __device__ __forceinline__ void wait_signal(uint32_t* addr, uint32_t expect_value) {
   uint32_t ready = *addr;
-  while (ready < expect_value) {
+  while (ready != expect_value) {
     // TODO correct?
     asm volatile("ld.acquire.gpu.global.u32 %0, [%1];"
                  : "=r"(ready)
