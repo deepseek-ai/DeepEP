@@ -296,10 +296,9 @@ def forward_layer_overlap(
     src_signals = torch.zeros(num_local_experts, dtype=torch.uint32, device=down_input.device)
 
     # NOTE need to change according to DeepEP src code
-    # deepep_num_sms = 32
-    # deepgemm_num_sms = torch.cuda.get_device_properties(device='cuda').multi_processor_count - deepep_num_sms
-    deepgemm_num_sms = 30 # TODO temp
-    # TODO these streams do not wait, wrong?
+    deepep_num_sms = 32
+    deepgemm_num_sms = torch.cuda.get_device_properties(device='cuda').multi_processor_count - deepep_num_sms
+
     hack_stream.wait_stream(torch.cuda.current_stream())
     with torch.cuda.stream(hack_stream):
         for local_expert_idx in range(num_local_experts):
@@ -340,7 +339,7 @@ def forward_layer_overlap(
 
     # hack
     # print(f'hi call sync', flush=True)
-    torch.cuda.synchronize()
+    # torch.cuda.synchronize()
 
     # print(f'hi call large_gemm', flush=True)
     large_gemm()
