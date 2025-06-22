@@ -4,6 +4,7 @@ import random
 import time
 from contextlib import contextmanager
 from pathlib import Path
+from typing import Tuple
 
 import torch
 import torch.distributed as dist
