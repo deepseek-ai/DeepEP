@@ -51,7 +51,7 @@ def test_main(num_tokens: int, hidden: int, num_experts: int, num_topk: int,
     hack_stream = torch.cuda.Stream()
 
     # noinspection PyShadowingNames
-    def test_func(fn_mode: str):
+    def execute_forward_layer(fn_mode: str):
         if fn_mode == 'naive':
             f = forward_layer_naive
         elif fn_mode == 'overlap':
@@ -59,7 +59,7 @@ def test_main(num_tokens: int, hidden: int, num_experts: int, num_topk: int,
         else:
             raise NotImplementedError
 
-        f(
+        return f(
             hidden_states=x,
             w13_weight_fp8=w13_weight_fp8,
             w2_weight_fp8=w2_weight_fp8,
@@ -73,6 +73,13 @@ def test_main(num_tokens: int, hidden: int, num_experts: int, num_topk: int,
             num_ranks=num_ranks,
         )
 
+    # correctness
+    if 1:
+        out_naive = execute_forward_layer("naive")
+        out_overlap = execute_forward_layer("overlap")
+        diff = calc_diff(out_naive, out_overlap)
+        assert diff < 1e-4, f"{diff=} {out_naive=} {out_overlap=}"
+
     for fn_mode in [
         # 'naive', # TODO
         'overlap',
@@ -82,7 +89,7 @@ def test_main(num_tokens: int, hidden: int, num_experts: int, num_topk: int,
         else:
             trace_path = None
         print(f"Execute bench {fn_mode=} {rank=} {trace_path=}", flush=True)
-        bench_kineto(partial(test_func, fn_mode=fn_mode),
+        bench_kineto(partial(execute_forward_layer, fn_mode=fn_mode),
                      kernel_names=('dispatch', 'combine'), barrier_comm_profiling=True,
                      suppress_kineto_output=False, # NOTE MODIFIED
                      trace_path=trace_path)
