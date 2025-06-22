@@ -383,16 +383,27 @@ LAUNCH_KERNEL(&cfg, dispatch_func, \
 }
 
 // copy from: https://github.com/pytorch/pytorch/pull/139227
-__device__ __forceinline__ void wait_signal(uint32_t* addr) {
-  int ready = *addr;
-  while (!ready) {
-    asm volatile("ld.volatile.global.b32 %0, [%1];"
+// __device__ __forceinline__ void wait_signal(uint32_t* addr) {
+//   int ready = *addr;
+//   while (!ready) {
+//     asm volatile("ld.volatile.global.b32 %0, [%1];"
+//                  : "=r"(ready)
+//                  : "l"(addr)
+//                  : "memory");
+// // #if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ > 700)
+//     asm volatile("nanosleep.u32 20;");
+// // #endif
+//   };
+// }
+__device__ __forceinline__ void wait_signal(uint32_t* addr, uint32_t expect_value) {
+  uint32_t ready = *addr;
+  while (ready < expect_value) {
+    // TODO correct?
+    asm volatile("ld.acquire.gpu.global.u32 %0, [%1];"
                  : "=r"(ready)
                  : "l"(addr)
                  : "memory");
-// #if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ > 700)
     asm volatile("nanosleep.u32 20;");
-// #endif
   };
 }
 
@@ -409,7 +420,7 @@ combine(void* combined_x,
         int num_experts, int rank, int num_ranks,
         int num_warp_groups, int num_warps_per_group,
         int phases, bool zero_copy,
-        uint32_t* src_signals) {
+        uint32_t* src_signals, uint32_t src_signal_expect_value) {
     const auto sm_id = static_cast<int>(blockIdx.x);
     const auto num_sms = static_cast<int>(gridDim.x);
     const auto thread_id = static_cast<int>(threadIdx.x);
@@ -469,7 +480,7 @@ combine(void* combined_x,
             if (src_signals != nullptr) {
               if (threadIdx.x == 0) {
 //                 if (threadIdx.x == 0) { printf("combine sm_id=%d local_expert_idx=%d before-call-wait-signal\n", sm_id, local_expert_idx); }
-                wait_signal(src_signals + local_expert_idx);
+                wait_signal(src_signals + local_expert_idx, src_signal_expect_value);
 //                 if (threadIdx.x == 0) { printf("combine sm_id=%d local_expert_idx=%d after-call-wait-signal\n", sm_id, local_expert_idx); }
               }
 
@@ -630,7 +641,7 @@ void combine(void* combined_x,
              int num_topk, int num_experts, int rank, int num_ranks,
              void* workspace, int num_device_sms,
              cudaStream_t stream, int phases, bool zero_copy,
-             uint32_t* src_signals) {
+             uint32_t* src_signals, uint32_t src_signal_expect_value) {
     constexpr int kNumMaxTopk = 9;
 
     const int num_warp_groups = ((phases & LOW_LATENCY_RECV_PHASE) == 0)
@@ -660,7 +671,7 @@ LAUNCH_KERNEL(&cfg, combine_func, \
               num_max_dispatch_tokens_per_rank, \
               num_experts, rank, num_ranks, \
               num_warp_groups, num_warps_per_group, \
-              phases, zero_copy, src_signals); } break
+              phases, zero_copy, src_signals, src_signal_expect_value); } break
 
     SETUP_LAUNCH_CONFIG(num_sms, num_warps * 32, stream);
     SWITCH_HIDDEN(COMBINE_LAUNCH_CASE);
