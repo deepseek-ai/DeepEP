@@ -169,7 +169,7 @@ def forward_layer_naive(
     combined_x, combine_event, combine_hook = buffer.low_latency_combine(
         down_output, topk_idx, topk_weights, comm_handle,
         return_recv_hook=True,
-        async_finish=True, # NOTE
+        # async_finish=True, # NOTE
     )
     combine_event.current_stream_wait()
     large_gemm()
@@ -320,7 +320,7 @@ def forward_layer_overlap(
     combined_x, combine_event, combine_hook = buffer.low_latency_combine(
         down_output, topk_idx, topk_weights, comm_handle,
         return_recv_hook=True,
-        async_finish=True, # NOTE
+        # async_finish=True, # NOTE
         src_signals=src_signals,
     )
 
