@@ -334,18 +334,18 @@ def forward_layer_overlap(
     # raise Exception
     # # ------------------------------------
 
-    print(f'hi call current_stream_wait', flush=True)
+    # print(f'hi call current_stream_wait', flush=True)
     combine_event.current_stream_wait()
 
     # hack
-    print(f'hi call sync', flush=True)
+    # print(f'hi call sync', flush=True)
     torch.cuda.synchronize()
 
-    print(f'hi call large_gemm', flush=True)
+    # print(f'hi call large_gemm', flush=True)
     large_gemm()
-    print(f'hi call combine_hook', flush=True)
+    # print(f'hi call combine_hook', flush=True)
     combine_hook()
-    print(f'hi END', flush=True)
+    # print(f'hi END', flush=True)
 
     return combined_x
 
