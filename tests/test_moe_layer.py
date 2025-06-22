@@ -315,8 +315,8 @@ def forward_layer_overlap(
     deepgemm_num_sms_upper_bound = torch.cuda.get_device_properties(device='cuda').multi_processor_count - deepep_num_sms
     actual_deepgemm_num_sms = {
         # temp hardcoded
-        4: 120,
-        48: 116,
+        # 4: 120, 48: 116, # normal
+        4: 119, 48: 120, # with the "specially treat first expert"
     }[num_ranks]
 
     src_signals = torch.zeros(num_local_experts, dtype=torch.uint32, device=down_input.device)
