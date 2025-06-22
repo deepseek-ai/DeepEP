@@ -48,6 +48,8 @@ def test_main(num_tokens: int, hidden: int, num_experts: int, num_topk: int,
     w13_weight_fp8 = create_weight_fp8(num_groups=num_local_experts, n=4096, k=hidden)
     w2_weight_fp8 = create_weight_fp8(num_groups=num_local_experts, n=hidden, k=2048)
 
+    hack_stream = torch.cuda.Stream()
+
     # noinspection PyShadowingNames
     def test_func(fn_mode: str):
         if fn_mode == 'naive':
@@ -67,6 +69,7 @@ def test_main(num_tokens: int, hidden: int, num_experts: int, num_topk: int,
             num_tokens=num_tokens,
             num_experts=num_experts,
             num_local_experts=num_local_experts,
+            hack_stream=hack_stream,
         )
 
     for fn_mode in [
@@ -139,6 +142,7 @@ def forward_layer_naive(
     num_tokens,
     num_experts,
     num_local_experts,
+    hack_stream,
 ):
     down_input, down_input_scale, comm_handle, expected_m, masked_m, num_groups, m = (
         forward_layer_naive_first_half(
@@ -266,6 +270,7 @@ def forward_layer_overlap(
         num_tokens,
         num_experts,
         num_local_experts,
+        hack_stream,
 ):
     # # ------------------------------------
     # print("hi prepare deepgemm_kwargs")
@@ -295,7 +300,6 @@ def forward_layer_overlap(
     # deepgemm_num_sms = torch.cuda.get_device_properties(device='cuda').multi_processor_count - deepep_num_sms
     deepgemm_num_sms = 30 # TODO temp
     # TODO these streams do not wait, wrong?
-    hack_stream = torch.cuda.Stream()
     hack_stream.wait_stream(torch.cuda.current_stream())
     with torch.cuda.stream(hack_stream):
         for local_expert_idx in range(num_local_experts):
