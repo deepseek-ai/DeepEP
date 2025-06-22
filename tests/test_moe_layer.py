@@ -81,6 +81,7 @@ def test_main(num_tokens: int, hidden: int, num_experts: int, num_topk: int,
         print(f"Correctness test {diff=}", flush=True)
         print(f"{out_naive=} {out_overlap=}")
         assert diff < 1e-4, f"{diff=} {out_naive=} {out_overlap=}"
+        raise Exception("deliberately stop")
 
     for fn_mode in [
         # 'naive', # TODO
@@ -199,6 +200,7 @@ def forward_layer_naive(
     large_gemm()
     combine_hook()
 
+    print(f"hi forward_layer_naive {combined_x=}")
     return combined_x
 
 def forward_layer_naive_first_half(
@@ -417,6 +419,7 @@ def forward_layer_overlap(
     if 0:
         assert torch.all(src_signals == src_signal_expect_value), f"{src_signals=} {src_signal_expect_value=}"
 
+    print(f"hi forward_layer_overlap {combined_x=}")
     return combined_x
 
 
