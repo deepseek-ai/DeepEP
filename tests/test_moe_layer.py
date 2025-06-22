@@ -310,11 +310,11 @@ def forward_layer_overlap(
 
     # NOTE need to change according to DeepEP src code
     deepep_num_sms = 32
-    deepgemm_num_epilogue_warp_group = 4
 
     deepgemm_num_sms = torch.cuda.get_device_properties(device='cuda').multi_processor_count - deepep_num_sms
 
-    src_signal_expect_value = deepgemm_num_epilogue_warp_group * deepgemm_num_sms
+    # TODO sometimes DeepGEMM choose to use *LESS* sms, we need to consider this
+    src_signal_expect_value = deepgemm_num_sms
 
     hack_stream.wait_stream(torch.cuda.current_stream())
     with torch.cuda.stream(hack_stream):
