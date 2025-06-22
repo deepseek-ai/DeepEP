@@ -12,7 +12,6 @@ from functools import partial
 
 import deep_ep
 
-from code.research_mono.research_mono.utils.folders import dir_primary_data
 from utils import init_dist, bench, bench_kineto, calc_diff, hash_tensor, per_token_cast_back, profile_kineto
 
 
