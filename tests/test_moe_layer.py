@@ -73,8 +73,8 @@ def test_main(num_tokens: int, hidden: int, num_experts: int, num_topk: int,
         )
 
     for fn_mode in [
-        # 'naive', # TODO temp rm
-        'overlap',
+        'naive', # TODO
+        # 'overlap',
     ]:
         if rank == 0:
             trace_path = str(Path("/data/numa0/tom/temp_sglang_server2local/") / f"{time.time()}-TP-{rank}.trace.json.gz")
@@ -157,14 +157,18 @@ def forward_layer_naive(
     down_output = torch.empty(
         (num_groups, m, n), device=down_input.device, dtype=torch.bfloat16
     )
-    deep_gemm.fp8_m_grouped_gemm_nt_masked(
-        down_input_fp8,
-        w2_weight_fp8,
-        down_output,
-        masked_m,
-        expected_m,
-        recipe=(1, 128, 128),
-    )
+
+    print("HACK: put deepgemm in another stream (logically wrong)")
+    hack_stream.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(hack_stream):
+        deep_gemm.fp8_m_grouped_gemm_nt_masked(
+            down_input_fp8,
+            w2_weight_fp8,
+            down_output,
+            masked_m,
+            expected_m,
+            recipe=(1, 128, 128),
+        )
 
     combined_x, combine_event, combine_hook = buffer.low_latency_combine(
         down_output, topk_idx, topk_weights, comm_handle,
