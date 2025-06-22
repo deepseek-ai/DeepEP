@@ -297,9 +297,9 @@ def forward_layer_overlap(
     # TODO these streams do not wait, wrong?
     hack_stream = torch.cuda.Stream()
     hack_stream.wait_stream(torch.cuda.current_stream())
-    for local_expert_idx in range(num_local_experts):
-        # print(f'hi call gemm {local_expert_idx=}', flush=True)
-        with torch.cuda.stream(hack_stream):
+    with torch.cuda.stream(hack_stream):
+        for local_expert_idx in range(num_local_experts):
+            # print(f'hi call gemm {local_expert_idx=}', flush=True)
             with configure_deep_gemm_num_sms(deepgemm_num_sms):
                 deep_gemm.fp8_m_grouped_gemm_nt_masked(
                     _pick_expert_fp8(down_input_fp8, local_expert_idx=local_expert_idx),
@@ -309,8 +309,8 @@ def forward_layer_overlap(
                     expected_m,
                     recipe=(1, 128, 128),
                 )
-        # print(f'hi call notify_src_signals {local_expert_idx=}', flush=True)
-        buffer.runtime.notify_src_signals(src_signals, local_expert_idx)
+            # print(f'hi call notify_src_signals {local_expert_idx=}', flush=True)
+            buffer.runtime.notify_src_signals(src_signals, local_expert_idx)
 
     # print('hi call low_latency_combine', flush=True)
     combined_x, combine_event, combine_hook = buffer.low_latency_combine(
