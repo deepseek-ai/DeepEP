@@ -1190,16 +1190,13 @@ Buffer::low_latency_combine(const torch::Tensor& x, const torch::Tensor& topk_id
     auto buffer = layout.buffers[low_latency_buffer_idx];
     auto next_buffer = layout.buffers[low_latency_buffer_idx ^= 1];
 
-    // NOTE MODIFIED allow hook+async
     // Wait previous tasks to be finished
     // NOTES: the hook mode will always use the default stream
     auto compute_stream = at::cuda::getCurrentCUDAStream();
-    const bool use_single_stream = return_recv_hook and (not async);
-    auto send_launch_stream = use_single_stream ? compute_stream : comm_stream;
-    const auto recv_launch_stream = compute_stream;
-//    EP_HOST_ASSERT(not (async and return_recv_hook));
-    if (not use_single_stream)
-        stream_wait(send_launch_stream, compute_stream);
+    auto launch_stream = return_recv_hook ? compute_stream : comm_stream;
+    EP_HOST_ASSERT(not (async and return_recv_hook));
+    if (not return_recv_hook)
+        stream_wait(launch_stream, compute_stream);
 
     // Allocate output tensor
     torch::Tensor combined_x;
@@ -1214,7 +1211,7 @@ Buffer::low_latency_combine(const torch::Tensor& x, const torch::Tensor& topk_id
 
     // Kernel launch
     auto next_clean_meta = next_buffer.clean_meta();
-    auto launcher = [=](int phases, const at::cuda::CUDAStream& chosen_launch_stream) {
+    auto launcher = [=](int phases) {
         internode_ll::combine(combined_x.data_ptr(),
                               buffer.combine_rdma_recv_data_buffer, buffer.combine_rdma_recv_flag_buffer,
                               buffer.combine_rdma_send_buffer,
@@ -1224,25 +1221,25 @@ Buffer::low_latency_combine(const torch::Tensor& x, const torch::Tensor& topk_id
                               num_combined_tokens, hidden, num_max_dispatch_tokens_per_rank,
                               num_topk, num_experts, rank, num_ranks,
                               workspace, num_device_sms,
-                              chosen_launch_stream, phases, zero_copy,
+                              launch_stream, phases, zero_copy,
                               src_signals.has_value() ? src_signals->data_ptr<uint32_t>() : nullptr);
     };
-    launcher(return_recv_hook ? LOW_LATENCY_SEND_PHASE : (LOW_LATENCY_SEND_PHASE | LOW_LATENCY_RECV_PHASE), send_launch_stream);
+    launcher(return_recv_hook ? LOW_LATENCY_SEND_PHASE : (LOW_LATENCY_SEND_PHASE | LOW_LATENCY_RECV_PHASE));
 
     // Wait streams
     std::optional<EventHandle> event;
     if (async) {
         // NOTES: we must ensure the all tensors will not be deallocated before the stream-wait happens,
         // so in Python API, we must wrap all tensors into the event handle.
-        event = EventHandle(send_launch_stream);
+        event = EventHandle(launch_stream);
     } else if (not return_recv_hook) {
-        stream_wait(compute_stream, send_launch_stream);
+        stream_wait(compute_stream, launch_stream);
     }
 
     // Receiver callback
     std::optional<std::function<void()>> recv_hook = std::nullopt;
     if (return_recv_hook)
-        recv_hook = [=]() { launcher(LOW_LATENCY_RECV_PHASE, recv_launch_stream); };
+        recv_hook = [=]() { launcher(LOW_LATENCY_RECV_PHASE); };
 
     // Return values
     return {combined_x, event, recv_hook};
