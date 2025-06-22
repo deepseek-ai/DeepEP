@@ -312,6 +312,8 @@ def forward_layer_overlap(
     deepep_num_sms = 32
     deepgemm_num_sms = torch.cuda.get_device_properties(device='cuda').multi_processor_count - deepep_num_sms
 
+    src_signal_expect_value = TODO
+
     hack_stream.wait_stream(torch.cuda.current_stream())
     with torch.cuda.stream(hack_stream):
         for local_expert_idx in range(num_local_experts):
@@ -334,6 +336,7 @@ def forward_layer_overlap(
         return_recv_hook=True,
         # async_finish=True, # NOTE
         src_signals=src_signals,
+        src_signal_expect_value=src_signal_expect_value,
     )
 
     # # ------------------------------------
@@ -359,6 +362,8 @@ def forward_layer_overlap(
     # print(f'hi call combine_hook', flush=True)
     combine_hook()
     # print(f'hi END', flush=True)
+
+    assert torch.all(src_signals == src_signal_expect_value), f"{src_signals=} {src_signal_expect_value=}"
 
     return combined_x
 
