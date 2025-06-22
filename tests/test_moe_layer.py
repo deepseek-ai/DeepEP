@@ -287,6 +287,22 @@ def forward_layer_overlap(
         src_signals=src_signals,
     )
 
+    num_groups, m, k, n = 6, 1024, 2048, 7168
+    a, b, d, ref_d = deepgemm_generate_grouped_masked(num_groups, m, k, n)
+    masked_m = torch.ones((num_groups, ), device='cuda', dtype=torch.int) * m
+    expected_m = min(int(masked_m.float().mean()) + 1, m)
+    deepgemm_kwargs = dict(a=a, b=b, d=d, masked_m=masked_m, expected_m=expected_m)
+    deepgemm_stream = torch.cuda.Stream()
+
+    deepgemm_num_sms = 30  # very small
+    with torch.cuda.stream(deepgemm_stream):
+        with configure_deep_gemm_num_sms(deepgemm_num_sms):
+            for _ in range(20):
+                print("hi call fp8_m_grouped_gemm_nt_masked")
+                deep_gemm.fp8_m_grouped_gemm_nt_masked(**deepgemm_kwargs)
+
+    raise Exception
+
     # NOTE need to change according to DeepEP src code
     # deepep_num_sms = 32
     # deepgemm_num_sms = torch.cuda.get_device_properties(device='cuda').multi_processor_count - deepep_num_sms
@@ -347,6 +363,25 @@ def configure_deep_gemm_num_sms(num_sms):
             yield
         finally:
             deep_gemm.config.set_num_sms(original_num_sms)
+
+
+# COPIED from deepgemm
+def deepgemm_generate_grouped_masked(num_groups: int, m: int, k: int, n: int) -> \
+        Tuple[Tuple[torch.Tensor, torch.Tensor], Tuple[torch.Tensor, torch.Tensor], torch.Tensor, torch.Tensor]:
+    from deep_gemm.utils.math import align, ceil_div, per_token_cast_to_fp8, per_block_cast_to_fp8
+
+    a = torch.randn((num_groups, m, k), device='cuda', dtype=torch.bfloat16)
+    b = torch.randn((num_groups, n, k), device='cuda', dtype=torch.bfloat16)
+    d = torch.empty((num_groups, m, n), device='cuda', dtype=torch.bfloat16)
+    ref_d = torch.einsum('gmk,gnk->gmn', a, b)
+
+    a_fp8 = (torch.empty_like(a, dtype=torch.float8_e4m3fn), torch.empty((num_groups, m, ceil_div(k, 128)), device='cuda', dtype=torch.float))
+    b_fp8 = (torch.empty_like(b, dtype=torch.float8_e4m3fn), torch.empty((num_groups, ceil_div(n, 128), ceil_div(k, 128)), device='cuda', dtype=torch.float))
+    for i in range(num_groups):
+        a_fp8[0][i], a_fp8[1][i] = per_token_cast_to_fp8(a[i])
+        b_fp8[0][i], b_fp8[1][i] = per_block_cast_to_fp8(b[i])
+
+    return a_fp8, b_fp8, d, ref_d
 
 # --------------------------------------------- SGLANG -----------------------------------------------------
 
