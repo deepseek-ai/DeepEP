@@ -310,15 +310,11 @@ def forward_layer_overlap(
 
     # NOTE need to change according to DeepEP src code
     deepep_num_sms = 32
-
-    deepgemm_num_sms = torch.cuda.get_device_properties(device='cuda').multi_processor_count - deepep_num_sms
-
-    # TODO sometimes DeepGEMM choose to use *LESS* sms, we need to consider this
-    src_signal_expect_value = deepgemm_num_sms
+    deepgemm_num_sms_upper_bound = torch.cuda.get_device_properties(device='cuda').multi_processor_count - deepep_num_sms
 
     hack_stream.wait_stream(torch.cuda.current_stream())
     with torch.cuda.stream(hack_stream):
-        with configure_deep_gemm_num_sms(deepgemm_num_sms):
+        with configure_deep_gemm_num_sms(deepgemm_num_sms_upper_bound):
             # for local_expert_idx in range(num_local_experts):
             #     deep_gemm.fp8_m_grouped_gemm_nt_masked(
             #         _pick_expert_fp8(down_input_fp8, local_expert_idx=local_expert_idx),
@@ -331,10 +327,15 @@ def forward_layer_overlap(
             #     buffer.runtime.notify_src_signals(src_signals, local_expert_idx)
 
             # print("hi call fp8_m_grouped_gemm_nt_masked", flush=True)
-            deep_gemm.fp8_m_grouped_gemm_nt_masked(
+            deepgemm_out = deep_gemm.fp8_m_grouped_gemm_nt_masked(
                 down_input_fp8, w2_weight_fp8, down_output, masked_m, expected_m, recipe=(1, 128, 128),
                 d_signals=src_signals,
             )
+            actual_deepgemm_num_sms = deepgemm_out["num_sms"]
+
+    # sometimes DeepGEMM choose to use *LESS* sms, we need to consider this
+    src_signal_expect_value = actual_deepgemm_num_sms
+    print(f"{deepgemm_num_sms_upper_bound=} {actual_deepgemm_num_sms=}", flush=True)
 
     # print('hi call low_latency_combine', flush=True)
     combined_x, combine_event, combine_hook = buffer.low_latency_combine(
@@ -346,9 +347,9 @@ def forward_layer_overlap(
     )
 
     # # ------------------------------------
-    # deepgemm_num_sms = 30  # very small
+    # deepgemm_num_sms_upper_bound = 30  # very small
     # with torch.cuda.stream(deepgemm_stream):
-    #     with configure_deep_gemm_num_sms(deepgemm_num_sms):
+    #     with configure_deep_gemm_num_sms(deepgemm_num_sms_upper_bound):
     #         for _ in range(20):
     #             print("hi call fp8_m_grouped_gemm_nt_masked")
     #             deep_gemm.fp8_m_grouped_gemm_nt_masked(**deepgemm_kwargs)
