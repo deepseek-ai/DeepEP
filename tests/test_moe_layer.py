@@ -273,10 +273,6 @@ def forward_layer_overlap(
         src_signals=src_signals,
     )
 
-    # TODO temp
-    print(f'hi call sync', flush=True)
-    torch.cuda.synchronize()
-
     # NOTE need to change according to DeepEP src code
     # deepep_num_sms = 32
     # deepgemm_num_sms = torch.cuda.get_device_properties(device='cuda').multi_processor_count - deepep_num_sms
