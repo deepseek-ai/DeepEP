@@ -1254,7 +1254,7 @@ Buffer::low_latency_combine(const torch::Tensor& x, const torch::Tensor& topk_id
 
 void Buffer::notify_src_signals(const torch::Tensor& src_signals, int index) {
     const uint32_t* addr = src_signals.data_ptr<uint32_t>() + index;
-    cuStreamWriteValue32(comm_stream, (CUdeviceptr) addr, 1, 0);
+    CU_CHECK(cuStreamWriteValue32(comm_stream, (CUdeviceptr) addr, 1, 0));
 }
 
 torch::Tensor
