@@ -468,7 +468,9 @@ combine(void* combined_x,
             if (threadIdx.x == 0) { printf("combine sm_id=%d local_expert_idx=%d before-wait\n", sm_id, local_expert_idx); }
             if (src_signals != nullptr) {
               if (threadIdx.x == 0) {
+                if (threadIdx.x == 0) { printf("combine sm_id=%d local_expert_idx=%d before-call-wait-signal\n", sm_id, local_expert_idx); }
                 wait_signal(src_signals + local_expert_idx);
+                if (threadIdx.x == 0) { printf("combine sm_id=%d local_expert_idx=%d after-call-wait-signal\n", sm_id, local_expert_idx); }
               }
 
               // TODO original code uses NamedBarrier, better than this?
