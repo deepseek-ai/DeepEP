@@ -79,6 +79,7 @@ def test_main(num_tokens: int, hidden: int, num_experts: int, num_topk: int,
         out_overlap = execute_forward_layer("overlap")
         diff = calc_diff(out_naive, out_overlap)
         print(f"Correctness test {diff=}", flush=True)
+        print(f"{out_naive=} {out_overlap=}")
         assert diff < 1e-4, f"{diff=} {out_naive=} {out_overlap=}"
 
     for fn_mode in [
