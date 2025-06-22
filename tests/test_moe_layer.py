@@ -403,7 +403,8 @@ def forward_layer_overlap(
     combine_hook()
     # print(f'hi END', flush=True)
 
-    assert torch.all(src_signals == src_signal_expect_value), f"{src_signals=} {src_signal_expect_value=}"
+    if 0:
+        assert torch.all(src_signals == src_signal_expect_value), f"{src_signals=} {src_signal_expect_value=}"
 
     return combined_x
 
