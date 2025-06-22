@@ -336,6 +336,10 @@ def forward_layer_overlap(
                 d_signals=src_signals,
             )
 
+    print(f'hi call hack sync', flush=True)
+    torch.cuda.synchronize()
+    print(f'hi after a while {src_signals=}', flush=True)
+
     print('hi call low_latency_combine', flush=True)
     combined_x, combine_event, combine_hook = buffer.low_latency_combine(
         down_output, topk_idx, topk_weights, comm_handle,
