@@ -75,8 +75,8 @@ def test_main(num_tokens: int, hidden: int, num_experts: int, num_topk: int,
 
     # correctness
     if 1:
-        out_naive = execute_forward_layer("naive").clone()
         out_overlap = execute_forward_layer("overlap").clone()
+        out_naive = execute_forward_layer("naive").clone()
         diff = calc_diff(out_naive, out_overlap)
         print(f"Correctness test {diff=}", flush=True)
         print(f"{out_naive=} {out_overlap=}")
@@ -170,23 +170,22 @@ def forward_layer_naive(
         (num_groups, m, n), device=down_input.device, dtype=torch.bfloat16
     )
 
-    # NOTE need to change according to DeepEP src code
-    deepep_num_sms = 32
-    deepgemm_num_sms = torch.cuda.get_device_properties(device='cuda').multi_processor_count - deepep_num_sms
-
-    print("HACK: put deepgemm in another stream (logically wrong)")
-    hack_stream.wait_stream(torch.cuda.current_stream())
-    with torch.cuda.stream(hack_stream):
-    # with nullcontext():
-        with configure_deep_gemm_num_sms(deepgemm_num_sms):
-            deep_gemm.fp8_m_grouped_gemm_nt_masked(
-                down_input_fp8,
-                w2_weight_fp8,
-                down_output,
-                masked_m,
-                expected_m,
-                recipe=(1, 128, 128),
-            )
+    # # NOTE need to change according to DeepEP src code
+    # deepep_num_sms = 32
+    # deepgemm_num_sms = torch.cuda.get_device_properties(device='cuda').multi_processor_count - deepep_num_sms
+    #
+    # print("HACK: put deepgemm in another stream (logically wrong)")
+    # hack_stream.wait_stream(torch.cuda.current_stream())
+    # with torch.cuda.stream(hack_stream):
+    #     with configure_deep_gemm_num_sms(deepgemm_num_sms):
+    deep_gemm.fp8_m_grouped_gemm_nt_masked(
+        down_input_fp8,
+        w2_weight_fp8,
+        down_output,
+        masked_m,
+        expected_m,
+        recipe=(1, 128, 128),
+    )
 
     combined_x, combine_event, combine_hook = buffer.low_latency_combine(
         down_output, topk_idx, topk_weights, comm_handle,
