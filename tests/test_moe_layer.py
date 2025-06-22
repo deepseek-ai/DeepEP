@@ -362,7 +362,7 @@ def forward_layer_overlap(
                 recipe=(1, 128, 128),
                 d_signals=src_signals[expert_slice],
             )
-            assert deepgemm_out["num_sms"] == actual_deepgemm_num_sms
+            assert deepgemm_out["num_sms"] == actual_deepgemm_num_sms, f"{deepgemm_out=} {actual_deepgemm_num_sms=}"
 
     # sometimes DeepGEMM choose to use *LESS* sms, we need to consider this
     src_signal_expect_value = actual_deepgemm_num_sms
