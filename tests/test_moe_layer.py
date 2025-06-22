@@ -310,6 +310,7 @@ def forward_layer_overlap(
     down_output = torch.empty((num_groups, m, n), device=down_input.device, dtype=torch.bfloat16)
 
     # NOTE need to change according to DeepEP src code
+    # TODO if DeepGEMM does not use all SM then let DeepEP use more
     deepep_num_sms = 32
     deepgemm_num_sms_upper_bound = torch.cuda.get_device_properties(device='cuda').multi_processor_count - deepep_num_sms
     actual_deepgemm_num_sms = {
