@@ -292,17 +292,20 @@ def forward_layer_overlap(
     # deepgemm_num_sms = torch.cuda.get_device_properties(device='cuda').multi_processor_count - deepep_num_sms
     deepgemm_num_sms = 64 # TODO temp
 
+    hack_stream = torch.cuda.Stream()
+
     for local_expert_idx in range(num_local_experts):
         print(f'hi call gemm {local_expert_idx=}', flush=True)
-        with configure_deep_gemm_num_sms(deepgemm_num_sms):
-            deep_gemm.fp8_m_grouped_gemm_nt_masked(
-                _pick_expert_fp8(down_input_fp8, local_expert_idx=local_expert_idx),
-                _pick_expert_fp8(w2_weight_fp8, local_expert_idx=local_expert_idx),
-                _pick_expert(down_output, local_expert_idx=local_expert_idx),
-                masked_m[local_expert_idx:local_expert_idx+1],
-                expected_m,
-                recipe=(1, 128, 128),
-            )
+        with torch.cuda.stream(hack_stream):
+            with configure_deep_gemm_num_sms(deepgemm_num_sms):
+                deep_gemm.fp8_m_grouped_gemm_nt_masked(
+                    _pick_expert_fp8(down_input_fp8, local_expert_idx=local_expert_idx),
+                    _pick_expert_fp8(w2_weight_fp8, local_expert_idx=local_expert_idx),
+                    _pick_expert(down_output, local_expert_idx=local_expert_idx),
+                    masked_m[local_expert_idx:local_expert_idx+1],
+                    expected_m,
+                    recipe=(1, 128, 128),
+                )
 
         print(f'hi call notify_src_signals {local_expert_idx=}', flush=True)
         buffer.runtime.notify_src_signals(src_signals, local_expert_idx)
