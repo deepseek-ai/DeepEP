@@ -319,8 +319,10 @@ def forward_layer_overlap(
         4: 119, 48: 120, # with the "specially treat first expert"
     }[num_ranks]
 
-    src_signals = torch.zeros(num_local_experts, dtype=torch.uint32, device=down_input.device)
-    src_signals[0] = actual_deepgemm_num_sms
+    src_signals = (
+        torch.tensor([actual_deepgemm_num_sms] + [0] * (num_local_experts - 1), dtype=torch.uint32, device="cpu")
+        .to(down_input.device, non_blocking=True)
+    )
 
     expert_slice = slice(0, 1)
     deep_gemm.fp8_m_grouped_gemm_nt_masked(
