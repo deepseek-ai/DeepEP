@@ -15,6 +15,7 @@ import deep_ep
 from utils import init_dist, bench, bench_kineto, calc_diff, hash_tensor, per_token_cast_back
 from sglang.srt.layers.moe.ep_moe.kernels import silu_and_mul_masked_post_quant_fwd
 from sglang.srt.layers.quantization.fp8_utils import _requant_weight_ue8m0
+from deep_gemm.utils.layout import transform_sf_into_required_layout
 
 # --------------------------------------------- main -----------------------------------------------------
 
@@ -242,6 +243,14 @@ def forward_layer_naive_first_half(
         scale_ue8m0=True,
     )
     del gateup_output
+
+    # ref: DeepGEMM dispatch.py
+    down_input_scale = transform_sf_into_required_layout(
+        down_input_scale,
+        mn=down_input.shape[1], k=down_input.shape[2],
+        recipe=(1, 128, 128),
+        num_groups=num_groups, is_sfa=True,
+    )
 
     return down_input, down_input_scale, comm_handle, expected_m, masked_m, num_groups, m
 
