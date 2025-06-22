@@ -75,8 +75,8 @@ def test_main(num_tokens: int, hidden: int, num_experts: int, num_topk: int,
 
     # correctness
     if 1:
-        out_naive = execute_forward_layer("naive")
-        out_overlap = execute_forward_layer("overlap")
+        out_naive = execute_forward_layer("naive").clone()
+        out_overlap = execute_forward_layer("overlap").clone()
         diff = calc_diff(out_naive, out_overlap)
         print(f"Correctness test {diff=}", flush=True)
         print(f"{out_naive=} {out_overlap=}")
