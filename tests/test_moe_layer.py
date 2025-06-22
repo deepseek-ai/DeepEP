@@ -306,11 +306,23 @@ def forward_layer_overlap(
     down_input_fp8 = (down_input, down_input_scale)
     down_output = torch.empty((num_groups, m, n), device=down_input.device, dtype=torch.bfloat16)
 
-    src_signals = torch.zeros(num_local_experts, dtype=torch.uint32, device=down_input.device)
-
     # NOTE need to change according to DeepEP src code
     deepep_num_sms = 32
     deepgemm_num_sms_upper_bound = torch.cuda.get_device_properties(device='cuda').multi_processor_count - deepep_num_sms
+    actual_deepgemm_num_sms = 116
+
+    src_signals = torch.zeros(num_local_experts, dtype=torch.uint32, device=down_input.device)
+    src_signals[0] = actual_deepgemm_num_sms
+
+    expert_slice = slice(0, 1)
+    deep_gemm.fp8_m_grouped_gemm_nt_masked(
+        _pick_expert_fp8(down_input_fp8, expert_slice),
+        _pick_expert_fp8(w2_weight_fp8, expert_slice),
+        down_output[expert_slice, :, :],
+        masked_m[expert_slice],
+        expected_m,
+        recipe=(1, 128, 128),
+    )
 
     hack_stream.wait_stream(torch.cuda.current_stream())
     with torch.cuda.stream(hack_stream):
@@ -327,11 +339,23 @@ def forward_layer_overlap(
             #     buffer.runtime.notify_src_signals(src_signals, local_expert_idx)
 
             # print("hi call fp8_m_grouped_gemm_nt_masked", flush=True)
+            # deepgemm_out = deep_gemm.fp8_m_grouped_gemm_nt_masked(
+            #     down_input_fp8, w2_weight_fp8, down_output, masked_m, expected_m, recipe=(1, 128, 128),
+            #     d_signals=src_signals,
+            # )
+            # actual_deepgemm_num_sms = deepgemm_out["num_sms"]
+
+            expert_slice = slice(1, num_experts)
             deepgemm_out = deep_gemm.fp8_m_grouped_gemm_nt_masked(
-                down_input_fp8, w2_weight_fp8, down_output, masked_m, expected_m, recipe=(1, 128, 128),
-                d_signals=src_signals,
+                _pick_expert_fp8(down_input_fp8, expert_slice),
+                _pick_expert_fp8(w2_weight_fp8, expert_slice),
+                down_output[expert_slice, :, :],
+                masked_m[expert_slice],
+                expected_m,
+                recipe=(1, 128, 128),
+                d_signals=src_signals[expert_slice],
             )
-            actual_deepgemm_num_sms = deepgemm_out["num_sms"]
+            assert deepgemm_out["num_sms"] == actual_deepgemm_num_sms
 
     # sometimes DeepGEMM choose to use *LESS* sms, we need to consider this
     src_signal_expect_value = actual_deepgemm_num_sms
@@ -376,14 +400,8 @@ def forward_layer_overlap(
     return combined_x
 
 
-def _pick_expert_fp8(a, local_expert_idx):
-    return (
-        _pick_expert(a[0], local_expert_idx),
-        _pick_expert(a[1], local_expert_idx),
-    )
-
-def _pick_expert(a, local_expert_idx):
-    return a[local_expert_idx:local_expert_idx + 1, :, :]
+def _pick_expert_fp8(a, expert_slice):
+    return a[0][expert_slice, :, :], a[1][expert_slice, :, :]
 
 
 @contextmanager
