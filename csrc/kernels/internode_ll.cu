@@ -533,6 +533,14 @@ combine(void* combined_x,
 //             atomic_add_release_global(atomic_clean_flag, -1);
 //         }
 //         __syncwarp();
+    } else {
+        // TODO improve?
+        for (int local_expert_idx = 0; local_expert_idx < num_local_experts; ++local_expert_idx) {
+            if (src_signals != nullptr) {
+              // TODO original code uses NamedBarrier, better than this?
+              __syncthreads();
+            }
+        }
     }
 
     // Receiving phase
