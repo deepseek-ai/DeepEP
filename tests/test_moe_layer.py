@@ -335,7 +335,7 @@ def forward_layer_overlap(
 
     # sometimes DeepGEMM choose to use *LESS* sms, we need to consider this
     src_signal_expect_value = actual_deepgemm_num_sms
-    print(f"{deepgemm_num_sms_upper_bound=} {actual_deepgemm_num_sms=}", flush=True)
+    # print(f"{deepgemm_num_sms_upper_bound=} {actual_deepgemm_num_sms=}", flush=True)
 
     # print('hi call low_latency_combine', flush=True)
     combined_x, combine_event, combine_hook = buffer.low_latency_combine(
