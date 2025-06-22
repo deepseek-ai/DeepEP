@@ -330,17 +330,13 @@ def forward_layer_overlap(
             #     )
             #     buffer.runtime.notify_src_signals(src_signals, local_expert_idx)
 
-            print("hi call fp8_m_grouped_gemm_nt_masked", flush=True)
+            # print("hi call fp8_m_grouped_gemm_nt_masked", flush=True)
             deep_gemm.fp8_m_grouped_gemm_nt_masked(
                 down_input_fp8, w2_weight_fp8, down_output, masked_m, expected_m, recipe=(1, 128, 128),
                 d_signals=src_signals,
             )
 
-    print(f'hi call hack sync', flush=True)
-    torch.cuda.synchronize()
-    print(f'hi after a while {src_signals=}', flush=True)
-
-    print('hi call low_latency_combine', flush=True)
+    # print('hi call low_latency_combine', flush=True)
     combined_x, combine_event, combine_hook = buffer.low_latency_combine(
         down_output, topk_idx, topk_weights, comm_handle,
         return_recv_hook=True,
@@ -359,7 +355,7 @@ def forward_layer_overlap(
     # raise Exception
     # # ------------------------------------
 
-    print(f'hi after a while {src_signals=}', flush=True)
+    # print(f'hi after a while {src_signals=}', flush=True)
 
     assert combine_event.event is None
     # combine_event.current_stream_wait()
