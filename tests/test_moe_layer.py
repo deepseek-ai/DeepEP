@@ -273,6 +273,12 @@ def forward_layer_overlap(
         src_signals=src_signals,
     )
 
+    a = torch.randn((1000,))
+    for i in range(100):
+        print(f'hi call randn and addition', flush=True)
+        b = torch.randn((1000,))
+        a += b
+
     # NOTE need to change according to DeepEP src code
     deepep_num_sms = 32
     deepgemm_num_sms = torch.cuda.get_device_properties(device='cuda').multi_processor_count - deepep_num_sms
