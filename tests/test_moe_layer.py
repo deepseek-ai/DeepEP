@@ -273,19 +273,9 @@ def forward_layer_overlap(
         src_signals=src_signals,
     )
 
-    # TODO temp
-    for local_expert_idx in range(num_local_experts):
-        print(f'hi call notify_src_signals {local_expert_idx=}', flush=True)
-        buffer.runtime.notify_src_signals(src_signals, local_expert_idx)
-
-    # TODO temp
-    print(f'hi call sync', flush=True)
-    torch.cuda.synchronize()
-
     # NOTE need to change according to DeepEP src code
-    # deepep_num_sms = 32
-    # deepgemm_num_sms = torch.cuda.get_device_properties(device='cuda').multi_processor_count - deepep_num_sms
-    deepgemm_num_sms = 64 # TODO temp
+    deepep_num_sms = 32
+    deepgemm_num_sms = torch.cuda.get_device_properties(device='cuda').multi_processor_count - deepep_num_sms
 
     for local_expert_idx in range(num_local_experts):
         print(f'hi call gemm {local_expert_idx=}', flush=True)
