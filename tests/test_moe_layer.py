@@ -267,6 +267,16 @@ def forward_layer_overlap(
         num_experts,
         num_local_experts,
 ):
+    # ------------------------------------
+    print("hi prepare deepgemm_kwargs")
+    num_groups, m, k, n = 6, 1024, 2048, 7168
+    a, b, d, ref_d = deepgemm_generate_grouped_masked(num_groups, m, k, n)
+    masked_m = torch.ones((num_groups, ), device='cuda', dtype=torch.int) * m
+    expected_m = min(int(masked_m.float().mean()) + 1, m)
+    deepgemm_kwargs = dict(a=a, b=b, d=d, masked_m=masked_m, expected_m=expected_m)
+    deepgemm_stream = torch.cuda.Stream()
+    # ------------------------------------
+
     down_input, down_input_scale, comm_handle, expected_m, masked_m, num_groups, m = (
         forward_layer_naive_first_half(
             hidden_states=hidden_states, w13_weight_fp8=w13_weight_fp8,
@@ -288,19 +298,14 @@ def forward_layer_overlap(
         src_signals=src_signals,
     )
 
-    num_groups, m, k, n = 6, 1024, 2048, 7168
-    a, b, d, ref_d = deepgemm_generate_grouped_masked(num_groups, m, k, n)
-    masked_m = torch.ones((num_groups, ), device='cuda', dtype=torch.int) * m
-    expected_m = min(int(masked_m.float().mean()) + 1, m)
-    deepgemm_kwargs = dict(a=a, b=b, d=d, masked_m=masked_m, expected_m=expected_m)
-    deepgemm_stream = torch.cuda.Stream()
-
+    # ------------------------------------
     deepgemm_num_sms = 30  # very small
     with torch.cuda.stream(deepgemm_stream):
         with configure_deep_gemm_num_sms(deepgemm_num_sms):
             for _ in range(20):
                 print("hi call fp8_m_grouped_gemm_nt_masked")
                 deep_gemm.fp8_m_grouped_gemm_nt_masked(**deepgemm_kwargs)
+    # ------------------------------------
 
     raise Exception
 
