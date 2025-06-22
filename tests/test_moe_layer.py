@@ -14,6 +14,7 @@ from deep_gemm.utils.math import align, ceil_div, per_block_cast_to_fp8
 import deep_ep
 from utils import init_dist, bench, bench_kineto, calc_diff, hash_tensor, per_token_cast_back
 from sglang.srt.layers.moe.ep_moe.kernels import silu_and_mul_masked_post_quant_fwd
+from sglang.srt.layers.quantization.fp8_utils import _requant_weight_ue8m0
 
 # --------------------------------------------- main -----------------------------------------------------
 
@@ -87,6 +88,10 @@ def create_weight_fp8(num_groups, n, k):
     b_fp8 = (torch.empty_like(b, dtype=torch.float8_e4m3fn), torch.empty((num_groups, ceil_div(n, 128), ceil_div(k, 128)), device='cuda', dtype=torch.float))
     for i in range(num_groups):
         b_fp8[0][i], b_fp8[1][i] = per_block_cast_to_fp8(b[i])
+
+    # ref:
+    b_fp8 = _requant_weight_ue8m0(*b_fp8, weight_block_size=[128, 128])
+
     return b_fp8
 
 
