@@ -529,27 +529,16 @@ combine(void* combined_x,
 //                     combined_values[j] += static_cast<float>(x_bf16[j]) * reg_topk_weights[i];
 //             }
 
-            // TODO not handle topk_idx==-1 case!
             {
-                // Read from sources
-                auto rdma_buffer_row_N0 = reinterpret_cast<const uint8_t*>(reinterpret_cast<const int*>(static_cast<uint8_t*>(rdma_recv_x) + (reg_topk_idx[0] * num_max_dispatch_tokens_per_rank + token_idx) * num_bytes_per_slot));
-                auto rdma_buffer_row_N1 = reinterpret_cast<const uint8_t*>(reinterpret_cast<const int*>(static_cast<uint8_t*>(rdma_recv_x) + (reg_topk_idx[1] * num_max_dispatch_tokens_per_rank + token_idx) * num_bytes_per_slot));
-                auto rdma_buffer_row_N2 = reinterpret_cast<const uint8_t*>(reinterpret_cast<const int*>(static_cast<uint8_t*>(rdma_recv_x) + (reg_topk_idx[2] * num_max_dispatch_tokens_per_rank + token_idx) * num_bytes_per_slot));
-                auto rdma_buffer_row_N3 = reinterpret_cast<const uint8_t*>(reinterpret_cast<const int*>(static_cast<uint8_t*>(rdma_recv_x) + (reg_topk_idx[3] * num_max_dispatch_tokens_per_rank + token_idx) * num_bytes_per_slot));
-                auto rdma_buffer_row_N4 = reinterpret_cast<const uint8_t*>(reinterpret_cast<const int*>(static_cast<uint8_t*>(rdma_recv_x) + (reg_topk_idx[4] * num_max_dispatch_tokens_per_rank + token_idx) * num_bytes_per_slot));
-                auto rdma_buffer_row_N5 = reinterpret_cast<const uint8_t*>(reinterpret_cast<const int*>(static_cast<uint8_t*>(rdma_recv_x) + (reg_topk_idx[5] * num_max_dispatch_tokens_per_rank + token_idx) * num_bytes_per_slot));
-                auto rdma_buffer_row_N6 = reinterpret_cast<const uint8_t*>(reinterpret_cast<const int*>(static_cast<uint8_t*>(rdma_recv_x) + (reg_topk_idx[6] * num_max_dispatch_tokens_per_rank + token_idx) * num_bytes_per_slot));
-                auto rdma_buffer_row_N7 = reinterpret_cast<const uint8_t*>(reinterpret_cast<const int*>(static_cast<uint8_t*>(rdma_recv_x) + (reg_topk_idx[7] * num_max_dispatch_tokens_per_rank + token_idx) * num_bytes_per_slot));
-
-                // Reduce
-                auto x_vec_N0 = ld_nc_global(reinterpret_cast<const int4*>(rdma_buffer_row_N0) + thread_id);
-                auto x_vec_N1 = ld_nc_global(reinterpret_cast<const int4*>(rdma_buffer_row_N1) + thread_id);
-                auto x_vec_N2 = ld_nc_global(reinterpret_cast<const int4*>(rdma_buffer_row_N2) + thread_id);
-                auto x_vec_N3 = ld_nc_global(reinterpret_cast<const int4*>(rdma_buffer_row_N3) + thread_id);
-                auto x_vec_N4 = ld_nc_global(reinterpret_cast<const int4*>(rdma_buffer_row_N4) + thread_id);
-                auto x_vec_N5 = ld_nc_global(reinterpret_cast<const int4*>(rdma_buffer_row_N5) + thread_id);
-                auto x_vec_N6 = ld_nc_global(reinterpret_cast<const int4*>(rdma_buffer_row_N6) + thread_id);
-                auto x_vec_N7 = ld_nc_global(reinterpret_cast<const int4*>(rdma_buffer_row_N7) + thread_id);
+                // Read from sources, Reduce
+                int4 x_vec_N0 = reg_topk_idx[0] >= 0 ? ld_nc_global(reinterpret_cast<const int4*>(reinterpret_cast<const uint8_t*>(reinterpret_cast<const int*>(static_cast<uint8_t*>(rdma_recv_x) + (reg_topk_idx[0] * num_max_dispatch_tokens_per_rank + token_idx) * num_bytes_per_slot))) + thread_id) : 0;
+                int4 x_vec_N1 = reg_topk_idx[1] >= 0 ? ld_nc_global(reinterpret_cast<const int4*>(reinterpret_cast<const uint8_t*>(reinterpret_cast<const int*>(static_cast<uint8_t*>(rdma_recv_x) + (reg_topk_idx[1] * num_max_dispatch_tokens_per_rank + token_idx) * num_bytes_per_slot))) + thread_id) : 0;
+                int4 x_vec_N1 = reg_topk_idx[2] >= 0 ? ld_nc_global(reinterpret_cast<const int4*>(reinterpret_cast<const uint8_t*>(reinterpret_cast<const int*>(static_cast<uint8_t*>(rdma_recv_x) + (reg_topk_idx[2] * num_max_dispatch_tokens_per_rank + token_idx) * num_bytes_per_slot))) + thread_id) : 0;
+                int4 x_vec_N1 = reg_topk_idx[3] >= 0 ? ld_nc_global(reinterpret_cast<const int4*>(reinterpret_cast<const uint8_t*>(reinterpret_cast<const int*>(static_cast<uint8_t*>(rdma_recv_x) + (reg_topk_idx[3] * num_max_dispatch_tokens_per_rank + token_idx) * num_bytes_per_slot))) + thread_id) : 0;
+                int4 x_vec_N1 = reg_topk_idx[4] >= 0 ? ld_nc_global(reinterpret_cast<const int4*>(reinterpret_cast<const uint8_t*>(reinterpret_cast<const int*>(static_cast<uint8_t*>(rdma_recv_x) + (reg_topk_idx[4] * num_max_dispatch_tokens_per_rank + token_idx) * num_bytes_per_slot))) + thread_id) : 0;
+                int4 x_vec_N1 = reg_topk_idx[5] >= 0 ? ld_nc_global(reinterpret_cast<const int4*>(reinterpret_cast<const uint8_t*>(reinterpret_cast<const int*>(static_cast<uint8_t*>(rdma_recv_x) + (reg_topk_idx[5] * num_max_dispatch_tokens_per_rank + token_idx) * num_bytes_per_slot))) + thread_id) : 0;
+                int4 x_vec_N1 = reg_topk_idx[6] >= 0 ? ld_nc_global(reinterpret_cast<const int4*>(reinterpret_cast<const uint8_t*>(reinterpret_cast<const int*>(static_cast<uint8_t*>(rdma_recv_x) + (reg_topk_idx[6] * num_max_dispatch_tokens_per_rank + token_idx) * num_bytes_per_slot))) + thread_id) : 0;
+                int4 x_vec_N1 = reg_topk_idx[7] >= 0 ? ld_nc_global(reinterpret_cast<const int4*>(reinterpret_cast<const uint8_t*>(reinterpret_cast<const int*>(static_cast<uint8_t*>(rdma_recv_x) + (reg_topk_idx[7] * num_max_dispatch_tokens_per_rank + token_idx) * num_bytes_per_slot))) + thread_id) : 0;
 
                 const auto x_bf16_N0 = reinterpret_cast<nv_bfloat16*>(&x_vec_N0);
                 const auto x_bf16_N1 = reinterpret_cast<nv_bfloat16*>(&x_vec_N1);
@@ -560,22 +549,38 @@ combine(void* combined_x,
                 const auto x_bf16_N6 = reinterpret_cast<nv_bfloat16*>(&x_vec_N6);
                 const auto x_bf16_N7 = reinterpret_cast<nv_bfloat16*>(&x_vec_N7);
 
-                #pragma unroll
-                for (int j = 0; j < kNumElemsPerInt4; ++ j) combined_values[j] += static_cast<float>(x_bf16_N0[j]) * reg_topk_weights[0];
-                #pragma unroll
-                for (int j = 0; j < kNumElemsPerInt4; ++ j) combined_values[j] += static_cast<float>(x_bf16_N1[j]) * reg_topk_weights[1];
-                #pragma unroll
-                for (int j = 0; j < kNumElemsPerInt4; ++ j) combined_values[j] += static_cast<float>(x_bf16_N2[j]) * reg_topk_weights[2];
-                #pragma unroll
-                for (int j = 0; j < kNumElemsPerInt4; ++ j) combined_values[j] += static_cast<float>(x_bf16_N3[j]) * reg_topk_weights[3];
-                #pragma unroll
-                for (int j = 0; j < kNumElemsPerInt4; ++ j) combined_values[j] += static_cast<float>(x_bf16_N4[j]) * reg_topk_weights[4];
-                #pragma unroll
-                for (int j = 0; j < kNumElemsPerInt4; ++ j) combined_values[j] += static_cast<float>(x_bf16_N5[j]) * reg_topk_weights[5];
-                #pragma unroll
-                for (int j = 0; j < kNumElemsPerInt4; ++ j) combined_values[j] += static_cast<float>(x_bf16_N6[j]) * reg_topk_weights[6];
-                #pragma unroll
-                for (int j = 0; j < kNumElemsPerInt4; ++ j) combined_values[j] += static_cast<float>(x_bf16_N7[j]) * reg_topk_weights[7];
+                if (reg_topk_idx[0] >= 0) {
+                    #pragma unroll
+                    for (int j = 0; j < kNumElemsPerInt4; ++ j) combined_values[j] += static_cast<float>(x_bf16_N0[j]) * reg_topk_weights[0];
+                }
+                if (reg_topk_idx[1] >= 0) {
+                    #pragma unroll
+                    for (int j = 0; j < kNumElemsPerInt4; ++ j) combined_values[j] += static_cast<float>(x_bf16_N1[j]) * reg_topk_weights[1];
+                }
+                if (reg_topk_idx[2] >= 0) {
+                    #pragma unroll
+                    for (int j = 0; j < kNumElemsPerInt4; ++ j) combined_values[j] += static_cast<float>(x_bf16_N2[j]) * reg_topk_weights[2];
+                }
+                if (reg_topk_idx[3] >= 0) {
+                    #pragma unroll
+                    for (int j = 0; j < kNumElemsPerInt4; ++ j) combined_values[j] += static_cast<float>(x_bf16_N3[j]) * reg_topk_weights[3];
+                }
+                if (reg_topk_idx[4] >= 0) {
+                    #pragma unroll
+                    for (int j = 0; j < kNumElemsPerInt4; ++ j) combined_values[j] += static_cast<float>(x_bf16_N4[j]) * reg_topk_weights[4];
+                }
+                if (reg_topk_idx[5] >= 0) {
+                    #pragma unroll
+                    for (int j = 0; j < kNumElemsPerInt4; ++ j) combined_values[j] += static_cast<float>(x_bf16_N5[j]) * reg_topk_weights[5];
+                }
+                if (reg_topk_idx[6] >= 0) {
+                    #pragma unroll
+                    for (int j = 0; j < kNumElemsPerInt4; ++ j) combined_values[j] += static_cast<float>(x_bf16_N6[j]) * reg_topk_weights[6];
+                }
+                if (reg_topk_idx[7] >= 0) {
+                    #pragma unroll
+                    for (int j = 0; j < kNumElemsPerInt4; ++ j) combined_values[j] += static_cast<float>(x_bf16_N7[j]) * reg_topk_weights[7];
+                }
             }
 
             // Write results
