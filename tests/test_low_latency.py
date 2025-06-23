@@ -6,7 +6,7 @@ import torch.distributed as dist
 from functools import partial
 
 import deep_ep
-from utils import init_dist, bench, bench_kineto, calc_diff, hash_tensor, per_token_cast_back
+from utils import init_dist, bench, bench_kineto, calc_diff, hash_tensor, per_token_cast_back, profile_kineto
 
 
 def test_main(num_tokens: int, hidden: int, num_experts: int, num_topk: int,
@@ -136,6 +136,13 @@ def test_main(num_tokens: int, hidden: int, num_experts: int, num_topk: int,
         num_selections = (topk_idx[i] != -1).sum().item()
         num_dispatch_comm_bytes += num_fp8_bytes * num_selections
         num_combine_comm_bytes += num_bf16_bytes * num_selections
+
+    if int(os.environ.get("DEEPEP_ENABLE_PROFILE", "0")):
+        group.barrier()
+        profile_kineto(partial(test_func, zero_copy=True, return_recv_hook=True),
+                       barrier_comm_profiling=True, enable_cuda_profiler=rank == 0)
+        print("Early halt since profiling")
+        return
 
     # Dispatch + combine testing
     avg_t, min_t, max_t = bench(partial(test_func, zero_copy=False, return_recv_hook=False))
