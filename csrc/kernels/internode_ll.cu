@@ -516,7 +516,7 @@ combine(void* combined_x,
             // TODO is the aggressive ld PTX ok here?
             {
                 auto reg_topk_idx_vec = reinterpret_cast<int4*>(reg_topk_idx);
-                auto reg_topk_weights_vec = reinterpret_cast<int4*>(reg_topk_weights);
+                auto reg_topk_weights_vec = reinterpret_cast<float4*>(reg_topk_weights);
 
                 // TODO ensure GMEM is aligned?
                 reg_topk_idx_vec[0] = ld_nc_global(reinterpret_cast<const int4*>(topk_idx + token_idx * num_topk + 0));
