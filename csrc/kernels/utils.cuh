@@ -201,8 +201,8 @@ __device__  __forceinline__ int4 ld_nc_global(const int4 *ptr) {
 
 // NOTE ADD
 template <>
-__device__  __forceinline__ int4 ld_nc_global(const float4 *ptr) {
-    int4 ret;
+__device__  __forceinline__ float4 ld_nc_global(const float4 *ptr) {
+    float4 ret;
     asm volatile(LD_NC_FUNC ".v4.f32 {%0, %1, %2, %3}, [%4];"
             : "=f"(ret.x), "=f"(ret.y), "=f"(ret.z), "=f"(ret.w) : "l"(ptr));
     return ret;
