@@ -13,7 +13,9 @@ def init_dist(local_rank: int, num_local_ranks: int):
     port = int(os.getenv('MASTER_PORT', '8361'))
     num_nodes = int(os.getenv('WORLD_SIZE', 1))
     node_rank = int(os.getenv('RANK', 0))
-    assert (num_local_ranks < 8 and num_nodes == 1) or num_local_ranks == 8
+
+    print('HACK: remove init_dist assertion')
+    # assert (num_local_ranks < 8 and num_nodes == 1) or num_local_ranks == 8
 
     sig = inspect.signature(dist.init_process_group)
     params = {

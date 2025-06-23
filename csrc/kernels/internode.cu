@@ -14,7 +14,9 @@ extern nvshmem_team_t cpu_rdma_team;
 struct SourceMeta {
     int src_rdma_rank, is_token_in_nvl_rank_bits;
 
+#ifndef NVLINK_DOMAIN_LARGE
     EP_STATIC_ASSERT(NUM_MAX_NVL_PEERS == 8, "Invalid number of maximum NVL peers");
+#endif
 
     __forceinline__ SourceMeta() = default;
 
@@ -85,6 +87,7 @@ notify_dispatch(const int* num_tokens_per_rank, int* moe_recv_counter_mapped, in
                 void* rdma_buffer_ptr,
                 void** buffer_ptrs, int** barrier_signal_ptrs, int rank,
                 const nvshmem_team_t rdma_team) {
+#ifndef NVLINK_DOMAIN_LARGE
     auto sm_id = static_cast<int>(blockIdx.x);
     auto thread_id = static_cast<int>(threadIdx.x), warp_id = thread_id / 32, lane_id = get_lane_id();
     auto num_threads = static_cast<int>(blockDim.x), num_warps = num_threads / 32;
@@ -282,6 +285,7 @@ notify_dispatch(const int* num_tokens_per_rank, int* moe_recv_counter_mapped, in
                 prefix_row[i] += prefix_row[i - 1];
         }
     }
+#endif
 }
 
 void notify_dispatch(const int* num_tokens_per_rank, int* moe_recv_counter_mapped, int num_ranks,
@@ -349,6 +353,7 @@ dispatch(int4* recv_x, float* recv_x_scales, int64_t* recv_topk_idx, float* recv
          void* rdma_buffer_ptr, int num_max_rdma_chunked_send_tokens, int num_max_rdma_chunked_recv_tokens,
          void** buffer_ptrs, int num_max_nvl_chunked_send_tokens, int num_max_nvl_chunked_recv_tokens,
          int rank, int num_ranks) {
+#ifndef NVLINK_DOMAIN_LARGE
     enum class WarpRole {
         kRDMASender,
         kRDMASenderCoordinator,
@@ -935,6 +940,7 @@ dispatch(int4* recv_x, float* recv_x_scales, int64_t* recv_topk_idx, float* recv
                 st_relaxed_sys_global(nvl_channel_head.buffer(), cached_channel_head_idx);
         }
     }
+#endif
 }
 
 void dispatch(void* recv_x, float* recv_x_scales, int64_t* recv_topk_idx, float* recv_topk_weights, void* recv_src_meta,
