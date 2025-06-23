@@ -209,8 +209,7 @@ __device__  __forceinline__ float4 ld_nc_global(const float4 *ptr) {
 }
 
 // NOTE ADD
-template <>
-__device__  __forceinline__ int4 ld_nc_global_slow(const int4 *ptr) {
+__device__  __forceinline__ int4 ld_nc_global_slow_int4(const int4 *ptr) {
     int4 ret;
     asm volatile("ld.volatile.global.v4.s32 {%0, %1, %2, %3}, [%4];"
             : "=r"(ret.x), "=r"(ret.y), "=r"(ret.z), "=r"(ret.w) : "l"(ptr));
@@ -218,8 +217,7 @@ __device__  __forceinline__ int4 ld_nc_global_slow(const int4 *ptr) {
 }
 
 // NOTE ADD
-template <>
-__device__  __forceinline__ float4 ld_nc_global_slow(const float4 *ptr) {
+__device__  __forceinline__ float4 ld_nc_global_slow_float4(const float4 *ptr) {
     float4 ret;
     asm volatile("ld.volatile.global.v4.f32 {%0, %1, %2, %3}, [%4];"
             : "=f"(ret.x), "=f"(ret.y), "=f"(ret.z), "=f"(ret.w) : "l"(ptr));
