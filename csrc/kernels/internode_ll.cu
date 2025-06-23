@@ -504,17 +504,28 @@ combine(void* combined_x,
     if (thread_id < hidden_bf16_int4) {
         for (int token_idx = sm_id; token_idx < num_combined_tokens; token_idx += num_sms) {
             // Read top-k indices and weights
-            int reg_topk_idx[kNumMaxTopk];
-            float reg_topk_weights[kNumMaxTopk];
-            #pragma unroll
-            for (int i = 0; i < num_topk; ++ i) {
-                // TODO try 128bit load
-                // TODO try SMEM
-                reg_topk_idx[i] = static_cast<int>(__ldg(topk_idx + token_idx * num_topk + i));
-                reg_topk_weights[i] = __ldg(topk_weights + token_idx * num_topk + i);
+
+            // TODO align 16 to be castable?
+            alignas(16) int reg_topk_idx[kNumMaxTopk];
+            alignas(16) float reg_topk_weights[kNumMaxTopk];
+//             #pragma unroll
+//             for (int i = 0; i < num_topk; ++ i) {
+//                 reg_topk_idx[i] = static_cast<int>(__ldg(topk_idx + token_idx * num_topk + i));
+//                 reg_topk_weights[i] = __ldg(topk_weights + token_idx * num_topk + i);
+//             }
+            // TODO is the aggressive ld PTX ok here?
+            {
+                auto reg_topk_idx_vec = reinterpret_cast<int4*>(reg_topk_idx);
+                auto reg_topk_weights_vec = reinterpret_cast<int4*>(reg_topk_weights);
+
+                reg_topk_idx_vec[0] = ld_nc_global(static_cast<const int4*>(topk_idx + token_idx * num_topk + 0));
+                reg_topk_idx_vec[1] = ld_nc_global(static_cast<const int4*>(topk_idx + token_idx * num_topk + 4));
+                reg_topk_weights_vec[0] = ld_nc_global(static_cast<const int4*>(topk_weights + token_idx * num_topk + 0));
+                reg_topk_weights_vec[1] = ld_nc_global(static_cast<const int4*>(topk_weights + token_idx * num_topk + 4));
             }
 
             float combined_values[kNumElemsPerInt4] = {0.0f};
+
 
 //             #pragma unroll
 //             for (int i = 0; i < num_topk; ++ i) if (reg_topk_idx[i] >= 0) {
