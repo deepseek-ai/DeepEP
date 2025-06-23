@@ -520,8 +520,8 @@ combine(void* combined_x,
 
                 reg_topk_idx_vec[0] = ld_nc_global(static_cast<const int4*>(topk_idx + token_idx * num_topk + 0));
                 reg_topk_idx_vec[1] = ld_nc_global(static_cast<const int4*>(topk_idx + token_idx * num_topk + 4));
-                reg_topk_weights_vec[0] = ld_nc_global(static_cast<const int4*>(topk_weights + token_idx * num_topk + 0));
-                reg_topk_weights_vec[1] = ld_nc_global(static_cast<const int4*>(topk_weights + token_idx * num_topk + 4));
+                reg_topk_weights_vec[0] = ld_nc_global(static_cast<const float4*>(topk_weights + token_idx * num_topk + 0));
+                reg_topk_weights_vec[1] = ld_nc_global(static_cast<const float4*>(topk_weights + token_idx * num_topk + 4));
             }
 
             float combined_values[kNumElemsPerInt4] = {0.0f};
