@@ -618,8 +618,8 @@ combine(dtype_t* recv_x, float* recv_topk_weights,
         const auto num_threads_per_rank = num_send_warps_per_rank * 32;
         const auto send_thread_id = thread_id;
         const auto send_warp_id = send_thread_id / 32;
-        const auto send_rank_id = thread_id / num_threads_per_rank;
-        const auto send_warp_id_in_rank = send_warp_id % num_send_warps_per_rank;
+        const auto send_rank_id = (responsible_channel + send_warp_id) % kNumRanks;
+        const auto send_warp_id_in_rank = send_warp_id / kNumRanks;
         EP_STATIC_ASSERT(num_send_warps * 32 == kNumThreads, "Invalid warp count");
 
         // Calculate pointers by the specific layout
