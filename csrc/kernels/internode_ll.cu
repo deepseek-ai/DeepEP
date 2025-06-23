@@ -509,6 +509,7 @@ combine(void* combined_x,
             #pragma unroll
             for (int i = 0; i < num_topk; ++ i) {
                 // TODO try 128bit load
+                // TODO try SMEM
                 reg_topk_idx[i] = static_cast<int>(__ldg(topk_idx + token_idx * num_topk + i));
                 reg_topk_weights[i] = __ldg(topk_weights + token_idx * num_topk + i);
             }
