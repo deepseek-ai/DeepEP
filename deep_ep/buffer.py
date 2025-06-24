@@ -570,6 +570,10 @@ class Buffer:
             event: the event after executing the kernel (valid only if `async_finish` is set).
             hook: the receiving hook function (valid only if `return_recv_hook` is set).
         """
+
+        # hack
+        topk_idx = topk_idx.to(torch.int32)
+
         src_info, layout_range, num_max_dispatch_tokens_per_rank, hidden, num_experts = handle
         combined_x, event, hook = self.runtime.low_latency_combine(x, topk_idx, topk_weights, src_info, layout_range,
                                                                    num_max_dispatch_tokens_per_rank, num_experts,

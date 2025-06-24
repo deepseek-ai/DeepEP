@@ -152,7 +152,7 @@ void dispatch(void* packed_recv_x, void* packed_recv_x_scales,
 
 void combine(void* combined_x,
              void* rdma_recv_x, int* rdma_recv_flag, void* rdma_send_x,
-             const void* x, const int64_t* topk_idx, const float* topk_weights,
+             const void* x, const int32_t* topk_idx_i32, const float* topk_weights,
              const int* src_info, const int64_t* layout_range,
              int* next_clean, int num_next_clean_int,
              int num_combined_tokens, int hidden, int num_max_dispatch_tokens_per_rank,

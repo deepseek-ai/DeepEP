@@ -386,7 +386,7 @@ template <int kHidden, int kNumMaxTopk>
 __global__ __launch_bounds__(1024, 1) void
 combine(void* combined_x,
         void* rdma_recv_x, int* rdma_recv_flag, void* rdma_send_x,
-        const void* x, const int64_t* topk_idx, const float* topk_weights,
+        const void* x, const int32_t* topk_idx_i32, const float* topk_weights,
         const int* src_info, const int64_t* layout_range,
         int* next_clean, int num_next_clean_int,
         int* atomic_clean_flag,
@@ -519,8 +519,8 @@ combine(void* combined_x,
 
                 // TODO ensure GMEM is aligned?
                 // TODO is the aggressive ld PTX ok here?
-                reg_topk_idx_vec[0] = ld_nc_global_slow_int4(reinterpret_cast<const int4*>(topk_idx + token_idx * num_topk + 0));
-                reg_topk_idx_vec[1] = ld_nc_global_slow_int4(reinterpret_cast<const int4*>(topk_idx + token_idx * num_topk + 4));
+                reg_topk_idx_vec[0] = ld_nc_global_slow_int4(reinterpret_cast<const int4*>(topk_idx_i32 + token_idx * num_topk + 0));
+                reg_topk_idx_vec[1] = ld_nc_global_slow_int4(reinterpret_cast<const int4*>(topk_idx_i32 + token_idx * num_topk + 4));
                 reg_topk_weights_vec[0] = ld_nc_global_slow_float4(reinterpret_cast<const float4*>(topk_weights + token_idx * num_topk + 0));
                 reg_topk_weights_vec[1] = ld_nc_global_slow_float4(reinterpret_cast<const float4*>(topk_weights + token_idx * num_topk + 4));
             }
@@ -611,7 +611,7 @@ combine(void* combined_x,
 
 void combine(void* combined_x,
              void* rdma_recv_x, int* rdma_recv_flag, void* rdma_send_x,
-             const void* x, const int64_t* topk_idx, const float* topk_weights,
+             const void* x, const int32_t* topk_idx_i32, const float* topk_weights,
              const int* src_info, const int64_t* layout_range,
              int* next_clean, int num_next_clean_int,
              int num_combined_tokens, int hidden, int num_max_dispatch_tokens_per_rank,
@@ -636,7 +636,7 @@ auto combine_func = combine<hidden, kNumMaxTopk>; \
 LAUNCH_KERNEL(&cfg, combine_func, \
               combined_x, \
               rdma_recv_x, rdma_recv_flag, rdma_send_x, \
-              x, topk_idx, topk_weights, src_info, layout_range, \
+              x, topk_idx_i32, topk_weights, src_info, layout_range, \
               next_clean, num_next_clean_int, \
               atomic_clean_flag, \
               num_combined_tokens, hidden, num_topk, \
