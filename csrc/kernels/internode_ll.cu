@@ -519,10 +519,10 @@ combine(void* combined_x,
 
                 // TODO ensure GMEM is aligned?
                 // TODO is the aggressive ld PTX ok here?
-                reg_topk_idx_vec[0] = ld_nc_global_slow_int4(reinterpret_cast<const int4*>(topk_idx_i32 + token_idx * num_topk + 0));
-                reg_topk_idx_vec[1] = ld_nc_global_slow_int4(reinterpret_cast<const int4*>(topk_idx_i32 + token_idx * num_topk + 4));
-                reg_topk_weights_vec[0] = ld_nc_global_slow_float4(reinterpret_cast<const float4*>(topk_weights + token_idx * num_topk + 0));
-                reg_topk_weights_vec[1] = ld_nc_global_slow_float4(reinterpret_cast<const float4*>(topk_weights + token_idx * num_topk + 4));
+                reg_topk_idx_vec[0] = ld_nc_global_int4(reinterpret_cast<const int4*>(topk_idx_i32 + token_idx * num_topk + 0));
+                reg_topk_idx_vec[1] = ld_nc_global_int4(reinterpret_cast<const int4*>(topk_idx_i32 + token_idx * num_topk + 4));
+                reg_topk_weights_vec[0] = ld_nc_global_float4(reinterpret_cast<const float4*>(topk_weights + token_idx * num_topk + 0));
+                reg_topk_weights_vec[1] = ld_nc_global_float4(reinterpret_cast<const float4*>(topk_weights + token_idx * num_topk + 4));
             }
 
             float combined_values[kNumElemsPerInt4] = {0.0f};
