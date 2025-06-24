@@ -597,7 +597,7 @@ combine(void* combined_x,
                 if (!int4_equal(reg_topk_idx_vec[0] , temp_a)) { printf("assert-eq failed item=0 thread_id=%d \n", thread_id); }
                 if (!int4_equal(reg_topk_idx_vec[1] , temp_b)) { printf("assert-eq failed item=1 \n"); }
                 if (!float4_equal(reg_topk_weights_vec[0] , temp_c)) { printf("assert-eq failed item=2 \n"); }
-                if (!float4_equal(reg_topk_weights_vec[1] , temp_c)) { printf("assert-eq failed item=3 \n"); }
+                if (!float4_equal(reg_topk_weights_vec[1] , temp_d)) { printf("assert-eq failed item=3 \n"); }
 // ------------------------------------------------------------------------------------
             }
 
