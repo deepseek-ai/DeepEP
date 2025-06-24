@@ -94,9 +94,10 @@ def test_main(num_tokens: int, hidden: int, num_experts: int, num_topk: int,
                                                                              return_recv_hook=return_recv_hook, out=out)
                         hook() if return_recv_hook else event.current_stream_wait()
                         if do_check:
-                            diff = calc_diff(x * topk_weights.masked_fill(topk_idx == -1, 0).sum(dim=1).view(-1, 1), combined_x)
+                            expect_ans = x * topk_weights.masked_fill(topk_idx == -1, 0).sum(dim=1).view(-1, 1)
+                            diff = calc_diff(expect_ans, combined_x)
                             assert torch.isnan(combined_x).sum().item() == 0
-                            assert diff < (7e-4 if round_scale else 1e-5), f'Error: {diff=}, {zero_copy=}'
+                            assert diff < (7e-4 if round_scale else 1e-5), f'Error: {diff=}, {zero_copy=}, {expect_ans=} {combined_x=}'
                             hash_value ^= hash_tensor(combined_x)
 
     def create_test_cast_with_outliers(num_outliers):
