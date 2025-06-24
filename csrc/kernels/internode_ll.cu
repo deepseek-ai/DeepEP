@@ -388,10 +388,12 @@ constexpr int kNumActualTopkDivFour = 2;
 
 // TODO closure
 __device__ __forceinline__ int4* compute_shared_topk_info_addr(int4* shared_topk_info, int idx_iteration, int idx_iow, int idx_topkdivfour) {
-    return shared_topk_info
+    int4* ans = shared_topk_info
         + idx_iteration * (kIdxOrWeightDim * kNumActualTopkDivFour)
         + idx_iow * kNumActualTopkDivFour
         + idx_topkdivfour;
+    EP_DEVICE_ASSERT(reinterpret_cast<uintptr_t>(ans) % 16 == 0);
+    return ans;
 }
 
 __device__ __forceinline__ bool int4_equal(int4 a, int4 b) {
@@ -513,6 +515,7 @@ combine(void* combined_x,
 
     // (6 num_tokens_per_sm, 2 idx_or_weights, 2 topk_div_four, 16B elem_size)
     alignas(16) __shared__ int4 shared_topk_info[kMaxNumTokensPerSm * kIdxOrWeightDim * kNumActualTopkDivFour];
+    EP_DEVICE_ASSERT(reinterpret_cast<uintptr_t>(shared_topk_info) % 16 == 0);
 
     int4 temp_buf;
     int prepare_topk_idx_iteration, prepare_topk_idx_iow, prepare_topk_idx_topkdivfour;
@@ -538,6 +541,7 @@ combine(void* combined_x,
             + prepare_topk_token_idx * kNumActualTopkDivFour
             + prepare_topk_idx_topkdivfour
         );
+        EP_DEVICE_ASSERT(reinterpret_cast<uintptr_t>(src_addr) % 16 == 0);
         temp_buf = ld_nc_global(src_addr);
     }
 
