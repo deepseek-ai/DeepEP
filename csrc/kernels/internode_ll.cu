@@ -388,11 +388,12 @@ constexpr int kNumActualTopkDivFour = 2;
 
 // TODO closure
 __device__ __forceinline__ int4* compute_shared_topk_info_addr(int4* shared_topk_info, int idx_iteration, int idx_iow, int idx_topkdivfour) {
-    int4* ans = shared_topk_info
-        + idx_iteration * (kIdxOrWeightDim * kNumActualTopkDivFour)
+    int index = idx_iteration * (kIdxOrWeightDim * kNumActualTopkDivFour)
         + idx_iow * kNumActualTopkDivFour
         + idx_topkdivfour;
+    int4* ans = shared_topk_info + index;
     EP_DEVICE_ASSERT(reinterpret_cast<uintptr_t>(ans) % 16 == 0);
+    EP_DEVICE_ASSERT((index >= 0) and (index < kMaxNumTokensPerSm * kIdxOrWeightDim * kNumActualTopkDivFour));
     return ans;
 }
 
@@ -518,7 +519,7 @@ combine(void* combined_x,
     EP_DEVICE_ASSERT(reinterpret_cast<uintptr_t>(shared_topk_info) % 16 == 0);
 
     int4 temp_buf;
-    int prepare_topk_idx_iteration, prepare_topk_idx_iow, prepare_topk_idx_topkdivfour;
+    int prepare_topk_idx_iteration = 0, prepare_topk_idx_iow = 0, prepare_topk_idx_topkdivfour = 0;
     // TODO only support few tokens if only use warp 0
     if (warp_id == 0) {
         int index = thread_id;
@@ -530,13 +531,13 @@ combine(void* combined_x,
         index /= kIdxOrWeightDim;
 
         prepare_topk_idx_iteration = index;
-
-        EP_DEVICE_ASSERT((prepare_topk_idx_topkdivfour >= 0) and (prepare_topk_idx_topkdivfour < kNumActualTopkDivFour));
-        EP_DEVICE_ASSERT((prepare_topk_idx_iow >= 0) and (prepare_topk_idx_iow < kIdxOrWeightDim));
-        EP_DEVICE_ASSERT((prepare_topk_idx_iteration >= 0) and (prepare_topk_idx_iteration < 6));
     }
     bool enable_prepare_topk = (warp_id == 0) and (prepare_topk_idx_iteration < self_num_iteration);
     if (enable_prepare_topk) {
+        EP_DEVICE_ASSERT((prepare_topk_idx_topkdivfour >= 0) and (prepare_topk_idx_topkdivfour < kNumActualTopkDivFour));
+        EP_DEVICE_ASSERT((prepare_topk_idx_iow >= 0) and (prepare_topk_idx_iow < kIdxOrWeightDim));
+        EP_DEVICE_ASSERT((prepare_topk_idx_iteration >= 0) and (prepare_topk_idx_iteration < 6));
+
         const int prepare_topk_token_idx = sm_id + prepare_topk_idx_iteration * num_sms;
         const int4* src_addr = (
             ((prepare_topk_idx_iow == 0)
@@ -547,6 +548,17 @@ combine(void* combined_x,
         );
         EP_DEVICE_ASSERT(reinterpret_cast<uintptr_t>(src_addr) % 16 == 0);
         temp_buf = ld_nc_global(src_addr);
+
+        printf(
+            "sm_id=%d thread_id=%d src_addr=%p topk_idx_i32=%p topk_weights=%p prepare_topk_idx_iteration=%d prepare_topk_idx_iow=%d prepare_topk_idx_topkdivfour=%d temp_buf=(%d,%d,%d,%d)\n",
+             sm_id, thread_id,
+             src_addr, topk_idx_i32, topk_weights,
+             prepare_topk_idx_iteration, prepare_topk_idx_iow, prepare_topk_idx_topkdivfour,
+              temp_buf.x,
+              temp_buf.y,
+              temp_buf.z,
+              temp_buf.w
+        );
     }
 
     // Wait all ranks to arrive
@@ -571,6 +583,7 @@ combine(void* combined_x,
 //         for (int token_idx = sm_id; token_idx < num_combined_tokens; token_idx += num_sms) {
         for (int idx_iteration = 0; idx_iteration < self_num_iteration; ++ idx_iteration) {
             const int token_idx = sm_id + idx_iteration * num_sms;
+            EP_DEVICE_ASSERT((token_idx >= sm_id) and (token_idx < num_combined_tokens));
 
             // Read top-k indices and weights
 
@@ -629,6 +642,13 @@ combine(void* combined_x,
                       temp_d.z,
                       temp_d.w
                      ); }
+
+                for(int i = 0;i<2;++i) {
+                    EP_DEVICE_ASSERT((reg_topk_idx_vec[i].x >= 0) and (reg_topk_idx_vec[i].x < 1000));
+                    EP_DEVICE_ASSERT((reg_topk_idx_vec[i].y >= 0) and (reg_topk_idx_vec[i].y < 1000));
+                    EP_DEVICE_ASSERT((reg_topk_idx_vec[i].z >= 0) and (reg_topk_idx_vec[i].z < 1000));
+                    EP_DEVICE_ASSERT((reg_topk_idx_vec[i].w >= 0) and (reg_topk_idx_vec[i].w < 1000));
+                }
 // ------------------------------------------------------------------------------------
 
                 // TODO hack!!!
@@ -638,6 +658,11 @@ combine(void* combined_x,
                 reg_topk_weights_vec[1] = temp_d;
 // ------------------------------------------------------------------------------------
             }
+
+            // TODO
+            // TODO hack!
+            // TODO
+            continue;
 
             float combined_values[kNumElemsPerInt4] = {0.0f};
 
