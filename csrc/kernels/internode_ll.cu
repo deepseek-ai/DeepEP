@@ -386,7 +386,7 @@ template <int kHidden, int kNumMaxTopk>
 __global__ __launch_bounds__(1024, 1) void
 combine(void* combined_x,
         void* rdma_recv_x, int* rdma_recv_flag, void* rdma_send_x,
-        const void* x, const int64_t* topk_idx, const float* topk_weights,
+        const void* x, const int32_t* topk_idx_i32, const float* topk_weights,
         const int* src_info, const int64_t* layout_range,
         int* next_clean, int num_next_clean_int,
         int* atomic_clean_flag,
@@ -504,27 +504,98 @@ combine(void* combined_x,
     if (thread_id < hidden_bf16_int4) {
         for (int token_idx = sm_id; token_idx < num_combined_tokens; token_idx += num_sms) {
             // Read top-k indices and weights
-            int reg_topk_idx[kNumMaxTopk];
-            float reg_topk_weights[kNumMaxTopk];
-            #pragma unroll
-            for (int i = 0; i < num_topk; ++ i) {
-                reg_topk_idx[i] = static_cast<int>(__ldg(topk_idx + token_idx * num_topk + i));
-                reg_topk_weights[i] = __ldg(topk_weights + token_idx * num_topk + i);
+
+            // TODO align 16 to be castable?
+            alignas(16) int reg_topk_idx[kNumMaxTopk];
+            alignas(16) float reg_topk_weights[kNumMaxTopk];
+//             #pragma unroll
+//             for (int i = 0; i < num_topk; ++ i) {
+//                 reg_topk_idx[i] = static_cast<int>(__ldg(topk_idx + token_idx * num_topk + i));
+//                 reg_topk_weights[i] = __ldg(topk_weights + token_idx * num_topk + i);
+//             }
+            {
+                auto reg_topk_idx_vec = reinterpret_cast<int4*>(reg_topk_idx);
+                auto reg_topk_weights_vec = reinterpret_cast<float4*>(reg_topk_weights);
+
+                // TODO ensure GMEM is aligned?
+                // TODO is the aggressive ld PTX ok here?
+                reg_topk_idx_vec[0] = ld_nc_global_slow_int4(reinterpret_cast<const int4*>(topk_idx_i32 + token_idx * num_topk + 0));
+                reg_topk_idx_vec[1] = ld_nc_global_slow_int4(reinterpret_cast<const int4*>(topk_idx_i32 + token_idx * num_topk + 4));
+                reg_topk_weights_vec[0] = ld_nc_global_slow_float4(reinterpret_cast<const float4*>(topk_weights + token_idx * num_topk + 0));
+                reg_topk_weights_vec[1] = ld_nc_global_slow_float4(reinterpret_cast<const float4*>(topk_weights + token_idx * num_topk + 4));
             }
 
             float combined_values[kNumElemsPerInt4] = {0.0f};
-            #pragma unroll
-            for (int i = 0; i < num_topk; ++ i) if (reg_topk_idx[i] >= 0) {
-                // Read from sources
-                auto rdma_buffer_type = reinterpret_cast<const int*>(static_cast<uint8_t*>(rdma_recv_x) + (reg_topk_idx[i] * num_max_dispatch_tokens_per_rank + token_idx) * num_bytes_per_slot);
-                auto rdma_buffer_row = reinterpret_cast<const uint8_t*>(rdma_buffer_type);
 
-                // Reduce
-                auto x_vec = ld_nc_global(reinterpret_cast<const int4*>(rdma_buffer_row) + thread_id);
-                const auto x_bf16 = reinterpret_cast<nv_bfloat16*>(&x_vec);
-                #pragma unroll
-                for (int j = 0; j < kNumElemsPerInt4; ++ j)
-                    combined_values[j] += static_cast<float>(x_bf16[j]) * reg_topk_weights[i];
+
+//             #pragma unroll
+//             for (int i = 0; i < num_topk; ++ i) if (reg_topk_idx[i] >= 0) {
+//
+//                 // Read from sources
+//                 auto rdma_buffer_type = reinterpret_cast<const int*>(static_cast<uint8_t*>(rdma_recv_x) + (reg_topk_idx[i] * num_max_dispatch_tokens_per_rank + token_idx) * num_bytes_per_slot);
+//                 auto rdma_buffer_row = reinterpret_cast<const uint8_t*>(rdma_buffer_type);
+//
+//                 // Reduce
+//                 auto x_vec = ld_nc_global(reinterpret_cast<const int4*>(rdma_buffer_row) + thread_id);
+//                 const auto x_bf16 = reinterpret_cast<nv_bfloat16*>(&x_vec);
+//                 #pragma unroll
+//                 for (int j = 0; j < kNumElemsPerInt4; ++ j)
+//                     combined_values[j] += static_cast<float>(x_bf16[j]) * reg_topk_weights[i];
+//             }
+
+            {
+                // Read from sources, Reduce
+                int4 zero4 = {0,0,0,0};
+                int4 x_vec_N0 = (reg_topk_idx[0] >= 0) ? ld_nc_global(reinterpret_cast<const int4*>(reinterpret_cast<const uint8_t*>(reinterpret_cast<const int*>(static_cast<uint8_t*>(rdma_recv_x) + (reg_topk_idx[0] * num_max_dispatch_tokens_per_rank + token_idx) * num_bytes_per_slot))) + thread_id) : zero4;
+                int4 x_vec_N1 = (reg_topk_idx[1] >= 0) ? ld_nc_global(reinterpret_cast<const int4*>(reinterpret_cast<const uint8_t*>(reinterpret_cast<const int*>(static_cast<uint8_t*>(rdma_recv_x) + (reg_topk_idx[1] * num_max_dispatch_tokens_per_rank + token_idx) * num_bytes_per_slot))) + thread_id) : zero4;
+                int4 x_vec_N2 = (reg_topk_idx[2] >= 0) ? ld_nc_global(reinterpret_cast<const int4*>(reinterpret_cast<const uint8_t*>(reinterpret_cast<const int*>(static_cast<uint8_t*>(rdma_recv_x) + (reg_topk_idx[2] * num_max_dispatch_tokens_per_rank + token_idx) * num_bytes_per_slot))) + thread_id) : zero4;
+                int4 x_vec_N3 = (reg_topk_idx[3] >= 0) ? ld_nc_global(reinterpret_cast<const int4*>(reinterpret_cast<const uint8_t*>(reinterpret_cast<const int*>(static_cast<uint8_t*>(rdma_recv_x) + (reg_topk_idx[3] * num_max_dispatch_tokens_per_rank + token_idx) * num_bytes_per_slot))) + thread_id) : zero4;
+                int4 x_vec_N4 = (reg_topk_idx[4] >= 0) ? ld_nc_global(reinterpret_cast<const int4*>(reinterpret_cast<const uint8_t*>(reinterpret_cast<const int*>(static_cast<uint8_t*>(rdma_recv_x) + (reg_topk_idx[4] * num_max_dispatch_tokens_per_rank + token_idx) * num_bytes_per_slot))) + thread_id) : zero4;
+                int4 x_vec_N5 = (reg_topk_idx[5] >= 0) ? ld_nc_global(reinterpret_cast<const int4*>(reinterpret_cast<const uint8_t*>(reinterpret_cast<const int*>(static_cast<uint8_t*>(rdma_recv_x) + (reg_topk_idx[5] * num_max_dispatch_tokens_per_rank + token_idx) * num_bytes_per_slot))) + thread_id) : zero4;
+                int4 x_vec_N6 = (reg_topk_idx[6] >= 0) ? ld_nc_global(reinterpret_cast<const int4*>(reinterpret_cast<const uint8_t*>(reinterpret_cast<const int*>(static_cast<uint8_t*>(rdma_recv_x) + (reg_topk_idx[6] * num_max_dispatch_tokens_per_rank + token_idx) * num_bytes_per_slot))) + thread_id) : zero4;
+                int4 x_vec_N7 = (reg_topk_idx[7] >= 0) ? ld_nc_global(reinterpret_cast<const int4*>(reinterpret_cast<const uint8_t*>(reinterpret_cast<const int*>(static_cast<uint8_t*>(rdma_recv_x) + (reg_topk_idx[7] * num_max_dispatch_tokens_per_rank + token_idx) * num_bytes_per_slot))) + thread_id) : zero4;
+
+                const auto x_bf16_N0 = reinterpret_cast<nv_bfloat16*>(&x_vec_N0);
+                const auto x_bf16_N1 = reinterpret_cast<nv_bfloat16*>(&x_vec_N1);
+                const auto x_bf16_N2 = reinterpret_cast<nv_bfloat16*>(&x_vec_N2);
+                const auto x_bf16_N3 = reinterpret_cast<nv_bfloat16*>(&x_vec_N3);
+                const auto x_bf16_N4 = reinterpret_cast<nv_bfloat16*>(&x_vec_N4);
+                const auto x_bf16_N5 = reinterpret_cast<nv_bfloat16*>(&x_vec_N5);
+                const auto x_bf16_N6 = reinterpret_cast<nv_bfloat16*>(&x_vec_N6);
+                const auto x_bf16_N7 = reinterpret_cast<nv_bfloat16*>(&x_vec_N7);
+
+                if (reg_topk_idx[0] >= 0) {
+                    #pragma unroll
+                    for (int j = 0; j < kNumElemsPerInt4; ++ j) combined_values[j] += static_cast<float>(x_bf16_N0[j]) * reg_topk_weights[0];
+                }
+                if (reg_topk_idx[1] >= 0) {
+                    #pragma unroll
+                    for (int j = 0; j < kNumElemsPerInt4; ++ j) combined_values[j] += static_cast<float>(x_bf16_N1[j]) * reg_topk_weights[1];
+                }
+                if (reg_topk_idx[2] >= 0) {
+                    #pragma unroll
+                    for (int j = 0; j < kNumElemsPerInt4; ++ j) combined_values[j] += static_cast<float>(x_bf16_N2[j]) * reg_topk_weights[2];
+                }
+                if (reg_topk_idx[3] >= 0) {
+                    #pragma unroll
+                    for (int j = 0; j < kNumElemsPerInt4; ++ j) combined_values[j] += static_cast<float>(x_bf16_N3[j]) * reg_topk_weights[3];
+                }
+                if (reg_topk_idx[4] >= 0) {
+                    #pragma unroll
+                    for (int j = 0; j < kNumElemsPerInt4; ++ j) combined_values[j] += static_cast<float>(x_bf16_N4[j]) * reg_topk_weights[4];
+                }
+                if (reg_topk_idx[5] >= 0) {
+                    #pragma unroll
+                    for (int j = 0; j < kNumElemsPerInt4; ++ j) combined_values[j] += static_cast<float>(x_bf16_N5[j]) * reg_topk_weights[5];
+                }
+                if (reg_topk_idx[6] >= 0) {
+                    #pragma unroll
+                    for (int j = 0; j < kNumElemsPerInt4; ++ j) combined_values[j] += static_cast<float>(x_bf16_N6[j]) * reg_topk_weights[6];
+                }
+                if (reg_topk_idx[7] >= 0) {
+                    #pragma unroll
+                    for (int j = 0; j < kNumElemsPerInt4; ++ j) combined_values[j] += static_cast<float>(x_bf16_N7[j]) * reg_topk_weights[7];
+                }
             }
 
             // Write results
@@ -540,7 +611,7 @@ combine(void* combined_x,
 
 void combine(void* combined_x,
              void* rdma_recv_x, int* rdma_recv_flag, void* rdma_send_x,
-             const void* x, const int64_t* topk_idx, const float* topk_weights,
+             const void* x, const int32_t* topk_idx_i32, const float* topk_weights,
              const int* src_info, const int64_t* layout_range,
              int* next_clean, int num_next_clean_int,
              int num_combined_tokens, int hidden, int num_max_dispatch_tokens_per_rank,
@@ -565,7 +636,7 @@ auto combine_func = combine<hidden, kNumMaxTopk>; \
 LAUNCH_KERNEL(&cfg, combine_func, \
               combined_x, \
               rdma_recv_x, rdma_recv_flag, rdma_send_x, \
-              x, topk_idx, topk_weights, src_info, layout_range, \
+              x, topk_idx_i32, topk_weights, src_info, layout_range, \
               next_clean, num_next_clean_int, \
               atomic_clean_flag, \
               num_combined_tokens, hidden, num_topk, \

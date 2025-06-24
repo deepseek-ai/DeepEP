@@ -1,4 +1,8 @@
 import inspect
+import json
+import tempfile
+from pathlib import Path
+
 import numpy as np
 import os
 import sys
@@ -13,7 +17,9 @@ def init_dist(local_rank: int, num_local_ranks: int):
     port = int(os.getenv('MASTER_PORT', '8361'))
     num_nodes = int(os.getenv('WORLD_SIZE', 1))
     node_rank = int(os.getenv('RANK', 0))
-    assert (num_local_ranks < 8 and num_nodes == 1) or num_local_ranks == 8
+
+    num_processes = int(os.getenv("DEEPEP_TEST_NUM_PROCESSES", "8"))
+    assert (num_local_ranks < num_processes and num_nodes == 1) or num_local_ranks == num_processes
 
     sig = inspect.signature(dist.init_process_group)
     params = {
@@ -152,7 +158,8 @@ class suppress_stdout_stderr:
 
 
 def bench_kineto(fn, kernel_names, num_tests: int = 30, suppress_kineto_output: bool = False,
-                 trace_path: Optional[str] = None, barrier_comm_profiling: bool = False):
+                 trace_path: Optional[str] = None, barrier_comm_profiling: bool = False,
+                 duplicate_name_period: Optional[int] = None):
     # Profile
     suppress = suppress_stdout_stderr if suppress_kineto_output else empty_suppress
     with suppress():
@@ -194,8 +201,49 @@ def bench_kineto(fn, kernel_names, num_tests: int = 30, suppress_kineto_output: 
                         kernel_times.append(float(time_str.replace(unit, '')) / scale)
                         break
                 break
-    return tuple(kernel_times) if is_tupled else kernel_times[0]
 
+    if duplicate_name_period is None:
+        return tuple(kernel_times) if is_tupled else kernel_times[0]
+    else:
+        detail_times = extract_detail_times_from_prof(prof, kernel_names=kernel_names, duplicate_name_period=duplicate_name_period)
+        return tuple(kernel_times) + (detail_times,)
+
+
+# NOTE modified from bench_kineto
+def profile_kineto(fn, num_tests: int = 30, barrier_comm_profiling: bool = False, enable_cuda_profiler: bool = False):
+    for i in range(2):
+        # NOTES: use a large kernel and a barrier to eliminate the unbalanced CPU launch overhead
+        if barrier_comm_profiling:
+            lhs = torch.randn((8192, 8192), dtype=torch.float, device='cuda')
+            rhs = torch.randn((8192, 8192), dtype=torch.float, device='cuda')
+            lhs @ rhs
+            dist.all_reduce(torch.ones(1, dtype=torch.float, device='cuda'))
+        for test_index in range(num_tests):
+            if enable_cuda_profiler and i == 1 and test_index == 10:
+                print("call cudaProfilerStart")
+                torch.cuda.cudart().cudaProfilerStart()
+            fn()
+            if enable_cuda_profiler and i == 1 and test_index == 10:
+                print("call cudaProfilerStop")
+                torch.cuda.cudart().cudaProfilerStop()
+
+
+def extract_detail_times_from_prof(prof, kernel_names, duplicate_name_period: int):
+    with tempfile.NamedTemporaryFile(suffix=".json") as tmp:
+        prof.export_chrome_trace(tmp.name)
+        profile_data = json.loads(Path(tmp.name).read_text())
+
+    ans = {}
+    for kernel_name in kernel_names:
+        name_matcher = f'::{kernel_name}<'
+        events = [e for e in profile_data["traceEvents"] if name_matcher in e["name"]]
+        events = sorted(events, key=lambda e: e["ts"])
+        durations = [e["dur"] / 1e6 for e in events]
+        ans[kernel_name] = [list_mean(durations[i::duplicate_name_period]) for i in range(duplicate_name_period)]
+    return ans
+
+def list_mean(xs):
+    return sum(xs) / len(xs)
 
 def hash_tensor(t: torch.Tensor):
     return t.view(torch.int64).sum().item()

@@ -1,10 +1,12 @@
+import json
+import os
 import random
 import torch
 import torch.distributed as dist
 from functools import partial
 
 import deep_ep
-from utils import init_dist, bench, bench_kineto, calc_diff, hash_tensor, per_token_cast_back
+from utils import init_dist, bench, bench_kineto, calc_diff, hash_tensor, per_token_cast_back, profile_kineto
 
 
 def test_main(num_tokens: int, hidden: int, num_experts: int, num_topk: int,
@@ -30,7 +32,7 @@ def test_main(num_tokens: int, hidden: int, num_experts: int, num_topk: int,
         topk_idx[random.randint(0, num_tokens - 1), random.randint(0, num_topk - 1)] = -1
 
     # Check dispatch correctness
-    do_check = True
+    do_check = bool(int(os.environ.get("DEEPEP_HACK_DO_CHECK", "1")))
     hash_value, num_times = 0, 0
     for return_recv_hook in (False, True):
         for dispatch_use_fp8 in (False, True):
@@ -135,23 +137,60 @@ def test_main(num_tokens: int, hidden: int, num_experts: int, num_topk: int,
         num_dispatch_comm_bytes += num_fp8_bytes * num_selections
         num_combine_comm_bytes += num_bf16_bytes * num_selections
 
+    if int(os.environ.get("DEEPEP_ENABLE_PROFILE", "0")):
+        group.barrier()
+        profile_kineto(partial(test_func, zero_copy=True, return_recv_hook=True),
+                       barrier_comm_profiling=True, enable_cuda_profiler=rank == 0)
+        print("Early halt since profiling")
+        return
+
     # Dispatch + combine testing
     avg_t, min_t, max_t = bench(partial(test_func, zero_copy=False, return_recv_hook=False))
     print(f'[rank {rank}] Dispatch + combine bandwidth: {(num_dispatch_comm_bytes + num_combine_comm_bytes) / 1e9 / avg_t:.2f} GB/s, '
           f'avg_t={avg_t * 1e6:.2f} us, min_t={min_t * 1e6:.2f} us, max_t={max_t * 1e6:.2f} us', flush=True)
 
+    output_data = {}
+
     # Separate profiling
     for return_recv_hook in (False, True):
         group.barrier()
-        dispatch_t, combine_t = bench_kineto(partial(test_func, zero_copy=True, return_recv_hook=return_recv_hook),
+        bench_output = bench_kineto(partial(test_func, zero_copy=True, return_recv_hook=return_recv_hook),
                                              kernel_names=('dispatch', 'combine'), barrier_comm_profiling=True,
-                                             suppress_kineto_output=True)
+                                             suppress_kineto_output=True, duplicate_name_period=2 if return_recv_hook else None)
         if not return_recv_hook:
-            print(f'[rank {rank}] Dispatch bandwidth: {num_dispatch_comm_bytes / 1e9 / dispatch_t:.2f} GB/s, avg_t={dispatch_t * 1e6:.2f} us | '
-                  f'Combine bandwidth: {num_combine_comm_bytes / 1e9 / combine_t:.2f} GB/s, avg_t={combine_t * 1e6:.2f} us', flush=True)
+            dispatch_t, combine_t = bench_output
+            data = dict(
+                dispatch_bandwidth=num_dispatch_comm_bytes / 1e9 / dispatch_t,
+                combine_bandwidth=num_combine_comm_bytes / 1e9 / combine_t,
+                dispatch_t_us=dispatch_t * 1e6,
+                combine_t_us=combine_t * 1e6,
+            )
+            print(f'[rank {rank}] Dispatch bandwidth: {data["dispatch_bandwidth"] :.2f} GB/s, avg_t={data["dispatch_t_us"] :.2f} us | '
+                  f'Combine bandwidth: {data["combine_bandwidth"] :.2f} GB/s, avg_t={data["combine_t_us"] :.2f} us', flush=True)
         else:
-            print(f'[rank {rank}] Dispatch send/recv time: {dispatch_t * 2 * 1e6:.2f} us | '
-                  f'Combine send/recv time: {combine_t * 2 * 1e6:.2f} us', flush=True)
+            dispatch_t, combine_t, detail_times = bench_output
+            data = dict(
+                dispatch_t_us=dispatch_t * 2 * 1e6,
+                combine_t_us=combine_t * 2 * 1e6,
+                dispatch_send_t_us=detail_times["dispatch"][0] * 1e6,
+                dispatch_recv_t_us=detail_times["dispatch"][1] * 1e6,
+                combine_send_t_us=detail_times["combine"][0] * 1e6,
+                combine_recv_t_us=detail_times["combine"][1] * 1e6,
+            )
+            print(f'[rank {rank}] Dispatch send/recv time: {data["dispatch_t_us"] :.2f} = {data["dispatch_send_t_us"] :.2f} + {data["dispatch_recv_t_us"] :.2f} us | '
+                  f'Combine send/recv time: {data["combine_t_us"] :.2f} = {data["combine_send_t_us"] :.2f} + {data["combine_recv_t_us"] :.2f} us', flush=True)
+
+        output_data |= {("hook_" if return_recv_hook else "std_") + k: v for k, v in data.items()}
+
+    print('MAIN_OUTPUT=' + json.dumps(dict(
+        rank=rank,
+        num_tokens=num_tokens,
+        hidden=hidden,
+        num_experts=num_experts,
+        num_topk=num_topk,
+        num_ranks=num_ranks,
+        **output_data,
+    )))
 
     return hash_value
 
@@ -159,13 +198,18 @@ def test_main(num_tokens: int, hidden: int, num_experts: int, num_topk: int,
 # noinspection PyUnboundLocalVariable
 def test_loop(local_rank: int, num_local_ranks: int):
     rank, num_ranks, group = init_dist(local_rank, num_local_ranks)
-    num_tokens, hidden, num_topk, num_experts = 128, 7168, 8, 288
+    # num_tokens, hidden, num_topk, num_experts = 4096, 7168, 8, (256 // num_ranks) * num_ranks
+    num_tokens = int(os.environ.get("DEEPEP_TEST_NUM_TOKENS", "4096"))
+    hidden = int(os.environ.get("DEEPEP_TEST_HIDDEN", "7168"))
+    num_topk = int(os.environ.get("DEEPEP_TEST_NUM_TOPK", "8"))
+    num_experts = int(os.environ.get("DEEPEP_TEST_NUM_EXPERTS", str((256 // num_ranks) * num_ranks)))
 
     num_rdma_bytes = deep_ep.Buffer.get_low_latency_rdma_size_hint(num_tokens, hidden, num_ranks, num_experts)
     if local_rank == 0:
         print(f'Allocating buffer size: {num_rdma_bytes / 1e6} MB ...', flush=True)
     buffer = deep_ep.Buffer(group, num_rdma_bytes=num_rdma_bytes, low_latency_mode=True,
-                            num_qps_per_rank=num_experts // num_ranks)
+                            num_qps_per_rank=num_experts // num_ranks,
+                            allow_mnnvl=bool(int(os.environ.get("DEEPEP_TEST_ALLOW_MNNVL", "0"))))
     test_main(num_tokens, hidden, num_experts, num_topk, rank, num_ranks, group, buffer, seed=1)
 
     do_pressure_test = False
@@ -183,5 +227,5 @@ def test_loop(local_rank: int, num_local_ranks: int):
 
 if __name__ == '__main__':
     # TODO: you may modify NUMA binding for less CPU overhead
-    num_processes = 8
+    num_processes = int(os.getenv("DEEPEP_TEST_NUM_PROCESSES", "8"))
     torch.multiprocessing.spawn(test_loop, args=(num_processes,), nprocs=num_processes)

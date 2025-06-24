@@ -21,6 +21,9 @@ if __name__ == '__main__':
     nvcc_dlink = []
     extra_link_args = []
 
+    # NOTE MODIFIED
+    nvcc_flags += ['-lineinfo']
+
     # NVSHMEM flags
     if disable_nvshmem:
         cxx_flags.append('-DDISABLE_NVSHMEM')

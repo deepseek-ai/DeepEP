@@ -1,3 +1,4 @@
+import os
 import time
 import torch
 import torch.distributed as dist
@@ -12,7 +13,12 @@ import test_low_latency
 
 def test_main(num_sms: int, local_rank: int, num_ranks: int, rank: int, buffer: deep_ep.Buffer, group: dist.ProcessGroup):
     # Settings
-    num_tokens, hidden, num_topk, num_experts = 4096, 7168, 8, (256 // num_ranks) * num_ranks
+    # num_tokens, hidden, num_topk, num_experts = 4096, 7168, 8, (256 // num_ranks) * num_ranks
+    num_tokens = int(os.environ.get("DEEPEP_TEST_NUM_TOKENS", "4096"))
+    hidden = int(os.environ.get("DEEPEP_TEST_HIDDEN", "7168"))
+    num_topk = int(os.environ.get("DEEPEP_TEST_NUM_TOPK", "8"))
+    num_experts = int(os.environ.get("DEEPEP_TEST_NUM_EXPERTS", str((256 // num_ranks) * num_ranks)))
+
     assert num_experts % num_ranks == 0
     if local_rank == 0:
         print(f'[config] num_tokens={num_tokens}, hidden={hidden}, num_topk={num_topk}', flush=True)
@@ -184,9 +190,9 @@ def test_main(num_sms: int, local_rank: int, num_ranks: int, rank: int, buffer: 
                 best_time, best_results = t, (num_sms, nvl_chunk_size)
             if local_rank == 0:
                 print(f'[tuning] SMs {num_sms}, NVL chunk {nvl_chunk_size if nvl_chunk_size else "default"}: '
-                      f'{nvl_recv_bytes / 1e9 / t:.2f} GB/s (NVL) ', flush=True)
+                      f'{nvl_recv_bytes / 1e9 / t:.2f} GB/s (NVL) t={t * 1e3}ms', flush=True)
         if local_rank == 0:
-            print(f'[tuning] Best dispatch ({"FP8" if isinstance(current_x, tuple) else "BF16"}): SMs {best_results[0]}, NVL chunk {best_results[1]}, {nvl_recv_bytes / 1e9 / best_time:.2f} GB/s (NVL)', flush=True)
+            print(f'[tuning] Best dispatch ({"FP8" if isinstance(current_x, tuple) else "BF16"}): SMs {best_results[0]}, NVL chunk {best_results[1]}, {nvl_recv_bytes / 1e9 / best_time:.2f} GB/s (NVL) t={best_time * 1e3}ms', flush=True)
             print('', flush=True)
 
         # Gather the best config from rank 0 and the first test setting
@@ -215,12 +221,12 @@ def test_main(num_sms: int, local_rank: int, num_ranks: int, rank: int, buffer: 
         t = bench(lambda: buffer.combine(**tune_args))[0]
         if local_rank == 0:
             print(f'[tuning] SMs {num_sms}, NVL chunk {nvl_chunk_size if nvl_chunk_size else "default"}: '
-                  f'{combine_bf16_nvl_send_bytes / 1e9 / t:.2f} GB/s (NVL) ', flush=True)
+                  f'{combine_bf16_nvl_send_bytes / 1e9 / t:.2f} GB/s (NVL)  t={t * 1e3}ms', flush=True)
             if t < best_time and nvl_chunk_size > 0:
                 best_time, best_results = t, (num_sms, nvl_chunk_size)
 
     if local_rank == 0:
-        print(f'[tuning] Best combine: SMs {best_results[0]}, NVL chunk {best_results[1]}: {combine_bf16_nvl_send_bytes / 1e9 / best_time:.2f} GB/s (NVL)', flush=True)
+        print(f'[tuning] Best combine: SMs {best_results[0]}, NVL chunk {best_results[1]}: {combine_bf16_nvl_send_bytes / 1e9 / best_time:.2f} GB/s (NVL) t={best_time * 1e3}ms', flush=True)
         print('', flush=True)
 
 
@@ -236,7 +242,9 @@ def test_loop(local_rank: int, num_local_ranks: int):
                             num_qps_per_rank=(ll_num_experts // num_ranks if test_ll_compatibility else 1))
     torch.manual_seed(rank)
 
-    for i in (24, ):
+    num_sms = int(os.environ.get("DEEPEP_TEST_NUM_SMS", "24"))
+
+    for i in (num_sms, ):
         test_main(i, local_rank, num_ranks, rank, buffer, group)
         if local_rank == 0:
             print('', flush=True)
@@ -252,5 +260,5 @@ def test_loop(local_rank: int, num_local_ranks: int):
 
 
 if __name__ == '__main__':
-    num_processes = 8
+    num_processes = int(os.getenv("DEEPEP_TEST_NUM_PROCESSES", "8"))
     torch.multiprocessing.spawn(test_loop, args=(num_processes, ), nprocs=num_processes)
