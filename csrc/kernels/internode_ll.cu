@@ -394,13 +394,6 @@ __device__ __forceinline__ int4* compute_shared_topk_info_addr(int4* shared_topk
         + idx_topkdivfour;
 }
 
-__device__ __forceinline__ bool int4_equal(int4 a, int4 b) {
-    return a.x == b.x && a.y == b.y && a.z == b.z && a.w == b.w;
-}
-__device__ __forceinline__ bool float4_equal(float4 a, float4 b) {
-    return a.x == b.x && a.y == b.y && a.z == b.z && a.w == b.w;
-}
-
 template <int kHidden, int kNumMaxTopk>
 __global__ __launch_bounds__(1024, 1) void
 combine(void* combined_x,
@@ -588,17 +581,6 @@ combine(void* combined_x,
                 reg_topk_idx_vec[1] = *compute_shared_topk_info_addr(shared_topk_info, idx_iteration, 0, 1);
                 reg_topk_weights_vec[0] = *reinterpret_cast<float4*>(compute_shared_topk_info_addr(shared_topk_info, idx_iteration, 1, 0));
                 reg_topk_weights_vec[1] = *reinterpret_cast<float4*>(compute_shared_topk_info_addr(shared_topk_info, idx_iteration, 1, 1));
-
-// ------------------------------------------------------------------------------------
-                int4 temp_a = ld_nc_global(reinterpret_cast<const int4*>(topk_idx_i32 + token_idx * num_topk + 0));
-                int4 temp_b = ld_nc_global(reinterpret_cast<const int4*>(topk_idx_i32 + token_idx * num_topk + 4));
-                float4 temp_c = ld_nc_global(reinterpret_cast<const float4*>(topk_weights + token_idx * num_topk + 0));
-                float4 temp_d = ld_nc_global(reinterpret_cast<const float4*>(topk_weights + token_idx * num_topk + 4));
-                if (!int4_equal(reg_topk_idx_vec[0] , temp_a)) { printf("assert-eq failed item=0 thread_id=%d \n", thread_id); }
-                if (!int4_equal(reg_topk_idx_vec[1] , temp_b)) { printf("assert-eq failed item=1 \n"); }
-                if (!float4_equal(reg_topk_weights_vec[0] , temp_c)) { printf("assert-eq failed item=2 \n"); }
-                if (!float4_equal(reg_topk_weights_vec[1] , temp_c)) { printf("assert-eq failed item=3 \n"); }
-// ------------------------------------------------------------------------------------
             }
 
             float combined_values[kNumElemsPerInt4] = {0.0f};
