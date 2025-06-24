@@ -489,6 +489,8 @@ combine(void* combined_x,
     if ((phases & LOW_LATENCY_RECV_PHASE) == 0)
         return;
 
+    int self_num_iteration = 1 + (num_combined_tokens - sm_id) / num_sms;
+
     // (6 num_tokens_per_sm, 2 idx_or_weights, 2 topk_div_four, 16B elem_size)
     constexpr int kMaxNumTokensPerSm = 6;
     constexpr int kIdxOrWeightDim = 2;
@@ -510,7 +512,7 @@ combine(void* combined_x,
         prepare_topk_idx_iow = TODO;
         prepare_topk_idx_topkdivfour = TODO;
     }
-    bool enable_prepare_topk = (warp_id == 0) and (TODO < TODO);
+    bool enable_prepare_topk = (warp_id == 0) and (prepare_topk_idx_iteration < self_num_iteration);
     if (enable_prepare_topk) {
         temp_buf = ld_nc_global(TODO);
     }
@@ -535,11 +537,8 @@ combine(void* combined_x,
     EP_STATIC_ASSERT(kHidden % (32 * kNumElemsPerInt4) == 0, "Invalid vectorization");
     if (thread_id < hidden_bf16_int4) {
 //         for (int token_idx = sm_id; token_idx < num_combined_tokens; token_idx += num_sms) {
-        for (int idx_iteration = 0; ; ++ idx_iteration) {
+        for (int idx_iteration = 0; idx_iteration < self_num_iteration; ++ idx_iteration) {
             const int token_idx = sm_id + idx_iteration * num_sms;
-            if (token_idx >= num_combined_tokens) {
-                break;
-            }
 
             // Read top-k indices and weights
 
