@@ -398,7 +398,8 @@ __device__ __forceinline__ bool int4_equal(int4 a, int4 b) {
     return a.x == b.x && a.y == b.y && a.z == b.z && a.w == b.w;
 }
 __device__ __forceinline__ bool float4_equal(float4 a, float4 b) {
-    return a.x == b.x && a.y == b.y && a.z == b.z && a.w == b.w;
+    return int4_equal(*reinterpret_cast<int4*>(a), *reinterpret_cast<int4*>(b));
+//     return a.x == b.x && a.y == b.y && a.z == b.z && a.w == b.w;
 }
 
 template <int kHidden, int kNumMaxTopk>
@@ -597,7 +598,18 @@ combine(void* combined_x,
                 if (!int4_equal(reg_topk_idx_vec[0] , temp_a)) { printf("assert-eq failed item=0 thread_id=%d \n", thread_id); }
                 if (!int4_equal(reg_topk_idx_vec[1] , temp_b)) { printf("assert-eq failed item=1 \n"); }
                 if (!float4_equal(reg_topk_weights_vec[0] , temp_c)) { printf("assert-eq failed item=2 \n"); }
-                if (!float4_equal(reg_topk_weights_vec[1] , temp_d)) { printf("assert-eq failed item=3 \n"); }
+                if (!float4_equal(reg_topk_weights_vec[1] , temp_d)) { printf(
+                    "assert-eq failed item=3 idx_iteration=%d sm_id=%d thread_id=%d a=(%f,%f,%f,%f) b=(%f,%f,%f,%f) \n",
+                     idx_iteration, sm_id, thread_id,
+                     reg_topk_weights_vec[1].x,
+                     reg_topk_weights_vec[1].y,
+                     reg_topk_weights_vec[1].z,
+                     reg_topk_weights_vec[1].w,
+                      temp_d.x,
+                      temp_d.y,
+                      temp_d.z,
+                      temp_d.w
+                     ); }
 // ------------------------------------------------------------------------------------
             }
 
