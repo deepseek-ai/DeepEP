@@ -522,7 +522,7 @@ combine(void* combined_x,
     }
     bool enable_prepare_topk = (warp_id == 0) and (prepare_topk_idx_iteration < self_num_iteration);
     if (enable_prepare_topk) {
-        int4* src_addr = (
+        const int4* src_addr = (
             ((prepare_topk_idx_iow == 0)
                 ? reinterpret_cast<const int4*>(topk_idx_i32)
                 : reinterpret_cast<const int4*>(topk_weights))
@@ -542,7 +542,7 @@ combine(void* combined_x,
     cg::this_grid().sync();
 
     if (enable_prepare_topk) {
-        const int4* smem_addr = compute_shared_topk_info_addr(shared_topk_info, prepare_topk_idx_iteration, prepare_topk_idx_iow, prepare_topk_idx_topkdivfour);
+        int4* smem_addr = compute_shared_topk_info_addr(shared_topk_info, prepare_topk_idx_iteration, prepare_topk_idx_iow, prepare_topk_idx_topkdivfour);
         *smem_addr = temp_buf;
     }
     __syncthreads(); // TODO can we rm this and use existing grid sync
