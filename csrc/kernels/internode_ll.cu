@@ -398,7 +398,7 @@ __device__ __forceinline__ bool int4_equal(int4 a, int4 b) {
     return a.x == b.x && a.y == b.y && a.z == b.z && a.w == b.w;
 }
 __device__ __forceinline__ bool float4_equal(float4 a, float4 b) {
-    return int4_equal(*reinterpret_cast<int4*>(a), *reinterpret_cast<int4*>(b));
+    return int4_equal(*reinterpret_cast<int4*>(&a), *reinterpret_cast<int4*>(&b));
 //     return a.x == b.x && a.y == b.y && a.z == b.z && a.w == b.w;
 }
 
