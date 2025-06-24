@@ -503,15 +503,15 @@ combine(void* combined_x,
     }
 
     int4 temp_buf;
-    int idx_iteration, idx_iow, idx_topkdivfour;
+    int prepare_topk_idx_iteration, prepare_topk_idx_iow, prepare_topk_idx_topkdivfour;
     // TODO only support few tokens if only use warp 0
     if (warp_id == 0) {
-        idx_iteration = TODO;
-        idx_iow = TODO;
-        idx_topkdivfour = TODO;
+        prepare_topk_idx_iteration = TODO;
+        prepare_topk_idx_iow = TODO;
+        prepare_topk_idx_topkdivfour = TODO;
     }
-    bool enable_ld_st_topk = (warp_id == 0) and (TODO < TODO);
-    if (enable_ld_st_topk) {
+    bool enable_prepare_topk = (warp_id == 0) and (TODO < TODO);
+    if (enable_prepare_topk) {
         temp_buf = ld_nc_global(TODO);
     }
 
@@ -524,8 +524,8 @@ combine(void* combined_x,
     }
     cg::this_grid().sync();
 
-    if (enable_ld_st_topk) {
-        const int4* smem_addr = compute_shared_topk_info_addr(idx_iteration, idx_iow, idx_topkdivfour);
+    if (enable_prepare_topk) {
+        const int4* smem_addr = compute_shared_topk_info_addr(prepare_topk_idx_iteration, prepare_topk_idx_iow, prepare_topk_idx_topkdivfour);
         *smem_addr = temp_buf;
     }
     __syncthreads(); // TODO can we rm this and use existing grid sync
