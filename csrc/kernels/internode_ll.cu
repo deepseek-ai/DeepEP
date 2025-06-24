@@ -489,6 +489,17 @@ combine(void* combined_x,
     if ((phases & LOW_LATENCY_RECV_PHASE) == 0)
         return;
 
+    // (6 num_tokens_per_sm, 2 idx_or_weights, 2 topk_div_four, 16B elem_size)
+    constexpr int kMaxNumTokensPerSm = 6;
+    constexpr int kIdxOrWeightDim = 2;
+    constexpr int kNumActualTopkDivFour = 2;
+    alignas(16) __shared__ int4 shared_topk_info[kMaxNumTokensPerSm * kIdxOrWeightDim * kNumActualTopkDivFour];
+    int4 temp_buf;
+    TODO_compute_index;
+    if (idx_iteration < TODO) {
+        temp_buf = ld_nc_global(TODO);
+    }
+
     // Wait all ranks to arrive
     if (responsible_expert_idx < num_experts) {
         EP_DEVICE_ASSERT(num_warps_per_group > 1);
@@ -497,6 +508,11 @@ combine(void* combined_x,
         }
     }
     cg::this_grid().sync();
+
+    if (idx_iteration < TODO) {
+        shared_topk_info[TODO] = temp_buf;
+    }
+    __syncthreads(); // TODO can we rm this and use existing grid sync
 
     // Reduce tokens with FP8 cast
     EP_DEVICE_ASSERT(num_topk <= 32 and hidden_bf16_int4 <= num_threads);
@@ -517,12 +533,17 @@ combine(void* combined_x,
                 auto reg_topk_idx_vec = reinterpret_cast<int4*>(reg_topk_idx);
                 auto reg_topk_weights_vec = reinterpret_cast<float4*>(reg_topk_weights);
 
-                // TODO ensure GMEM is aligned?
-                // TODO is the aggressive ld PTX ok here?
-                reg_topk_idx_vec[0] = ld_nc_global(reinterpret_cast<const int4*>(topk_idx_i32 + token_idx * num_topk + 0));
-                reg_topk_idx_vec[1] = ld_nc_global(reinterpret_cast<const int4*>(topk_idx_i32 + token_idx * num_topk + 4));
-                reg_topk_weights_vec[0] = ld_nc_global(reinterpret_cast<const float4*>(topk_weights + token_idx * num_topk + 0));
-                reg_topk_weights_vec[1] = ld_nc_global(reinterpret_cast<const float4*>(topk_weights + token_idx * num_topk + 4));
+//                 // TODO ensure GMEM is aligned?
+//                 // TODO is the aggressive ld PTX ok here?
+//                 reg_topk_idx_vec[0] = ld_nc_global(reinterpret_cast<const int4*>(topk_idx_i32 + token_idx * num_topk + 0));
+//                 reg_topk_idx_vec[1] = ld_nc_global(reinterpret_cast<const int4*>(topk_idx_i32 + token_idx * num_topk + 4));
+//                 reg_topk_weights_vec[0] = ld_nc_global(reinterpret_cast<const float4*>(topk_weights + token_idx * num_topk + 0));
+//                 reg_topk_weights_vec[1] = ld_nc_global(reinterpret_cast<const float4*>(topk_weights + token_idx * num_topk + 4));
+
+                reg_topk_idx_vec[0] = ld_shared_v4_i32(TODO);
+                reg_topk_idx_vec[1] = ld_shared_v4_i32(TODO);
+                reg_topk_weights_vec[0] = ld_shared_v4_f32(TODO);
+                reg_topk_weights_vec[1] = ld_shared_v4_f32(TODO);
             }
 
             float combined_values[kNumElemsPerInt4] = {0.0f};
