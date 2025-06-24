@@ -496,7 +496,9 @@ combine(void* combined_x,
     alignas(16) __shared__ int4 shared_topk_info[kMaxNumTokensPerSm * kIdxOrWeightDim * kNumActualTopkDivFour];
     int4 temp_buf;
     TODO_compute_index;
-    if (idx_iteration < TODO) {
+    // TODO only support few tokens if use this limitation
+    bool enable_ld_st_topk = (warp_id == 0) and (TODO < TODO);
+    if (enable_ld_st_topk) {
         temp_buf = ld_nc_global(TODO);
     }
 
@@ -509,7 +511,7 @@ combine(void* combined_x,
     }
     cg::this_grid().sync();
 
-    if (idx_iteration < TODO) {
+    if (enable_ld_st_topk) {
         shared_topk_info[TODO] = temp_buf;
     }
     __syncthreads(); // TODO can we rm this and use existing grid sync
