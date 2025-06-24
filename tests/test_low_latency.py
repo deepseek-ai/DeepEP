@@ -27,6 +27,8 @@ def test_main(num_tokens: int, hidden: int, num_experts: int, num_topk: int,
     topk_idx = torch.topk(scores, num_topk, dim=-1, largest=True, sorted=True)[1]
     topk_weights = torch.randn((num_tokens, num_topk), dtype=torch.float32, device='cuda').abs()
 
+    print(f"hi init {x=} {topk_weights=}")
+
     # Randomly mask some positions
     for i in range(10):
         topk_idx[random.randint(0, num_tokens - 1), random.randint(0, num_topk - 1)] = -1
@@ -84,6 +86,8 @@ def test_main(num_tokens: int, hidden: int, num_experts: int, num_topk: int,
                         else:
                             hash_value ^= hash_tensor(packed_recv_x[i, :num_valid_tokens])
 
+                    print(f"hi before combine {x=} {topk_weights=}")
+
                     # Check combine correctness
                     for zero_copy in (False, True):
                         if zero_copy:
@@ -97,6 +101,7 @@ def test_main(num_tokens: int, hidden: int, num_experts: int, num_topk: int,
                             expect_ans = x * topk_weights.masked_fill(topk_idx == -1, 0).sum(dim=1).view(-1, 1)
                             diff = calc_diff(expect_ans, combined_x)
                             assert torch.isnan(combined_x).sum().item() == 0
+                            print(f"hi {expect_ans=} {x=} {topk_weights=}")
                             assert diff < (7e-4 if round_scale else 1e-5), f'Error: {diff=}, {zero_copy=}, {expect_ans=} {combined_x=}'
                             hash_value ^= hash_tensor(combined_x)
 
