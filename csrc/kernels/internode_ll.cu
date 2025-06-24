@@ -387,7 +387,7 @@ constexpr int kIdxOrWeightDim = 2;
 constexpr int kNumActualTopkDivFour = 2;
 
 // TODO closure
-int4* compute_shared_topk_info_addr(int4* shared_topk_info, int idx_iteration, int idx_iow, int idx_topkdivfour) {
+__device__ __forceinline__ int4* compute_shared_topk_info_addr(int4* shared_topk_info, int idx_iteration, int idx_iow, int idx_topkdivfour) {
     return shared_topk_info
         + idx_iteration * (kIdxOrWeightDim * kNumActualTopkDivFour)
         + idx_iow * kNumActualTopkDivFour
