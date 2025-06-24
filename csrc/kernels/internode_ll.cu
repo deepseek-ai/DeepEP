@@ -595,7 +595,18 @@ combine(void* combined_x,
                 int4 temp_b = ld_nc_global(reinterpret_cast<const int4*>(topk_idx_i32 + token_idx * num_topk + 4));
                 float4 temp_c = ld_nc_global(reinterpret_cast<const float4*>(topk_weights + token_idx * num_topk + 0));
                 float4 temp_d = ld_nc_global(reinterpret_cast<const float4*>(topk_weights + token_idx * num_topk + 4));
-                if (!int4_equal(reg_topk_idx_vec[0] , temp_a)) { printf("assert-eq failed item=0 thread_id=%d \n", thread_id); }
+                if (!int4_equal(reg_topk_idx_vec[0] , temp_a)) { printf(
+                    "assert-eq failed item=0 idx_iteration=%d sm_id=%d thread_id=%d a=(%d,%d,%d,%d) b=(%d,%d,%d,%d) \n",
+                     idx_iteration, sm_id, thread_id,
+                     reg_topk_idx_vec[0].x,
+                     reg_topk_idx_vec[0].y,
+                     reg_topk_idx_vec[0].z,
+                     reg_topk_idx_vec[0].w,
+                      temp_a.x,
+                      temp_a.y,
+                      temp_a.z,
+                      temp_a.w
+                     ); }
                 if (!int4_equal(reg_topk_idx_vec[1] , temp_b)) { printf("assert-eq failed item=1 \n"); }
                 if (!float4_equal(reg_topk_weights_vec[0] , temp_c)) { printf("assert-eq failed item=2 \n"); }
                 if (!float4_equal(reg_topk_weights_vec[1] , temp_d)) { printf(
