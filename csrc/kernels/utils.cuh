@@ -224,22 +224,6 @@ __device__  __forceinline__ float4 ld_nc_global(const float4 *ptr) {
 //     return ret;
 // }
 
-// NOTE ADD
-__device__  __forceinline__ int4 ld_shared_v4_i32(const int4 *ptr) {
-    int4 ret;
-    asm volatile("ld.shared.v4.s32 {%0, %1, %2, %3}, [%4];"
-            : "=r"(ret.x), "=r"(ret.y), "=r"(ret.z), "=r"(ret.w) : "r"(ptr));
-    return ret;
-}
-
-// NOTE ADD
-__device__  __forceinline__ float4 ld_shared_v4_f32(const float4 *ptr) {
-    float4 ret;
-    asm volatile("ld.shared.v4.f32 {%0, %1, %2, %3}, [%4];"
-            : "=f"(ret.x), "=f"(ret.y), "=f"(ret.z), "=f"(ret.w) : "r"(ptr));
-    return ret;
-}
-
 __device__ __forceinline__ void st_na_relaxed(const uint8_t *ptr, uint8_t val) {
     asm volatile("st.relaxed.gpu.global.L1::no_allocate.b8 [%0], %1;" : : "l"(ptr), "h"(static_cast<uint16_t>(val)));
 }
