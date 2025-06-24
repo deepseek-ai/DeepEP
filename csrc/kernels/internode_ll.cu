@@ -522,7 +522,12 @@ combine(void* combined_x,
     }
     bool enable_prepare_topk = (warp_id == 0) and (prepare_topk_idx_iteration < self_num_iteration);
     if (enable_prepare_topk) {
-        temp_buf = ld_nc_global(TODO);
+        int4* src_addr = reinterpret_cast<const int4*>(
+            ((prepare_topk_idx_iow == 0) ? topk_idx_i32 : topk_weights)
+            + prepare_topk_idx_iteration * num_topk
+            + prepare_topk_idx_topkdivfour
+        );
+        temp_buf = ld_nc_global(src_addr);
     }
 
     // Wait all ranks to arrive
