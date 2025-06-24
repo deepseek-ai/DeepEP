@@ -382,6 +382,18 @@ LAUNCH_KERNEL(&cfg, dispatch_func, \
 #undef DISPATCH_LAUNCH_CASE
 }
 
+constexpr int kMaxNumTokensPerSm = 6;
+constexpr int kIdxOrWeightDim = 2;
+constexpr int kNumActualTopkDivFour = 2;
+
+// TODO closure
+int4* compute_shared_topk_info_addr(int4* shared_topk_info, int idx_iteration, int idx_iow, int idx_topkdivfour) {
+    return shared_topk_info
+        + idx_iteration * (kIdxOrWeightDim * kNumActualTopkDivFour)
+        + idx_iow * kNumActualTopkDivFour
+        + idx_topkdivfour;
+}
+
 template <int kHidden, int kNumMaxTopk>
 __global__ __launch_bounds__(1024, 1) void
 combine(void* combined_x,
@@ -492,17 +504,7 @@ combine(void* combined_x,
     int self_num_iteration = 1 + (num_combined_tokens - sm_id - 1) / num_sms;
 
     // (6 num_tokens_per_sm, 2 idx_or_weights, 2 topk_div_four, 16B elem_size)
-    constexpr int kMaxNumTokensPerSm = 6;
-    constexpr int kIdxOrWeightDim = 2;
-    constexpr int kNumActualTopkDivFour = 2;
     alignas(16) __shared__ int4 shared_topk_info[kMaxNumTokensPerSm * kIdxOrWeightDim * kNumActualTopkDivFour];
-
-    int4* compute_shared_topk_info_addr(int idx_iteration, int idx_iow, int idx_topkdivfour) {
-        return shared_topk_info
-            + idx_iteration * (kIdxOrWeightDim * kNumActualTopkDivFour)
-            + idx_iow * kNumActualTopkDivFour
-            + idx_topkdivfour;
-    }
 
     int4 temp_buf;
     int prepare_topk_idx_iteration, prepare_topk_idx_iow, prepare_topk_idx_topkdivfour;
@@ -515,7 +517,7 @@ combine(void* combined_x,
 
         prepare_topk_idx_iow = index % kIdxOrWeightDim;
         index /= kIdxOrWeightDim;
-        
+
         prepare_topk_idx_iteration = index;
     }
     bool enable_prepare_topk = (warp_id == 0) and (prepare_topk_idx_iteration < self_num_iteration);
@@ -533,7 +535,7 @@ combine(void* combined_x,
     cg::this_grid().sync();
 
     if (enable_prepare_topk) {
-        const int4* smem_addr = compute_shared_topk_info_addr(prepare_topk_idx_iteration, prepare_topk_idx_iow, prepare_topk_idx_topkdivfour);
+        const int4* smem_addr = compute_shared_topk_info_addr(shared_topk_info, prepare_topk_idx_iteration, prepare_topk_idx_iow, prepare_topk_idx_topkdivfour);
         *smem_addr = temp_buf;
     }
     __syncthreads(); // TODO can we rm this and use existing grid sync
@@ -567,10 +569,10 @@ combine(void* combined_x,
 //                 reg_topk_weights_vec[0] = ld_nc_global(reinterpret_cast<const float4*>(topk_weights + token_idx * num_topk + 0));
 //                 reg_topk_weights_vec[1] = ld_nc_global(reinterpret_cast<const float4*>(topk_weights + token_idx * num_topk + 4));
 
-                reg_topk_idx_vec[0] = ld_shared_v4_i32(compute_shared_topk_info_addr(idx_iteration, 0, 0));
-                reg_topk_idx_vec[1] = ld_shared_v4_i32(compute_shared_topk_info_addr(idx_iteration, 0, 1));
-                reg_topk_weights_vec[0] = ld_shared_v4_f32(compute_shared_topk_info_addr(idx_iteration, 1, 0));
-                reg_topk_weights_vec[1] = ld_shared_v4_f32(compute_shared_topk_info_addr(idx_iteration, 1, 1));
+                reg_topk_idx_vec[0] = ld_shared_v4_i32(compute_shared_topk_info_addr(shared_topk_info, idx_iteration, 0, 0));
+                reg_topk_idx_vec[1] = ld_shared_v4_i32(compute_shared_topk_info_addr(shared_topk_info, idx_iteration, 0, 1));
+                reg_topk_weights_vec[0] = ld_shared_v4_f32(compute_shared_topk_info_addr(shared_topk_info, idx_iteration, 1, 0));
+                reg_topk_weights_vec[1] = ld_shared_v4_f32(compute_shared_topk_info_addr(shared_topk_info, idx_iteration, 1, 1));
             }
 
             float combined_values[kNumElemsPerInt4] = {0.0f};
