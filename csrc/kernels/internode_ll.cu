@@ -512,7 +512,7 @@ combine(void* combined_x,
     if ((phases & LOW_LATENCY_RECV_PHASE) == 0)
         return;
 
-    int self_num_iteration = 1 + (num_combined_tokens - sm_id - 1) / num_sms;
+    int self_num_iteration = (sm_id >= num_combined_tokens) ? 0 : (1 + (num_combined_tokens - sm_id - 1) / num_sms);
 
     // (6 num_tokens_per_sm, 2 idx_or_weights, 2 topk_div_four, 16B elem_size)
     alignas(16) __shared__ int4 shared_topk_info[kMaxNumTokensPerSm * kIdxOrWeightDim * kNumActualTopkDivFour];
