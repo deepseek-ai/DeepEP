@@ -494,9 +494,22 @@ combine(void* combined_x,
     constexpr int kIdxOrWeightDim = 2;
     constexpr int kNumActualTopkDivFour = 2;
     alignas(16) __shared__ int4 shared_topk_info[kMaxNumTokensPerSm * kIdxOrWeightDim * kNumActualTopkDivFour];
+
+    int4* compute_shared_topk_info_addr(int idx_iteration, int idx_iow, int idx_topkdivfour) {
+        return shared_topk_info
+            + idx_iteration * (kIdxOrWeightDim * kNumActualTopkDivFour)
+            + idx_iow * kNumActualTopkDivFour
+            + idx_topkdivfour;
+    }
+
     int4 temp_buf;
-    TODO_compute_index;
-    // TODO only support few tokens if use this limitation
+    int idx_iteration, idx_iow, idx_topkdivfour;
+    // TODO only support few tokens if only use warp 0
+    if (warp_id == 0) {
+        idx_iteration = TODO;
+        idx_iow = TODO;
+        idx_topkdivfour = TODO;
+    }
     bool enable_ld_st_topk = (warp_id == 0) and (TODO < TODO);
     if (enable_ld_st_topk) {
         temp_buf = ld_nc_global(TODO);
@@ -512,7 +525,8 @@ combine(void* combined_x,
     cg::this_grid().sync();
 
     if (enable_ld_st_topk) {
-        shared_topk_info[TODO] = temp_buf;
+        const int4* smem_addr = compute_shared_topk_info_addr(idx_iteration, idx_iow, idx_topkdivfour);
+        *smem_addr = temp_buf;
     }
     __syncthreads(); // TODO can we rm this and use existing grid sync
 
