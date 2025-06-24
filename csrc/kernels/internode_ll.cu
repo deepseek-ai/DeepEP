@@ -506,24 +506,29 @@ combine(void* combined_x,
             // Read top-k indices and weights
 
             // TODO align 16 to be castable?
-            alignas(16) int reg_topk_idx[kNumMaxTopk];
-            alignas(16) float reg_topk_weights[kNumMaxTopk];
+//             alignas(16) int reg_topk_idx[kNumMaxTopk];
+//             alignas(16) float reg_topk_weights[kNumMaxTopk];
 //             #pragma unroll
 //             for (int i = 0; i < num_topk; ++ i) {
 //                 reg_topk_idx[i] = static_cast<int>(__ldg(topk_idx + token_idx * num_topk + i));
 //                 reg_topk_weights[i] = __ldg(topk_weights + token_idx * num_topk + i);
 //             }
-            {
-                auto reg_topk_idx_vec = reinterpret_cast<int4*>(reg_topk_idx);
-                auto reg_topk_weights_vec = reinterpret_cast<float4*>(reg_topk_weights);
-
-                // TODO ensure GMEM is aligned?
-                // TODO is the aggressive ld PTX ok here?
-                reg_topk_idx_vec[0] = ld_nc_global_slow_int4(reinterpret_cast<const int4*>(topk_idx_i32 + token_idx * num_topk + 0));
-                reg_topk_idx_vec[1] = ld_nc_global_slow_int4(reinterpret_cast<const int4*>(topk_idx_i32 + token_idx * num_topk + 4));
-                reg_topk_weights_vec[0] = ld_nc_global_slow_float4(reinterpret_cast<const float4*>(topk_weights + token_idx * num_topk + 0));
-                reg_topk_weights_vec[1] = ld_nc_global_slow_float4(reinterpret_cast<const float4*>(topk_weights + token_idx * num_topk + 4));
-            }
+//             {
+//                 auto reg_topk_idx_vec = reinterpret_cast<int4*>(reg_topk_idx);
+//                 auto reg_topk_weights_vec = reinterpret_cast<float4*>(reg_topk_weights);
+//
+//                 // TODO ensure GMEM is aligned?
+//                 // TODO is the aggressive ld PTX ok here?
+//                 reg_topk_idx_vec[0] = ld_nc_global_slow_int4(reinterpret_cast<const int4*>(topk_idx_i32 + token_idx * num_topk + 0));
+//                 reg_topk_idx_vec[1] = ld_nc_global_slow_int4(reinterpret_cast<const int4*>(topk_idx_i32 + token_idx * num_topk + 4));
+//                 reg_topk_weights_vec[0] = ld_nc_global_slow_float4(reinterpret_cast<const float4*>(topk_weights + token_idx * num_topk + 0));
+//                 reg_topk_weights_vec[1] = ld_nc_global_slow_float4(reinterpret_cast<const float4*>(topk_weights + token_idx * num_topk + 4));
+//             }
+            // TODO
+            // TODO temp hack
+            // TODO
+            alignas(16) int reg_topk_idx[kNumMaxTopk] = {5,3,2,7,6,4,0,1};
+            alignas(16) float reg_topk_weights[kNumMaxTopk] = {0.3,0.5,0.2,0.9,1.1,0.1,0.7,0.8};
 
             float combined_values[kNumElemsPerInt4] = {0.0f};
 
