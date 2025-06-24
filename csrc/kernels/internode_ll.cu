@@ -556,10 +556,10 @@ combine(void* combined_x,
 //                 reg_topk_weights_vec[0] = ld_nc_global(reinterpret_cast<const float4*>(topk_weights + token_idx * num_topk + 0));
 //                 reg_topk_weights_vec[1] = ld_nc_global(reinterpret_cast<const float4*>(topk_weights + token_idx * num_topk + 4));
 
-                reg_topk_idx_vec[0] = ld_shared_v4_i32(TODO);
-                reg_topk_idx_vec[1] = ld_shared_v4_i32(TODO);
-                reg_topk_weights_vec[0] = ld_shared_v4_f32(TODO);
-                reg_topk_weights_vec[1] = ld_shared_v4_f32(TODO);
+                reg_topk_idx_vec[0] = ld_shared_v4_i32(compute_shared_topk_info_addr(idx_iteration, 0, 0));
+                reg_topk_idx_vec[1] = ld_shared_v4_i32(compute_shared_topk_info_addr(idx_iteration, 0, 1));
+                reg_topk_weights_vec[0] = ld_shared_v4_f32(compute_shared_topk_info_addr(idx_iteration, 1, 0));
+                reg_topk_weights_vec[1] = ld_shared_v4_f32(compute_shared_topk_info_addr(idx_iteration, 1, 1));
             }
 
             float combined_values[kNumElemsPerInt4] = {0.0f};
