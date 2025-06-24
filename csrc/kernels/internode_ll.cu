@@ -611,6 +611,13 @@ combine(void* combined_x,
                       temp_d.w
                      ); }
 // ------------------------------------------------------------------------------------
+
+                // TODO hack!!!
+                reg_topk_idx_vec[0] = temp_a;
+                reg_topk_idx_vec[1] = temp_b;
+                reg_topk_weights_vec[0] = temp_c;
+                reg_topk_weights_vec[1] = temp_d;
+// ------------------------------------------------------------------------------------
             }
 
             float combined_values[kNumElemsPerInt4] = {0.0f};
