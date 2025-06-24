@@ -529,11 +529,12 @@ combine(void* combined_x,
     }
     bool enable_prepare_topk = (warp_id == 0) and (prepare_topk_idx_iteration < self_num_iteration);
     if (enable_prepare_topk) {
+        const int prepare_topk_token_idx = sm_id + prepare_topk_idx_iteration * num_sms;
         const int4* src_addr = (
             ((prepare_topk_idx_iow == 0)
                 ? reinterpret_cast<const int4*>(topk_idx_i32)
                 : reinterpret_cast<const int4*>(topk_weights))
-            + prepare_topk_idx_iteration * kNumActualTopkDivFour
+            + prepare_topk_token_idx * kNumActualTopkDivFour
             + prepare_topk_idx_topkdivfour
         );
         temp_buf = ld_nc_global(src_addr);
