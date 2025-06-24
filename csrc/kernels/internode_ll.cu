@@ -382,6 +382,31 @@ LAUNCH_KERNEL(&cfg, dispatch_func, \
 #undef DISPATCH_LAUNCH_CASE
 }
 
+// copy from: https://github.com/pytorch/pytorch/pull/139227
+// __device__ __forceinline__ void wait_signal(uint32_t* addr) {
+//   int ready = *addr;
+//   while (!ready) {
+//     asm volatile("ld.volatile.global.b32 %0, [%1];"
+//                  : "=r"(ready)
+//                  : "l"(addr)
+//                  : "memory");
+// // #if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ > 700)
+//     asm volatile("nanosleep.u32 20;");
+// // #endif
+//   };
+// }
+__device__ __forceinline__ void wait_signal(uint32_t* addr, uint32_t expect_value) {
+  uint32_t ready = *addr;
+  while (ready != expect_value) {
+    // TODO correct?
+    asm volatile("ld.acquire.gpu.global.u32 %0, [%1];"
+                 : "=r"(ready)
+                 : "l"(addr)
+                 : "memory");
+    asm volatile("nanosleep.u32 20;");
+  };
+}
+
 template <int kHidden, int kNumMaxTopk>
 __global__ __launch_bounds__(1024, 1) void
 combine(void* combined_x,
@@ -394,7 +419,8 @@ combine(void* combined_x,
         int num_max_dispatch_tokens_per_rank,
         int num_experts, int rank, int num_ranks,
         int num_warp_groups, int num_warps_per_group,
-        int phases, bool zero_copy) {
+        int phases, bool zero_copy,
+        uint32_t* src_signals, uint32_t src_signal_expect_value) {
     const auto sm_id = static_cast<int>(blockIdx.x);
     const auto num_sms = static_cast<int>(gridDim.x);
     const auto thread_id = static_cast<int>(threadIdx.x);
@@ -431,41 +457,115 @@ combine(void* combined_x,
 
     // Issue IBGDA sends
     if (responsible_expert_idx < num_experts) {
+        for (int local_expert_idx = 0; local_expert_idx < num_local_experts; ++local_expert_idx) {
+            const auto dst_rank = responsible_expert_idx / num_local_experts;
+
+//             const auto local_expert_idx = responsible_expert_idx % num_local_experts;
+            const auto token_cooperate_part_idx = responsible_expert_idx % num_local_experts;
+            const auto num_token_cooperate_parts = num_local_experts;
+
+            const auto global_expert_idx = rank * num_local_experts + local_expert_idx;
+            const auto layout = __ldg(layout_range + local_expert_idx * num_ranks + dst_rank);
+            const auto local_x = static_cast<const int4*>(x) +
+                    local_expert_idx * num_ranks * num_max_dispatch_tokens_per_rank * hidden_bf16_int4;
+            const auto local_src_info = src_info + local_expert_idx * num_ranks * num_max_dispatch_tokens_per_rank;
+            const auto rdma_send_x_vec = static_cast<uint8_t*>(rdma_send_x) +
+                    local_expert_idx * num_ranks * num_max_dispatch_tokens_per_rank * num_bytes_per_slot;
+
+            // Unpack layout
+            int offset, num_tokens_to_send;
+            unpack2(layout, num_tokens_to_send, offset);
+
+//             if (threadIdx.x == 0) { printf("combine sm_id=%d local_expert_idx=%d before-wait\n", sm_id, local_expert_idx); }
+            if (src_signals != nullptr) {
+              // NOTE deliberately do *NOT* check expert 0 signal!
+              if ((threadIdx.x == 0) and (local_expert_idx > 0)) {
+//                 if (threadIdx.x == 0) { printf("combine sm_id=%d local_expert_idx=%d before-call-wait-signal\n", sm_id, local_expert_idx); }
+                wait_signal(src_signals + local_expert_idx, src_signal_expect_value);
+//                 if (threadIdx.x == 0) { printf("combine sm_id=%d local_expert_idx=%d after-call-wait-signal\n", sm_id, local_expert_idx); }
+              }
+
+              // TODO original code uses NamedBarrier, better than this?
+              __syncthreads();
+            }
+//             if (threadIdx.x == 0) { printf("combine sm_id=%d local_expert_idx=%d after-wait\n", sm_id, local_expert_idx); }
+
+            // Issue IBGDA send
+//             for (int token_idx = offset + sub_warp_id; token_idx < offset + num_tokens_to_send; token_idx += num_warps_per_group) {
+//             for (
+//                 int token_idx = offset + sub_warp_id + token_cooperate_part_idx * num_warps_per_group;
+//                 token_idx < offset + num_tokens_to_send;
+//                 token_idx += num_warps_per_group * num_token_cooperate_parts
+//             ) {
+            const int num_tokens_to_send_per_cooperate_part = ceil_div(num_tokens_to_send, num_token_cooperate_parts);
+            const int token_idx_part_end = offset + min(num_tokens_to_send, num_tokens_to_send_per_cooperate_part * (token_cooperate_part_idx + 1));
+            for (
+                int token_idx = offset + num_tokens_to_send_per_cooperate_part * token_cooperate_part_idx + sub_warp_id;
+                token_idx < token_idx_part_end;
+                token_idx += num_warps_per_group
+            ) {
+                const auto x_int4 = local_x + token_idx * hidden_bf16_int4;
+                const auto rdma_send_type_row = reinterpret_cast<int*>(rdma_send_x_vec + token_idx * num_bytes_per_slot);
+                const auto rdma_send_x_vec_row = reinterpret_cast<uint8_t*>(rdma_send_type_row);
+
+                // Copy directly to local rank, or copy to buffer and issue RDMA
+                auto src_idx = __ldg(local_src_info + token_idx);
+                const auto buf_ptr = reinterpret_cast<int64_t>(rdma_send_x_vec_row);
+                const auto dst_ptr = reinterpret_cast<uint64_t>(rdma_recv_x) + (global_expert_idx * num_max_dispatch_tokens_per_rank + src_idx) * num_bytes_per_slot;
+                const auto dst_p2p_ptr = nvshmemi_get_p2p_ptr(dst_ptr, rank, dst_rank);
+                if (dst_p2p_ptr == 0) {
+                    const auto buf_int4_ptr = reinterpret_cast<int4*>(buf_ptr);
+                    if (not zero_copy)
+                        UNROLLED_WARP_COPY(7, lane_id, hidden_bf16_int4, buf_int4_ptr, x_int4, ld_nc_global, st_na_global);
+                    nvshmemi_ibgda_put_nbi_warp(dst_ptr, buf_ptr, hidden * sizeof(nv_bfloat16), dst_rank, local_expert_idx, lane_id, token_idx - offset);
+                } else {
+                    const auto dst_int4_ptr = reinterpret_cast<int4*>(dst_p2p_ptr);
+                    UNROLLED_WARP_COPY(7, lane_id, hidden_bf16_int4, dst_int4_ptr, x_int4, ld_nc_global, st_na_global);
+                }
+            }
+
+//             if (threadIdx.x == 0) { printf("combine sm_id=%d local_expert_idx=%d after-copy\n", sm_id, local_expert_idx); }
+        }
+
+//     if (threadIdx.x == 0) { printf("combine sm_id=%d end-send\n", sm_id); }
+
+// NOTE MOVED
+//         // Put the finishing flag
+//         EP_DEVICE_ASSERT(num_warps_per_group > 1 and num_warp_groups < 16);
+//         asm volatile("bar.sync %0, %1;" :: "r"(warp_group_id + 1), "r"(num_warps_per_group * 32));
+//         if (sub_warp_id == 1 and lane_id == 0) {
+//             while (ld_acquire_global(atomic_clean_flag) == 0);
+//             auto dst_ptr = reinterpret_cast<uint64_t>(rdma_recv_flag + global_expert_idx);
+//             auto dst_p2p_ptr = nvshmemi_get_p2p_ptr(dst_ptr, rank, dst_rank);
+//             if (dst_p2p_ptr == 0) {
+//                 nvshmemi_ibgda_amo_nonfetch_add(reinterpret_cast<int*>(dst_ptr), 1, dst_rank, local_expert_idx);
+//             } else {
+//                 st_release_sys_global(reinterpret_cast<int*>(dst_p2p_ptr), 1);
+//             }
+//             atomic_add_release_global(atomic_clean_flag, -1);
+//         }
+//         __syncwarp();
+    } else {
+        // TODO improve?
+        for (int local_expert_idx = 0; local_expert_idx < num_local_experts; ++local_expert_idx) {
+            if (src_signals != nullptr) {
+              // TODO original code uses NamedBarrier, better than this?
+              __syncthreads();
+            }
+        }
+    }
+
+    // Receiving phase
+    LOW_LATENCY_COMBINE_RECV:
+    if ((phases & LOW_LATENCY_RECV_PHASE) == 0)
+        return;
+
+    // NOTE HACK MOVED AND COPIED TO HERE
+    EP_DEVICE_ASSERT(not (((phases & LOW_LATENCY_SEND_PHASE) != 0) and ((phases & LOW_LATENCY_RECV_PHASE) != 0)));
+    {
         const auto dst_rank = responsible_expert_idx / num_local_experts;
         const auto local_expert_idx = responsible_expert_idx % num_local_experts;
         const auto global_expert_idx = rank * num_local_experts + local_expert_idx;
-        const auto layout = __ldg(layout_range + local_expert_idx * num_ranks + dst_rank);
-        const auto local_x = static_cast<const int4*>(x) +
-                local_expert_idx * num_ranks * num_max_dispatch_tokens_per_rank * hidden_bf16_int4;
-        const auto local_src_info = src_info + local_expert_idx * num_ranks * num_max_dispatch_tokens_per_rank;
-        const auto rdma_send_x_vec = static_cast<uint8_t*>(rdma_send_x) +
-                local_expert_idx * num_ranks * num_max_dispatch_tokens_per_rank * num_bytes_per_slot;
-
-        // Unpack layout
-        int offset, num_tokens_to_send;
-        unpack2(layout, num_tokens_to_send, offset);
-
-        // Issue IBGDA send
-        for (int token_idx = offset + sub_warp_id; token_idx < offset + num_tokens_to_send; token_idx += num_warps_per_group) {
-            const auto x_int4 = local_x + token_idx * hidden_bf16_int4;
-            const auto rdma_send_type_row = reinterpret_cast<int*>(rdma_send_x_vec + token_idx * num_bytes_per_slot);
-            const auto rdma_send_x_vec_row = reinterpret_cast<uint8_t*>(rdma_send_type_row);
-
-            // Copy directly to local rank, or copy to buffer and issue RDMA
-            auto src_idx = __ldg(local_src_info + token_idx);
-            const auto buf_ptr = reinterpret_cast<int64_t>(rdma_send_x_vec_row);
-            const auto dst_ptr = reinterpret_cast<uint64_t>(rdma_recv_x) + (global_expert_idx * num_max_dispatch_tokens_per_rank + src_idx) * num_bytes_per_slot;
-            const auto dst_p2p_ptr = nvshmemi_get_p2p_ptr(dst_ptr, rank, dst_rank);
-            if (dst_p2p_ptr == 0) {
-                const auto buf_int4_ptr = reinterpret_cast<int4*>(buf_ptr);
-                if (not zero_copy)
-                    UNROLLED_WARP_COPY(7, lane_id, hidden_bf16_int4, buf_int4_ptr, x_int4, ld_nc_global, st_na_global);
-                nvshmemi_ibgda_put_nbi_warp(dst_ptr, buf_ptr, hidden * sizeof(nv_bfloat16), dst_rank, local_expert_idx, lane_id, token_idx - offset);
-            } else {
-                const auto dst_int4_ptr = reinterpret_cast<int4*>(dst_p2p_ptr);
-                UNROLLED_WARP_COPY(7, lane_id, hidden_bf16_int4, dst_int4_ptr, x_int4, ld_nc_global, st_na_global);
-            }
-        }
 
         // Put the finishing flag
         EP_DEVICE_ASSERT(num_warps_per_group > 1 and num_warp_groups < 16);
@@ -483,11 +583,6 @@ combine(void* combined_x,
         }
         __syncwarp();
     }
-
-    // Receiving phase
-    LOW_LATENCY_COMBINE_RECV:
-    if ((phases & LOW_LATENCY_RECV_PHASE) == 0)
-        return;
 
     // Wait all ranks to arrive
     if (responsible_expert_idx < num_experts) {
@@ -546,9 +641,14 @@ void combine(void* combined_x,
              int num_combined_tokens, int hidden, int num_max_dispatch_tokens_per_rank,
              int num_topk, int num_experts, int rank, int num_ranks,
              void* workspace, int num_device_sms,
-             cudaStream_t stream, int phases, bool zero_copy) {
+             cudaStream_t stream, int phases, bool zero_copy,
+             uint32_t* src_signals, uint32_t src_signal_expect_value) {
     constexpr int kNumMaxTopk = 9;
-    const int num_warp_groups = ceil_div(num_experts, num_device_sms);
+
+    const int num_warp_groups = ((phases & LOW_LATENCY_RECV_PHASE) == 0)
+        ? 9
+        : ceil_div(num_experts, num_device_sms);
+
     const int num_warps_per_group = 32 / num_warp_groups;
     EP_HOST_ASSERT(num_warp_groups > 0 and num_warps_per_group > 0);
 
@@ -572,7 +672,7 @@ LAUNCH_KERNEL(&cfg, combine_func, \
               num_max_dispatch_tokens_per_rank, \
               num_experts, rank, num_ranks, \
               num_warp_groups, num_warps_per_group, \
-              phases, zero_copy); } break
+              phases, zero_copy, src_signals, src_signal_expect_value); } break
 
     SETUP_LAUNCH_CONFIG(num_sms, num_warps * 32, stream);
     SWITCH_HIDDEN(COMBINE_LAUNCH_CASE);

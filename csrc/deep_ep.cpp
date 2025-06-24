@@ -1159,7 +1159,8 @@ Buffer::low_latency_combine(const torch::Tensor& x, const torch::Tensor& topk_id
                             const torch::Tensor& src_info, const torch::Tensor& layout_range,
                             int num_max_dispatch_tokens_per_rank, int num_experts,
                             bool zero_copy, bool async, bool return_recv_hook,
-                            const std::optional<torch::Tensor>& out) {
+                            const std::optional<torch::Tensor>& out,
+                            const std::optional<torch::Tensor>& src_signals, uint32_t src_signal_expect_value) {
 #ifndef DISABLE_NVSHMEM
     EP_HOST_ASSERT(low_latency_mode);
 
@@ -1220,7 +1221,8 @@ Buffer::low_latency_combine(const torch::Tensor& x, const torch::Tensor& topk_id
                               num_combined_tokens, hidden, num_max_dispatch_tokens_per_rank,
                               num_topk, num_experts, rank, num_ranks,
                               workspace, num_device_sms,
-                              launch_stream, phases, zero_copy);
+                              launch_stream, phases, zero_copy,
+                              src_signals.has_value() ? src_signals->data_ptr<uint32_t>() : nullptr, src_signal_expect_value);
     };
     launcher(return_recv_hook ? LOW_LATENCY_SEND_PHASE : (LOW_LATENCY_SEND_PHASE | LOW_LATENCY_RECV_PHASE));
 
@@ -1245,6 +1247,12 @@ Buffer::low_latency_combine(const torch::Tensor& x, const torch::Tensor& topk_id
     EP_HOST_ASSERT(false and "NVSHMEM is disabled during compilation");
     return {};
 #endif
+}
+
+void Buffer::notify_src_signals(const torch::Tensor& src_signals, int index) {
+    const uint32_t* addr = src_signals.data_ptr<uint32_t>() + index;
+    // TODO comm stream or current stream or whatever stream?
+    CU_CHECK(cuStreamWriteValue32(at::cuda::getCurrentCUDAStream(), (CUdeviceptr) addr, 1, 0));
 }
 
 torch::Tensor
@@ -1312,6 +1320,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         .def("clean_low_latency_buffer", &deep_ep::Buffer::clean_low_latency_buffer)
         .def("low_latency_dispatch", &deep_ep::Buffer::low_latency_dispatch)
         .def("low_latency_combine", &deep_ep::Buffer::low_latency_combine)
+        .def("notify_src_signals", &deep_ep::Buffer::notify_src_signals)
         .def("get_next_low_latency_combine_buffer", &deep_ep::Buffer::get_next_low_latency_combine_buffer);
 
     m.def("is_sm90_compiled", deep_ep::is_sm90_compiled);
