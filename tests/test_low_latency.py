@@ -39,6 +39,10 @@ def test_main(num_tokens: int, hidden: int, num_experts: int, num_topk: int,
     do_check = bool(int(os.environ.get("DEEPEP_HACK_DO_CHECK", "1")))
     hash_value, num_times = 0, 0
     for return_recv_hook in (False, True):
+        if (not return_recv_hook) and bool(int(os.environ.get("DEEPEP_HACK_SKIP_NO_HOOK", "0"))):
+            print("HACK: skip no hook!!!")
+            continue
+
         for dispatch_use_fp8 in (False, True):
             for round_scale in (False, True) if dispatch_use_fp8 else (False, ):
                 for use_ue8m0 in (False, True) if round_scale else (False, ):

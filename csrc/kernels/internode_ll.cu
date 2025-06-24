@@ -530,6 +530,10 @@ combine(void* combined_x,
         index /= kIdxOrWeightDim;
 
         prepare_topk_idx_iteration = index;
+
+        EP_DEVICE_ASSERT((prepare_topk_idx_topkdivfour >= 0) and (prepare_topk_idx_topkdivfour < kNumActualTopkDivFour));
+        EP_DEVICE_ASSERT((prepare_topk_idx_iow >= 0) and (prepare_topk_idx_iow < kIdxOrWeightDim));
+        EP_DEVICE_ASSERT((prepare_topk_idx_iteration >= 0) and (prepare_topk_idx_iteration < 6));
     }
     bool enable_prepare_topk = (warp_id == 0) and (prepare_topk_idx_iteration < self_num_iteration);
     if (enable_prepare_topk) {
