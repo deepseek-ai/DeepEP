@@ -29,7 +29,7 @@ def test_main(num_tokens: int, hidden: int, num_experts: int, num_topk: int,
     topk_idx = torch.topk(scores, num_topk, dim=-1, largest=True, sorted=True)[1]
     topk_weights = torch.randn((num_tokens, num_topk), dtype=torch.float32, device='cuda').abs()
 
-    print(f"hi init {x=} {topk_weights=}")
+    print(f"hi init {x=} {topk_idx=} {topk_weights=}")
 
     # Randomly mask some positions
     for i in range(10):
@@ -88,7 +88,7 @@ def test_main(num_tokens: int, hidden: int, num_experts: int, num_topk: int,
                         else:
                             hash_value ^= hash_tensor(packed_recv_x[i, :num_valid_tokens])
 
-                    print(f"hi before combine {x=} {topk_weights=}")
+                    print(f"hi before combine {x=} {topk_idx=} {topk_weights=}")
 
                     # Check combine correctness
                     for zero_copy in (False, True):
@@ -99,11 +99,11 @@ def test_main(num_tokens: int, hidden: int, num_experts: int, num_topk: int,
                                                                              async_finish=not return_recv_hook, zero_copy=zero_copy,
                                                                              return_recv_hook=return_recv_hook, out=out)
 
-                        print(f"hi after combine-a {x=} {topk_weights=}")
+                        print(f"hi after combine-a {x=} {topk_idx=} {topk_weights=}", flush=True)
 
                         hook() if return_recv_hook else event.current_stream_wait()
 
-                        print(f"hi after combine-b {x=} {topk_weights=}")
+                        print(f"hi after combine-b {x=} {topk_idx=} {topk_weights=}", flush=True)
 
                         torch.set_printoptions(profile="full")
                         print(f"hi after combine-b full {x=} {topk_weights=}")
