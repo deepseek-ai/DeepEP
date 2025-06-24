@@ -388,21 +388,17 @@ constexpr int kNumActualTopkDivFour = 2;
 
 // TODO closure
 __device__ __forceinline__ int4* compute_shared_topk_info_addr(int4* shared_topk_info, int idx_iteration, int idx_iow, int idx_topkdivfour) {
-    int index = idx_iteration * (kIdxOrWeightDim * kNumActualTopkDivFour)
+    return shared_topk_info
+        + idx_iteration * (kIdxOrWeightDim * kNumActualTopkDivFour)
         + idx_iow * kNumActualTopkDivFour
         + idx_topkdivfour;
-    int4* ans = shared_topk_info + index;
-    EP_DEVICE_ASSERT(reinterpret_cast<uintptr_t>(ans) % 16 == 0);
-    EP_DEVICE_ASSERT((index >= 0) and (index < kMaxNumTokensPerSm * kIdxOrWeightDim * kNumActualTopkDivFour));
-    return ans;
 }
 
 __device__ __forceinline__ bool int4_equal(int4 a, int4 b) {
     return a.x == b.x && a.y == b.y && a.z == b.z && a.w == b.w;
 }
 __device__ __forceinline__ bool float4_equal(float4 a, float4 b) {
-    return int4_equal(*reinterpret_cast<int4*>(&a), *reinterpret_cast<int4*>(&b));
-//     return a.x == b.x && a.y == b.y && a.z == b.z && a.w == b.w;
+    return a.x == b.x && a.y == b.y && a.z == b.z && a.w == b.w;
 }
 
 template <int kHidden, int kNumMaxTopk>
@@ -512,14 +508,13 @@ combine(void* combined_x,
     if ((phases & LOW_LATENCY_RECV_PHASE) == 0)
         return;
 
-    int self_num_iteration = (sm_id >= num_combined_tokens) ? 0 : (1 + (num_combined_tokens - sm_id - 1) / num_sms);
+    int self_num_iteration = 1 + (num_combined_tokens - sm_id - 1) / num_sms;
 
     // (6 num_tokens_per_sm, 2 idx_or_weights, 2 topk_div_four, 16B elem_size)
     alignas(16) __shared__ int4 shared_topk_info[kMaxNumTokensPerSm * kIdxOrWeightDim * kNumActualTopkDivFour];
-    EP_DEVICE_ASSERT(reinterpret_cast<uintptr_t>(shared_topk_info) % 16 == 0);
 
     int4 temp_buf;
-    int prepare_topk_idx_iteration = 0, prepare_topk_idx_iow = 0, prepare_topk_idx_topkdivfour = 0;
+    int prepare_topk_idx_iteration, prepare_topk_idx_iow, prepare_topk_idx_topkdivfour;
     // TODO only support few tokens if only use warp 0
     if (warp_id == 0) {
         int index = thread_id;
@@ -534,10 +529,6 @@ combine(void* combined_x,
     }
     bool enable_prepare_topk = (warp_id == 0) and (prepare_topk_idx_iteration < self_num_iteration);
     if (enable_prepare_topk) {
-        EP_DEVICE_ASSERT((prepare_topk_idx_topkdivfour >= 0) and (prepare_topk_idx_topkdivfour < kNumActualTopkDivFour));
-        EP_DEVICE_ASSERT((prepare_topk_idx_iow >= 0) and (prepare_topk_idx_iow < kIdxOrWeightDim));
-        EP_DEVICE_ASSERT((prepare_topk_idx_iteration >= 0) and (prepare_topk_idx_iteration < 6));
-
         const int prepare_topk_token_idx = sm_id + prepare_topk_idx_iteration * num_sms;
         const int4* src_addr = (
             ((prepare_topk_idx_iow == 0)
@@ -546,19 +537,7 @@ combine(void* combined_x,
             + prepare_topk_token_idx * kNumActualTopkDivFour
             + prepare_topk_idx_topkdivfour
         );
-        EP_DEVICE_ASSERT(reinterpret_cast<uintptr_t>(src_addr) % 16 == 0);
         temp_buf = ld_nc_global(src_addr);
-
-//         printf(
-//             "sm_id=%d thread_id=%d src_addr=%p topk_idx_i32=%p topk_weights=%p prepare_topk_idx_iteration=%d prepare_topk_idx_iow=%d prepare_topk_idx_topkdivfour=%d temp_buf=(%d,%d,%d,%d)\n",
-//              sm_id, thread_id,
-//              src_addr, topk_idx_i32, topk_weights,
-//              prepare_topk_idx_iteration, prepare_topk_idx_iow, prepare_topk_idx_topkdivfour,
-//               temp_buf.x,
-//               temp_buf.y,
-//               temp_buf.z,
-//               temp_buf.w
-//         );
     }
 
     // Wait all ranks to arrive
@@ -583,7 +562,6 @@ combine(void* combined_x,
 //         for (int token_idx = sm_id; token_idx < num_combined_tokens; token_idx += num_sms) {
         for (int idx_iteration = 0; idx_iteration < self_num_iteration; ++ idx_iteration) {
             const int token_idx = sm_id + idx_iteration * num_sms;
-            EP_DEVICE_ASSERT((token_idx >= sm_id) and (token_idx < num_combined_tokens));
 
             // Read top-k indices and weights
 
@@ -612,57 +590,16 @@ combine(void* combined_x,
                 reg_topk_weights_vec[1] = *reinterpret_cast<float4*>(compute_shared_topk_info_addr(shared_topk_info, idx_iteration, 1, 1));
 
 // ------------------------------------------------------------------------------------
-//                 int4 temp_a = ld_nc_global(reinterpret_cast<const int4*>(topk_idx_i32 + token_idx * num_topk + 0));
-//                 int4 temp_b = ld_nc_global(reinterpret_cast<const int4*>(topk_idx_i32 + token_idx * num_topk + 4));
-//                 float4 temp_c = ld_nc_global(reinterpret_cast<const float4*>(topk_weights + token_idx * num_topk + 0));
-//                 float4 temp_d = ld_nc_global(reinterpret_cast<const float4*>(topk_weights + token_idx * num_topk + 4));
-//                 if (!int4_equal(reg_topk_idx_vec[0] , temp_a)) { printf(
-//                     "assert-eq failed item=0 idx_iteration=%d sm_id=%d thread_id=%d a=(%d,%d,%d,%d) b=(%d,%d,%d,%d) \n",
-//                      idx_iteration, sm_id, thread_id,
-//                      reg_topk_idx_vec[0].x,
-//                      reg_topk_idx_vec[0].y,
-//                      reg_topk_idx_vec[0].z,
-//                      reg_topk_idx_vec[0].w,
-//                       temp_a.x,
-//                       temp_a.y,
-//                       temp_a.z,
-//                       temp_a.w
-//                      ); }
-//                 if (!int4_equal(reg_topk_idx_vec[1] , temp_b)) { printf("assert-eq failed item=1 \n"); }
-//                 if (!float4_equal(reg_topk_weights_vec[0] , temp_c)) { printf("assert-eq failed item=2 \n"); }
-//                 if (!float4_equal(reg_topk_weights_vec[1] , temp_d)) { printf(
-//                     "assert-eq failed item=3 idx_iteration=%d sm_id=%d thread_id=%d a=(%f,%f,%f,%f) b=(%f,%f,%f,%f) \n",
-//                      idx_iteration, sm_id, thread_id,
-//                      reg_topk_weights_vec[1].x,
-//                      reg_topk_weights_vec[1].y,
-//                      reg_topk_weights_vec[1].z,
-//                      reg_topk_weights_vec[1].w,
-//                       temp_d.x,
-//                       temp_d.y,
-//                       temp_d.z,
-//                       temp_d.w
-//                      ); }
-//
-//                 for(int i = 0;i<2;++i) {
-//                     EP_DEVICE_ASSERT((reg_topk_idx_vec[i].x >= -1) and (reg_topk_idx_vec[i].x < 1000));
-//                     EP_DEVICE_ASSERT((reg_topk_idx_vec[i].y >= -1) and (reg_topk_idx_vec[i].y < 1000));
-//                     EP_DEVICE_ASSERT((reg_topk_idx_vec[i].z >= -1) and (reg_topk_idx_vec[i].z < 1000));
-//                     EP_DEVICE_ASSERT((reg_topk_idx_vec[i].w >= -1) and (reg_topk_idx_vec[i].w < 1000));
-//                 }
-// // ------------------------------------------------------------------------------------
-//
-//                 // TODO hack!!!
-//                 reg_topk_idx_vec[0] = temp_a;
-//                 reg_topk_idx_vec[1] = temp_b;
-//                 reg_topk_weights_vec[0] = temp_c;
-//                 reg_topk_weights_vec[1] = temp_d;
+                int4 temp_a = ld_nc_global(reinterpret_cast<const int4*>(topk_idx_i32 + token_idx * num_topk + 0));
+                int4 temp_b = ld_nc_global(reinterpret_cast<const int4*>(topk_idx_i32 + token_idx * num_topk + 4));
+                float4 temp_c = ld_nc_global(reinterpret_cast<const float4*>(topk_weights + token_idx * num_topk + 0));
+                float4 temp_d = ld_nc_global(reinterpret_cast<const float4*>(topk_weights + token_idx * num_topk + 4));
+                if (!int4_equal(reg_topk_idx_vec[0] , temp_a)) { printf("assert-eq failed item=0 thread_id=%d \n", thread_id); }
+                if (!int4_equal(reg_topk_idx_vec[1] , temp_b)) { printf("assert-eq failed item=1 \n"); }
+                if (!float4_equal(reg_topk_weights_vec[0] , temp_c)) { printf("assert-eq failed item=2 \n"); }
+                if (!float4_equal(reg_topk_weights_vec[1] , temp_c)) { printf("assert-eq failed item=3 \n"); }
 // ------------------------------------------------------------------------------------
             }
-
-//             // TODO
-//             // TODO hack!
-//             // TODO
-//             continue;
 
             float combined_values[kNumElemsPerInt4] = {0.0f};
 

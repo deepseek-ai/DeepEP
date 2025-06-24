@@ -1,8 +1,6 @@
 import json
 import os
 import random
-import time
-
 import torch
 import torch.distributed as dist
 from functools import partial
@@ -37,10 +35,6 @@ def test_main(num_tokens: int, hidden: int, num_experts: int, num_topk: int,
     do_check = bool(int(os.environ.get("DEEPEP_HACK_DO_CHECK", "1")))
     hash_value, num_times = 0, 0
     for return_recv_hook in (False, True):
-        if (not return_recv_hook) and bool(int(os.environ.get("DEEPEP_HACK_SKIP_NO_HOOK", "0"))):
-            print("HACK: skip no hook!!!")
-            continue
-
         for dispatch_use_fp8 in (False, True):
             for round_scale in (False, True) if dispatch_use_fp8 else (False, ):
                 for use_ue8m0 in (False, True) if round_scale else (False, ):
@@ -100,10 +94,9 @@ def test_main(num_tokens: int, hidden: int, num_experts: int, num_topk: int,
                                                                              return_recv_hook=return_recv_hook, out=out)
                         hook() if return_recv_hook else event.current_stream_wait()
                         if do_check:
-                            expect_ans = x * topk_weights.masked_fill(topk_idx == -1, 0).sum(dim=1).view(-1, 1)
-                            diff = calc_diff(expect_ans, combined_x)
+                            diff = calc_diff(x * topk_weights.masked_fill(topk_idx == -1, 0).sum(dim=1).view(-1, 1), combined_x)
                             assert torch.isnan(combined_x).sum().item() == 0
-                            assert diff < (7e-4 if round_scale else 1e-5), f'Error: {diff=}, {zero_copy=}, {expect_ans=} {combined_x=}'
+                            assert diff < (7e-4 if round_scale else 1e-5), f'Error: {diff=}, {zero_copy=}'
                             hash_value ^= hash_tensor(combined_x)
 
     def create_test_cast_with_outliers(num_outliers):
