@@ -508,9 +508,15 @@ combine(void* combined_x,
     int prepare_topk_idx_iteration, prepare_topk_idx_iow, prepare_topk_idx_topkdivfour;
     // TODO only support few tokens if only use warp 0
     if (warp_id == 0) {
-        prepare_topk_idx_iteration = TODO;
-        prepare_topk_idx_iow = TODO;
-        prepare_topk_idx_topkdivfour = TODO;
+        int index = thread_id;
+
+        prepare_topk_idx_topkdivfour = index % kNumActualTopkDivFour;
+        index /= kNumActualTopkDivFour;
+
+        prepare_topk_idx_iow = index % kIdxOrWeightDim;
+        index /= kIdxOrWeightDim;
+        
+        prepare_topk_idx_iteration = index;
     }
     bool enable_prepare_topk = (warp_id == 0) and (prepare_topk_idx_iteration < self_num_iteration);
     if (enable_prepare_topk) {
