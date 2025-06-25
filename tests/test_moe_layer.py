@@ -250,14 +250,16 @@ def forward_layer_naive_first_half(
     if enable_hack_disptach_fake_overlap_curr_iter:
         torch.cuda.current_stream().wait_stream(hack_stream)
 
+
+    # GroupGemm-0
+    num_groups, m, k = hidden_states_fp8[0].size()
+    n = w13_weight_fp8[0].size(1)
+    expected_m = min(expected_m, m)
+    gateup_output = torch.empty(
+        (num_groups, m, n), device=hidden_states_fp8[0].device, dtype=torch.bfloat16
+    )
+
     if not enable_hack_disptach_fake_overlap_curr_iter:
-        # GroupGemm-0
-        num_groups, m, k = hidden_states_fp8[0].size()
-        n = w13_weight_fp8[0].size(1)
-        expected_m = min(expected_m, m)
-        gateup_output = torch.empty(
-            (num_groups, m, n), device=hidden_states_fp8[0].device, dtype=torch.bfloat16
-        )
         deep_gemm.fp8_m_grouped_gemm_nt_masked(
             hidden_states_fp8,
             w13_weight_fp8,
