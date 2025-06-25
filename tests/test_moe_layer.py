@@ -242,14 +242,14 @@ def forward_layer_naive_first_half(
         round_scale=True, use_ue8m0=True,
     )
     assert dispatch_event.event is None
-    large_gemm()
-    dispatch_hook()
-
-    masked_m = recv_count
 
     if enable_hack_disptach_fake_overlap_curr_iter:
         torch.cuda.current_stream().wait_stream(hack_stream)
 
+    large_gemm()
+    dispatch_hook()
+
+    masked_m = recv_count
 
     # GroupGemm-0
     num_groups, m, k = hidden_states_fp8[0].size()
