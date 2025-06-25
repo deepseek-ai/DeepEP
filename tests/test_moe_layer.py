@@ -99,15 +99,18 @@ def test_main(num_tokens: int, hidden: int, num_experts: int, num_topk: int,
         'naive',
         # 'overlap',
     ]:
-        fn_with_mode = partial(execute_forward_layer, fn_mode=fn_mode)
-        graph = capture_cuda_graph(fn_with_mode)
+        fn = partial(execute_forward_layer, fn_mode=fn_mode)
+
+        if bool(int(os.environ.get("DEEPEP_ENABLE_CUDA_GRAPH", "0"))):
+            graph = capture_cuda_graph(fn)
+            fn = lambda: graph.replay()
 
         if rank == 0:
             trace_path = str(Path("/data/numa0/tom/temp_sglang_server2local/") / f"{time.time()}-TP-{rank}.trace.json.gz")
         else:
             trace_path = None
         print(f"Execute bench {fn_mode=} {rank=} {trace_path=}", flush=True)
-        bench_kineto(fn_with_mode,
+        bench_kineto(fn,
                      kernel_names=('dispatch', 'combine'), barrier_comm_profiling=True,
                      suppress_kineto_output=False,  # NOTE MODIFIED
                      trace_path=trace_path)
