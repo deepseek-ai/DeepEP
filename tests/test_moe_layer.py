@@ -56,6 +56,12 @@ def test_main(num_tokens: int, hidden: int, num_experts: int, num_topk: int,
     else:
         copy_engine_tester = None
 
+    if bool(int(os.environ.get("DEEPEP_HACK_INIT_DEEPGEMM_REDUCE_SM", "0"))):
+        deepep_num_sms = 32
+        deepgemm_num_sms = torch.cuda.get_device_properties(device='cuda').multi_processor_count - deepep_num_sms
+        deep_gemm.config.set_num_sms(deepgemm_num_sms)
+        print("HACK: change deepgemm num sms, BUT this may be overriden and useless!")
+
     # noinspection PyShadowingNames
     def execute_forward_layer(fn_mode: str):
         if fn_mode == 'naive':
