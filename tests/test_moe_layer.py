@@ -159,7 +159,8 @@ def forward_layer_naive(
     down_input, down_input_scale, comm_handle, expected_m, masked_m, num_groups, m = (
         forward_layer_naive_first_half(
             hidden_states=hidden_states, w13_weight_fp8=w13_weight_fp8,
-            buffer=buffer, topk_idx=topk_idx, num_tokens=num_tokens, num_experts=num_experts
+            buffer=buffer, topk_idx=topk_idx, num_tokens=num_tokens, num_experts=num_experts,
+            hack_stream=hack_stream,
         )
     )
 
@@ -202,6 +203,9 @@ def forward_layer_naive(
     print(f"hi forward_layer_naive {combined_x=}")
     return combined_x
 
+
+_hack_dispatch_fake_overlap_momento = None
+
 def forward_layer_naive_first_half(
         *,
         hidden_states,
@@ -210,12 +214,27 @@ def forward_layer_naive_first_half(
         topk_idx,
         num_tokens,
         num_experts,
+        hack_stream,
 ):
+    global _hack_dispatch_fake_overlap_momento
+    hack_dispatch_fake_overlap = bool(int(os.environ.get("DEEPEP_HACK_DISPATCH_FAKE_OVERLAP", "0")))
+
     # src: EPMoE
     fp8_dtype = torch.float8_e4m3fn
 
     # src: dispatch_a
     expected_m = (hidden_states.shape[0] * buffer.group_size * topk_idx.shape[1] + num_experts) // num_experts
+
+    enable_hack_disptach_fake_overlap_curr_iter = hack_dispatch_fake_overlap and (_hack_dispatch_fake_overlap_momento is not None)
+    if enable_hack_disptach_fake_overlap_curr_iter:
+        deepep_num_sms = 32
+        deepgemm_num_sms = torch.cuda.get_device_properties(device='cuda').multi_processor_count - deepep_num_sms
+
+        print("HACK: put deepgemm in another stream (logically wrong)")
+        hack_stream.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(hack_stream):
+            with configure_deep_gemm_num_sms(deepgemm_num_sms):
+                deep_gemm.fp8_m_grouped_gemm_nt_masked(**_hack_dispatch_fake_overlap_momento)
 
     hidden_states_fp8, recv_count, comm_handle, dispatch_event, dispatch_hook = buffer.low_latency_dispatch(
         hidden_states, topk_idx, num_tokens, num_experts,
@@ -228,21 +247,37 @@ def forward_layer_naive_first_half(
 
     masked_m = recv_count
 
-    # GroupGemm-0
-    num_groups, m, k = hidden_states_fp8[0].size()
-    n = w13_weight_fp8[0].size(1)
-    expected_m = min(expected_m, m)
-    gateup_output = torch.empty(
-        (num_groups, m, n), device=hidden_states_fp8[0].device, dtype=torch.bfloat16
-    )
-    deep_gemm.fp8_m_grouped_gemm_nt_masked(
-        hidden_states_fp8,
-        w13_weight_fp8,
-        gateup_output,
-        masked_m,
-        expected_m,
-        recipe=(1, 128, 128),
-    )
+    if enable_hack_disptach_fake_overlap_curr_iter:
+        torch.cuda.current_stream().wait_stream(hack_stream)
+
+    if not enable_hack_disptach_fake_overlap_curr_iter:
+        # GroupGemm-0
+        num_groups, m, k = hidden_states_fp8[0].size()
+        n = w13_weight_fp8[0].size(1)
+        expected_m = min(expected_m, m)
+        gateup_output = torch.empty(
+            (num_groups, m, n), device=hidden_states_fp8[0].device, dtype=torch.bfloat16
+        )
+        deep_gemm.fp8_m_grouped_gemm_nt_masked(
+            hidden_states_fp8,
+            w13_weight_fp8,
+            gateup_output,
+            masked_m,
+            expected_m,
+            recipe=(1, 128, 128),
+        )
+
+        if hack_dispatch_fake_overlap:
+            _hack_dispatch_fake_overlap_momento = {
+                "gemm_kwargs": {
+                    "a": (hidden_states_fp8[0].clone(), hidden_states_fp8[1].clone()),
+                    "b": w13_weight_fp8,
+                    "d": gateup_output.clone(),
+                    "masked_m": masked_m.clone(),
+                    "expected_m": expected_m,
+                    "recipe": (1, 128, 128),
+                },
+            }
 
     # Act
     down_input = torch.empty(
@@ -311,7 +346,8 @@ def forward_layer_overlap(
     down_input, down_input_scale, comm_handle, expected_m, masked_m, num_groups, m = (
         forward_layer_naive_first_half(
             hidden_states=hidden_states, w13_weight_fp8=w13_weight_fp8,
-            buffer=buffer, topk_idx=topk_idx, num_tokens=num_tokens, num_experts=num_experts
+            buffer=buffer, topk_idx=topk_idx, num_tokens=num_tokens, num_experts=num_experts,
+            hack_stream=hack_stream,
         )
     )
 
