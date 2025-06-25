@@ -102,7 +102,7 @@ def test_main(num_tokens: int, hidden: int, num_experts: int, num_topk: int,
     ]:
         fn = partial(execute_forward_layer, fn_mode=fn_mode)
 
-        if bool(int(os.environ.get("DEEPEP_ENABLE_CUDA_GRAPH", "0"))):
+        if bool(int(os.environ.get("DEEPEP_ENABLE_CUDA_GRAPH", "1"))):
             graph = capture_cuda_graph(fn)
             fn = lambda: graph.replay()
 
