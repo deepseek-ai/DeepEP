@@ -11,6 +11,9 @@ import torch
 import torch.distributed as dist
 from functools import partial
 
+import sglang.srt.utils
+sglang.srt.utils.log_info_on_rank0 = lambda logger, msg: logger.info(msg)
+
 import deep_gemm
 from deep_gemm.utils.math import align, ceil_div, per_block_cast_to_fp8
 import deep_ep
@@ -20,7 +23,6 @@ from sglang.srt.layers.quantization.fp8_utils import _requant_weight_ue8m0
 from deep_gemm.utils.layout import transform_sf_into_required_layout
 from sglang.srt.models.deepseek_v2 import DeepseekV2MLP
 from sglang.srt.layers.quantization.fp8 import Fp8Config
-import sglang.srt.utils
 
 # --------------------------------------------- main -----------------------------------------------------
 
@@ -165,7 +167,6 @@ class MyLayer(torch.nn.Module):
             'weight_block_size': [128, 128],
         })
 
-        sglang.srt.utils.log_info_on_rank0 = lambda logger, msg: logger.info(msg)
 
         self.shared_experts = DeepseekV2MLP(
             hidden_size=hidden,
