@@ -18,6 +18,7 @@ from utils import init_dist, bench, bench_kineto, calc_diff, hash_tensor, per_to
 from sglang.srt.layers.moe.ep_moe.kernels import silu_and_mul_masked_post_quant_fwd
 from sglang.srt.layers.quantization.fp8_utils import _requant_weight_ue8m0
 from deep_gemm.utils.layout import transform_sf_into_required_layout
+from sglang.srt.models.deepseek_v2 import DeepseekV2MLP
 
 # --------------------------------------------- main -----------------------------------------------------
 
@@ -154,6 +155,18 @@ class MyLayer(torch.nn.Module):
         self.w13_weight_fp8 = create_weight_fp8(num_groups=num_local_experts, n=4096, k=hidden)
         self.w2_weight_fp8 = create_weight_fp8(num_groups=num_local_experts, n=hidden, k=2048)
         self.hack_stream = torch.cuda.Stream()
+
+        self.shared_experts = DeepseekV2MLP(
+            hidden_size=hidden,
+            # intermediate_size=config.moe_intermediate_size * config.n_shared_experts,
+            intermediate_size=2048 * 1,
+            # hidden_act=config.hidden_act,
+            hidden_act="silu",
+            quant_config=None, # correct?
+            reduce_results=False,
+            # prefix=add_prefix("shared_experts", prefix),
+            tp_rank=0, tp_size=1,
+        )
 
     def forward_layer(self, fn_mode: str, **kwargs):
         if fn_mode == 'naive':
