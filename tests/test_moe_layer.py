@@ -234,7 +234,7 @@ def forward_layer_naive_first_half(
         hack_stream.wait_stream(torch.cuda.current_stream())
         with torch.cuda.stream(hack_stream):
             with configure_deep_gemm_num_sms(deepgemm_num_sms):
-                deep_gemm.fp8_m_grouped_gemm_nt_masked(**_hack_dispatch_fake_overlap_momento)
+                deep_gemm.fp8_m_grouped_gemm_nt_masked(**_hack_dispatch_fake_overlap_momento["gemm_kwargs"])
 
     hidden_states_fp8, recv_count, comm_handle, dispatch_event, dispatch_hook = buffer.low_latency_dispatch(
         hidden_states, topk_idx, num_tokens, num_experts,
