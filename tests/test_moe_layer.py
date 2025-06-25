@@ -189,8 +189,6 @@ class MyLayer(torch.nn.Module):
         num_local_experts,
         num_ranks,
     ):
-        shared_experts_output = self.shared_experts(hidden_states)
-
         down_input, down_input_scale, comm_handle, expected_m, masked_m, num_groups, m = (
             self.forward_layer_naive_first_half(
                 hidden_states=hidden_states,
@@ -227,6 +225,8 @@ class MyLayer(torch.nn.Module):
             return_recv_hook=True,
             # async_finish=True, # NOTE
         )
+
+        shared_experts_output = self.shared_experts(hidden_states)
 
         assert combine_event.event is None
         # combine_event.current_stream_wait()
