@@ -96,8 +96,9 @@ def test_main(num_tokens: int, hidden: int, num_experts: int, num_topk: int,
         raise Exception("deliberately stop")
 
     for fn_mode in [
-        'naive',
+        # 'naive',
         # 'overlap',
+        os.environ.get("DEEPEP_TEST_FN_MODE", "naive")
     ]:
         fn = partial(execute_forward_layer, fn_mode=fn_mode)
 
