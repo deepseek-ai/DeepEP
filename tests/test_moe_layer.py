@@ -1,6 +1,7 @@
 import json
 import os
 import random
+import threading
 import time
 from contextlib import contextmanager, nullcontext
 from pathlib import Path
@@ -70,6 +71,7 @@ def test_main(num_tokens: int, hidden: int, num_experts: int, num_topk: int,
             num_experts=num_experts,
             num_local_experts=num_local_experts,
             hack_stream=hack_stream,
+            ce_stream=ce_stream,
             num_ranks=num_ranks,
         )
 
@@ -82,6 +84,10 @@ def test_main(num_tokens: int, hidden: int, num_experts: int, num_topk: int,
         print(f"{out_naive=} {out_overlap=}")
         assert diff < 1e-4, f"{diff=} {out_naive=} {out_overlap=}"
         raise Exception("deliberately stop")
+
+    if bool(int(os.environ.get("DEEPEP_HACK_BACKGROUND_COPY_ENGINE", "0"))):
+        t = threading.Thread(target=_background_thread_copy_engine)
+        t.start()
 
     for fn_mode in [
         'naive',
@@ -156,9 +162,6 @@ def forward_layer_naive(
     hack_stream,
     num_ranks,
 ):
-    if bool(int(os.environ.get("DEEPEP_HACK_BACKGROUND_COPY_ENGINE", "0"))):
-        TODO
-
     down_input, down_input_scale, comm_handle, expected_m, masked_m, num_groups, m = (
         forward_layer_naive_first_half(
             hidden_states=hidden_states, w13_weight_fp8=w13_weight_fp8,
@@ -494,6 +497,25 @@ def deepgemm_generate_grouped_masked(num_groups: int, m: int, k: int, n: int) ->
         b_fp8[0][i], b_fp8[1][i] = per_block_cast_to_fp8(b[i])
 
     return a_fp8, b_fp8, d, ref_d
+
+def _background_thread_copy_engine():
+    ce_stream = torch.cuda.Stream()
+    ce_stream.wait_stream(torch.cuda.current_stream())
+
+    device_count = torch.cuda.device_count()
+    assert device_count == 4
+
+    src_device = torch.cuda.current_device()
+    dst_device = (src_device + 1) % device_count
+
+    size = 100_000_000
+    src = torch.randn((size,), dtype=torch.uint8, device=f'cuda:{src_device}')
+    dst = torch.randn((size,), dtype=torch.uint8, device=f'cuda:{dst_device}')
+
+    while True:
+        dst.copy_(src, non_blocking=True)
+        time.sleep(1e-5)
+
 
 # --------------------------------------------- SGLANG -----------------------------------------------------
 
