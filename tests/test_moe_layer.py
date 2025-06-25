@@ -581,6 +581,7 @@ class CopyEngineTester:
 
 # ref: CUDAGraphRunner, https://pytorch.org/blog/accelerating-pytorch-with-cuda-graphs/
 def capture_cuda_graph(run_once):
+    print("[capture_cuda_graph] warmup")
     s = torch.cuda.Stream()
     s.wait_stream(torch.cuda.current_stream())
     with torch.cuda.stream(s):
@@ -588,6 +589,7 @@ def capture_cuda_graph(run_once):
             run_once()
     torch.cuda.current_stream().wait_stream(s)
 
+    print("[capture_cuda_graph] capture")
     graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(graph):
         out = run_once()
