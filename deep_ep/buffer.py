@@ -167,7 +167,7 @@ class Buffer:
         return tensor[:size.numel()].view(size)
 
     @staticmethod
-    def unpack_bias(bias: Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]):
+    def _unpack_bias(bias: Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]):
         bias_0, bias_1 = None, None
         if isinstance(bias, torch.Tensor):
             bias_0 = bias
@@ -381,7 +381,7 @@ class Buffer:
 
         # NOTES: the second `_` is for the sending side, so we should use the third one
         rank_prefix_matrix, _, channel_prefix_matrix, src_idx, is_recv_token_in_rank, send_head = handle
-        bias_0, bias_1 = Buffer.unpack_bias(bias)
+        bias_0, bias_1 = Buffer._unpack_bias(bias)
 
         # Launch the kernel
         recv_x, recv_topk_weights, event = self.runtime.intranode_combine(
@@ -460,7 +460,7 @@ class Buffer:
             _, _, \
             rdma_channel_prefix_matrix, rdma_rank_prefix_sum, gbl_channel_prefix_matrix, gbl_rank_prefix_sum, \
             src_meta, send_rdma_head, send_nvl_head = handle
-        bias_0, bias_1 = Buffer.unpack_bias(bias)
+        bias_0, bias_1 = Buffer._unpack_bias(bias)
 
         # Launch the kernel
         combined_x, combined_topk_weights, event = self.runtime.internode_combine(
