@@ -102,6 +102,7 @@ def test_main(num_tokens: int, hidden: int, num_experts: int, num_topk: int,
                      kernel_names=('dispatch', 'combine'), barrier_comm_profiling=True,
                      suppress_kineto_output=False, # NOTE MODIFIED
                      trace_path=trace_path)
+        print("Execute bench end", flush=True)
 
 
 def create_weight_fp8(num_groups, n, k):
