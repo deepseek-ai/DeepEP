@@ -24,6 +24,7 @@ from sglang.srt.layers.quantization.fp8_utils import _requant_weight_ue8m0
 from deep_gemm.utils.layout import transform_sf_into_required_layout
 from sglang.srt.models.deepseek_v2 import DeepseekV2MLP
 from sglang.srt.layers.quantization.fp8 import Fp8Config
+from sglang.srt.layers.quantization.fp8_utils import requant_weight_ue8m0_inplace
 
 # --------------------------------------------- main -----------------------------------------------------
 
@@ -180,6 +181,16 @@ class MyLayer(torch.nn.Module):
             # prefix=add_prefix("shared_experts", prefix),
             tp_rank=0, tp_size=1,
         )
+
+        mlp = self.shared_experts
+        weight_block_size = quant_config.weight_block_size
+        for module in [
+            mlp.gate_up_proj,
+            mlp.down_proj,
+        ]:
+            requant_weight_ue8m0_inplace(
+                module.weight, module.weight_scale_inv, weight_block_size
+            )
 
     def forward_layer(self, fn_mode: str, **kwargs):
         if fn_mode == 'naive':
