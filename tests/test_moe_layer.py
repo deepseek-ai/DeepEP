@@ -51,6 +51,11 @@ def test_main(num_tokens: int, hidden: int, num_experts: int, num_topk: int,
 
     hack_stream = torch.cuda.Stream()
 
+    if bool(int(os.environ.get("DEEPEP_HACK_BACKGROUND_COPY_ENGINE", "0"))):
+        copy_engine_tester = CopyEngineTester()
+    else:
+        copy_engine_tester = None
+
     # noinspection PyShadowingNames
     def execute_forward_layer(fn_mode: str):
         if fn_mode == 'naive':
@@ -59,6 +64,9 @@ def test_main(num_tokens: int, hidden: int, num_experts: int, num_topk: int,
             f = forward_layer_overlap
         else:
             raise NotImplementedError
+
+        if copy_engine_tester is not None:
+            copy_engine_tester()
 
         return f(
             hidden_states=x,
@@ -83,10 +91,6 @@ def test_main(num_tokens: int, hidden: int, num_experts: int, num_topk: int,
         print(f"{out_naive=} {out_overlap=}")
         assert diff < 1e-4, f"{diff=} {out_naive=} {out_overlap=}"
         raise Exception("deliberately stop")
-
-    if bool(int(os.environ.get("DEEPEP_HACK_BACKGROUND_COPY_ENGINE", "0"))):
-        t = threading.Thread(target=_background_thread_copy_engine)
-        t.start()
 
     for fn_mode in [
         'naive',
@@ -498,11 +502,10 @@ def deepgemm_generate_grouped_masked(num_groups: int, m: int, k: int, n: int) ->
 
     return a_fp8, b_fp8, d, ref_d
 
-def _background_thread_copy_engine():
-    ce_stream = torch.cuda.Stream()
-    ce_stream.wait_stream(torch.cuda.current_stream())
+class CopyEngineTester:
+    def __init__(self):
+        self.alt_stream = torch.cuda.Stream()
 
-    with torch.cuda.stream(ce_stream):
         device_count = torch.cuda.device_count()
         assert device_count == 4
 
@@ -510,19 +513,20 @@ def _background_thread_copy_engine():
         dst_device = (src_device + 1) % device_count
 
         size = 8 * 1024 ** 3
-        num_iter = 500
 
-        print("[background_thread_copy_engine] init data", flush=True)
-        src = torch.full((size,), 42, dtype=torch.uint8, device=f'cuda:{src_device}')
-        dst = torch.full((size,), 42, dtype=torch.uint8, device=f'cuda:{dst_device}')
+        self.src = torch.full((size,), 42, dtype=torch.uint8, device=f'cuda:{src_device}')
+        self.dst = torch.full((size,), 42, dtype=torch.uint8, device=f'cuda:{dst_device}')
 
-        print("[background_thread_copy_engine] loop", flush=True)
-        for i in range(num_iter):
-            dst.copy_(src, non_blocking=True)
-            time.sleep(1e-5)
 
-        print("[background_thread_copy_engine] sleep forever", flush=True)
-        time.sleep(1000)
+    def __call__(self):
+        num_iter = 10
+
+        self.alt_stream.wait_stream(torch.cuda.current_stream())
+
+        with torch.cuda.stream(self.alt_stream):
+            for i in range(num_iter):
+                self.dst.copy_(self.src, non_blocking=True)
+
 
 # --------------------------------------------- SGLANG -----------------------------------------------------
 
