@@ -71,7 +71,6 @@ def test_main(num_tokens: int, hidden: int, num_experts: int, num_topk: int,
             num_experts=num_experts,
             num_local_experts=num_local_experts,
             hack_stream=hack_stream,
-            ce_stream=ce_stream,
             num_ranks=num_ranks,
         )
 
