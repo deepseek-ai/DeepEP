@@ -341,7 +341,7 @@ void dispatch(void* packed_recv_x, void* packed_recv_x_scales,
     constexpr int kNumMaxTopK = 9;
 
     const int num_warp_groups = ((phases & LOW_LATENCY_RECV_PHASE) == 0)
-        ? 12
+        ? 9
         : ceil_div(num_experts, num_device_sms);
 
     const int num_warps_per_group = 32 / num_warp_groups;
