@@ -156,6 +156,9 @@ def forward_layer_naive(
     hack_stream,
     num_ranks,
 ):
+    if bool(int(os.environ.get("DEEPEP_HACK_BACKGROUND_COPY_ENGINE", "0"))):
+        TODO
+
     down_input, down_input_scale, comm_handle, expected_m, masked_m, num_groups, m = (
         forward_layer_naive_first_half(
             hidden_states=hidden_states, w13_weight_fp8=w13_weight_fp8,
