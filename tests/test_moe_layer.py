@@ -62,19 +62,15 @@ def test_main(num_tokens: int, hidden: int, num_experts: int, num_topk: int,
         deep_gemm.config.set_num_sms(deepgemm_num_sms)
         print("HACK: change deepgemm num sms, BUT this may be overriden and useless!")
 
+    layer = MyLayer()
+
     # noinspection PyShadowingNames
     def execute_forward_layer(fn_mode: str):
-        if fn_mode == 'naive':
-            f = forward_layer_naive
-        elif fn_mode == 'overlap':
-            f = forward_layer_overlap
-        else:
-            raise NotImplementedError
-
         if copy_engine_tester is not None:
             copy_engine_tester()
 
-        return f(
+        return layer.forward_layer(
+            fn_mode=fn_mode,
             hidden_states=x,
             w13_weight_fp8=w13_weight_fp8,
             w2_weight_fp8=w2_weight_fp8,
@@ -158,9 +154,18 @@ def test_loop(local_rank: int, num_local_ranks: int):
 # --------------------------------------------- layer -----------------------------------------------------
 
 class MyLayer(torch.nn.Module):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
+    def __init__(self):
+        super().__init__()
         self._hack_dispatch_fake_overlap_momento = None
+
+    def forward_layer(self, fn_mode: str, **kwargs):
+        if fn_mode == 'naive':
+            f = self.forward_layer_naive
+        elif fn_mode == 'overlap':
+            f = self.forward_layer_overlap
+        else:
+            raise NotImplementedError
+        return f(**kwargs)
 
     def forward_layer_naive(
         self,
