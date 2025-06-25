@@ -200,7 +200,7 @@ def forward_layer_naive(
     large_gemm()
     combine_hook()
 
-    print(f"hi forward_layer_naive {combined_x=}")
+    # print(f"hi forward_layer_naive {combined_x=}")
     return combined_x
 
 
