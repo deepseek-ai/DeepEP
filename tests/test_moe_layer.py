@@ -235,7 +235,7 @@ class MyLayer(torch.nn.Module):
         combine_hook()
 
         # print(f"hi forward_layer_naive {combined_x=}")
-        return combined_x
+        return combined_x, shared_experts_output
 
 
     def forward_layer_naive_first_half(
@@ -485,7 +485,7 @@ class MyLayer(torch.nn.Module):
             assert torch.all(down_output_signals == src_signal_expect_value), f"{down_output_signals=} {src_signal_expect_value=}"
 
         # print(f"hi forward_layer_overlap {combined_x=}")
-        return combined_x
+        return combined_x, shared_experts_output
 
 
 def _pick_expert_fp8(a, expert_slice):
