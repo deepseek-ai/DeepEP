@@ -46,9 +46,6 @@ def test_main(num_tokens: int, hidden: int, num_experts: int, num_topk: int,
     for i in range(10):
         topk_idx[random.randint(0, num_tokens - 1), random.randint(0, num_topk - 1)] = -1
 
-    w13_weight_fp8 = create_weight_fp8(num_groups=num_local_experts, n=4096, k=hidden)
-    w2_weight_fp8 = create_weight_fp8(num_groups=num_local_experts, n=hidden, k=2048)
-
     hack_stream = torch.cuda.Stream()
 
     if bool(int(os.environ.get("DEEPEP_HACK_BACKGROUND_COPY_ENGINE", "0"))):
@@ -62,7 +59,9 @@ def test_main(num_tokens: int, hidden: int, num_experts: int, num_topk: int,
         deep_gemm.config.set_num_sms(deepgemm_num_sms)
         print("HACK: change deepgemm num sms, BUT this may be overriden and useless!")
 
-    layer = MyLayer()
+    layer = MyLayer(
+        num_local_experts=num_local_experts, hidden=hidden,
+    )
 
     # noinspection PyShadowingNames
     def execute_forward_layer(fn_mode: str):
@@ -72,8 +71,6 @@ def test_main(num_tokens: int, hidden: int, num_experts: int, num_topk: int,
         return layer.forward_layer(
             fn_mode=fn_mode,
             hidden_states=x,
-            w13_weight_fp8=w13_weight_fp8,
-            w2_weight_fp8=w2_weight_fp8,
             buffer=buffer,
             topk_idx=topk_idx,
             topk_weights=topk_weights,
@@ -154,9 +151,11 @@ def test_loop(local_rank: int, num_local_ranks: int):
 # --------------------------------------------- layer -----------------------------------------------------
 
 class MyLayer(torch.nn.Module):
-    def __init__(self):
+    def __init__(self, *, num_local_experts, hidden):
         super().__init__()
         self._hack_dispatch_fake_overlap_momento = None
+        self.w13_weight_fp8 = create_weight_fp8(num_groups=num_local_experts, n=4096, k=hidden)
+        self.w2_weight_fp8 = create_weight_fp8(num_groups=num_local_experts, n=hidden, k=2048)
 
     def forward_layer(self, fn_mode: str, **kwargs):
         if fn_mode == 'naive':
@@ -171,8 +170,6 @@ class MyLayer(torch.nn.Module):
         self,
         *,
         hidden_states,
-        w13_weight_fp8,
-        w2_weight_fp8,
         buffer,
         topk_idx,
         topk_weights,
@@ -184,14 +181,14 @@ class MyLayer(torch.nn.Module):
     ):
         down_input, down_input_scale, comm_handle, expected_m, masked_m, num_groups, m = (
             self.forward_layer_naive_first_half(
-                hidden_states=hidden_states, w13_weight_fp8=w13_weight_fp8,
+                hidden_states=hidden_states,
                 buffer=buffer, topk_idx=topk_idx, num_tokens=num_tokens, num_experts=num_experts,
                 hack_stream=hack_stream,
             )
         )
 
         # GroupGemm-1
-        n = w2_weight_fp8[0].size(1)
+        n = self.w2_weight_fp8[0].size(1)
         down_input_fp8 = (down_input, down_input_scale)
         down_output = torch.empty(
             (num_groups, m, n), device=down_input.device, dtype=torch.bfloat16
@@ -207,7 +204,7 @@ class MyLayer(torch.nn.Module):
         #     with configure_deep_gemm_num_sms(deepgemm_num_sms):
         deep_gemm.fp8_m_grouped_gemm_nt_masked(
             down_input_fp8,
-            w2_weight_fp8,
+            self.w2_weight_fp8,
             down_output,
             masked_m,
             expected_m,
@@ -234,7 +231,6 @@ class MyLayer(torch.nn.Module):
             self,
             *,
             hidden_states,
-            w13_weight_fp8,
             buffer,
             topk_idx,
             num_tokens,
@@ -277,7 +273,7 @@ class MyLayer(torch.nn.Module):
 
         # GroupGemm-0
         num_groups, m, k = hidden_states_fp8[0].size()
-        n = w13_weight_fp8[0].size(1)
+        n = self.w13_weight_fp8[0].size(1)
         expected_m = min(expected_m, m)
         gateup_output = torch.empty(
             (num_groups, m, n), device=hidden_states_fp8[0].device, dtype=torch.bfloat16
@@ -286,7 +282,7 @@ class MyLayer(torch.nn.Module):
         if not enable_hack_disptach_fake_overlap_curr_iter:
             deep_gemm.fp8_m_grouped_gemm_nt_masked(
                 hidden_states_fp8,
-                w13_weight_fp8,
+                self.w13_weight_fp8,
                 gateup_output,
                 masked_m,
                 expected_m,
@@ -297,7 +293,7 @@ class MyLayer(torch.nn.Module):
                 self._hack_dispatch_fake_overlap_momento = {
                     "gemm_kwargs": {
                         "a": (hidden_states_fp8[0].clone(), hidden_states_fp8[1].clone()),
-                        "b": w13_weight_fp8,
+                        "b": self.w13_weight_fp8,
                         "d": gateup_output.clone(),
                         "masked_m": masked_m.clone(),
                         "expected_m": expected_m,
@@ -349,8 +345,6 @@ class MyLayer(torch.nn.Module):
             self,
             *,
             hidden_states,
-            w13_weight_fp8,
-            w2_weight_fp8,
             buffer,
             topk_idx,
             topk_weights,
@@ -372,13 +366,13 @@ class MyLayer(torch.nn.Module):
 
         down_input, down_input_scale, comm_handle, expected_m, masked_m, num_groups, m = (
             self.forward_layer_naive_first_half(
-                hidden_states=hidden_states, w13_weight_fp8=w13_weight_fp8,
+                hidden_states=hidden_states,
                 buffer=buffer, topk_idx=topk_idx, num_tokens=num_tokens, num_experts=num_experts,
                 hack_stream=hack_stream,
             )
         )
 
-        n = w2_weight_fp8[0].size(1)
+        n = self.w2_weight_fp8[0].size(1)
         down_input_fp8 = (down_input, down_input_scale)
         down_output = torch.empty((num_groups, m, n), device=down_input.device, dtype=torch.bfloat16)
 
@@ -397,7 +391,7 @@ class MyLayer(torch.nn.Module):
         expert_slice = slice(0, 1)
         deep_gemm.fp8_m_grouped_gemm_nt_masked(
             _pick_expert_fp8(down_input_fp8, expert_slice),
-            _pick_expert_fp8(w2_weight_fp8, expert_slice),
+            _pick_expert_fp8(self.w2_weight_fp8, expert_slice),
             down_output[expert_slice, :, :],
             masked_m[expert_slice],
             expected_m,
@@ -428,7 +422,7 @@ class MyLayer(torch.nn.Module):
                 expert_slice = slice(1, num_local_experts)
                 deepgemm_out = deep_gemm.fp8_m_grouped_gemm_nt_masked(
                     _pick_expert_fp8(down_input_fp8, expert_slice),
-                    _pick_expert_fp8(w2_weight_fp8, expert_slice),
+                    _pick_expert_fp8(self.w2_weight_fp8, expert_slice),
                     down_output[expert_slice, :, :],
                     masked_m[expert_slice],
                     expected_m,
