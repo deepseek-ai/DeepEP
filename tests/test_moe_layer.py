@@ -11,8 +11,9 @@ import torch
 import torch.distributed as dist
 from functools import partial
 
-import sglang.srt.utils
-sglang.srt.utils.log_info_on_rank0 = lambda logger, msg: logger.info(msg)
+import sglang.srt.distributed
+sglang.srt.distributed.get_tensor_model_parallel_rank = lambda: torch.distributed.get_rank()
+sglang.srt.distributed.get_tensor_model_parallel_world_size = lambda: torch.distributed.get_world_size()
 
 import deep_gemm
 from deep_gemm.utils.math import align, ceil_div, per_block_cast_to_fp8
