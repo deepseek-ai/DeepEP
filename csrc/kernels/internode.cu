@@ -1569,12 +1569,14 @@ combine(int4* combined_x, float* combined_topk_weights,
                 // Combine current token
                 auto recv_fn = [&](int src_rdma_rank, int slot_idx, int hidden_int4_idx) -> int4 { return ld_nc_global(reinterpret_cast<const int4*>(rdma_channel_data.recv_buffer(src_rdma_rank) + slot_idx * num_bytes_per_rdma_token) + hidden_int4_idx);};
                 auto recv_tw_fn = [&](int src_rdma_rank, int slot_idx, int topk_idx) -> float { return ld_nc_global(reinterpret_cast<const float*>(rdma_channel_data.recv_buffer(src_rdma_rank) + slot_idx * num_bytes_per_rdma_token + hidden_bytes + sizeof(SourceMeta)) + topk_idx);};
-                combine_token<kNumRDMARanks, false, dtype_t, kNumTopkRDMARanks>(expected_head >= 0,
+                combine_token<kNumRDMARanks, true, dtype_t, kNumTopkRDMARanks>(expected_head >= 0,
                                                                          expected_head, lane_id,
                                                                          hidden_int4, num_topk,
                                                                          combined_x + token_idx * hidden_int4,
                                                                          combined_topk_weights + token_idx * num_topk,
-                                                                         nullptr, nullptr, num_max_rdma_chunked_recv_tokens, recv_fn, recv_tw_fn);
+                                                                         bias_0 == nullptr ? nullptr : bias_0 + token_idx * hidden_int4,
+                                                                         bias_1 == nullptr ? nullptr : bias_1 + token_idx * hidden_int4,
+                                                                         num_max_rdma_chunked_recv_tokens, recv_fn, recv_tw_fn);
             }
 
             // Retired
