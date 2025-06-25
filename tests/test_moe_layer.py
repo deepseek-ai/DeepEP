@@ -189,6 +189,8 @@ class MyLayer(torch.nn.Module):
         num_local_experts,
         num_ranks,
     ):
+        shared_experts_output = self.shared_experts(hidden_states)
+
         down_input, down_input_scale, comm_handle, expected_m, masked_m, num_groups, m = (
             self.forward_layer_naive_first_half(
                 hidden_states=hidden_states,
@@ -437,6 +439,8 @@ class MyLayer(torch.nn.Module):
                 )
                 assert deepgemm_out["num_sms"] == actual_deepgemm_num_sms, f"{deepgemm_out=} {actual_deepgemm_num_sms=}"
 
+                shared_experts_output = self.shared_experts(hidden_states)
+
         # sometimes DeepGEMM choose to use *LESS* sms, we need to consider this
         src_signal_expect_value = actual_deepgemm_num_sms
         # print(f"{deepgemm_num_sms_upper_bound=} {actual_deepgemm_num_sms=}", flush=True)
@@ -468,6 +472,8 @@ class MyLayer(torch.nn.Module):
         # hack
         # print(f'hi call sync', flush=True)
         # torch.cuda.synchronize()
+
+        torch.cuda.current_stream().wait_stream(self.hack_stream)
 
         # print(f'hi call large_gemm', flush=True)
         large_gemm()
