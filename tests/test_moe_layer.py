@@ -74,7 +74,7 @@ def test_main(num_tokens: int, hidden: int, num_experts: int, num_topk: int,
         )
 
     # correctness
-    if 1:
+    if bool(int(os.environ.get("DEEPEP_HACK_DO_CHECK", "1"))):
         out_overlap = execute_forward_layer("overlap").clone()
         out_naive = execute_forward_layer("naive").clone()
         diff = calc_diff(out_naive, out_overlap)
@@ -84,8 +84,8 @@ def test_main(num_tokens: int, hidden: int, num_experts: int, num_topk: int,
         raise Exception("deliberately stop")
 
     for fn_mode in [
-        # 'naive', # TODO
-        'overlap',
+        'naive',
+        # 'overlap',
     ]:
         if rank == 0:
             trace_path = str(Path("/data/numa0/tom/temp_sglang_server2local/") / f"{time.time()}-TP-{rank}.trace.json.gz")
@@ -453,7 +453,7 @@ def forward_layer_overlap(
     if 0:
         assert torch.all(down_output_signals == src_signal_expect_value), f"{down_output_signals=} {src_signal_expect_value=}"
 
-    print(f"hi forward_layer_overlap {combined_x=}")
+    # print(f"hi forward_layer_overlap {combined_x=}")
     return combined_x
 
 
