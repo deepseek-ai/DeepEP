@@ -509,7 +509,7 @@ def _background_thread_copy_engine():
         src_device = torch.cuda.current_device()
         dst_device = (src_device + 1) % device_count
 
-        size = 100_000_000
+        size = 8 * 1024 ** 3
         src = torch.full((size,), 42, dtype=torch.uint8, device=f'cuda:{src_device}')
         dst = torch.full((size,), 42, dtype=torch.uint8, device=f'cuda:{dst_device}')
 
