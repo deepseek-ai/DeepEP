@@ -46,8 +46,6 @@ def test_main(num_tokens: int, hidden: int, num_experts: int, num_topk: int,
     for i in range(10):
         topk_idx[random.randint(0, num_tokens - 1), random.randint(0, num_topk - 1)] = -1
 
-    hack_stream = torch.cuda.Stream()
-
     if bool(int(os.environ.get("DEEPEP_HACK_BACKGROUND_COPY_ENGINE", "0"))):
         copy_engine_tester = CopyEngineTester()
     else:
@@ -77,7 +75,6 @@ def test_main(num_tokens: int, hidden: int, num_experts: int, num_topk: int,
             num_tokens=num_tokens,
             num_experts=num_experts,
             num_local_experts=num_local_experts,
-            hack_stream=hack_stream,
             num_ranks=num_ranks,
         )
 
@@ -156,6 +153,7 @@ class MyLayer(torch.nn.Module):
         self._hack_dispatch_fake_overlap_momento = None
         self.w13_weight_fp8 = create_weight_fp8(num_groups=num_local_experts, n=4096, k=hidden)
         self.w2_weight_fp8 = create_weight_fp8(num_groups=num_local_experts, n=hidden, k=2048)
+        self.hack_stream = torch.cuda.Stream()
 
     def forward_layer(self, fn_mode: str, **kwargs):
         if fn_mode == 'naive':
@@ -176,14 +174,12 @@ class MyLayer(torch.nn.Module):
         num_tokens,
         num_experts,
         num_local_experts,
-        hack_stream,
         num_ranks,
     ):
         down_input, down_input_scale, comm_handle, expected_m, masked_m, num_groups, m = (
             self.forward_layer_naive_first_half(
                 hidden_states=hidden_states,
                 buffer=buffer, topk_idx=topk_idx, num_tokens=num_tokens, num_experts=num_experts,
-                hack_stream=hack_stream,
             )
         )
 
@@ -235,7 +231,6 @@ class MyLayer(torch.nn.Module):
             topk_idx,
             num_tokens,
             num_experts,
-            hack_stream,
     ):
         hack_dispatch_fake_overlap = bool(int(os.environ.get("DEEPEP_HACK_DISPATCH_FAKE_OVERLAP", "0")))
 
@@ -251,8 +246,8 @@ class MyLayer(torch.nn.Module):
             deepgemm_num_sms = torch.cuda.get_device_properties(device='cuda').multi_processor_count - deepep_num_sms
 
             print("HACK: put deepgemm in another stream (logically wrong)")
-            hack_stream.wait_stream(torch.cuda.current_stream())
-            with torch.cuda.stream(hack_stream):
+            self.hack_stream.wait_stream(torch.cuda.current_stream())
+            with torch.cuda.stream(self.hack_stream):
                 with configure_deep_gemm_num_sms(deepgemm_num_sms):
                     deep_gemm.fp8_m_grouped_gemm_nt_masked(**self._hack_dispatch_fake_overlap_momento["gemm_kwargs"])
 
@@ -264,7 +259,7 @@ class MyLayer(torch.nn.Module):
         assert dispatch_event.event is None
 
         if enable_hack_disptach_fake_overlap_curr_iter:
-            torch.cuda.current_stream().wait_stream(hack_stream)
+            torch.cuda.current_stream().wait_stream(self.hack_stream)
 
         large_gemm()
         dispatch_hook()
@@ -351,7 +346,6 @@ class MyLayer(torch.nn.Module):
             num_tokens,
             num_experts,
             num_local_experts,
-            hack_stream,
             num_ranks,
     ):
         # # ------------------------------------
@@ -368,7 +362,6 @@ class MyLayer(torch.nn.Module):
             self.forward_layer_naive_first_half(
                 hidden_states=hidden_states,
                 buffer=buffer, topk_idx=topk_idx, num_tokens=num_tokens, num_experts=num_experts,
-                hack_stream=hack_stream,
             )
         )
 
@@ -398,8 +391,8 @@ class MyLayer(torch.nn.Module):
             recipe=(1, 128, 128),
         )
 
-        hack_stream.wait_stream(torch.cuda.current_stream())
-        with torch.cuda.stream(hack_stream):
+        self.hack_stream.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(self.hack_stream):
             with configure_deep_gemm_num_sms(deepgemm_num_sms_upper_bound):
                 # for local_expert_idx in range(num_local_experts):
                 #     deep_gemm.fp8_m_grouped_gemm_nt_masked(
