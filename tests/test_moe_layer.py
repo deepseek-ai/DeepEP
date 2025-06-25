@@ -99,14 +99,17 @@ def test_main(num_tokens: int, hidden: int, num_experts: int, num_topk: int,
         'naive',
         # 'overlap',
     ]:
+        fn_with_mode = partial(execute_forward_layer, fn_mode=fn_mode)
+        graph = capture_cuda_graph(fn_with_mode)
+
         if rank == 0:
             trace_path = str(Path("/data/numa0/tom/temp_sglang_server2local/") / f"{time.time()}-TP-{rank}.trace.json.gz")
         else:
             trace_path = None
         print(f"Execute bench {fn_mode=} {rank=} {trace_path=}", flush=True)
-        bench_kineto(partial(execute_forward_layer, fn_mode=fn_mode),
+        bench_kineto(fn_with_mode,
                      kernel_names=('dispatch', 'combine'), barrier_comm_profiling=True,
-                     suppress_kineto_output=False, # NOTE MODIFIED
+                     suppress_kineto_output=False,  # NOTE MODIFIED
                      trace_path=trace_path)
         print("Execute bench end", flush=True)
 
@@ -571,6 +574,22 @@ class CopyEngineTester:
         with torch.cuda.stream(self.alt_stream):
             for i in range(num_iter):
                 self.dst.copy_(self.src, non_blocking=True)
+
+
+# ref: CUDAGraphRunner, https://pytorch.org/blog/accelerating-pytorch-with-cuda-graphs/
+def capture_cuda_graph(run_once):
+    s = torch.cuda.Stream()
+    s.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(s):
+        for i in range(3):
+            run_once()
+    torch.cuda.current_stream().wait_stream(s)
+
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        out = run_once()
+
+    return graph
 
 
 # --------------------------------------------- SGLANG -----------------------------------------------------
