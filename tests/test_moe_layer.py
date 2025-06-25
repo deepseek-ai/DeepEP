@@ -510,13 +510,19 @@ def _background_thread_copy_engine():
         dst_device = (src_device + 1) % device_count
 
         size = 8 * 1024 ** 3
+        num_iter = 500
+
+        print("[background_thread_copy_engine] init data", flush=True)
         src = torch.full((size,), 42, dtype=torch.uint8, device=f'cuda:{src_device}')
         dst = torch.full((size,), 42, dtype=torch.uint8, device=f'cuda:{dst_device}')
 
-        while True:
+        print("[background_thread_copy_engine] loop", flush=True)
+        for i in range(num_iter):
             dst.copy_(src, non_blocking=True)
             time.sleep(1e-5)
 
+        print("[background_thread_copy_engine] sleep forever", flush=True)
+        time.sleep(1000)
 
 # --------------------------------------------- SGLANG -----------------------------------------------------
 
