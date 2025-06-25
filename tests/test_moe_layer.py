@@ -502,19 +502,20 @@ def _background_thread_copy_engine():
     ce_stream = torch.cuda.Stream()
     ce_stream.wait_stream(torch.cuda.current_stream())
 
-    device_count = torch.cuda.device_count()
-    assert device_count == 4
+    with torch.cuda.stream(ce_stream):
+        device_count = torch.cuda.device_count()
+        assert device_count == 4
 
-    src_device = torch.cuda.current_device()
-    dst_device = (src_device + 1) % device_count
+        src_device = torch.cuda.current_device()
+        dst_device = (src_device + 1) % device_count
 
-    size = 100_000_000
-    src = torch.full((size,), 42, dtype=torch.uint8, device=f'cuda:{src_device}')
-    dst = torch.full((size,), 42, dtype=torch.uint8, device=f'cuda:{dst_device}')
+        size = 100_000_000
+        src = torch.full((size,), 42, dtype=torch.uint8, device=f'cuda:{src_device}')
+        dst = torch.full((size,), 42, dtype=torch.uint8, device=f'cuda:{dst_device}')
 
-    while True:
-        dst.copy_(src, non_blocking=True)
-        time.sleep(1e-5)
+        while True:
+            dst.copy_(src, non_blocking=True)
+            time.sleep(1e-5)
 
 
 # --------------------------------------------- SGLANG -----------------------------------------------------
