@@ -415,9 +415,6 @@ class MyLayer(torch.nn.Module):
         )
         assert dispatch_event.event is None
 
-        large_gemm()
-        dispatch_hook()
-
         masked_m = recv_count
 
         # GroupGemm-0
@@ -442,6 +439,8 @@ class MyLayer(torch.nn.Module):
                     recipe=(1, 128, 128),
                     src_signals=gateup_input_signals,
                 )
+
+        dispatch_hook()
 
         torch.cuda.current_stream().wait_stream(self.hack_stream)
 
