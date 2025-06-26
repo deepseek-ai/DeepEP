@@ -280,9 +280,6 @@ class MyLayer(torch.nn.Module):
     ):
         hack_dispatch_fake_overlap = bool(int(os.environ.get("DEEPEP_HACK_DISPATCH_FAKE_OVERLAP", "0")))
 
-        # src: EPMoE
-        fp8_dtype = torch.float8_e4m3fn
-
         # src: dispatch_a
         expected_m = (hidden_states.shape[0] * buffer.group_size * topk_idx.shape[1] + num_experts) // num_experts
 
@@ -342,6 +339,24 @@ class MyLayer(torch.nn.Module):
                     },
                 }
 
+        down_input, down_input_scale = self.forward_activation(
+            gateup_output=gateup_output,
+            masked_m=masked_m,
+            num_groups=num_groups,
+        )
+
+        return down_input, down_input_scale, comm_handle, expected_m, masked_m, num_groups, m
+
+    def forward_activation(
+            self,
+            *,
+            gateup_output,
+            masked_m,
+            num_groups,
+    ):
+        # src: EPMoE
+        fp8_dtype = torch.float8_e4m3fn
+
         # Act
         down_input = torch.empty(
             (
@@ -380,7 +395,7 @@ class MyLayer(torch.nn.Module):
             num_groups=num_groups, is_sfa=True,
         )
 
-        return down_input, down_input_scale, comm_handle, expected_m, masked_m, num_groups, m
+        return down_input, down_input_scale
 
     def forward_layer_overlap(
             self,
