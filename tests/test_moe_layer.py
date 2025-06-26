@@ -400,6 +400,11 @@ class MyLayer(torch.nn.Module):
         # deepgemm_stream = torch.cuda.Stream()
         # # ------------------------------------
 
+        # NOTE need to change according to DeepEP src code
+        # TODO if DeepGEMM does not use all SM then let DeepEP use more
+        deepep_num_sms = 32
+        deepgemm_num_sms_upper_bound = torch.cuda.get_device_properties(device='cuda').multi_processor_count - deepep_num_sms
+
         # src: dispatch_a
         expected_m = (hidden_states.shape[0] * buffer.group_size * topk_idx.shape[1] + num_experts) // num_experts
 
@@ -425,15 +430,20 @@ class MyLayer(torch.nn.Module):
 
         gateup_input_signals = torch.zeros((num_local_experts,), dtype=torch.uint32, device=hidden_states_fp8[0].device)
 
-        deep_gemm.fp8_m_grouped_gemm_nt_masked(
-            hidden_states_fp8,
-            self.w13_weight_fp8,
-            gateup_output,
-            masked_m,
-            expected_m,
-            recipe=(1, 128, 128),
-            src_signals=gateup_input_signals,
-        )
+        self.hack_stream.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(self.hack_stream):
+            with configure_deep_gemm_num_sms(deepgemm_num_sms_upper_bound):
+                deep_gemm.fp8_m_grouped_gemm_nt_masked(
+                    hidden_states_fp8,
+                    self.w13_weight_fp8,
+                    gateup_output,
+                    masked_m,
+                    expected_m,
+                    recipe=(1, 128, 128),
+                    src_signals=gateup_input_signals,
+                )
+
+        torch.cuda.current_stream().wait_stream(self.hack_stream)
 
         down_input, down_input_scale = self.forward_activation(
             gateup_output=gateup_output,
@@ -445,11 +455,7 @@ class MyLayer(torch.nn.Module):
         down_input_fp8 = (down_input, down_input_scale)
         down_output = torch.empty((num_groups, m, n), device=down_input.device, dtype=torch.bfloat16)
 
-        # NOTE need to change according to DeepEP src code
-        # TODO if DeepGEMM does not use all SM then let DeepEP use more
-        deepep_num_sms = 32
-        deepgemm_num_sms_upper_bound = torch.cuda.get_device_properties(device='cuda').multi_processor_count - deepep_num_sms
-        actual_deepgemm_num_sms = {
+        actual_down_deepgemm_num_sms = {
             # temp hardcoded
             # 4: 120, 48: 116, # normal
             4: 119, 48: 120, # with the "specially treat first expert"
@@ -486,7 +492,7 @@ class MyLayer(torch.nn.Module):
                 #     down_input_fp8, w2_weight_fp8, down_output, masked_m, expected_m, recipe=(1, 128, 128),
                 #     d_signals=down_output_signals,
                 # )
-                # actual_deepgemm_num_sms = deepgemm_out["num_sms"]
+                # actual_down_deepgemm_num_sms = deepgemm_out["num_sms"]
 
                 expert_slice = slice(1, num_local_experts)
                 deepgemm_out = deep_gemm.fp8_m_grouped_gemm_nt_masked(
@@ -498,13 +504,13 @@ class MyLayer(torch.nn.Module):
                     recipe=(1, 128, 128),
                     d_signals=down_output_signals[expert_slice],
                 )
-                assert deepgemm_out["num_sms"] == actual_deepgemm_num_sms, f"{deepgemm_out=} {actual_deepgemm_num_sms=}"
+                assert deepgemm_out["num_sms"] == actual_down_deepgemm_num_sms, f"{deepgemm_out=} {actual_down_deepgemm_num_sms=}"
 
                 shared_experts_output = self.shared_experts(hidden_states)
 
         # sometimes DeepGEMM choose to use *LESS* sms, we need to consider this
-        src_signal_expect_value = actual_deepgemm_num_sms
-        # print(f"{deepgemm_num_sms_upper_bound=} {actual_deepgemm_num_sms=}", flush=True)
+        src_signal_expect_value = actual_down_deepgemm_num_sms
+        # print(f"{deepgemm_num_sms_upper_bound=} {actual_down_deepgemm_num_sms=}", flush=True)
 
         # print('hi call low_latency_combine', flush=True)
         combined_x, combine_event, combine_hook = buffer.low_latency_combine(
