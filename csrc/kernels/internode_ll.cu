@@ -101,6 +101,11 @@ dispatch(void* packed_recv_x, void* packed_recv_x_scales,
         TODO; // read to local register
     }
 
+    // Send data
+    for (int dst_local_expert_idx = 0; dst_local_expert_idx < num_local_experts; ++dst_expert_local_idx) {
+        
+    }
+
 //     // There are 2 kinds of warps in this part:
 //     // 1. The first-kind warps for FP8 cast and sending top-k tokens
 //     // 2. The last warp for reading `topk_idx` and count for per-expert information
