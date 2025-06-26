@@ -432,6 +432,7 @@ class MyLayer(torch.nn.Module):
             masked_m,
             expected_m,
             recipe=(1, 128, 128),
+            src_signals=gateup_input_signals,
         )
 
         down_input, down_input_scale = self.forward_activation(
