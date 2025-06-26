@@ -171,6 +171,7 @@ dispatch(void* packed_recv_x, void* packed_recv_x_scales,
 
                 // Issue IBGDA sends
                 if (dst_expert_idx >= 0) {
+                    TODO; // change slot idx
                     int slot_idx = lane_id == 0 ? atomicAdd(atomic_counter_per_expert + dst_expert_idx, 1) : 0;
                     slot_idx = __shfl_sync(0xffffffff, slot_idx, 0);
                     const auto dst_rank = dst_expert_idx / num_local_experts;
