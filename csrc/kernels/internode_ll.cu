@@ -102,20 +102,22 @@ dispatch(void* packed_recv_x, void* packed_recv_x_scales,
     }
 
     // Send data
-    for (int dst_local_expert_idx = 0; dst_local_expert_idx < num_local_experts; ++dst_expert_local_idx) {
-        
+    {
+        constexpr int kNumElemsPerRead = sizeof(int4) / sizeof(nv_bfloat16);
+        EP_DEVICE_ASSERT(kHidden % kNumElemsPerRead == 0);
+        EP_STATIC_ASSERT(kNumElemsPerRead * 32 % kNumPerChannels == 0, "Invalid vectorization");
+        const auto num_threads = (num_warps - 1) * 32;
+        const size_t hidden_bf16_int4 = kHidden / kNumElemsPerRead;
+
+        for (int dst_local_expert_idx = 0; dst_local_expert_idx < num_local_experts; ++dst_expert_local_idx) {
+
+        }
     }
 
 //     // There are 2 kinds of warps in this part:
 //     // 1. The first-kind warps for FP8 cast and sending top-k tokens
 //     // 2. The last warp for reading `topk_idx` and count for per-expert information
 //     if (warp_id < num_warps - 1) {
-//         constexpr int kNumElemsPerRead = sizeof(int4) / sizeof(nv_bfloat16);
-//         EP_DEVICE_ASSERT(kHidden % kNumElemsPerRead == 0);
-//         EP_STATIC_ASSERT(kNumElemsPerRead * 32 % kNumPerChannels == 0, "Invalid vectorization");
-//         const auto num_threads = (num_warps - 1) * 32;
-//         const size_t hidden_bf16_int4 = kHidden / kNumElemsPerRead;
-//
 //         for (int token_idx = sm_id; token_idx < num_tokens; token_idx += num_sms) {
 //             const auto x_int4 = static_cast<const int4*>(x) + token_idx * hidden_bf16_int4;
 //             const auto rdma_x_src_idx = reinterpret_cast<int*>(static_cast<uint8_t*>(rdma_x) + token_idx * num_bytes_per_msg);
