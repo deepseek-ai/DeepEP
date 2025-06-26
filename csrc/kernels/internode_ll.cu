@@ -119,7 +119,7 @@ dispatch(void* packed_recv_x, void* packed_recv_x_scales,
                 // Overlap top-k index read and source token index writes
 //                 auto dst_expert_idx = warp_id < num_topk ? static_cast<int>(__ldg(topk_idx + token_idx * num_topk + warp_id)) : -1;
                 auto dst_expert_idx = warp_id < num_topk ? TODO_load_from_smem : -1;
-                
+
                 // TODO maybe improve
                 if (dst_expert_idx != interesting_dst_local_expert_idx) {
                     continue;
@@ -151,6 +151,7 @@ dispatch(void* packed_recv_x, void* packed_recv_x_scales,
                         calculate_fp8_scales(amax, scale, scale_inv, round_scale);
                         if (lane_id == 0 or lane_id == 16)
                             rdma_x_scales[i * kNumElemsPerRead / 128] = scale_inv;
+                        TODO; // handle u8 scales (cast, pack)
 
                         // Cast into send buffer
                         vec_t int2_value;
