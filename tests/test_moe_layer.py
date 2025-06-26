@@ -423,6 +423,8 @@ class MyLayer(torch.nn.Module):
             (num_groups, m, n), device=hidden_states_fp8[0].device, dtype=torch.bfloat16
         )
 
+        gateup_input_signals = torch.zeros((num_local_experts,), dtype=torch.uint32, device=hidden_states_fp8[0].device)
+
         deep_gemm.fp8_m_grouped_gemm_nt_masked(
             hidden_states_fp8,
             self.w13_weight_fp8,
