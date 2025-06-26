@@ -94,6 +94,13 @@ dispatch(void* packed_recv_x, void* packed_recv_x_scales,
         st_release_sys_global(TODO_addr, input_count_per_expert[TODO]);
     }
 
+    // Read stat
+    {
+        while ((TODO_var = ld_acquire_sys_global(TODO_addr)) == 0);
+        TODO; // store to SMEM
+        TODO; // read to local register
+    }
+
 //     // There are 2 kinds of warps in this part:
 //     // 1. The first-kind warps for FP8 cast and sending top-k tokens
 //     // 2. The last warp for reading `topk_idx` and count for per-expert information
