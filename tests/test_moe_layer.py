@@ -220,64 +220,6 @@ class MyLayer(torch.nn.Module):
         num_local_experts,
         num_ranks,
     ):
-        down_input, down_input_scale, comm_handle, expected_m, masked_m, num_groups, m = (
-            self.forward_layer_naive_first_half(
-                hidden_states=hidden_states,
-                buffer=buffer, topk_idx=topk_idx, num_tokens=num_tokens, num_experts=num_experts,
-            )
-        )
-
-        # GroupGemm-1
-        n = self.w2_weight_fp8[0].size(1)
-        down_input_fp8 = (down_input, down_input_scale)
-        down_output = torch.empty(
-            (num_groups, m, n), device=down_input.device, dtype=torch.bfloat16
-        )
-
-        # # NOTE need to change according to DeepEP src code
-        # deepep_num_sms = 32
-        # deepgemm_num_sms = torch.cuda.get_device_properties(device='cuda').multi_processor_count - deepep_num_sms
-        #
-        # print("HACK: put deepgemm in another stream (logically wrong)")
-        # hack_stream.wait_stream(torch.cuda.current_stream())
-        # with torch.cuda.stream(hack_stream):
-        #     with configure_deep_gemm_num_sms(deepgemm_num_sms):
-        deep_gemm.fp8_m_grouped_gemm_nt_masked(
-            down_input_fp8,
-            self.w2_weight_fp8,
-            down_output,
-            masked_m,
-            expected_m,
-            recipe=(1, 128, 128),
-        )
-
-        combined_x, combine_event, combine_hook = buffer.low_latency_combine(
-            down_output, topk_idx, topk_weights, comm_handle,
-            return_recv_hook=True,
-            # async_finish=True, # NOTE
-        )
-
-        shared_experts_output = self.shared_experts(hidden_states)
-
-        assert combine_event.event is None
-        # combine_event.current_stream_wait()
-
-        large_gemm()
-        combine_hook()
-
-        # print(f"hi forward_layer_naive {combined_x=}")
-        return combined_x, shared_experts_output
-
-
-    def forward_layer_naive_first_half(
-            self,
-            *,
-            hidden_states,
-            buffer,
-            topk_idx,
-            num_tokens,
-            num_experts,
-    ):
         hack_dispatch_fake_overlap = bool(int(os.environ.get("DEEPEP_HACK_DISPATCH_FAKE_OVERLAP", "0")))
 
         # src: dispatch_a
@@ -345,7 +287,46 @@ class MyLayer(torch.nn.Module):
             num_groups=num_groups,
         )
 
-        return down_input, down_input_scale, comm_handle, expected_m, masked_m, num_groups, m
+        # GroupGemm-1
+        n = self.w2_weight_fp8[0].size(1)
+        down_input_fp8 = (down_input, down_input_scale)
+        down_output = torch.empty(
+            (num_groups, m, n), device=down_input.device, dtype=torch.bfloat16
+        )
+
+        # # NOTE need to change according to DeepEP src code
+        # deepep_num_sms = 32
+        # deepgemm_num_sms = torch.cuda.get_device_properties(device='cuda').multi_processor_count - deepep_num_sms
+        #
+        # print("HACK: put deepgemm in another stream (logically wrong)")
+        # hack_stream.wait_stream(torch.cuda.current_stream())
+        # with torch.cuda.stream(hack_stream):
+        #     with configure_deep_gemm_num_sms(deepgemm_num_sms):
+        deep_gemm.fp8_m_grouped_gemm_nt_masked(
+            down_input_fp8,
+            self.w2_weight_fp8,
+            down_output,
+            masked_m,
+            expected_m,
+            recipe=(1, 128, 128),
+        )
+
+        combined_x, combine_event, combine_hook = buffer.low_latency_combine(
+            down_output, topk_idx, topk_weights, comm_handle,
+            return_recv_hook=True,
+            # async_finish=True, # NOTE
+        )
+
+        shared_experts_output = self.shared_experts(hidden_states)
+
+        assert combine_event.event is None
+        # combine_event.current_stream_wait()
+
+        large_gemm()
+        combine_hook()
+
+        # print(f"hi forward_layer_naive {combined_x=}")
+        return combined_x, shared_experts_output
 
     def forward_activation(
             self,
@@ -419,11 +400,71 @@ class MyLayer(torch.nn.Module):
         # deepgemm_stream = torch.cuda.Stream()
         # # ------------------------------------
 
-        down_input, down_input_scale, comm_handle, expected_m, masked_m, num_groups, m = (
-            self.forward_layer_naive_first_half(
-                hidden_states=hidden_states,
-                buffer=buffer, topk_idx=topk_idx, num_tokens=num_tokens, num_experts=num_experts,
+        hack_dispatch_fake_overlap = bool(int(os.environ.get("DEEPEP_HACK_DISPATCH_FAKE_OVERLAP", "0")))
+
+        # src: dispatch_a
+        expected_m = (hidden_states.shape[0] * buffer.group_size * topk_idx.shape[1] + num_experts) // num_experts
+
+        enable_hack_disptach_fake_overlap_curr_iter = hack_dispatch_fake_overlap and (self._hack_dispatch_fake_overlap_momento is not None)
+        if enable_hack_disptach_fake_overlap_curr_iter:
+            deepep_num_sms = 32
+            deepgemm_num_sms = torch.cuda.get_device_properties(device='cuda').multi_processor_count - deepep_num_sms
+
+            print("HACK: put deepgemm in another stream (logically wrong)")
+            self.hack_stream.wait_stream(torch.cuda.current_stream())
+            with torch.cuda.stream(self.hack_stream):
+                with configure_deep_gemm_num_sms(deepgemm_num_sms):
+                    deep_gemm.fp8_m_grouped_gemm_nt_masked(**self._hack_dispatch_fake_overlap_momento["gemm_kwargs"])
+
+        hidden_states_fp8, recv_count, comm_handle, dispatch_event, dispatch_hook = buffer.low_latency_dispatch(
+            hidden_states, topk_idx, num_tokens, num_experts,
+            use_fp8=True, async_finish=False, return_recv_hook=True,
+            round_scale=True, use_ue8m0=True,
+        )
+        assert dispatch_event.event is None
+
+        if enable_hack_disptach_fake_overlap_curr_iter:
+            torch.cuda.current_stream().wait_stream(self.hack_stream)
+
+        large_gemm()
+        dispatch_hook()
+
+        masked_m = recv_count
+
+        # GroupGemm-0
+        num_groups, m, k = hidden_states_fp8[0].size()
+        n = self.w13_weight_fp8[0].size(1)
+        expected_m = min(expected_m, m)
+        gateup_output = torch.empty(
+            (num_groups, m, n), device=hidden_states_fp8[0].device, dtype=torch.bfloat16
+        )
+
+        if not enable_hack_disptach_fake_overlap_curr_iter:
+            deep_gemm.fp8_m_grouped_gemm_nt_masked(
+                hidden_states_fp8,
+                self.w13_weight_fp8,
+                gateup_output,
+                masked_m,
+                expected_m,
+                recipe=(1, 128, 128),
             )
+
+            if hack_dispatch_fake_overlap:
+                self._hack_dispatch_fake_overlap_momento = {
+                    "gemm_kwargs": {
+                        "a": (hidden_states_fp8[0].clone(), hidden_states_fp8[1].clone()),
+                        "b": self.w13_weight_fp8,
+                        "d": gateup_output.clone(),
+                        "masked_m": masked_m.clone(),
+                        "expected_m": expected_m,
+                        "recipe": (1, 128, 128),
+                    },
+                }
+
+        down_input, down_input_scale = self.forward_activation(
+            gateup_output=gateup_output,
+            masked_m=masked_m,
+            num_groups=num_groups,
         )
 
         n = self.w2_weight_fp8[0].size(1)
