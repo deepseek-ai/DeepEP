@@ -51,6 +51,14 @@ dispatch(void* packed_recv_x, void* packed_recv_x_scales,
          int num_topk, int num_experts, int rank, int num_ranks,
          int num_warp_groups, int num_warps_per_group,
          bool round_scale, int phases) {
+    // Sending phase
+    if ((phases & LOW_LATENCY_SEND_PHASE) == 0)
+        goto LOW_LATENCY_DISPATCH_RECV;
+    // Receiving phase
+    LOW_LATENCY_DISPATCH_RECV:
+    if ((phases & LOW_LATENCY_RECV_PHASE) == 0)
+        return;
+
     const auto sm_id = static_cast<int>(blockIdx.x);
     const auto thread_id = static_cast<int>(threadIdx.x);
     const auto warp_id = thread_id / 32, lane_id = get_lane_id();
@@ -83,9 +91,9 @@ dispatch(void* packed_recv_x, void* packed_recv_x_scales,
     constexpr int kNumMaxWarpGroups = 32;
     __shared__ int shared_num_tokens_sent_per_expert[kNumMaxWarpGroups];
 
-    // Sending phase
-    if ((phases & LOW_LATENCY_SEND_PHASE) == 0)
-        goto LOW_LATENCY_DISPATCH_RECV;
+//     // Sending phase
+//     if ((phases & LOW_LATENCY_SEND_PHASE) == 0)
+//         goto LOW_LATENCY_DISPATCH_RECV;
 
     // Write stat to remote
     {
@@ -276,12 +284,12 @@ dispatch(void* packed_recv_x, void* packed_recv_x_scales,
 //             packed_recv_count[dst_expert_local_idx] = 0;
 //     }
 //     __syncwarp();
-
-    // Receiving phase
-    LOW_LATENCY_DISPATCH_RECV:
-    if ((phases & LOW_LATENCY_RECV_PHASE) == 0)
-        return;
-
+//
+//     // Receiving phase
+//     LOW_LATENCY_DISPATCH_RECV:
+//     if ((phases & LOW_LATENCY_RECV_PHASE) == 0)
+//         return;
+//
 //     // For send-and-recv kernels, we need a grid sync for making `packed_recv_count` visible
 //     if (phases & LOW_LATENCY_SEND_PHASE)
 //         cg::this_grid().sync();
