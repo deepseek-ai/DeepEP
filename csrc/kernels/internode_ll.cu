@@ -196,6 +196,11 @@ dispatch(void* packed_recv_x, void* packed_recv_x_scales,
 //                     lane_id == 0 ? atomic_add_release_global(atomic_finish_counter_per_expert + dst_expert_idx, 1) : 0;
                 }
             }
+
+            lane_id == 0 ? atomic_add_release_global(atomic_finish_counter_per_expert + dst_expert_idx, 1) : 0;
+            if (TODO_output_of_atomic_operation == TODO_num_cooperations) {
+                st_release_sys_global(TODO_remote_signal_addr, 1);
+            }
         }
     }
 
