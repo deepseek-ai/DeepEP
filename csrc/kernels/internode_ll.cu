@@ -89,6 +89,8 @@ dispatch(void* packed_recv_x, void* packed_recv_x_scales,
 
     // Write stat to remote
     {
+        TODO; // only send info of first local expert
+        TODO; // use multicast addr?
         st_release_sys_global(TODO_addr, input_count_per_expert[TODO]);
     }
 
