@@ -44,7 +44,7 @@ dispatch(void* packed_recv_x, void* packed_recv_x_scales,
          int* cumulative_local_expert_recv_stats,
          void* rdma_recv_x, int* rdma_recv_count, void* rdma_x,
          const void* x, const int64_t* topk_idx,
-         const int16_t* ,
+         const int16_t* input_count_per_expert,
          int* atomic_counter_per_expert, int* atomic_finish_counter_per_expert,
          int* next_clean, int num_next_clean_int,
          int num_tokens, int num_max_dispatch_tokens_per_rank,
@@ -89,7 +89,7 @@ dispatch(void* packed_recv_x, void* packed_recv_x_scales,
 
     // Write stat to remote
     {
-        st_release_sys_global(TODO_addr, TODO);
+        st_release_sys_global(TODO_addr, input_count_per_expert[TODO]);
     }
 
 //     // There are 2 kinds of warps in this part:
