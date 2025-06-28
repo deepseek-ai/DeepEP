@@ -250,5 +250,5 @@ def test_loop(local_rank: int, num_local_ranks: int):
 
 
 if __name__ == '__main__':
-    num_processes = 8
+    num_processes = int(os.getenv("DEEPEP_TEST_NUM_PROCESSES", "8"))
     torch.multiprocessing.spawn(test_loop, args=(num_processes, ), nprocs=num_processes)
