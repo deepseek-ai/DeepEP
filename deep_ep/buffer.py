@@ -562,7 +562,7 @@ class Buffer:
 
     # noinspection PyTypeChecker
     def low_latency_combine(self, x: torch.Tensor, topk_idx: torch.Tensor, topk_weights: torch.Tensor,
-                            handle: tuple, zero_copy: bool = False, async_finish: bool = False,
+                            handle: tuple, use_logfmt: bool = False, zero_copy: bool = False, async_finish: bool = False,
                             return_recv_hook: bool = False, out: Optional[torch.Tensor] = None) -> \
             Tuple[torch.Tensor, EventOverlap, Callable]:
         """
@@ -597,7 +597,7 @@ class Buffer:
         src_info, layout_range, num_max_dispatch_tokens_per_rank, hidden, num_experts = handle
         combined_x, event, hook = self.runtime.low_latency_combine(x, topk_idx, topk_weights, src_info, layout_range,
                                                                    num_max_dispatch_tokens_per_rank, num_experts,
-                                                                   zero_copy, async_finish, return_recv_hook, out)
+                                                                   use_logfmt, zero_copy, async_finish, return_recv_hook, out)
         tensors_to_record = (x, topk_idx, topk_weights, src_info, layout_range, combined_x)
         return combined_x, EventOverlap(event, tensors_to_record if async_finish else None), hook
 

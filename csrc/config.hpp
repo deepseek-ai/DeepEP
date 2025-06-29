@@ -138,7 +138,7 @@ struct LowLatencyLayout {
         // NOTES: you should add a control `int4` for combine messages if you want to do data transformation
         EP_HOST_ASSERT(num_scales * sizeof(float) <= hidden);
         size_t num_bytes_per_dispatch_msg = sizeof(int4) + std::max(hidden * sizeof(nv_bfloat16), hidden + num_scales * sizeof(float));
-        size_t num_bytes_per_combine_msg = hidden * sizeof(nv_bfloat16);
+        size_t num_bytes_per_combine_msg = hidden * sizeof(nv_bfloat16) + sizeof(int4);
 
         // Send buffer
         size_t dispatch_send_buffer_bytes = num_max_dispatch_tokens_per_rank * num_bytes_per_dispatch_msg;

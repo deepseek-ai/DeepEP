@@ -246,6 +246,11 @@ __device__  __forceinline__ void st_na_global(const dtype_t *ptr, const dtype_t&
 }
 
 template <>
+__device__  __forceinline__ void st_na_global(const uint16_t *ptr, const uint16_t& value) {
+    asm volatile(ST_NA_FUNC ".u16 [%0], %1;" ::"l"(ptr), "h"(value));
+}
+
+template <>
 __device__  __forceinline__ void st_na_global(const int *ptr, const int& value) {
     asm volatile(ST_NA_FUNC ".s32 [%0], %1;" ::"l"(ptr), "r"(value));
 }
@@ -386,12 +391,18 @@ __forceinline__ __device__ int warp_reduce_sum(int value) {
 }
 
 __forceinline__ __device__ float half_warp_reduce_max(float value) {
-    auto mask = __activemask();
-    // The mask be in `{0xffffffff, 0xffff}`
-    value = max(value, __shfl_xor_sync(mask, value, 8));
-    value = max(value, __shfl_xor_sync(mask, value, 4));
-    value = max(value, __shfl_xor_sync(mask, value, 2));
-    value = max(value, __shfl_xor_sync(mask, value, 1));
+    value = max(value, __shfl_xor_sync(0xffffffff, value, 8));
+    value = max(value, __shfl_xor_sync(0xffffffff, value, 4));
+    value = max(value, __shfl_xor_sync(0xffffffff, value, 2));
+    value = max(value, __shfl_xor_sync(0xffffffff, value, 1));
+    return value;
+}
+
+__forceinline__ __device__ float half_warp_reduce_min(float value) {
+    value = min(value, __shfl_xor_sync(0xffffffff, value, 8));
+    value = min(value, __shfl_xor_sync(0xffffffff, value, 4));
+    value = min(value, __shfl_xor_sync(0xffffffff, value, 2));
+    value = min(value, __shfl_xor_sync(0xffffffff, value, 1));
     return value;
 }
 
