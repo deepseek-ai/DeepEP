@@ -15,7 +15,7 @@ def test_main(num_tokens: int, hidden: int, num_experts: int, num_topk: int,
     assert num_experts % num_ranks == 0
     num_local_experts = num_experts // num_ranks
 
-    # NOTES: the integers greater than 256 exceeds the BF16 precision limit
+    # NOTES: the integers greater than 256 exceed the BF16 precision limit
     rank_offset = 128
     assert num_ranks - rank_offset < 257, 'Too many ranks (exceeding test precision limit)'
 
