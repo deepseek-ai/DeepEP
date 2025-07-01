@@ -392,12 +392,14 @@ compress_logfmt(void* rdma_recv_x, void* rdma_send_x,
     const auto sm_id = static_cast<int>(blockIdx.x);
     const auto num_sms = static_cast<int>(gridDim.x);
     const auto thread_id = static_cast<int>(threadIdx.x);
-    const auto warp_id = thread_id / 32, lane_id = get_lane_id();
+    const auto warp_id = __shfl_sync(0xffffffff, thread_id / 32, 0), lane_id = get_lane_id();
     const auto num_local_experts = num_experts / num_ranks;
     constexpr int kNumWarpsPerGroup = 2;
+    EP_STATIC_ASSERT(kNumWarpsPerGroup == 2, "Invalid kNumWarpsPerGroup");
     const auto warp_group_id = warp_id / kNumWarpsPerGroup;
     const auto sub_warp_id = warp_id % kNumWarpsPerGroup;
     int token_idx = warp_group_id * num_sms + sm_id;
+    const auto lane_group_id = lane_id / 16, sub_lane_id = lane_id % 16;
 
     // Data type staffs
     constexpr int kNumElemsPerInt4 = sizeof(int4) / sizeof(nv_bfloat16);
@@ -447,32 +449,48 @@ compress_logfmt(void* rdma_recv_x, void* rdma_send_x,
             const auto rdma_send_x_vec = static_cast<uint8_t*>(rdma_send_x) +
                     local_expert_idx * num_ranks * num_max_dispatch_tokens_per_rank * num_bytes_per_slot;
 
-            const auto x_int4 = local_x + token_idx * hidden_bf16_int4 + warp_id % 2 * (hidden_bf16_int4 / 2);
-            const auto rdma_send_type_row = reinterpret_cast<int*>(rdma_send_x_vec + token_idx * num_bytes_per_slot) + warp_id % 2 * (hidden_bf16_int4 / 2);
+            const auto x_int4 = local_x + token_idx * hidden_bf16_int4;
+            const auto rdma_send_type_row = reinterpret_cast<int*>(rdma_send_x_vec + token_idx * num_bytes_per_slot);
             const auto rdma_send_x_vec_row = reinterpret_cast<uint8_t*>(rdma_send_type_row);
 
             const auto buf_ptr = reinterpret_cast<int64_t>(rdma_send_x_vec_row);
             const auto dst_ptr = reinterpret_cast<uint64_t>(rdma_recv_x) + (global_expert_idx * num_max_dispatch_tokens_per_rank + src_idx) * num_bytes_per_slot;
-            const auto cpy_src_int4_ptr = x_int4;
-            const auto cpy_dst_int64_ptr = reinterpret_cast<int64_t*>(rank != dst_rank ? buf_ptr : dst_ptr);
-            int dst_int64_ptr_offset = 1 * sizeof(int4) / sizeof(int64_t);
-            uint64_t half_warp_flag = 0;
+            const auto cpy_src_int4_ptr = x_int4 + hidden_bf16_int4 / kNumWarpsPerGroup * sub_warp_id;
+            const auto cpy_dst_int64_ptr = reinterpret_cast<int64_t*>(rank == dst_rank ? dst_ptr : buf_ptr);
+
+            const int initial_dst_int64_ptr_offset = sizeof(int4) / sizeof(int64_t) + hidden_bf16_int4 / kNumWarpsPerGroup * (sizeof(int4) / sizeof(int64_t)) * sub_warp_id;
+
+            constexpr int kPrefetchCount = 3;
+            constexpr float kThreshold = 1.0f;
+            constexpr float kLogThreshold = 1;//10.0f; // __logf(kThreshold)
+            constexpr float kMinClip = 22.1807097779182499013514278f; // `== log(2 ^ (2 ^ 5))`
+            constexpr int kNumBits = 10;
+            constexpr unsigned int kNumValues = 1 << (kNumBits - 1);
+            EP_STATIC_ASSERT(kHidden % (kNumWarpsPerGroup * kNumElemsPerInt4 * 32) == 0 and kNumElemsPerInt4 == 8, "Invalid hidden");
+            EP_STATIC_ASSERT(kHidden / (kNumWarpsPerGroup * kNumElemsPerInt4 * 32) >= kPrefetchCount, "Invalid hidden");
+            EP_STATIC_ASSERT(kHidden <= 128 * 64, "Invalid hidden");
+            EP_STATIC_ASSERT(kNumElemsPerInt4 * kNumBits == (sizeof(int64_t) + sizeof(int16_t)) * 8, "Invalid log format");
+
             #pragma unroll
-            for (int i = lane_id, group = 0; i < hidden_bf16_int4 / 2; i += 32, group += 2) {
+            for (int k = 0; k < kPrefetchCount; k++) {
+                asm volatile("prefetch.global.L1 [%0];" :: "l"(cpy_src_int4_ptr + (lane_id + k * 32)));
+            }
+            int prefetch_i = lane_id + kPrefetchCount * 32;
+
+            int half_warp_flag = 0, half_warp_compressed_cnt = 0;
+            int log_a_store_idx = 0;
+            int my_log_a_store_idx;
+            float my_log_amax, my_log_amin;
+
+            #pragma unroll
+            for (int i = lane_id, channel_group_id_in_segment = lane_group_id; i < hidden_bf16_int4 / kNumWarpsPerGroup; i += 32, channel_group_id_in_segment += 2) {
                 // Read
                 auto int4_value = ld_nc_global(cpy_src_int4_ptr + i);
-                if (i + 32 < hidden_bf16_int4 / 2)
-                asm volatile("prefetch.global.L1 [%0];" :  : "l"(cpy_src_int4_ptr + i + 32));
+                if (prefetch_i < hidden_bf16_int4 / kNumWarpsPerGroup) {
+                    asm volatile("prefetch.global.L1 [%0];" :: "l"(cpy_src_int4_ptr + (prefetch_i)));
+                    prefetch_i += 32;
+                }
                 auto bf16_values = reinterpret_cast<nv_bfloat16*>(&int4_value);
-
-                constexpr float kThreshold = 1.0f;
-                constexpr float kLogThreshold = -10.0f; // __logf(kThreshold)
-                constexpr float kMinClip = 22.1807097779182499013514278f; // `== log(2 ^ (2 ^ 5))`
-                constexpr int kNumBits = 10;
-                constexpr unsigned int kNumValues = 1 << (kNumBits - 1);
-                EP_STATIC_ASSERT(kHidden % (kNumElemsPerInt4 * 32) == 0 and kNumElemsPerInt4 == 8, "Invalid hidden");
-                EP_STATIC_ASSERT(kHidden <= 128 * 64, "Invalid hidden");
-                EP_STATIC_ASSERT(kNumElemsPerInt4 * kNumBits == (sizeof(int64_t) + sizeof(int16_t)) * 8, "Invalid log format");
 
                 // Local log amax
                 float log_abs_values[kNumElemsPerInt4], log_amax, log_amin;
@@ -488,15 +506,16 @@ compress_logfmt(void* rdma_recv_x, void* rdma_send_x,
                 log_amax = half_warp_reduce_max(log_amax);
                 log_amin = fmaxf(half_warp_reduce_min(log_amin), log_amax - kMinClip);
 
-                int peer_half_warp_int64_ptr_offset = __shfl_xor_sync(0xffffffff, log_amax <= kLogThreshold ? 10 * 2 : 16 * 2, 16);
+                int is_peer_half_warp_compressed = __shfl_xor_sync(0xffffffff, log_amax <= kLogThreshold, 16);
                 // Use LogFMT only with `amax <= kThreshold` (maybe not all half-warps)
                 if (log_amax <= kLogThreshold) {
-                    const auto step = (log_amax - log_amin) / static_cast<float>(kNumValues - 2);
-                    const auto rounding = 2.0f - (__logf((1.0f + __expf(step)) / 2.0f) / step);
+                    //const auto step = (log_amax - log_amin) / static_cast<float>(kNumValues - 2);
+                    const auto inv_step = static_cast<float>(kNumValues - 2) / (log_amax - log_amin);
+                    const auto rounding = 1.5f;//2.0f - __logf((1.0f + __expf(__fdividef(1.0f, inv_step))) / 2.0f) * inv_step;
 
                     // Encode
                     auto encode = [=](const nv_bfloat16& value, const float& log_abs_value) -> unsigned int {
-                        const auto encoded = static_cast<unsigned int>(fmaxf((log_abs_value - log_amin) / step + rounding, 0.0f));
+                        const auto encoded = static_cast<unsigned int>(fmaxf((log_abs_value - log_amin) * inv_step + rounding, 0.0f));
                         return value < static_cast<nv_bfloat16>(0) ? kNumValues + encoded : encoded;
                     };
                     unsigned int out[kNumElemsPerInt4];
@@ -509,37 +528,35 @@ compress_logfmt(void* rdma_recv_x, void* rdma_send_x,
                     out32[1] = (out[4] << (32 - kNumBits * 1)) + (out[5] << (32 - kNumBits * 2)) + (out[3] >> (10 - (32 - kNumBits * 3))) + (out[6] << (32 - kNumBits * 3));
                     uint16_t out16 = ((out[3] & 0b0011111100) << (10 - (32 - kNumBits * 3))) + out[7];
 
-                    if (lane_id >= 16) {
-                        dst_int64_ptr_offset += peer_half_warp_int64_ptr_offset;
-                        st_na_global(cpy_dst_int64_ptr + (dst_int64_ptr_offset + (lane_id - 16)), *reinterpret_cast<const int64_t*>(out32));
-                        st_na_global(reinterpret_cast<uint16_t*>(cpy_dst_int64_ptr + (dst_int64_ptr_offset + 16)) + (lane_id - 16), out16);
-                        dst_int64_ptr_offset += 10 * 2;
-                    } else {
-                        st_na_global(cpy_dst_int64_ptr + (dst_int64_ptr_offset + lane_id), *reinterpret_cast<const int64_t*>(out32));
-                        st_na_global(reinterpret_cast<uint16_t*>(cpy_dst_int64_ptr + (dst_int64_ptr_offset + 16)) + lane_id, out16);
-                        dst_int64_ptr_offset += 10 * 2 + peer_half_warp_int64_ptr_offset;
+                    log_a_store_idx += lane_group_id * is_peer_half_warp_compressed;
+                    int dst_int64_ptr_offset = initial_dst_int64_ptr_offset + channel_group_id_in_segment * (16 * 2) - log_a_store_idx * (16 * 2 - 10 * 2);
+                    st_na_global(cpy_dst_int64_ptr + (dst_int64_ptr_offset + sub_lane_id), *reinterpret_cast<const int64_t*>(out32));
+                    st_na_global(reinterpret_cast<uint16_t*>(cpy_dst_int64_ptr) + ((dst_int64_ptr_offset + 16) * (sizeof(int64_t) / sizeof(uint16_t)) + sub_lane_id), out16);
+                    if (sub_lane_id == half_warp_compressed_cnt++) {
+                        my_log_a_store_idx = log_a_store_idx;
+                        my_log_amax = log_amax;
+                        my_log_amin = log_amin;
                     }
+                    log_a_store_idx += 1 + (1 - lane_group_id) * is_peer_half_warp_compressed;
                 } else {
-                    if (lane_id >= 16) {
-                        dst_int64_ptr_offset += peer_half_warp_int64_ptr_offset;
-                        st_na_global(reinterpret_cast<int4*>(cpy_dst_int64_ptr + dst_int64_ptr_offset) + (lane_id - 16), int4_value);
-                        dst_int64_ptr_offset += 16 * 2;
-                        half_warp_flag += 1ull << (group + 1);
-                    } else {
-                        st_na_global(reinterpret_cast<int4*>(cpy_dst_int64_ptr + dst_int64_ptr_offset) + lane_id, int4_value);
-                        dst_int64_ptr_offset += 16 * 2 + peer_half_warp_int64_ptr_offset;
-                        half_warp_flag += 1ull << group;
-                    }
+                    log_a_store_idx += lane_group_id * is_peer_half_warp_compressed;
+                    int dst_int64_ptr_offset = initial_dst_int64_ptr_offset + channel_group_id_in_segment * (16 * 2) - log_a_store_idx * (16 * 2 - 10 * 2);
+                    st_na_global(reinterpret_cast<int4*>(cpy_dst_int64_ptr) + (dst_int64_ptr_offset / (sizeof(int4) / sizeof(int64_t)) + sub_lane_id), int4_value);
+                    log_a_store_idx += 0 + (1 - lane_group_id) * is_peer_half_warp_compressed;
+                    half_warp_flag += 1 << channel_group_id_in_segment;
                 }
-                __syncwarp();
             }
-            uint64_t first_half_warp_flag = __shfl_sync(0xffffffff, half_warp_flag, 0);
+            int first_half_warp_flag = __shfl_sync(0xffffffff, half_warp_flag, 0);
+            if (sub_lane_id < half_warp_compressed_cnt) {
+                int dst_int64_ptr_offset = initial_dst_int64_ptr_offset + hidden_bf16_int4 / kNumWarpsPerGroup * (sizeof(int4) / sizeof(int64_t)) - log_a_store_idx * (16 * 2 - 10 * 2);
+                st_na_global(cpy_dst_int64_ptr + (dst_int64_ptr_offset + my_log_a_store_idx), pack2<float, int64_t>(my_log_amax, my_log_amin));
+            }
             if (lane_id == 32 - 1) {
-                st_na_global(cpy_dst_int64_ptr + 0, static_cast<int64_t>(half_warp_flag + first_half_warp_flag));
+                st_na_global(reinterpret_cast<int*>(cpy_dst_int64_ptr) + sub_warp_id, half_warp_flag + first_half_warp_flag);
             }
-            ;
-            token_idx += (1024 / 32 / 2) * num_sms;
-            new_token_idx += (1024 / 32 / 2) * num_sms;
+
+            token_idx += (1024 / 32 / kNumWarpsPerGroup) * num_sms;
+            new_token_idx += (1024 / 32 / kNumWarpsPerGroup) * num_sms;
         }
     }
 }
@@ -642,29 +659,41 @@ combine(void* combined_x,
             const auto buf_ptr = reinterpret_cast<int64_t>(rdma_send_x_vec_row);
             const auto dst_ptr = reinterpret_cast<uint64_t>(rdma_recv_x) + (global_expert_idx * num_max_dispatch_tokens_per_rank + src_idx) * num_bytes_per_slot;
             const auto dst_p2p_ptr = nvshmemi_get_p2p_ptr(dst_ptr, rank, dst_rank);
-            size_t buf_bytes = hidden * sizeof(nv_bfloat16);
+            size_t buf_bytes[2], buf_bytes_int4[2];
             if constexpr (kUseLogFMT) {
                 constexpr int kNumBits = 10;
-                if (lane_id == 0) {
-                    uint64_t flag = ld_nc_global(reinterpret_cast<const int64_t*>(buf_ptr));
-                    buf_bytes =num_bytes_per_slot;//+= sizeof(int4) - __popcll(flag) * (128 * sizeof(nv_bfloat16) - (128 * kNumBits / 8 + 2 * sizeof(nv_bfloat16)));
+                int uncompressed_cnt;
+                if (lane_id < 2) {
+                    unsigned int flag = ld_nc_global(reinterpret_cast<const int*>(rank == dst_rank ? dst_ptr : buf_ptr) + lane_id);
+                    uncompressed_cnt = __popc(flag);
                 }
-                buf_bytes = __shfl_sync(0xffffffff, buf_bytes, 0);
+                buf_bytes[0] = __shfl_sync(0xffffffff, uncompressed_cnt, 0) * (128 * sizeof(nv_bfloat16) - (128 * kNumBits / 8 + 2 * sizeof(float))) + (kHidden / 2 * kNumBits / 8 + sizeof(int4));
+                buf_bytes[1] = __shfl_sync(0xffffffff, uncompressed_cnt, 1) * (128 * sizeof(nv_bfloat16) - (128 * kNumBits / 8 + 2 * sizeof(float))) + kHidden / 2 * kNumBits / 8;
+                #pragma unroll
+                for (int i = 0; i < 2; i++) {
+                    buf_bytes_int4[i] = (buf_bytes[i] + sizeof(int4) - 1) / sizeof(int4);
+                }
             }
             if (dst_p2p_ptr == 0) {
                 const auto buf_int4_ptr = reinterpret_cast<int4*>(buf_ptr);
                 if constexpr (not kUseLogFMT) {
                     if (not zero_copy)
                         UNROLLED_WARP_COPY(7, lane_id, hidden_bf16_int4, buf_int4_ptr, x_int4, ld_nc_global, st_na_global);
+                    nvshmemi_ibgda_put_nbi_warp(dst_ptr, buf_ptr, hidden * sizeof(nv_bfloat16), dst_rank, local_expert_idx, lane_id, token_idx - offset);
+                } else {
+                    nvshmemi_ibgda_put_nbi_warp(dst_ptr, buf_ptr, buf_bytes[0], dst_rank, local_expert_idx, lane_id, 0);
+                    nvshmemi_ibgda_put_nbi_warp(dst_ptr + buf_bytes_int4[0] * sizeof(int4), buf_ptr + (kHidden / 2 * sizeof(nv_bfloat16) + sizeof(int4)), buf_bytes[1], dst_rank, local_expert_idx, lane_id, token_idx - offset);
                 }
-                nvshmemi_ibgda_put_nbi_warp(dst_ptr, buf_ptr, buf_bytes, dst_rank, local_expert_idx, lane_id, token_idx - offset);
-            } else if constexpr (not kUseLogFMT) {
-                const auto dst_int4_ptr = reinterpret_cast<int4*>(dst_p2p_ptr);
-                UNROLLED_WARP_COPY(7, lane_id, hidden_bf16_int4, dst_int4_ptr, x_int4, ld_nc_global, st_na_global);
             } else {
                 const auto dst_int4_ptr = reinterpret_cast<int4*>(dst_p2p_ptr);
-                UNROLLED_WARP_COPY(7, lane_id, hidden_bf16_int4 / 16 * 10 + 1, dst_int4_ptr, reinterpret_cast<int4*>(buf_ptr), ld_nc_global, st_na_global);
-                //EP_DEVICE_ASSERT(dst_p2p_ptr == dst_ptr);
+                if constexpr (not kUseLogFMT) {
+                    UNROLLED_WARP_COPY(7, lane_id, hidden_bf16_int4, dst_int4_ptr, x_int4, ld_nc_global, st_na_global);
+                } else {
+                    if (rank != dst_rank) {
+                        UNROLLED_WARP_COPY(7, lane_id, buf_bytes_int4[0], dst_int4_ptr, reinterpret_cast<int4*>(buf_ptr), ld_nc_global, st_na_global);
+                        UNROLLED_WARP_COPY(7, lane_id, buf_bytes_int4[1], dst_int4_ptr + buf_bytes_int4[0], reinterpret_cast<int4*>(buf_ptr + (kHidden / 2 * sizeof(nv_bfloat16) + sizeof(int4))), ld_nc_global, st_na_global);
+                    }
+                }
             }
         }
 
@@ -689,6 +718,12 @@ combine(void* combined_x,
     LOW_LATENCY_COMBINE_RECV:
     if ((phases & LOW_LATENCY_RECV_PHASE) == 0)
         return;
+
+    const auto thread_group_id = thread_id / static_cast<int>(hidden_bf16_int4 / 2);
+    const auto sub_thread_id = thread_id % static_cast<int>(hidden_bf16_int4 / 2);
+    const auto channel_group_id_in_segment = sub_thread_id / (128 / kNumElemsPerInt4);
+    //const auto thread_id_in_channel_group = sub_thread_id % (128 / kNumElemsPerInt4);
+    const unsigned int channel_group_mask = (1u << channel_group_id_in_segment) - 1u;
 
     // Wait all ranks to arrive
     if (responsible_expert_idx < num_experts) {
@@ -718,6 +753,13 @@ combine(void* combined_x,
             for (int i = 0; i < num_topk; ++ i) if (reg_topk_idx[i] >= 0) {
                 // Read from sources
                 auto rdma_buffer_type = reinterpret_cast<const int*>(static_cast<uint8_t*>(rdma_recv_x) + (reg_topk_idx[i] * num_max_dispatch_tokens_per_rank + token_idx) * num_bytes_per_slot);
+                int flag;
+                if (lane_id == 0) {
+                    flag = ld_nc_global(rdma_buffer_type + thread_group_id);
+                }
+                flag = __shfl_sync(0xffffffff, flag, 0);
+                int prefix_uncompressed_cnt = __popc(flag & channel_group_mask);
+                //int offset = 
                 auto rdma_buffer_row = reinterpret_cast<const uint8_t*>(rdma_buffer_type);
 
                 // Reduce
