@@ -499,7 +499,7 @@ combine(void* combined_x,
     cg::this_grid().sync();
 
     // Reduce tokens
-    EP_DEVICE_ASSERT(num_topk <= 32 and hidden_bf16_int4 <= 2 * num_threads);
+    EP_DEVICE_ASSERT(num_topk <= 32 and hidden_bf16_int4 <= 1024);
     EP_STATIC_ASSERT(kHidden % (32 * kNumElemsPerInt4) == 0, "Invalid vectorization");
     for (int k = thread_id; k < hidden_bf16_int4; k += num_threads) {
         for (int token_idx = sm_id; token_idx < num_combined_tokens; token_idx += num_sms) {
