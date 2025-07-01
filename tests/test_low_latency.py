@@ -145,15 +145,15 @@ def test_main(num_tokens: int, hidden: int, num_experts: int, num_topk: int,
     # Separate profiling
     for return_recv_hook in (False, True):
         group.barrier()
-        dispatch_t, combine_t = bench_kineto(partial(test_func, return_recv_hook=return_recv_hook),
-                                             kernel_names=('dispatch', 'combine'), barrier_comm_profiling=True,
-                                             suppress_kineto_output=True)
+        dispatch_t, combine_t, compress_logfmt_t = bench_kineto(partial(test_func, return_recv_hook=return_recv_hook),
+                                                                kernel_names=('dispatch', 'combine', 'compress_logfmt'), barrier_comm_profiling=True,
+                                                                suppress_kineto_output=True)
         if not return_recv_hook:
             print(f'[rank {rank}] Dispatch bandwidth: {num_dispatch_comm_bytes / 1e9 / dispatch_t:.2f} GB/s, avg_t={dispatch_t * 1e6:.2f} us | '
-                  f'Combine bandwidth: {num_combine_comm_bytes / 1e9 / combine_t:.2f} GB/s, avg_t={combine_t * 1e6:.2f} us', flush=True)
+                  f'Combine bandwidth: {num_combine_comm_bytes / 1e9 / combine_t:.2f} GB/s, avg_t={combine_t * 1e6:.2f} us Compress {compress_logfmt_t * 1e6:.2f} us', flush=True)
         else:
             print(f'[rank {rank}] Dispatch send/recv time: {dispatch_t * 2 * 1e6:.2f} us | '
-                  f'Combine send/recv time: {combine_t * 2 * 1e6:.2f} us', flush=True)
+                  f'Combine send/recv time: {combine_t * 2 * 1e6:.2f} us Compress {compress_logfmt_t * 1e6:.2f} us', flush=True)
 
     return hash_value
 

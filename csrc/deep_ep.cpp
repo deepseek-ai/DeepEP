@@ -1184,7 +1184,7 @@ Buffer::low_latency_dispatch(const torch::Tensor& x, const torch::Tensor& topk_i
 
 std::tuple<torch::Tensor, std::optional<EventHandle>, std::optional<std::function<void()>>>
 Buffer::low_latency_combine(const torch::Tensor& x, const torch::Tensor& topk_idx, const torch::Tensor& topk_weights,
-                            const torch::Tensor& src_info, const torch::Tensor& layout_range,
+                            const torch::Tensor& packed_recv_count, const torch::Tensor& src_info, const torch::Tensor& layout_range,
                             int num_max_dispatch_tokens_per_rank, int num_experts,
                             bool use_logfmt, bool zero_copy, bool async, bool return_recv_hook,
                             const std::optional<torch::Tensor>& out) {
@@ -1202,6 +1202,8 @@ Buffer::low_latency_combine(const torch::Tensor& x, const torch::Tensor& topk_id
     EP_HOST_ASSERT(topk_weights.dim() == 2 and topk_weights.is_contiguous());
     EP_HOST_ASSERT(topk_weights.size(0) <= num_max_dispatch_tokens_per_rank);
     EP_HOST_ASSERT(topk_weights.scalar_type() == torch::kFloat32);
+    EP_HOST_ASSERT(packed_recv_count.dim() == 1 and packed_recv_count.is_contiguous());
+    EP_HOST_ASSERT(packed_recv_count.scalar_type() == torch::kInt32 and packed_recv_count.size(0) == num_experts / num_ranks);
     EP_HOST_ASSERT(src_info.dim() == 2 and src_info.is_contiguous());
     EP_HOST_ASSERT(src_info.scalar_type() == torch::kInt32 and x.size(0) == src_info.size(0));
     EP_HOST_ASSERT(layout_range.dim() == 2 and layout_range.is_contiguous());
@@ -1239,7 +1241,13 @@ Buffer::low_latency_combine(const torch::Tensor& x, const torch::Tensor& topk_id
     // Kernel launch
     auto next_clean_meta = next_buffer.clean_meta();
     if (use_logfmt) {
-        ;
+        internode_ll::compress_logfmt(buffer.combine_rdma_recv_data_buffer, buffer.combine_rdma_send_buffer,
+                                      x.data_ptr(),
+                                      packed_recv_count.data_ptr<int32_t>(), src_info.data_ptr<int>(), layout_range.data_ptr<int64_t>(),
+                                      hidden, num_max_dispatch_tokens_per_rank,
+                                      num_experts, rank, num_ranks,
+                                      num_device_sms,
+                                      launch_stream);
     }
     auto launcher = [=](int phases) {
         internode_ll::combine(combined_x.data_ptr(),

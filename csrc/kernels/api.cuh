@@ -152,6 +152,14 @@ void dispatch(void* packed_recv_x, void* packed_recv_x_scales,
               void* workspace, int num_device_sms,
               cudaStream_t stream, int phases);
 
+void compress_logfmt(void* rdma_recv_x, void* rdma_send_x,
+                     const void* x,
+                     const int32_t* packed_recv_count, const int* src_info, const int64_t* layout_range,
+                     int hidden, int num_max_dispatch_tokens_per_rank,
+                     int num_experts, int rank, int num_ranks,
+                     int num_device_sms,
+                     cudaStream_t stream);
+
 void combine(void* combined_x,
              void* rdma_recv_x, int* rdma_recv_flag, void* rdma_send_x,
              const void* x, const int64_t* topk_idx, const float* topk_weights,
