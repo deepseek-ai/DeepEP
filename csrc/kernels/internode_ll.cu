@@ -462,7 +462,7 @@ compress_logfmt(void* rdma_recv_x, void* rdma_send_x,
 
             constexpr int kPrefetchCount = 3;
             constexpr float kThreshold = 1.0f;
-            constexpr float kLogThreshold = 1;//10.0f; // __logf(kThreshold)
+            constexpr float kLogThreshold = 10.0f; // __logf(kThreshold)
             constexpr float kMinClip = 22.1807097779182499013514278f; // `== log(2 ^ (2 ^ 5))`
             constexpr int kNumBits = 10;
             constexpr unsigned int kNumValues = 1 << (kNumBits - 1);
@@ -682,7 +682,7 @@ combine(void* combined_x,
                     nvshmemi_ibgda_put_nbi_warp(dst_ptr, buf_ptr, hidden * sizeof(nv_bfloat16), dst_rank, local_expert_idx, lane_id, token_idx - offset);
                 } else {
                     nvshmemi_ibgda_put_nbi_warp(dst_ptr, buf_ptr, buf_bytes[0], dst_rank, local_expert_idx, lane_id, 0);
-                    nvshmemi_ibgda_put_nbi_warp(dst_ptr + buf_bytes_int4[0] * sizeof(int4), buf_ptr + (kHidden / 2 * sizeof(nv_bfloat16) + sizeof(int4)), buf_bytes[1], dst_rank, local_expert_idx, lane_id, token_idx - offset);
+                    nvshmemi_ibgda_put_nbi_warp(dst_ptr + (kHidden / 2 * sizeof(nv_bfloat16) + sizeof(int4)), buf_ptr + (kHidden / 2 * sizeof(nv_bfloat16) + sizeof(int4)), buf_bytes[1], dst_rank, local_expert_idx, lane_id, token_idx - offset);
                 }
             } else {
                 const auto dst_int4_ptr = reinterpret_cast<int4*>(dst_p2p_ptr);
@@ -691,7 +691,7 @@ combine(void* combined_x,
                 } else {
                     if (rank != dst_rank) {
                         UNROLLED_WARP_COPY(7, lane_id, buf_bytes_int4[0], dst_int4_ptr, reinterpret_cast<int4*>(buf_ptr), ld_nc_global, st_na_global);
-                        UNROLLED_WARP_COPY(7, lane_id, buf_bytes_int4[1], dst_int4_ptr + buf_bytes_int4[0], reinterpret_cast<int4*>(buf_ptr + (kHidden / 2 * sizeof(nv_bfloat16) + sizeof(int4))), ld_nc_global, st_na_global);
+                        UNROLLED_WARP_COPY(7, lane_id, buf_bytes_int4[1], dst_int4_ptr + (kHidden / 2 * sizeof(nv_bfloat16) + sizeof(int4)) / sizeof(int4), reinterpret_cast<int4*>(buf_ptr + (kHidden / 2 * sizeof(nv_bfloat16) + sizeof(int4))), ld_nc_global, st_na_global);
                     }
                 }
             }
@@ -722,8 +722,12 @@ combine(void* combined_x,
     const auto thread_group_id = thread_id / static_cast<int>(hidden_bf16_int4 / 2);
     const auto sub_thread_id = thread_id % static_cast<int>(hidden_bf16_int4 / 2);
     const auto channel_group_id_in_segment = sub_thread_id / (128 / kNumElemsPerInt4);
-    //const auto thread_id_in_channel_group = sub_thread_id % (128 / kNumElemsPerInt4);
-    const unsigned int channel_group_mask = (1u << channel_group_id_in_segment) - 1u;
+    const auto thread_id_in_channel_group = sub_thread_id % (128 / kNumElemsPerInt4);
+    const int base_int64_ptr_offset = sizeof(int4) / sizeof(int64_t) + thread_group_id * ((kHidden / 2 * sizeof(nv_bfloat16)) / sizeof(int64_t));
+    const int data_base_int64_ptr_offset = base_int64_ptr_offset + channel_group_id_in_segment * (10 * 2);
+    const int ainfo_base_int64_ptr_offset = base_int64_ptr_offset + (kHidden / 2 / 128) * (10 * 2);
+    const unsigned int channel_group_mask = (1u << channel_group_id_in_segment);
+    const unsigned int prefix_channel_group_mask = channel_group_mask - 1u;
 
     // Wait all ranks to arrive
     if (responsible_expert_idx < num_experts) {
@@ -758,16 +762,71 @@ combine(void* combined_x,
                     flag = ld_nc_global(rdma_buffer_type + thread_group_id);
                 }
                 flag = __shfl_sync(0xffffffff, flag, 0);
-                int prefix_uncompressed_cnt = __popc(flag & channel_group_mask);
-                //int offset = 
-                auto rdma_buffer_row = reinterpret_cast<const uint8_t*>(rdma_buffer_type);
+                int prefix_uncompressed_cnt = __popc(flag & prefix_channel_group_mask);
+                int data_int64_ptr_offset = data_base_int64_ptr_offset + prefix_uncompressed_cnt * (16 * 2 - 10 * 2);
+                if (flag & channel_group_mask) {
+                    auto rdma_buffer_row = reinterpret_cast<const int4*>(rdma_buffer_type) + data_int64_ptr_offset / (sizeof(int4) / sizeof(int64_t));
 
-                // Reduce
-                auto x_vec = ld_nc_global(reinterpret_cast<const int4*>(rdma_buffer_row) + thread_id);
-                const auto x_bf16 = reinterpret_cast<nv_bfloat16*>(&x_vec);
-                #pragma unroll
-                for (int j = 0; j < kNumElemsPerInt4; ++ j)
-                    combined_values[j] += static_cast<float>(x_bf16[j]) * reg_topk_weights[i];
+                    // Reduce
+                    auto x_vec = ld_nc_global(rdma_buffer_row + thread_id_in_channel_group);
+                    const auto x_bf16 = reinterpret_cast<nv_bfloat16*>(&x_vec);
+                    #pragma unroll
+                    for (int j = 0; j < kNumElemsPerInt4; ++ j)
+                        combined_values[j] += static_cast<float>(x_bf16[j]) * reg_topk_weights[i];
+                } else {
+                    auto rdma_buffer_row = reinterpret_cast<const int64_t*>(rdma_buffer_type) + data_int64_ptr_offset;
+
+                    // Reduce
+                    auto x_vec = ld_nc_global(rdma_buffer_row + thread_id_in_channel_group);
+                    const auto x_uint32 = reinterpret_cast<uint32_t*>(&x_vec);
+
+                    float ainfo;
+                    if (thread_id_in_channel_group < 2) {
+                        int uncompressed_cnt = __popc(flag);
+                        int ainfo_int64_ptr_offset = ainfo_base_int64_ptr_offset + uncompressed_cnt * (16 * 2 - 10 * 2);
+                        ainfo = ld_nc_global(reinterpret_cast<const float*>(rdma_buffer_type) + (ainfo_int64_ptr_offset * (sizeof(int64_t) / sizeof(float) + thread_id_in_channel_group)));
+                    }
+
+                    constexpr int kNumBits = 10;
+                    constexpr unsigned int kNumValues = 1 << (kNumBits - 1);
+
+                    unsigned int out[kNumElemsPerInt4];
+                    out[0] = (x_uint32[0] >> (kNumBits * 2));// & ((1u << kNumBits) - 1);
+                    out[1] = (x_uint32[0] >> kNumBits);// & ((1u << kNumBits) - 1);
+                    out[2] = x_uint32[0];// & ((1u << kNumBits) - 1);
+                    out[4] = x_uint32[1] >> (32 - kNumBits * 1);
+                    out[5] = (x_uint32[1] >> (32 - kNumBits * 2));// & ((1u << kNumBits) - 1);
+                    out[6] = (x_uint32[1] >> (32 - kNumBits * 3));// & ((1u << kNumBits) - 1);
+
+                    float log_amax = __shfl_sync(0xffffffff, ainfo, 0);
+                    float log_amin = __shfl_sync(0xffffffff, ainfo, 1);
+
+                    const auto step = (log_amax - log_amin) / static_cast<float>(kNumValues - 2);
+                    //const auto inv_step = static_cast<float>(kNumValues - 2) / (log_amax - log_amin);
+                    const auto rounding = 1.5f;//2.0f - __logf((1.0f + __expf(__fdividef(1.0f, inv_step))) / 2.0f) * inv_step;
+
+                    // Decode
+                    auto decode = [=](const uint32_t& out) -> float {
+                        uint32_t y = out & (kNumValues - 1);
+                        float abs_value;
+                        if (log_amax == log_amin) {
+                            abs_value = __expf(log_amax);//FIX
+                        } else {
+                            abs_value = y != 0 ? __expf((y - 1) * step + log_amin) : 0;
+                        }
+                        return (out & kNumValues) ? -abs_value : abs_value;
+                    };
+
+                    // Reduce
+                    auto x_vec = ld_nc_global(reinterpret_cast<const uint16_t*>(rdma_buffer_type) + (data_int64_ptr_offset / (sizeof(int4) / sizeof(int64_t)) + thread_id_in_channel_group);
+
+                    combined_values[0] += decode(out[0]) * reg_topk_weights[0];
+                    combined_values[1] += decode(out[1]) * reg_topk_weights[1];
+                    combined_values[2] += decode(out[2]) * reg_topk_weights[2];
+                    combined_values[4] += decode(out[4]) * reg_topk_weights[4];
+                    combined_values[5] += decode(out[5]) * reg_topk_weights[5];
+                    combined_values[6] += decode(out[6]) * reg_topk_weights[6];
+                }
             }
 
             // Write results
