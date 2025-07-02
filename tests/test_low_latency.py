@@ -160,12 +160,12 @@ def test_main(num_tokens: int, hidden: int, num_experts: int, num_topk: int,
 
 
 # noinspection PyUnboundLocalVariable
-def test_loop(local_rank: int, num_local_ranks: int):
+def test_loop(local_rank: int, num_local_ranks: int, args):
     rank, num_ranks, group = init_dist(local_rank, num_local_ranks)
-    num_tokens = int(os.environ.get('EP_TEST_NUM_TOKENS', '128'))
-    hidden = int(os.environ.get('EP_TEST_HIDDEN', '7168'))
-    num_topk = int(os.environ.get('EP_TEST_NUM_TOPK', '8'))
-    num_experts = int(os.environ.get('EP_TEST_NUM_EXPERTS', '288'))
+    num_tokens = args.num_tokens
+    hidden = args.hidden
+    num_topk = args.num_topk
+    num_experts = args.num_experts
 
     num_rdma_bytes = deep_ep.Buffer.get_low_latency_rdma_size_hint(num_tokens, hidden, num_ranks, num_experts)
     if local_rank == 0:
@@ -193,7 +193,15 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Test low latency expert parallel')
     parser.add_argument('--num-processes', type=int, default=8,
                        help='Number of processes to spawn (default: 8)')
+    parser.add_argument('--num-tokens', type=int, default=128,
+                       help='Number of tokens (default: 128)')
+    parser.add_argument('--hidden', type=int, default=7168,
+                       help='Hidden dimension size (default: 7168)')
+    parser.add_argument('--num-topk', type=int, default=8,
+                       help='Number of top-k experts (default: 8)')
+    parser.add_argument('--num-experts', type=int, default=288,
+                       help='Number of experts (default: 288)')
     args = parser.parse_args()
 
     num_processes = args.num_processes
-    torch.multiprocessing.spawn(test_loop, args=(num_processes,), nprocs=num_processes)
+    torch.multiprocessing.spawn(test_loop, args=(num_processes, args), nprocs=num_processes)
