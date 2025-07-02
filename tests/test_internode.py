@@ -11,13 +11,13 @@ from utils import init_dist, bench, calc_diff, create_grouped_scores, inplace_un
 import test_low_latency
 
 
-def test_main(num_sms: int, local_rank: int, num_local_ranks: int, num_ranks: int, num_nodes: int, rank: int, buffer: deep_ep.Buffer, group: dist.ProcessGroup):
+def test_main(num_sms: int, local_rank: int, num_local_ranks: int, num_ranks: int, num_nodes: int, rank: int, buffer: deep_ep.Buffer, group: dist.ProcessGroup, args):
     # Settings
-    num_tokens = int(os.environ.get('EP_TEST_NUM_TOKENS', '4096'))
-    hidden = int(os.environ.get('EP_TEST_HIDDEN', '7168'))
-    num_topk_groups = int(os.environ.get('EP_TEST_NUM_TOPK_GROUPS', str(min(num_nodes, 4))))
-    num_topk = int(os.environ.get('EP_TEST_NUM_TOPK', '8'))
-    num_experts = int(os.environ.get('EP_TEST_NUM_EXPERTS', str((256 // num_ranks) * num_ranks)))
+    num_tokens = args.num_tokens
+    hidden = args.hidden
+    num_topk_groups = args.num_topk_groups
+    num_topk = args.num_topk
+    num_experts = args.num_experts
 
     assert num_experts % num_ranks == 0 and num_local_ranks == 8
     if local_rank == 0:
@@ -224,7 +224,7 @@ def test_main(num_sms: int, local_rank: int, num_local_ranks: int, num_ranks: in
 
 
 # noinspection PyUnboundLocalVariable
-def test_loop(local_rank: int, num_local_ranks: int):
+def test_loop(local_rank: int, num_local_ranks: int, args):
     num_nodes = int(os.getenv('WORLD_SIZE', 1))
     rank, num_ranks, group = init_dist(local_rank, num_local_ranks)
     test_ll_compatibility = os.getenv('EP_TEST_LL_COMPATIBILITY', False)
@@ -240,7 +240,7 @@ def test_loop(local_rank: int, num_local_ranks: int):
     torch.manual_seed(rank)
 
     for i in (num_sms, ):
-        test_main(i, local_rank, num_local_ranks, num_ranks, num_nodes, rank, buffer, group)
+        test_main(i, local_rank, num_local_ranks, num_ranks, num_nodes, rank, buffer, group, args)
         if local_rank == 0:
             print('', flush=True)
 
@@ -259,7 +259,26 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Test internode expert parallel')
     parser.add_argument('--num-processes', type=int, default=8,
                        help='Number of processes to spawn (default: 8)')
+    parser.add_argument('--num-tokens', type=int, default=4096,
+                       help='Number of tokens (default: 4096)')
+    parser.add_argument('--hidden', type=int, default=7168,
+                       help='Hidden dimension size (default: 7168)')
+    parser.add_argument('--num-topk-groups', type=int, default=None,
+                       help='Number of top-k groups (default: min(num_nodes, 4))')
+    parser.add_argument('--num-topk', type=int, default=8,
+                       help='Number of top-k experts (default: 8)')
+    parser.add_argument('--num-experts', type=int, default=None,
+                       help='Number of experts (default: calculated as (256 // num_ranks) * num_ranks)')
     args = parser.parse_args()
 
+    # Set default num_topk_groups if not provided
+    if args.num_topk_groups is None:
+        num_nodes = int(os.getenv('WORLD_SIZE', 1))
+        args.num_topk_groups = min(num_nodes, 4)
+
+    # Set default num_experts if not provided
+    if args.num_experts is None:
+        args.num_experts = (256 // args.num_processes) * args.num_processes
+
     num_processes = args.num_processes
-    torch.multiprocessing.spawn(test_loop, args=(num_processes, ), nprocs=num_processes)
+    torch.multiprocessing.spawn(test_loop, args=(num_processes, args), nprocs=num_processes)
