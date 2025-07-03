@@ -156,7 +156,7 @@ def test_loop(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
     if local_rank == 0:
         print(f'Allocating buffer size: {num_rdma_bytes / 1e6} MB ...', flush=True)
     buffer = deep_ep.Buffer(group, num_rdma_bytes=num_rdma_bytes, low_latency_mode=True,
-                            num_qps_per_rank=num_experts // num_ranks)
+                            num_qps_per_rank=num_experts // num_ranks, allow_mnnvl=args.allow_mnnvl)
     test_main(num_tokens, hidden, num_experts, num_topk, rank, num_ranks, group, buffer, seed=1)
 
     do_pressure_test = False
@@ -185,6 +185,8 @@ if __name__ == '__main__':
                        help='Number of top-k experts (default: 8)')
     parser.add_argument('--num-experts', type=int, default=288,
                        help='Number of experts (default: 288)')
+    parser.add_argument('--allow-mnnvl', action="store_true",
+                        help='Allow MNNVL for communication')
     args = parser.parse_args()
 
     num_processes = args.num_processes
