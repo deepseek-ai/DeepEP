@@ -406,6 +406,22 @@ __forceinline__ __device__ float half_warp_reduce_min(float value) {
     return value;
 }
 
+__forceinline__ __device__ nv_bfloat16 half_warp_reduce_max(nv_bfloat16 value) {
+    value = __hmax(value, __shfl_xor_sync(0xffffffff, value, 8));
+    value = __hmax(value, __shfl_xor_sync(0xffffffff, value, 4));
+    value = __hmax(value, __shfl_xor_sync(0xffffffff, value, 2));
+    value = __hmax(value, __shfl_xor_sync(0xffffffff, value, 1));
+    return value;
+}
+
+__forceinline__ __device__ nv_bfloat16 half_warp_reduce_min(nv_bfloat16 value) {
+    value = __hmin(value, __shfl_xor_sync(0xffffffff, value, 8));
+    value = __hmin(value, __shfl_xor_sync(0xffffffff, value, 4));
+    value = __hmin(value, __shfl_xor_sync(0xffffffff, value, 2));
+    value = __hmin(value, __shfl_xor_sync(0xffffffff, value, 1));
+    return value;
+}
+
 __forceinline__ __device__ int get_lane_id() {
     int lane_id;
     asm("mov.s32 %0, %laneid;" : "=r"(lane_id));
