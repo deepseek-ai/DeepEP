@@ -93,7 +93,7 @@ def test_main(num_tokens: int, hidden: int, num_experts: int, num_topk: int,
                                                                                  async_finish=not return_recv_hook, zero_copy=zero_copy,
                                                                                  return_recv_hook=return_recv_hook, out=out)
                             hook() if return_recv_hook else event.current_stream_wait()
-                            if do_check:
+                            if do_check or not use_logfmt:
                                 diff = calc_diff(x * topk_weights.masked_fill(topk_idx == -1, 0).sum(dim=1).view(-1, 1), combined_x)
                                 assert torch.isnan(combined_x).sum().item() == 0
                                 assert diff < (7e-4 if round_scale else 1e-5), f'Error: {diff=}, {zero_copy=}'
