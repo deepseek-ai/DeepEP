@@ -1,3 +1,4 @@
+import argparse
 import random
 import torch
 import torch.distributed as dist
@@ -15,7 +16,7 @@ def test_main(num_tokens: int, hidden: int, num_experts: int, num_topk: int,
     assert num_experts % num_ranks == 0
     num_local_experts = num_experts // num_ranks
 
-    # NOTES: the integers greater than 256 exceeds the BF16 precision limit
+    # NOTES: the integers greater than 256 exceed the BF16 precision limit
     rank_offset = 128
     assert num_ranks - rank_offset < 257, 'Too many ranks (exceeding test precision limit)'
 
@@ -97,16 +98,6 @@ def test_main(num_tokens: int, hidden: int, num_experts: int, num_topk: int,
                             assert diff < (7e-4 if round_scale else 1e-5), f'Error: {diff=}, {zero_copy=}'
                             hash_value ^= hash_tensor(combined_x)
 
-    def create_test_cast_with_outliers(num_outliers):
-        tmp = torch.randn((num_tokens, hidden), dtype=torch.bfloat16, device='cuda')
-        tmp /= tmp.abs().amax(dim=1).view(-1, 1)
-        assert tmp.abs().amax().item() <= 1
-
-        # Create some amax outliers
-        for i in range(num_outliers):
-            tmp[random.randint(0, num_tokens - 1)] *= 1e3
-        return tmp
-
     # noinspection PyShadowingNames
     def large_gemm_with_hook(hook):
         mat_0 = torch.randn((8192, 8192), dtype=torch.float)
@@ -145,21 +136,21 @@ def test_main(num_tokens: int, hidden: int, num_experts: int, num_topk: int,
         group.barrier()
         dispatch_t, combine_t = bench_kineto(partial(test_func, zero_copy=True, return_recv_hook=return_recv_hook),
                                              kernel_names=('dispatch', 'combine'), barrier_comm_profiling=True,
-                                             suppress_kineto_output=True)
+                                             suppress_kineto_output=True, num_kernels_per_period=2 if return_recv_hook else 1)
         if not return_recv_hook:
             print(f'[rank {rank}] Dispatch bandwidth: {num_dispatch_comm_bytes / 1e9 / dispatch_t:.2f} GB/s, avg_t={dispatch_t * 1e6:.2f} us | '
                   f'Combine bandwidth: {num_combine_comm_bytes / 1e9 / combine_t:.2f} GB/s, avg_t={combine_t * 1e6:.2f} us', flush=True)
         else:
-            print(f'[rank {rank}] Dispatch send/recv time: {dispatch_t * 2 * 1e6:.2f} us | '
-                  f'Combine send/recv time: {combine_t * 2 * 1e6:.2f} us', flush=True)
-
+            print(f'[rank {rank}] Dispatch send/recv time: {dispatch_t[0] * 1e6:.2f} + {dispatch_t[1] * 1e6:.2f} us | '
+                  f'Combine send/recv time: {combine_t[0] * 1e6:.2f} + {combine_t[1] * 1e6:.2f} us', flush=True)
     return hash_value
 
 
-# noinspection PyUnboundLocalVariable
-def test_loop(local_rank: int, num_local_ranks: int):
+# noinspection PyUnboundLocalVariable,PyShadowingNames
+def test_loop(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
     rank, num_ranks, group = init_dist(local_rank, num_local_ranks)
-    num_tokens, hidden, num_topk, num_experts = 128, 7168, 8, 288
+    num_tokens, hidden = args.num_tokens, args.hidden
+    num_topk, num_experts = args.num_topk, args.num_experts
 
     num_rdma_bytes = deep_ep.Buffer.get_low_latency_rdma_size_hint(num_tokens, hidden, num_ranks, num_experts)
     if local_rank == 0:
@@ -183,5 +174,18 @@ def test_loop(local_rank: int, num_local_ranks: int):
 
 if __name__ == '__main__':
     # TODO: you may modify NUMA binding for less CPU overhead
-    num_processes = 8
-    torch.multiprocessing.spawn(test_loop, args=(num_processes,), nprocs=num_processes)
+    parser = argparse.ArgumentParser(description='Test low-latency EP kernels')
+    parser.add_argument('--num-processes', type=int, default=8,
+                       help='Number of processes to spawn (default: 8)')
+    parser.add_argument('--num-tokens', type=int, default=128,
+                       help='Number of tokens (default: 128)')
+    parser.add_argument('--hidden', type=int, default=7168,
+                       help='Hidden dimension size (default: 7168)')
+    parser.add_argument('--num-topk', type=int, default=8,
+                       help='Number of top-k experts (default: 8)')
+    parser.add_argument('--num-experts', type=int, default=288,
+                       help='Number of experts (default: 288)')
+    args = parser.parse_args()
+
+    num_processes = args.num_processes
+    torch.multiprocessing.spawn(test_loop, args=(num_processes, args), nprocs=num_processes)

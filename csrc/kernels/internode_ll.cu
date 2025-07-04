@@ -499,9 +499,9 @@ combine(void* combined_x,
     cg::this_grid().sync();
 
     // Reduce tokens
-    EP_DEVICE_ASSERT(num_topk <= 32 and hidden_bf16_int4 <= num_threads);
+    EP_DEVICE_ASSERT(num_topk <= 32);
     EP_STATIC_ASSERT(kHidden % (32 * kNumElemsPerInt4) == 0, "Invalid vectorization");
-    if (thread_id < hidden_bf16_int4) {
+    for (int hidden_idx = thread_id; hidden_idx < hidden_bf16_int4; hidden_idx += num_threads) {
         for (int token_idx = sm_id; token_idx < num_combined_tokens; token_idx += num_sms) {
             // Read top-k indices and weights
             int reg_topk_idx[kNumMaxTopk];
@@ -520,7 +520,7 @@ combine(void* combined_x,
                 auto rdma_buffer_row = reinterpret_cast<const uint8_t*>(rdma_buffer_type);
 
                 // Reduce
-                auto x_vec = ld_nc_global(reinterpret_cast<const int4*>(rdma_buffer_row) + thread_id);
+                auto x_vec = ld_nc_global(reinterpret_cast<const int4*>(rdma_buffer_row) + hidden_idx);
                 const auto x_bf16 = reinterpret_cast<nv_bfloat16*>(&x_vec);
                 #pragma unroll
                 for (int j = 0; j < kNumElemsPerInt4; ++ j)
@@ -533,7 +533,7 @@ combine(void* combined_x,
             #pragma unroll
             for (int j = 0; j < kNumElemsPerInt4; ++ j)
                 combined_bf16[j] = static_cast<nv_bfloat16>(combined_values[j]);
-            (static_cast<int4*>(combined_x) + token_idx * hidden_bf16_int4)[thread_id] = combined_int4;
+            (static_cast<int4*>(combined_x) + token_idx * hidden_bf16_int4)[hidden_idx] = combined_int4;
         }
     }
 }

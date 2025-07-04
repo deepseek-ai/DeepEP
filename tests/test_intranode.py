@@ -1,3 +1,4 @@
+import argparse
 import time
 import torch
 import torch.distributed as dist
@@ -10,9 +11,13 @@ from utils import init_dist, bench, calc_diff, inplace_unique, per_token_cast_to
 import test_low_latency
 
 
-def test_main(num_sms: int, local_rank: int, num_ranks: int, rank: int, buffer: deep_ep.Buffer, group: dist.ProcessGroup):
+# noinspection PyShadowingNames
+def test_main(args: argparse.Namespace, num_sms: int, local_rank: int, num_ranks: int, rank: int,
+              buffer: deep_ep.Buffer, group: dist.ProcessGroup):
     # Settings
-    num_tokens, hidden, num_topk, num_experts = 4096, 7168, 8, (256 // num_ranks) * num_ranks
+    num_tokens, hidden = args.num_tokens, args.hidden
+    num_topk, num_experts = args.num_topk, args.num_experts
+
     assert num_experts % num_ranks == 0
     if local_rank == 0:
         print(f'[config] num_tokens={num_tokens}, hidden={hidden}, num_topk={num_topk}', flush=True)
@@ -224,8 +229,8 @@ def test_main(num_sms: int, local_rank: int, num_ranks: int, rank: int, buffer: 
         print('', flush=True)
 
 
-# noinspection PyUnboundLocalVariable
-def test_loop(local_rank: int, num_local_ranks: int):
+# noinspection PyUnboundLocalVariable,PyShadowingNames
+def test_loop(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
     rank, num_ranks, group = init_dist(local_rank, num_local_ranks)
     test_ll_compatibility, num_rdma_bytes = False, 0
     if test_ll_compatibility:
@@ -237,7 +242,7 @@ def test_loop(local_rank: int, num_local_ranks: int):
     torch.manual_seed(rank)
 
     for i in (24, ):
-        test_main(i, local_rank, num_ranks, rank, buffer, group)
+        test_main(args, i, local_rank, num_ranks, rank, buffer, group)
         if local_rank == 0:
             print('', flush=True)
 
@@ -252,5 +257,18 @@ def test_loop(local_rank: int, num_local_ranks: int):
 
 
 if __name__ == '__main__':
-    num_processes = 8
-    torch.multiprocessing.spawn(test_loop, args=(num_processes, ), nprocs=num_processes)
+    parser = argparse.ArgumentParser(description='Test intranode EP kernels')
+    parser.add_argument('--num-processes', type=int, default=8,
+                       help='Number of processes to spawn (default: 8)')
+    parser.add_argument('--num-tokens', type=int, default=4096,
+                       help='Number of tokens (default: 4096)')
+    parser.add_argument('--hidden', type=int, default=7168,
+                       help='Hidden dimension size (default: 7168)')
+    parser.add_argument('--num-topk', type=int, default=8,
+                       help='Number of top-k experts (default: 8)')
+    parser.add_argument('--num-experts', type=int, default=256,
+                       help='Number of experts (default: 256)')
+    args = parser.parse_args()
+
+    num_processes = args.num_processes
+    torch.multiprocessing.spawn(test_loop, args=(num_processes, args), nprocs=num_processes)
