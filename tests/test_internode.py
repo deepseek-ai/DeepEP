@@ -82,7 +82,7 @@ def test_main(num_sms: int, local_rank: int, num_local_ranks: int, num_ranks: in
     time.sleep(1)
 
     # Config
-    rdma_buffer_size, nvl_buffer_size = 128, (720 if num_ranks in (144, 160) else 768)
+    rdma_buffer_size, nvl_buffer_size = 128, (720 if num_ranks in (144, 160) else 512)
     config = deep_ep.Config(num_sms, 8, nvl_buffer_size, 16, rdma_buffer_size)
 
     # Test dispatch
