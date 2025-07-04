@@ -1240,7 +1240,7 @@ Buffer::low_latency_combine(const torch::Tensor& x, const torch::Tensor& topk_id
 
     // Kernel launch
     auto next_clean_meta = next_buffer.clean_meta();
-    if (use_logfmt) {/*
+    if (use_logfmt) {
         internode_ll::compress_logfmt(buffer.combine_rdma_recv_data_buffer, buffer.combine_rdma_send_buffer,
                                       x.data_ptr(),
                                       packed_recv_count.data_ptr<int32_t>(), src_info.data_ptr<int>(), layout_range.data_ptr<int64_t>(),
@@ -1248,13 +1248,13 @@ Buffer::low_latency_combine(const torch::Tensor& x, const torch::Tensor& topk_id
                                       num_experts, rank, num_ranks,
                                       num_device_sms,
                                       launch_stream);
-    */}
+    }
     auto launcher = [=](int phases) {
         internode_ll::combine(combined_x.data_ptr(),
                               buffer.combine_rdma_recv_data_buffer, buffer.combine_rdma_recv_flag_buffer,
                               buffer.combine_rdma_send_buffer,
                               x.data_ptr(), topk_idx.data_ptr<int64_t>(), topk_weights.data_ptr<float>(),
-                              packed_recv_count.data_ptr<int32_t>(), src_info.data_ptr<int>(), layout_range.data_ptr<int64_t>(),
+                              src_info.data_ptr<int>(), layout_range.data_ptr<int64_t>(),
                               next_clean_meta.first, next_clean_meta.second,
                               num_combined_tokens, hidden, num_max_dispatch_tokens_per_rank,
                               num_topk, num_experts, rank, num_ranks,
