@@ -88,10 +88,6 @@ def bench(fn, num_warmups: int = 50, num_tests: int = 50, post_fn=None):
     torch.cuda.synchronize()
     cache = torch.empty(int(256e6 // 4), dtype=torch.int, device='cuda')
 
-    # Warmup
-    for _ in range(num_warmups):
-        fn()
-
     # Flush L2
     cache.zero_()
 
@@ -105,6 +101,10 @@ def bench(fn, num_warmups: int = 50, num_tests: int = 50, post_fn=None):
         end_events[i].record()
         if post_fn is not None:
             post_fn()
+        torch.cuda.synchronize()
+        g = torch.cuda.current_device(); print(f"i = {i} , [GPU {g}] device name: {torch.cuda.get_device_name(g)}",  flush=True)
+        dist.barrier()
+        torch.cuda.synchronize()
     torch.cuda.synchronize()
 
     times = np.array([s.elapsed_time(e) / 1e3 for s, e in zip(start_events, end_events)])[1:]
