@@ -617,13 +617,13 @@ __global__ __launch_bounds__(1024, 1) void
 combine(void* combined_x,
         void* rdma_recv_x, int* rdma_recv_flag, void* rdma_send_x,
         const void* x, const int64_t* topk_idx, const float* topk_weights,
-        const int* src_info, const int64_t* layout_range,
+        const int32_t* packed_recv_count, const int* src_info, const int64_t* layout_range,
         int* next_clean, int num_next_clean_int,
         int* atomic_clean_flag,
         int num_combined_tokens, int hidden, int num_topk,
         int num_max_dispatch_tokens_per_rank,
         int num_experts, int rank, int num_ranks,
-        int num_warp_groups, int num_warps_per_group,
+        int num_warp_groups, int num_warps_per_group, int num_sender_sms,
         int phases, bool zero_copy) {
     const auto sm_id = static_cast<int>(blockIdx.x);
     const auto num_sms = static_cast<int>(gridDim.x);
@@ -651,6 +651,206 @@ combine(void* combined_x,
     // Sending phase
     if ((phases & LOW_LATENCY_SEND_PHASE) == 0)
         goto LOW_LATENCY_COMBINE_RECV;
+if constexpr (kUseLogFMT){
+    const auto sm_id = static_cast<int>(blockIdx.x);
+    const auto num_sms = static_cast<int>(gridDim.x);
+    const auto thread_id = static_cast<int>(threadIdx.x);
+    const auto num_threads = static_cast<int>(blockDim.x);
+    const auto warp_id = __shfl_sync(0xffffffff, thread_id / 32, 0), lane_id = get_lane_id();
+    const auto num_local_experts = num_experts / num_ranks;
+    constexpr int kNumWarpsPerGroup = 2;
+    EP_STATIC_ASSERT(kNumWarpsPerGroup == 2, "Invalid kNumWarpsPerGroup");
+    const auto warp_group_id = warp_id / kNumWarpsPerGroup;
+    const auto sub_warp_id = warp_id % kNumWarpsPerGroup;
+    int token_idx = warp_group_id * num_sms + sm_id;
+    const auto lane_group_id = lane_id / 16, sub_lane_id = lane_id % 16;
+
+    // Data type staffs
+    constexpr int kNumElemsPerInt4 = sizeof(int4) / sizeof(nv_bfloat16);
+    const size_t hidden_bf16_int4 = kHidden / kNumElemsPerInt4;
+
+    // Message package
+    constexpr size_t half_log_amax_amin_bytes_per_combine_msg = kHidden / kNumWarpsPerGroup / 128 * (2 * sizeof(nv_bfloat16));
+    constexpr size_t num_bytes_per_slot = kHidden * sizeof(nv_bfloat16) + sizeof(int4) + half_log_amax_amin_bytes_per_combine_msg * kNumWarpsPerGroup;
+    EP_STATIC_ASSERT(num_bytes_per_slot % sizeof(int4) == 0, "Invalid vectorization");
+
+    __shared__ int32_t shared_packed_recv_count[32];
+    __shared__ int64_t shared_layout_range[288];
+    if (thread_id < num_local_experts * num_ranks) {
+        shared_layout_range[thread_id] = __ldg(layout_range + thread_id);
+    }
+    if (thread_id - (num_threads - 32) >= 0 && thread_id - (num_threads - 32) < num_local_experts) {
+        shared_packed_recv_count[thread_id - (num_threads - 32)] = __ldg(packed_recv_count + (thread_id - (num_threads - 32)));
+    }
+    __syncthreads();
+
+    int local_expert_idx = 0;
+    int new_token_idx = token_idx - shared_packed_recv_count[local_expert_idx];
+    while (true) {
+        while (local_expert_idx + 1 < num_local_experts && new_token_idx >= 0) {
+            token_idx = new_token_idx;
+            new_token_idx = token_idx - shared_packed_recv_count[++local_expert_idx];
+        }
+        if (new_token_idx >= 0) {
+            break;
+        } else {
+            const auto local_src_info = src_info + local_expert_idx * num_ranks * num_max_dispatch_tokens_per_rank;
+            int src_idx;
+
+            int64_t layout;
+            int offset, num_tokens_to_send;
+            int dst_rank = 0;
+            #pragma unroll
+            for (int i = lane_id; i < num_ranks; i += 32) {
+                layout = shared_layout_range[local_expert_idx * num_ranks + i];
+                // Unpack layout
+                unpack2(layout, num_tokens_to_send, offset);
+                if (offset <= token_idx && token_idx < offset + num_tokens_to_send) {
+                    dst_rank = i;
+                }
+            }
+            /*
+            if (lane_id < num_ranks) {
+                layout = __ldg(layout_range + local_expert_idx * num_ranks + lane_id);
+                // Unpack layout
+                unpack2(layout, num_tokens_to_send, offset);
+            }
+            */
+            if (lane_id == 32 - 1) {
+                // Copy directly to local rank, or copy to buffer
+                src_idx = __ldg(local_src_info + token_idx);
+            }
+            dst_rank = __reduce_add_sync(0xffffffff, dst_rank);
+            /*
+            unsigned int flag = __ballot_sync(0xffffffff, lane_id < num_ranks && offset <= token_idx && token_idx < offset + num_tokens_to_send);
+            const int dst_rank = __ffs(flag) - 1;
+            */
+            src_idx = __shfl_sync(0xffffffff, src_idx, 32 - 1);
+
+            const auto global_expert_idx = rank * num_local_experts + local_expert_idx;
+            const auto local_x = static_cast<const int4*>(x) +
+                    local_expert_idx * num_ranks * num_max_dispatch_tokens_per_rank * hidden_bf16_int4;
+            const auto rdma_send_x_vec = static_cast<uint8_t*>(rdma_send_x) +
+                    local_expert_idx * num_ranks * num_max_dispatch_tokens_per_rank * num_bytes_per_slot;
+
+            const auto x_int4 = local_x + token_idx * hidden_bf16_int4;
+            const auto rdma_send_type_row = reinterpret_cast<int*>(rdma_send_x_vec + token_idx * num_bytes_per_slot);
+            const auto rdma_send_x_vec_row = reinterpret_cast<uint8_t*>(rdma_send_type_row);
+
+            const auto buf_ptr = reinterpret_cast<int64_t>(rdma_send_x_vec_row);
+            const auto dst_ptr = reinterpret_cast<uint64_t>(rdma_recv_x) + (global_expert_idx * num_max_dispatch_tokens_per_rank + src_idx) * num_bytes_per_slot;
+            const auto cpy_src_int4_ptr = x_int4 + hidden_bf16_int4 / kNumWarpsPerGroup * sub_warp_id;
+            const auto cpy_dst_int64_ptr = reinterpret_cast<int64_t*>(rank == dst_rank ? dst_ptr : buf_ptr);
+
+            const int initial_dst_int64_ptr_offset = sizeof(int4) / sizeof(int64_t) + half_log_amax_amin_bytes_per_combine_msg / sizeof(int64_t) + (half_log_amax_amin_bytes_per_combine_msg / sizeof(int64_t) + hidden_bf16_int4 / kNumWarpsPerGroup * (sizeof(int4) / sizeof(int64_t))) * sub_warp_id;
+
+            constexpr int kPrefetchCount = 2;
+            constexpr float kThreshold = 1.0f;
+            constexpr float kLogThreshold = 10.0f; // __logf(kThreshold)
+            constexpr float kMinClip = 22.1807097779182499013514278f; // `== log(2 ^ (2 ^ 5))`
+            constexpr int kNumBits = 10;
+            constexpr unsigned int kNumValues = 1 << (kNumBits - 1);
+            EP_STATIC_ASSERT(kHidden % (kNumWarpsPerGroup * kNumElemsPerInt4 * 32) == 0 and kNumElemsPerInt4 == 8 and kNumElemsPerInt4 % 2 == 0, "Invalid hidden");
+            EP_STATIC_ASSERT(kHidden / (kNumWarpsPerGroup * kNumElemsPerInt4 * 32) >= kPrefetchCount, "Invalid hidden");
+            EP_STATIC_ASSERT(kHidden <= 128 * 64, "Invalid hidden");
+            EP_STATIC_ASSERT(kNumElemsPerInt4 * kNumBits == (sizeof(int64_t) + sizeof(int16_t)) * 8, "Invalid log format");
+
+            if constexpr (kPrefetchCount > 1) {
+                #pragma unroll
+                for (int k = 0; k < kPrefetchCount; k++) {
+                    asm volatile("prefetch.global.L1 [%0];" :: "l"(cpy_src_int4_ptr + (lane_id + k * 32)));
+                }
+            }
+            int prefetch_i = lane_id + kPrefetchCount * 32;
+
+            int half_warp_flag = 0;
+            int log_a_store_idx = 0;
+            int my_store_idx = -1;
+            nv_bfloat16 my_amax, my_amin;
+
+            #pragma unroll
+            for (int k = 0, channel_group_id_in_segment = lane_group_id; k * 32 < hidden_bf16_int4 / kNumWarpsPerGroup; k++, channel_group_id_in_segment += 2) {
+                // Read
+                auto int4_value = ld_nc_global(cpy_src_int4_ptr + (lane_id + k * 32));
+                if (prefetch_i < hidden_bf16_int4 / kNumWarpsPerGroup) {
+                    asm volatile("prefetch.global.L1 [%0];" :: "l"(cpy_src_int4_ptr + (prefetch_i)));
+                    prefetch_i += 32;
+                }
+                auto bf162_values = reinterpret_cast<const nv_bfloat162*>(&int4_value);
+
+                // Local log amax
+                nv_bfloat162 bf16_abs_values[kNumElemsPerInt4 / 2], amaxs, amins;
+                #pragma unroll
+                for (int j = 0; j < kNumElemsPerInt4 / 2; ++ j) {
+                    bf16_abs_values[j] = __habs2(bf162_values[j]);
+                    amaxs = j == 0 ? bf16_abs_values[j] : __hmax2(amaxs, bf16_abs_values[j]);
+                    amins = j == 0 ? bf16_abs_values[j] : __hmin2(amins, bf16_abs_values[j]);
+                }
+                nv_bfloat16 amax = __hmax(amaxs.x, amaxs.y), amin = __hmin(amins.x, amins.y);
+
+                // Reduce per 128 channels
+                amax = half_warp_reduce_max(amax);
+                amin = half_warp_reduce_min(amin);
+                float log_amax = __logf(static_cast<float>(amax));
+                float log_amin = fmaxf(__logf(static_cast<float>(amin)), log_amax - kMinClip);
+
+                int is_peer_half_warp_compressed = __shfl_xor_sync(0xffffffff, log_amax <= kLogThreshold, 16);
+                // Use LogFMT only with `amax <= kThreshold` (maybe not all half-warps)
+                if (log_amax <= kLogThreshold) {
+                    //const auto step = (log_amax - log_amin) / static_cast<float>(kNumValues - 2);
+                    const auto inv_step = __fdividef(static_cast<float>(kNumValues - 2), log_amax - log_amin);// / (log_amax - log_amin);
+                    const auto rounding = 1.5f;//2.0f - __logf((1.0f + __expf(__fdividef(1.0f, inv_step))) / 2.0f) * inv_step;
+
+                    // Encode
+                    auto encode = [=](const nv_bfloat16& value, const float& log_abs_value) -> unsigned int {
+                        const auto encoded = (static_cast<unsigned int>(fmaxf((log_abs_value - log_amin) * inv_step + rounding, 0.0f))) & (kNumValues - 1);
+                        return value < CUDART_ZERO_BF16 ? kNumValues + encoded : encoded;
+                    };
+                    unsigned int out[kNumElemsPerInt4];
+                    #pragma unroll
+                    for (int j = 0; j < kNumElemsPerInt4 / 2; ++ j) {
+                        float2 abs_values = __bfloat1622float2(bf16_abs_values[j]);
+                        out[j * 2] = encode(bf162_values[j].x, __logf(abs_values.x));
+                        out[j * 2 + 1] = encode(bf162_values[j].y, __logf(abs_values.y));
+                    }
+                    uint32_t out32[2];
+                    out32[0] = (out[0] << (kNumBits * 2)) + (out[1] << (kNumBits * 1)) + (out[3] << (kNumBits * 3)) + out[2];
+                    out32[1] = (out[4] << (32 - kNumBits * 1)) + (out[5] << (32 - kNumBits * 2)) + (out[3] >> (10 - (32 - kNumBits * 3))) + (out[6] << (32 - kNumBits * 3));
+                    uint16_t out16 = ((out[3] & 0b0011111100u) << (10 - (32 - kNumBits * 3))) + out[7];
+
+                    log_a_store_idx += lane_group_id * is_peer_half_warp_compressed;
+                    int dst_int64_ptr_offset = initial_dst_int64_ptr_offset + channel_group_id_in_segment * (16 * 2) - log_a_store_idx * (16 * 2 - 10 * 2);
+                    st_na_global(cpy_dst_int64_ptr + (dst_int64_ptr_offset + sub_lane_id), *reinterpret_cast<const int64_t*>(out32));
+                    st_na_global(reinterpret_cast<uint16_t*>(cpy_dst_int64_ptr) + ((dst_int64_ptr_offset + 16) * (sizeof(int64_t) / sizeof(uint16_t)) + sub_lane_id), out16);
+                    if (sub_lane_id == k) {
+                        my_store_idx = channel_group_id_in_segment;
+                        my_amax = amax;
+                        my_amin = amin;
+                    }
+                    log_a_store_idx += 1 + (1 - lane_group_id) * is_peer_half_warp_compressed;
+                } else {
+                    log_a_store_idx += lane_group_id * is_peer_half_warp_compressed;
+                    int dst_int64_ptr_offset = initial_dst_int64_ptr_offset + channel_group_id_in_segment * (16 * 2) - log_a_store_idx * (16 * 2 - 10 * 2);
+                    st_na_global(reinterpret_cast<int4*>(cpy_dst_int64_ptr) + (dst_int64_ptr_offset / (sizeof(int4) / sizeof(int64_t)) + sub_lane_id), int4_value);
+                    log_a_store_idx += 0 + (1 - lane_group_id) * is_peer_half_warp_compressed;
+                    half_warp_flag += 1 << channel_group_id_in_segment;
+                }
+            }
+            int first_half_warp_flag = __shfl_sync(0xffffffff, half_warp_flag, 0);
+            if (my_store_idx >= 0) {
+                int dst_int64_ptr_offset = initial_dst_int64_ptr_offset - half_log_amax_amin_bytes_per_combine_msg / sizeof(int64_t);
+                st_na_global(reinterpret_cast<int*>(cpy_dst_int64_ptr) + (dst_int64_ptr_offset * (sizeof(int64_t) / sizeof(int)) + my_store_idx), pack2<nv_bfloat16, int>(my_amax, my_amin));
+            }
+            if (lane_id == 32 - 1) {
+                st_na_global(reinterpret_cast<int*>(cpy_dst_int64_ptr) + sub_warp_id, half_warp_flag + first_half_warp_flag);
+            }
+
+            token_idx += (1024 / 32 / kNumWarpsPerGroup) * num_sms;
+            new_token_idx += (1024 / 32 / kNumWarpsPerGroup) * num_sms;
+        }
+    }
+    cg::this_grid().sync();
+}
 
     // Clean up next buffer
     if (sm_id == 0 and warp_group_id == 0 and sub_warp_id == 0) {
@@ -665,7 +865,7 @@ combine(void* combined_x,
     }
 
     // Issue IBGDA sends
-    if (responsible_expert_idx < num_experts) {
+    if (warp_id < num_warp_groups * num_warps_per_group and responsible_expert_idx < num_experts) {
         const auto dst_rank = responsible_expert_idx / num_local_experts;
         const auto local_expert_idx = responsible_expert_idx % num_local_experts;
         const auto global_expert_idx = rank * num_local_experts + local_expert_idx;
@@ -771,7 +971,7 @@ combine(void* combined_x,
     EP_DEVICE_ASSERT(num_topk <= 16 and hidden_bf16_int4 <= num_threads);
     EP_STATIC_ASSERT(kHidden % (32 * kNumElemsPerInt4) == 0, "Invalid vectorization");
     if (thread_id < hidden_bf16_int4) {
-        for (int token_idx = sm_id; token_idx < num_combined_tokens; token_idx += num_sms) {
+        for (int token_idx = sm_id; token_idx < num_combined_tokens; token_idx += num_sender_sms) {
             // Read top-k indices and weights
             int reg_topk_idx[kNumMaxTopk];
             float reg_topk_weights[kNumMaxTopk];
@@ -890,7 +1090,7 @@ combine(void* combined_x,
 void combine(void* combined_x,
              void* rdma_recv_x, int* rdma_recv_flag, void* rdma_send_x,
              const void* x, const int64_t* topk_idx, const float* topk_weights,
-             const int* src_info, const int64_t* layout_range,
+             const int32_t* packed_recv_count, const int* src_info, const int64_t* layout_range,
              int* next_clean, int num_next_clean_int,
              int num_combined_tokens, int hidden, int num_max_dispatch_tokens_per_rank,
              int num_topk, int num_experts, int rank, int num_ranks,
@@ -903,7 +1103,7 @@ void combine(void* combined_x,
     EP_HOST_ASSERT(num_warp_groups > 0 and num_warps_per_group > 0);
 
     const auto num_warps = num_warp_groups * num_warps_per_group;
-    const auto num_sms = ceil_div(num_experts, num_warp_groups);
+    const auto num_sender_sms = ceil_div(num_experts, num_warp_groups);
 
     // Check workspace
     auto atomic_clean_flag = static_cast<int*>(workspace);
@@ -920,16 +1120,16 @@ auto combine_func = use_logfmt ? \
 LAUNCH_KERNEL(&cfg, combine_func, \
               combined_x, \
               rdma_recv_x, rdma_recv_flag, rdma_send_x, \
-              x, topk_idx, topk_weights, src_info, layout_range, \
+              x, topk_idx, topk_weights, packed_recv_count, src_info, layout_range, \
               next_clean, num_next_clean_int, \
               atomic_clean_flag, \
               num_combined_tokens, hidden, num_topk, \
               num_max_dispatch_tokens_per_rank, \
               num_experts, rank, num_ranks, \
-              num_warp_groups, num_warps_per_group, \
+              num_warp_groups, num_warps_per_group, num_sender_sms, \
               phases, zero_copy); } break
 
-    SETUP_LAUNCH_CONFIG(num_sms, num_warps * 32, stream);
+    SETUP_LAUNCH_CONFIG(num_device_sms, 1024/*num_warps * 32*/, stream);
     SWITCH_HIDDEN(COMBINE_LAUNCH_CASE);
 #undef COMBINE_LAUNCH_CASE
 }
