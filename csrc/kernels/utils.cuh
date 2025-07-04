@@ -164,6 +164,13 @@ __device__  __forceinline__ uint8_t ld_nc_global(const uint8_t *ptr) {
 }
 
 template <>
+__device__  __forceinline__ uint16_t ld_nc_global(const uint16_t *ptr) {
+    uint16_t ret;
+    asm volatile(LD_NC_FUNC ".u16 %0, [%1];" : "=h"(ret) : "l"(ptr));
+    return ret;
+}
+
+template <>
 __device__  __forceinline__ int ld_nc_global(const int *ptr) {
     int ret;
     asm volatile(LD_NC_FUNC ".s32 %0, [%1];" : "=r"(ret) : "l"(ptr));

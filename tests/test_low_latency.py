@@ -21,6 +21,7 @@ def test_main(num_tokens: int, hidden: int, num_experts: int, num_topk: int,
 
     x = torch.ones((num_tokens, hidden), dtype=torch.bfloat16, device='cuda') * (rank - rank_offset)
     x[:, -128:] = torch.arange(num_tokens, device='cuda').to(torch.bfloat16).view(-1, 1)
+    x[:, ::128] = 0
     scores = torch.randn((num_tokens, num_experts), dtype=torch.float32, device='cuda').abs() + 1
     topk_idx = torch.topk(scores, num_topk, dim=-1, largest=True, sorted=True)[1]
     topk_weights = torch.randn((num_tokens, num_topk), dtype=torch.float32, device='cuda').abs()
@@ -30,7 +31,7 @@ def test_main(num_tokens: int, hidden: int, num_experts: int, num_topk: int,
         topk_idx[random.randint(0, num_tokens - 1), random.randint(0, num_topk - 1)] = -1
 
     # Check dispatch correctness
-    do_check = False
+    do_check = True
     hash_value, num_times = 0, 0
     for return_recv_hook in (False, True):
         for dispatch_use_fp8 in (False, True):
@@ -53,7 +54,7 @@ def test_main(num_tokens: int, hidden: int, num_experts: int, num_topk: int,
                     for i in range(num_local_experts if do_check else 0):
                         expert_id = rank * num_local_experts + i
                         recv_x = per_token_cast_back(packed_recv_x[0][i], packed_recv_x[1][i]) if dispatch_use_fp8 else packed_recv_x[i]
-                        recv_count, recv_src_info, recv_layout_range = packed_recv_count[i], handle[0][i], handle[1][i]
+                        recv_count, recv_src_info, recv_layout_range = packed_recv_count[i], handle[1][i], handle[2][i]
 
                         # Check expert indices
                         int_mask = (2 ** 32) - 1
@@ -64,8 +65,12 @@ def test_main(num_tokens: int, hidden: int, num_experts: int, num_topk: int,
 
                         # Check received data
                         recv_x = recv_x[:num_valid_tokens]
+                        recv_x[:, ::128] = recv_x[:, 1::128]
                         recv_x_amin = recv_x[:, :-128].amin(dim=-1)
                         recv_src_info = recv_src_info[:num_valid_tokens]
+                        if not torch.equal(recv_x_amin, recv_x[:, :-128].amax(dim=-1)):
+                            print(recv_x_amin, recv_x[:, :-128].amax(dim=-1), flush=True)
+                            print("A", recv_x[0], flush=True)
                         assert torch.equal(recv_x_amin, recv_x[:, :-128].amax(dim=-1))
                         if round_scale:
                             assert calc_diff(recv_x[:, -1], recv_src_info.view(-1)) < 0.007
@@ -96,7 +101,7 @@ def test_main(num_tokens: int, hidden: int, num_experts: int, num_topk: int,
                             if do_check or not use_logfmt:
                                 diff = calc_diff(x * topk_weights.masked_fill(topk_idx == -1, 0).sum(dim=1).view(-1, 1), combined_x)
                                 assert torch.isnan(combined_x).sum().item() == 0
-                                assert diff < (7e-4 if round_scale else 1e-5), f'Error: {diff=}, {zero_copy=}'
+                                assert diff < (7e-4 if round_scale else 1e-5), f'Error: {diff=}, {zero_copy=}, {use_logfmt}'
                                 hash_value ^= hash_tensor(combined_x)
 
     def create_test_cast_with_outliers(num_outliers):
