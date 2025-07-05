@@ -541,7 +541,7 @@ combine(void* combined_x,
         *smem_addr = temp_buf;
     }
 
-    __syncthreads();
+//     __syncthreads();
 
     // Reduce tokens with FP8 cast
     EP_DEVICE_ASSERT(num_topk <= 32 and hidden_bf16_int4 <= num_threads);
@@ -555,8 +555,10 @@ combine(void* combined_x,
             alignas(16) float reg_topk_weights[kNumMaxTopk];
             auto reg_topk_idx_vec = reinterpret_cast<int4*>(reg_topk_idx);
             auto reg_topk_weights_vec = reinterpret_cast<float4*>(reg_topk_weights);
-            reg_topk_idx_vec[0] = *compute_shared_topk_info_addr(idx_iteration, 0, 0);
-            reg_topk_idx_vec[1] = *compute_shared_topk_info_addr(idx_iteration, 0, 1);
+//             reg_topk_idx_vec[0] = *compute_shared_topk_info_addr(idx_iteration, 0, 0);
+//             reg_topk_idx_vec[1] = *compute_shared_topk_info_addr(idx_iteration, 0, 1);
+            reg_topk_idx_vec[0] = {0,1,2,3};
+            reg_topk_idx_vec[1] = {4,5,6,7};
             reg_topk_weights_vec[0] = *reinterpret_cast<float4*>(compute_shared_topk_info_addr(idx_iteration, 1, 0));
             reg_topk_weights_vec[1] = *reinterpret_cast<float4*>(compute_shared_topk_info_addr(idx_iteration, 1, 1));
 
