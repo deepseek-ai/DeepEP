@@ -386,14 +386,6 @@ constexpr int kMaxNumTokensPerSm = 6;
 constexpr int kIdxOrWeightDim = 2;
 constexpr int kNumActualTopkDivFour = 2;
 
-// TODO closure
-__device__ __forceinline__ int4* compute_shared_topk_info_addr(int4* shared_topk_info, int idx_iteration, int idx_iow, int idx_topkdivfour) {
-    return shared_topk_info
-        + idx_iteration * (kIdxOrWeightDim * kNumActualTopkDivFour)
-        + idx_iow * kNumActualTopkDivFour
-        + idx_topkdivfour;
-}
-
 template <int kHidden, int kNumMaxTopk>
 __global__ __launch_bounds__(1024, 1) void
 combine(void* combined_x,
@@ -505,6 +497,12 @@ combine(void* combined_x,
 
     // (6 num_tokens_per_sm, 2 idx_or_weights, 2 topk_div_four, 16B elem_size)
     alignas(16) __shared__ int4 shared_topk_info[kMaxNumTokensPerSm * kIdxOrWeightDim * kNumActualTopkDivFour];
+    const auto compute_shared_topk_info_addr = [=](int idx_iteration, int idx_iow, int idx_topkdivfour) {
+        return shared_topk_info
+            + idx_iteration * (kIdxOrWeightDim * kNumActualTopkDivFour)
+            + idx_iow * kNumActualTopkDivFour
+            + idx_topkdivfour;
+    }
 
     int4 temp_buf;
     int prepare_topk_idx_iteration, prepare_topk_idx_iow, prepare_topk_idx_topkdivfour;
@@ -543,7 +541,7 @@ combine(void* combined_x,
     cg::this_grid().sync();
 
     if (enable_prepare_topk) {
-        int4* smem_addr = compute_shared_topk_info_addr(shared_topk_info, prepare_topk_idx_iteration, prepare_topk_idx_iow, prepare_topk_idx_topkdivfour);
+        int4* smem_addr = compute_shared_topk_info_addr(prepare_topk_idx_iteration, prepare_topk_idx_iow, prepare_topk_idx_topkdivfour);
         *smem_addr = temp_buf;
     }
     __syncthreads(); // TODO can we rm this and use existing grid sync
@@ -561,10 +559,10 @@ combine(void* combined_x,
             alignas(16) float reg_topk_weights[kNumMaxTopk];
             auto reg_topk_idx_vec = reinterpret_cast<int4*>(reg_topk_idx);
             auto reg_topk_weights_vec = reinterpret_cast<float4*>(reg_topk_weights);
-            reg_topk_idx_vec[0] = *compute_shared_topk_info_addr(shared_topk_info, idx_iteration, 0, 0);
-            reg_topk_idx_vec[1] = *compute_shared_topk_info_addr(shared_topk_info, idx_iteration, 0, 1);
-            reg_topk_weights_vec[0] = *reinterpret_cast<float4*>(compute_shared_topk_info_addr(shared_topk_info, idx_iteration, 1, 0));
-            reg_topk_weights_vec[1] = *reinterpret_cast<float4*>(compute_shared_topk_info_addr(shared_topk_info, idx_iteration, 1, 1));
+            reg_topk_idx_vec[0] = *compute_shared_topk_info_addr(idx_iteration, 0, 0);
+            reg_topk_idx_vec[1] = *compute_shared_topk_info_addr(idx_iteration, 0, 1);
+            reg_topk_weights_vec[0] = *reinterpret_cast<float4*>(compute_shared_topk_info_addr(idx_iteration, 1, 0));
+            reg_topk_weights_vec[1] = *reinterpret_cast<float4*>(compute_shared_topk_info_addr(idx_iteration, 1, 1));
 
             // Read from sources, Reduce
             int4 zero4 = {0,0,0,0};
