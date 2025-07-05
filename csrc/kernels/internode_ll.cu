@@ -496,54 +496,54 @@ combine(void* combined_x,
 
     int self_num_iteration = (sm_id >= num_combined_tokens) ? 0 : (1 + (num_combined_tokens - sm_id - 1) / num_sms);
 
-//     // TODO generalize
-//     // (6 num_tokens_per_sm, 2 idx_or_weights, 2 topk_div_four, 16B elem_size)
-//     alignas(16) __shared__ int4 shared_topk_info[kMaxNumTokensPerSm * kIdxOrWeightDim * kNumActualTopkDivFour];
-//     const auto compute_shared_topk_info_addr = [=](int idx_iteration, int idx_iow, int idx_topkdivfour) {
-//         return shared_topk_info
-//             + idx_iteration * (kIdxOrWeightDim * kNumActualTopkDivFour)
-//             + idx_iow * kNumActualTopkDivFour
-//             + idx_topkdivfour;
-//     };
-//
-//     int4 temp_buf;
-//     int prepare_topk_idx_iteration, prepare_topk_idx_iow, prepare_topk_idx_topkdivfour;
-//     // TODO only support few tokens if only use warp 0
-//     if (warp_id == 0) {
-//         int index = thread_id;
-//         prepare_topk_idx_topkdivfour = index % kNumActualTopkDivFour;
-//         index /= kNumActualTopkDivFour;
-//         prepare_topk_idx_iow = index % kIdxOrWeightDim;
-//         index /= kIdxOrWeightDim;
-//         prepare_topk_idx_iteration = index;
-//     }
-//     bool enable_prepare_topk = (warp_id == 0) and (prepare_topk_idx_iteration < self_num_iteration);
-//     if (enable_prepare_topk) {
-//         const int prepare_topk_token_idx = sm_id + prepare_topk_idx_iteration * num_sms;
-//         const int4* src_addr = (
-//             ((prepare_topk_idx_iow == 0)
-//                 ? reinterpret_cast<const int4*>(topk_idx_i32)
-//                 : reinterpret_cast<const int4*>(topk_weights))
-//             + prepare_topk_token_idx * kNumActualTopkDivFour
-//             + prepare_topk_idx_topkdivfour
-//         );
-//         temp_buf = ld_nc_global(src_addr);
-//     }
-//
-//     // Wait all ranks to arrive
-//     if (responsible_expert_idx < num_experts) {
-//         EP_DEVICE_ASSERT(num_warps_per_group > 1);
-//         if (sub_warp_id == 0 and lane_id == 0) {
-//             while (ld_acquire_sys_global(rdma_recv_flag + responsible_expert_idx) == 0);
-//         }
-//     }
-//     cg::this_grid().sync();
-//
-//     if (enable_prepare_topk) {
-//         int4* smem_addr = compute_shared_topk_info_addr(prepare_topk_idx_iteration, prepare_topk_idx_iow, prepare_topk_idx_topkdivfour);
-//         *smem_addr = temp_buf;
-//     }
-//     __syncthreads(); // TODO can we rm this and use existing grid sync
+    // TODO generalize
+    // (6 num_tokens_per_sm, 2 idx_or_weights, 2 topk_div_four, 16B elem_size)
+    alignas(16) __shared__ int4 shared_topk_info[kMaxNumTokensPerSm * kIdxOrWeightDim * kNumActualTopkDivFour];
+    const auto compute_shared_topk_info_addr = [=](int idx_iteration, int idx_iow, int idx_topkdivfour) {
+        return shared_topk_info
+            + idx_iteration * (kIdxOrWeightDim * kNumActualTopkDivFour)
+            + idx_iow * kNumActualTopkDivFour
+            + idx_topkdivfour;
+    };
+
+    int4 temp_buf;
+    int prepare_topk_idx_iteration, prepare_topk_idx_iow, prepare_topk_idx_topkdivfour;
+    // TODO only support few tokens if only use warp 0
+    if (warp_id == 0) {
+        int index = thread_id;
+        prepare_topk_idx_topkdivfour = index % kNumActualTopkDivFour;
+        index /= kNumActualTopkDivFour;
+        prepare_topk_idx_iow = index % kIdxOrWeightDim;
+        index /= kIdxOrWeightDim;
+        prepare_topk_idx_iteration = index;
+    }
+    bool enable_prepare_topk = (warp_id == 0) and (prepare_topk_idx_iteration < self_num_iteration);
+    if (enable_prepare_topk) {
+        const int prepare_topk_token_idx = sm_id + prepare_topk_idx_iteration * num_sms;
+        const int4* src_addr = (
+            ((prepare_topk_idx_iow == 0)
+                ? reinterpret_cast<const int4*>(topk_idx_i32)
+                : reinterpret_cast<const int4*>(topk_weights))
+            + prepare_topk_token_idx * kNumActualTopkDivFour
+            + prepare_topk_idx_topkdivfour
+        );
+        temp_buf = ld_nc_global(src_addr);
+    }
+
+    // Wait all ranks to arrive
+    if (responsible_expert_idx < num_experts) {
+        EP_DEVICE_ASSERT(num_warps_per_group > 1);
+        if (sub_warp_id == 0 and lane_id == 0) {
+            while (ld_acquire_sys_global(rdma_recv_flag + responsible_expert_idx) == 0);
+        }
+    }
+    cg::this_grid().sync();
+
+    if (enable_prepare_topk) {
+        int4* smem_addr = compute_shared_topk_info_addr(prepare_topk_idx_iteration, prepare_topk_idx_iow, prepare_topk_idx_topkdivfour);
+        *smem_addr = temp_buf;
+    }
+    __syncthreads(); // TODO can we rm this and use existing grid sync
 
     // Reduce tokens with FP8 cast
     EP_DEVICE_ASSERT(num_topk <= 32 and hidden_bf16_int4 <= num_threads);
@@ -554,16 +554,14 @@ combine(void* combined_x,
 
             // Read top-k indices and weights
 
-//             alignas(16) int reg_topk_idx[kNumMaxTopk];
-//             alignas(16) float reg_topk_weights[kNumMaxTopk];
-//             auto reg_topk_idx_vec = reinterpret_cast<int4*>(reg_topk_idx);
-//             auto reg_topk_weights_vec = reinterpret_cast<float4*>(reg_topk_weights);
-//             reg_topk_idx_vec[0] = *compute_shared_topk_info_addr(idx_iteration, 0, 0);
-//             reg_topk_idx_vec[1] = *compute_shared_topk_info_addr(idx_iteration, 0, 1);
-//             reg_topk_weights_vec[0] = *reinterpret_cast<float4*>(compute_shared_topk_info_addr(idx_iteration, 1, 0));
-//             reg_topk_weights_vec[1] = *reinterpret_cast<float4*>(compute_shared_topk_info_addr(idx_iteration, 1, 1));
-            alignas(16) int reg_topk_idx[kNumMaxTopk] = {0,1,2,3,4,5,6,7};
-            alignas(16) float reg_topk_weights[kNumMaxTopk] = {0.0,0.1,0.2,0.3,0.4,0.5,0.6,0.7};
+            alignas(16) int reg_topk_idx[kNumMaxTopk];
+            alignas(16) float reg_topk_weights[kNumMaxTopk];
+            auto reg_topk_idx_vec = reinterpret_cast<int4*>(reg_topk_idx);
+            auto reg_topk_weights_vec = reinterpret_cast<float4*>(reg_topk_weights);
+            reg_topk_idx_vec[0] = *compute_shared_topk_info_addr(idx_iteration, 0, 0);
+            reg_topk_idx_vec[1] = *compute_shared_topk_info_addr(idx_iteration, 0, 1);
+            reg_topk_weights_vec[0] = *reinterpret_cast<float4*>(compute_shared_topk_info_addr(idx_iteration, 1, 0));
+            reg_topk_weights_vec[1] = *reinterpret_cast<float4*>(compute_shared_topk_info_addr(idx_iteration, 1, 1));
 
             // Read from sources, Reduce
             int4 zero4 = {0,0,0,0};
