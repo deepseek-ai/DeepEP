@@ -567,8 +567,6 @@ combine(void* combined_x,
             reg_topk_weights_vec[0] = *reinterpret_cast<float4*>(compute_shared_topk_info_addr(shared_topk_info, idx_iteration, 1, 0));
             reg_topk_weights_vec[1] = *reinterpret_cast<float4*>(compute_shared_topk_info_addr(shared_topk_info, idx_iteration, 1, 1));
 
-            float combined_values[kNumElemsPerInt4] = {0.0f};
-
             // Read from sources, Reduce
             int4 zero4 = {0,0,0,0};
             constexpr int UNROLL_NUM = 8; // TODO
@@ -578,6 +576,7 @@ combine(void* combined_x,
                 x_vec[i] = (reg_topk_idx[i] >= 0) ? ld_nc_global(reinterpret_cast<const int4*>(reinterpret_cast<const uint8_t*>(reinterpret_cast<const int*>(static_cast<uint8_t*>(rdma_recv_x) + (reg_topk_idx[i] * num_max_dispatch_tokens_per_rank + token_idx) * num_bytes_per_slot))) + thread_id) : zero4;
             }
 
+            float combined_values[kNumElemsPerInt4] = {0.0f};
             #pragma unroll
             for (int i = 0; i < UNROLL_NUM; ++i) {
                 if (reg_topk_idx[i] >= 0) {
