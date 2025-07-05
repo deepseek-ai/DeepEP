@@ -502,7 +502,7 @@ combine(void* combined_x,
             + idx_iteration * (kIdxOrWeightDim * kNumActualTopkDivFour)
             + idx_iow * kNumActualTopkDivFour
             + idx_topkdivfour;
-    }
+    };
 
     int4 temp_buf;
     int prepare_topk_idx_iteration, prepare_topk_idx_iow, prepare_topk_idx_topkdivfour;
