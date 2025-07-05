@@ -523,6 +523,15 @@ combine(void* combined_x,
     auto reg_topk_idx_vec = reinterpret_cast<int4*>(reg_topk_idx);
     auto reg_topk_weights_vec = reinterpret_cast<float4*>(reg_topk_weights);
 
+    // TODO have issue when less than 1 wave?
+    {
+        const int init_token_idx = compute_token_idx(0);
+        reg_topk_idx_vec[0] = *compute_topk_gmem_addr(init_token_idx, 0, 0);
+        reg_topk_idx_vec[1] = *compute_topk_gmem_addr(init_token_idx, 0, 1);
+        reg_topk_weights_vec[0] = *reinterpret_cast<const float4*>(compute_topk_gmem_addr(init_token_idx, 1, 0));
+        reg_topk_weights_vec[1] = *reinterpret_cast<const float4*>(compute_topk_gmem_addr(init_token_idx, 1, 1));
+    }
+
     int4 temp_buf;
     int prepare_topk_idx_iteration, prepare_topk_idx_iow, prepare_topk_idx_topkdivfour;
     // TODO only support few tokens if only use warp 0
@@ -539,15 +548,6 @@ combine(void* combined_x,
         const int prepare_topk_token_idx = sm_id + prepare_topk_idx_iteration * num_sms;
         const int4* src_addr = compute_topk_gmem_addr(prepare_topk_token_idx, prepare_topk_idx_iow, prepare_topk_idx_topkdivfour);
         temp_buf = ld_nc_global(src_addr);
-    }
-
-    // TODO have issue when less than 1 wave?
-    {
-        const int init_token_idx = compute_token_idx(0);
-        reg_topk_idx_vec[0] = *compute_topk_gmem_addr(init_token_idx, 0, 0);
-        reg_topk_idx_vec[1] = *compute_topk_gmem_addr(init_token_idx, 0, 1);
-        reg_topk_weights_vec[0] = *reinterpret_cast<const float4*>(compute_topk_gmem_addr(init_token_idx, 1, 0));
-        reg_topk_weights_vec[1] = *reinterpret_cast<const float4*>(compute_topk_gmem_addr(init_token_idx, 1, 1));
     }
 
     // Wait all ranks to arrive
