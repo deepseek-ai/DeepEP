@@ -171,9 +171,9 @@ def test_main(num_tokens: int, hidden: int, num_experts: int, num_topk: int,
     output_data = {}
 
     # Separate profiling
-    for return_recv_hook in (False, True):
-        for num_tests in (30, 300):
-            print(f"HACK: {num_tests=}")
+    for num_tests in (30, 300):
+        print(f"HACK: {num_tests=}")
+        for return_recv_hook in (False, True):
             group.barrier()
             bench_output = bench_kineto(partial(test_func, zero_copy=True, return_recv_hook=return_recv_hook),
                                                  kernel_names=('dispatch', 'combine'), barrier_comm_profiling=True,
