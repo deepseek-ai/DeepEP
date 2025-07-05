@@ -532,8 +532,8 @@ combine(void* combined_x,
 
     // Wait all ranks to arrive
     const int recv_flag_responsible_expert_idx = thread_id;
-    const int recv_flag_addr = rdma_recv_flag + recv_flag_responsible_expert_idx;
-    const int recv_flag_value;
+    const int* recv_flag_addr = rdma_recv_flag + recv_flag_responsible_expert_idx;
+    int recv_flag_value;
     if (recv_flag_responsible_expert_idx < num_experts) {
         recv_flag_value = ld_acquire_sys_global(recv_flag_addr);
     }
