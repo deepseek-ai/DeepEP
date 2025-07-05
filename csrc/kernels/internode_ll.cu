@@ -532,13 +532,21 @@ combine(void* combined_x,
 
     // Wait all ranks to arrive
     const int recv_flag_responsible_expert_idx = thread_id;
+    const int recv_flag_addr = rdma_recv_flag + recv_flag_responsible_expert_idx;
+    const int recv_flag_value;
     if (recv_flag_responsible_expert_idx < num_experts) {
-        while (ld_acquire_sys_global(rdma_recv_flag + recv_flag_responsible_expert_idx) == 0);
+        recv_flag_value = ld_acquire_sys_global(recv_flag_addr);
     }
 
     if (enable_prepare_topk) {
         int4* smem_addr = compute_shared_topk_info_addr(prepare_topk_idx_iteration, prepare_topk_idx_iow, prepare_topk_idx_topkdivfour);
         *smem_addr = temp_buf;
+    }
+
+    if (recv_flag_responsible_expert_idx < num_experts) {
+        while (recv_flag_value == 0) {
+            recv_flag_value = ld_acquire_sys_global(recv_flag_addr);
+        }
     }
 
     __syncthreads();
