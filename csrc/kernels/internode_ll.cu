@@ -604,8 +604,7 @@ void combine(void* combined_x,
     const int num_warps_per_group = 32 / num_warp_groups;
     EP_HOST_ASSERT(num_warp_groups > 0 and num_warps_per_group > 0);
 
-    // HACK
-    const auto num_warps = (phases == LOW_LATENCY_RECV_PHASE) ? 28 : (num_warp_groups * num_warps_per_group);
+    const auto num_warps = num_warp_groups * num_warps_per_group;
     const auto num_sms = ceil_div(num_experts, num_warp_groups);
 
     // Check workspace
