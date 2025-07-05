@@ -138,15 +138,15 @@ def test_main(num_tokens: int, hidden: int, num_experts: int, num_topk: int,
         if zero_copy:
             buffer.get_next_low_latency_combine_buffer(handle)[:, :, :] = simulated_gemm_x
 
-        if do_profile:
-            print("call cudaProfilerStart")
-            torch.cuda.cudart().cudaProfilerStart()
         combined_x, event, hook = buffer.low_latency_combine(simulated_gemm_x, topk_idx, topk_weights, handle,
                                                              zero_copy=zero_copy, return_recv_hook=return_recv_hook)
         if do_profile:
+            print("call cudaProfilerStart")
+            torch.cuda.cudart().cudaProfilerStart()
+        large_gemm_with_hook(hook) if return_recv_hook else None
+        if do_profile:
             print("call cudaProfilerStop")
             torch.cuda.cudart().cudaProfilerStop()
-        large_gemm_with_hook(hook) if return_recv_hook else None
 
     # Calculate bandwidth
     num_fp8_bytes, num_bf16_bytes = (hidden + hidden / 128 * 4 + 16), hidden * 2
