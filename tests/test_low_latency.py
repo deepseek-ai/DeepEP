@@ -172,37 +172,34 @@ def test_main(num_tokens: int, hidden: int, num_experts: int, num_topk: int,
 
     # Separate profiling
     for return_recv_hook in (False, True):
-        for num_tests in (30, 300):
-            print(f"HACK: {num_tests=}")
-            group.barrier()
-            bench_output = bench_kineto(partial(test_func, zero_copy=True, return_recv_hook=return_recv_hook),
-                                                 kernel_names=('dispatch', 'combine'), barrier_comm_profiling=True,
-                                                 suppress_kineto_output=True, duplicate_name_period=2 if return_recv_hook else None,
-                                                 num_tests=num_tests)
-            if not return_recv_hook:
-                dispatch_t, combine_t = bench_output
-                data = dict(
-                    dispatch_bandwidth=num_dispatch_comm_bytes / 1e9 / dispatch_t,
-                    combine_bandwidth=num_combine_comm_bytes / 1e9 / combine_t,
-                    dispatch_t_us=dispatch_t * 1e6,
-                    combine_t_us=combine_t * 1e6,
-                )
-                print(f'[rank {rank}] Dispatch bandwidth: {data["dispatch_bandwidth"] :.2f} GB/s, avg_t={data["dispatch_t_us"] :.2f} us | '
-                      f'Combine bandwidth: {data["combine_bandwidth"] :.2f} GB/s, avg_t={data["combine_t_us"] :.2f} us', flush=True)
-            else:
-                dispatch_t, combine_t, detail_times = bench_output
-                data = dict(
-                    dispatch_t_us=dispatch_t * 2 * 1e6,
-                    combine_t_us=combine_t * 2 * 1e6,
-                    dispatch_send_t_us=detail_times["dispatch"][0] * 1e6,
-                    dispatch_recv_t_us=detail_times["dispatch"][1] * 1e6,
-                    combine_send_t_us=detail_times["combine"][0] * 1e6,
-                    combine_recv_t_us=detail_times["combine"][1] * 1e6,
-                )
-                print(f'[rank {rank}] Dispatch send/recv time: {data["dispatch_t_us"] :.2f} = {data["dispatch_send_t_us"] :.2f} + {data["dispatch_recv_t_us"] :.2f} us | '
-                      f'Combine send/recv time: {data["combine_t_us"] :.2f} = {data["combine_send_t_us"] :.2f} + {data["combine_recv_t_us"] :.2f} us', flush=True)
+        group.barrier()
+        bench_output = bench_kineto(partial(test_func, zero_copy=True, return_recv_hook=return_recv_hook),
+                                             kernel_names=('dispatch', 'combine'), barrier_comm_profiling=True,
+                                             suppress_kineto_output=True, duplicate_name_period=2 if return_recv_hook else None)
+        if not return_recv_hook:
+            dispatch_t, combine_t = bench_output
+            data = dict(
+                dispatch_bandwidth=num_dispatch_comm_bytes / 1e9 / dispatch_t,
+                combine_bandwidth=num_combine_comm_bytes / 1e9 / combine_t,
+                dispatch_t_us=dispatch_t * 1e6,
+                combine_t_us=combine_t * 1e6,
+            )
+            print(f'[rank {rank}] Dispatch bandwidth: {data["dispatch_bandwidth"] :.2f} GB/s, avg_t={data["dispatch_t_us"] :.2f} us | '
+                  f'Combine bandwidth: {data["combine_bandwidth"] :.2f} GB/s, avg_t={data["combine_t_us"] :.2f} us', flush=True)
+        else:
+            dispatch_t, combine_t, detail_times = bench_output
+            data = dict(
+                dispatch_t_us=dispatch_t * 2 * 1e6,
+                combine_t_us=combine_t * 2 * 1e6,
+                dispatch_send_t_us=detail_times["dispatch"][0] * 1e6,
+                dispatch_recv_t_us=detail_times["dispatch"][1] * 1e6,
+                combine_send_t_us=detail_times["combine"][0] * 1e6,
+                combine_recv_t_us=detail_times["combine"][1] * 1e6,
+            )
+            print(f'[rank {rank}] Dispatch send/recv time: {data["dispatch_t_us"] :.2f} = {data["dispatch_send_t_us"] :.2f} + {data["dispatch_recv_t_us"] :.2f} us | '
+                  f'Combine send/recv time: {data["combine_t_us"] :.2f} = {data["combine_send_t_us"] :.2f} + {data["combine_recv_t_us"] :.2f} us', flush=True)
 
-            output_data |= {("hook_" if return_recv_hook else "std_") + k: v for k, v in data.items()}
+        output_data |= {("hook_" if return_recv_hook else "std_") + k: v for k, v in data.items()}
 
     print('MAIN_OUTPUT=' + json.dumps(dict(
         rank=rank,
