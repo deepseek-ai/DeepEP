@@ -531,11 +531,9 @@ combine(void* combined_x,
     }
 
     // Wait all ranks to arrive
-    {
-        const int responsible_expert_idx = thread_id;
-        if (responsible_expert_idx < num_experts) {
-            while (ld_acquire_sys_global(rdma_recv_flag + responsible_expert_idx) == 0);
-        }
+    const int recv_flag_responsible_expert_idx = thread_id;
+    if (recv_flag_responsible_expert_idx < num_experts) {
+        while (ld_acquire_sys_global(rdma_recv_flag + recv_flag_responsible_expert_idx) == 0);
     }
 
     if (enable_prepare_topk) {
