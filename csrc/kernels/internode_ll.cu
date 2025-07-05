@@ -552,7 +552,6 @@ combine(void* combined_x,
     EP_DEVICE_ASSERT(num_topk <= 32 and hidden_bf16_int4 <= num_threads);
     EP_STATIC_ASSERT(kHidden % (32 * kNumElemsPerInt4) == 0, "Invalid vectorization");
     if (thread_id < hidden_bf16_int4) {
-//         for (int token_idx = sm_id; token_idx < num_combined_tokens; token_idx += num_sms) {
         for (int idx_iteration = 0; idx_iteration < self_num_iteration; ++ idx_iteration) {
             const int token_idx = sm_id + idx_iteration * num_sms;
 
