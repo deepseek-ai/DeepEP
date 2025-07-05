@@ -382,6 +382,7 @@ LAUNCH_KERNEL(&cfg, dispatch_func, \
 #undef DISPATCH_LAUNCH_CASE
 }
 
+// TODO generalize
 constexpr int kMaxNumTokensPerSm = 6;
 constexpr int kIdxOrWeightDim = 2;
 constexpr int kNumActualTopkDivFour = 2;
@@ -495,6 +496,7 @@ combine(void* combined_x,
 
     int self_num_iteration = (sm_id >= num_combined_tokens) ? 0 : (1 + (num_combined_tokens - sm_id - 1) / num_sms);
 
+    // TODO generalize
     // (6 num_tokens_per_sm, 2 idx_or_weights, 2 topk_div_four, 16B elem_size)
     alignas(16) __shared__ int4 shared_topk_info[kMaxNumTokensPerSm * kIdxOrWeightDim * kNumActualTopkDivFour];
     const auto compute_shared_topk_info_addr = [=](int idx_iteration, int idx_iow, int idx_topkdivfour) {
@@ -509,13 +511,10 @@ combine(void* combined_x,
     // TODO only support few tokens if only use warp 0
     if (warp_id == 0) {
         int index = thread_id;
-
         prepare_topk_idx_topkdivfour = index % kNumActualTopkDivFour;
         index /= kNumActualTopkDivFour;
-
         prepare_topk_idx_iow = index % kIdxOrWeightDim;
         index /= kIdxOrWeightDim;
-
         prepare_topk_idx_iteration = index;
     }
     bool enable_prepare_topk = (warp_id == 0) and (prepare_topk_idx_iteration < self_num_iteration);
