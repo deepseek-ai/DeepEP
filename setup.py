@@ -21,7 +21,8 @@ if __name__ == '__main__':
     nvcc_dlink = []
     extra_link_args = []
 
-    nvcc_flags += os.environ.get("DEEPEP_EXTRA_NVCC_FLAGS", "").split(" ")
+    if (extra_nvcc_flags := os.environ.get("DEEPEP_EXTRA_NVCC_FLAGS")) is not None:
+        nvcc_flags += extra_nvcc_flags.split(" ")
 
     # NVSHMEM flags
     if disable_nvshmem:
