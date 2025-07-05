@@ -604,55 +604,20 @@ combine(void* combined_x,
             {
                 // Read from sources, Reduce
                 int4 zero4 = {0,0,0,0};
-                int4 x_vec_N0 = (reg_topk_idx[0] >= 0) ? ld_nc_global(reinterpret_cast<const int4*>(reinterpret_cast<const uint8_t*>(reinterpret_cast<const int*>(static_cast<uint8_t*>(rdma_recv_x) + (reg_topk_idx[0] * num_max_dispatch_tokens_per_rank + token_idx) * num_bytes_per_slot))) + thread_id) : zero4;
-                int4 x_vec_N1 = (reg_topk_idx[1] >= 0) ? ld_nc_global(reinterpret_cast<const int4*>(reinterpret_cast<const uint8_t*>(reinterpret_cast<const int*>(static_cast<uint8_t*>(rdma_recv_x) + (reg_topk_idx[1] * num_max_dispatch_tokens_per_rank + token_idx) * num_bytes_per_slot))) + thread_id) : zero4;
-                int4 x_vec_N2 = (reg_topk_idx[2] >= 0) ? ld_nc_global(reinterpret_cast<const int4*>(reinterpret_cast<const uint8_t*>(reinterpret_cast<const int*>(static_cast<uint8_t*>(rdma_recv_x) + (reg_topk_idx[2] * num_max_dispatch_tokens_per_rank + token_idx) * num_bytes_per_slot))) + thread_id) : zero4;
-                int4 x_vec_N3 = (reg_topk_idx[3] >= 0) ? ld_nc_global(reinterpret_cast<const int4*>(reinterpret_cast<const uint8_t*>(reinterpret_cast<const int*>(static_cast<uint8_t*>(rdma_recv_x) + (reg_topk_idx[3] * num_max_dispatch_tokens_per_rank + token_idx) * num_bytes_per_slot))) + thread_id) : zero4;
-                int4 x_vec_N4 = (reg_topk_idx[4] >= 0) ? ld_nc_global(reinterpret_cast<const int4*>(reinterpret_cast<const uint8_t*>(reinterpret_cast<const int*>(static_cast<uint8_t*>(rdma_recv_x) + (reg_topk_idx[4] * num_max_dispatch_tokens_per_rank + token_idx) * num_bytes_per_slot))) + thread_id) : zero4;
-                int4 x_vec_N5 = (reg_topk_idx[5] >= 0) ? ld_nc_global(reinterpret_cast<const int4*>(reinterpret_cast<const uint8_t*>(reinterpret_cast<const int*>(static_cast<uint8_t*>(rdma_recv_x) + (reg_topk_idx[5] * num_max_dispatch_tokens_per_rank + token_idx) * num_bytes_per_slot))) + thread_id) : zero4;
-                int4 x_vec_N6 = (reg_topk_idx[6] >= 0) ? ld_nc_global(reinterpret_cast<const int4*>(reinterpret_cast<const uint8_t*>(reinterpret_cast<const int*>(static_cast<uint8_t*>(rdma_recv_x) + (reg_topk_idx[6] * num_max_dispatch_tokens_per_rank + token_idx) * num_bytes_per_slot))) + thread_id) : zero4;
-                int4 x_vec_N7 = (reg_topk_idx[7] >= 0) ? ld_nc_global(reinterpret_cast<const int4*>(reinterpret_cast<const uint8_t*>(reinterpret_cast<const int*>(static_cast<uint8_t*>(rdma_recv_x) + (reg_topk_idx[7] * num_max_dispatch_tokens_per_rank + token_idx) * num_bytes_per_slot))) + thread_id) : zero4;
+                constexpr int UNROLL_NUM = 8; // TODO
+                int4 x_vec[UNROLL_NUM];
+                #pragma unroll
+                for (int i = 0; i < UNROLL_NUM; ++i) {
+                    x_vec[i] = (reg_topk_idx[i] >= 0) ? ld_nc_global(reinterpret_cast<const int4*>(reinterpret_cast<const uint8_t*>(reinterpret_cast<const int*>(static_cast<uint8_t*>(rdma_recv_x) + (reg_topk_idx[i] * num_max_dispatch_tokens_per_rank + token_idx) * num_bytes_per_slot))) + thread_id) : zero4;
+                }
 
-                const auto x_bf16_N0 = reinterpret_cast<nv_bfloat16*>(&x_vec_N0);
-                const auto x_bf16_N1 = reinterpret_cast<nv_bfloat16*>(&x_vec_N1);
-                const auto x_bf16_N2 = reinterpret_cast<nv_bfloat16*>(&x_vec_N2);
-                const auto x_bf16_N3 = reinterpret_cast<nv_bfloat16*>(&x_vec_N3);
-                const auto x_bf16_N4 = reinterpret_cast<nv_bfloat16*>(&x_vec_N4);
-                const auto x_bf16_N5 = reinterpret_cast<nv_bfloat16*>(&x_vec_N5);
-                const auto x_bf16_N6 = reinterpret_cast<nv_bfloat16*>(&x_vec_N6);
-                const auto x_bf16_N7 = reinterpret_cast<nv_bfloat16*>(&x_vec_N7);
-
-                if (reg_topk_idx[0] >= 0) {
-                    #pragma unroll
-                    for (int j = 0; j < kNumElemsPerInt4; ++ j) combined_values[j] += static_cast<float>(x_bf16_N0[j]) * reg_topk_weights[0];
-                }
-                if (reg_topk_idx[1] >= 0) {
-                    #pragma unroll
-                    for (int j = 0; j < kNumElemsPerInt4; ++ j) combined_values[j] += static_cast<float>(x_bf16_N1[j]) * reg_topk_weights[1];
-                }
-                if (reg_topk_idx[2] >= 0) {
-                    #pragma unroll
-                    for (int j = 0; j < kNumElemsPerInt4; ++ j) combined_values[j] += static_cast<float>(x_bf16_N2[j]) * reg_topk_weights[2];
-                }
-                if (reg_topk_idx[3] >= 0) {
-                    #pragma unroll
-                    for (int j = 0; j < kNumElemsPerInt4; ++ j) combined_values[j] += static_cast<float>(x_bf16_N3[j]) * reg_topk_weights[3];
-                }
-                if (reg_topk_idx[4] >= 0) {
-                    #pragma unroll
-                    for (int j = 0; j < kNumElemsPerInt4; ++ j) combined_values[j] += static_cast<float>(x_bf16_N4[j]) * reg_topk_weights[4];
-                }
-                if (reg_topk_idx[5] >= 0) {
-                    #pragma unroll
-                    for (int j = 0; j < kNumElemsPerInt4; ++ j) combined_values[j] += static_cast<float>(x_bf16_N5[j]) * reg_topk_weights[5];
-                }
-                if (reg_topk_idx[6] >= 0) {
-                    #pragma unroll
-                    for (int j = 0; j < kNumElemsPerInt4; ++ j) combined_values[j] += static_cast<float>(x_bf16_N6[j]) * reg_topk_weights[6];
-                }
-                if (reg_topk_idx[7] >= 0) {
-                    #pragma unroll
-                    for (int j = 0; j < kNumElemsPerInt4; ++ j) combined_values[j] += static_cast<float>(x_bf16_N7[j]) * reg_topk_weights[7];
+                #pragma unroll
+                for (int i = 0; i < UNROLL_NUM; ++i) {
+                    if (reg_topk_idx[i] >= 0) {
+                        const auto x_bf16 = reinterpret_cast<nv_bfloat16*>(&x_vec[i]);
+                        #pragma unroll
+                        for (int j = 0; j < kNumElemsPerInt4; ++ j) combined_values[j] += static_cast<float>(x_bf16[j]) * reg_topk_weights[i];
+                    }
                 }
             }
 
