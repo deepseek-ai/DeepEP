@@ -21,7 +21,7 @@ if __name__ == '__main__':
     nvcc_dlink = []
     extra_link_args = []
 
-    # NOTE MODIFIED
+    # TODO merge another PR first
     nvcc_flags += ['-lineinfo']
 
     # NVSHMEM flags
