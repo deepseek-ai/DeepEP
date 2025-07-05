@@ -501,36 +501,10 @@ combine(void* combined_x,
     alignas(16) __shared__ int4 shared_topk_info[kMaxNumTokensPerSm * kIdxOrWeightDim * kNumActualTopkDivFour];
     const auto compute_shared_topk_info_addr = [=](int idx_iteration, int idx_iow, int idx_topkdivfour) {
         return shared_topk_info
-            + (idx_iteration - 1) * (kIdxOrWeightDim * kNumActualTopkDivFour)
+            + idx_iteration * (kIdxOrWeightDim * kNumActualTopkDivFour)
             + idx_iow * kNumActualTopkDivFour
             + idx_topkdivfour;
     };
-
-    const auto compute_topk_gmem_addr = [=](int token_idx, int idx_iow, int idx_topkdivfour) {
-        return ((idx_iow == 0)
-                   ? reinterpret_cast<const int4*>(topk_idx_i32)
-                   : reinterpret_cast<const int4*>(topk_weights))
-           + token_idx * kNumActualTopkDivFour
-           + idx_topkdivfour;
-    };
-
-    const auto compute_token_idx = [=](const int idx_iteration) {
-        return sm_id + idx_iteration * num_sms;
-    };
-
-    alignas(16) int reg_topk_idx[kNumMaxTopk];
-    alignas(16) float reg_topk_weights[kNumMaxTopk];
-    auto reg_topk_idx_vec = reinterpret_cast<int4*>(reg_topk_idx);
-    auto reg_topk_weights_vec = reinterpret_cast<float4*>(reg_topk_weights);
-
-    // TODO have issue when less than 1 wave?
-    {
-        const int init_token_idx = compute_token_idx(0);
-        reg_topk_idx_vec[0] = ld_nc_global(compute_topk_gmem_addr(init_token_idx, 0, 0));
-        reg_topk_idx_vec[1] = ld_nc_global(compute_topk_gmem_addr(init_token_idx, 0, 1));
-        reg_topk_weights_vec[0] = ld_nc_global(reinterpret_cast<const float4*>(compute_topk_gmem_addr(init_token_idx, 1, 0)));
-        reg_topk_weights_vec[1] = ld_nc_global(reinterpret_cast<const float4*>(compute_topk_gmem_addr(init_token_idx, 1, 1)));
-    }
 
     int4 temp_buf;
     int prepare_topk_idx_iteration, prepare_topk_idx_iow, prepare_topk_idx_topkdivfour;
@@ -541,12 +515,18 @@ combine(void* combined_x,
         index /= kNumActualTopkDivFour;
         prepare_topk_idx_iow = index % kIdxOrWeightDim;
         index /= kIdxOrWeightDim;
-        prepare_topk_idx_iteration = index + 1; // skip iter=0
+        prepare_topk_idx_iteration = index;
     }
     bool enable_prepare_topk = (warp_id == 0) and (prepare_topk_idx_iteration < self_num_iteration);
     if (enable_prepare_topk) {
         const int prepare_topk_token_idx = sm_id + prepare_topk_idx_iteration * num_sms;
-        const int4* src_addr = compute_topk_gmem_addr(prepare_topk_token_idx, prepare_topk_idx_iow, prepare_topk_idx_topkdivfour);
+        const int4* src_addr = (
+            ((prepare_topk_idx_iow == 0)
+                ? reinterpret_cast<const int4*>(topk_idx_i32)
+                : reinterpret_cast<const int4*>(topk_weights))
+            + prepare_topk_token_idx * kNumActualTopkDivFour
+            + prepare_topk_idx_topkdivfour
+        );
         temp_buf = ld_nc_global(src_addr);
     }
 
@@ -570,7 +550,17 @@ combine(void* combined_x,
     EP_STATIC_ASSERT(kHidden % (32 * kNumElemsPerInt4) == 0, "Invalid vectorization");
     if (thread_id < hidden_bf16_int4) {
         for (int idx_iteration = 0; idx_iteration < self_num_iteration; ++ idx_iteration) {
-            const int token_idx = compute_token_idx(idx_iteration);
+            const int token_idx = sm_id + idx_iteration * num_sms;
+
+            // Read top-k indices and weights
+            alignas(16) int reg_topk_idx[kNumMaxTopk];
+            alignas(16) float reg_topk_weights[kNumMaxTopk];
+            auto reg_topk_idx_vec = reinterpret_cast<int4*>(reg_topk_idx);
+            auto reg_topk_weights_vec = reinterpret_cast<float4*>(reg_topk_weights);
+            reg_topk_idx_vec[0] = *compute_shared_topk_info_addr(idx_iteration, 0, 0);
+            reg_topk_idx_vec[1] = *compute_shared_topk_info_addr(idx_iteration, 0, 1);
+            reg_topk_weights_vec[0] = *reinterpret_cast<float4*>(compute_shared_topk_info_addr(idx_iteration, 1, 0));
+            reg_topk_weights_vec[1] = *reinterpret_cast<float4*>(compute_shared_topk_info_addr(idx_iteration, 1, 1));
 
             // Read from sources, Reduce
             int4 zero4 = {0,0,0,0};
@@ -589,15 +579,6 @@ combine(void* combined_x,
                     #pragma unroll
                     for (int j = 0; j < kNumElemsPerInt4; ++ j) combined_values[j] += static_cast<float>(x_bf16[j]) * reg_topk_weights[i];
                 }
-            }
-
-            // Read top-k indices and weights
-            const int next_idx_iteration = idx_iteration + 1;
-            if (next_idx_iteration < self_num_iteration) {
-                reg_topk_idx_vec[0] = *compute_shared_topk_info_addr(next_idx_iteration, 0, 0);
-                reg_topk_idx_vec[1] = *compute_shared_topk_info_addr(next_idx_iteration, 0, 1);
-                reg_topk_weights_vec[0] = *reinterpret_cast<float4*>(compute_shared_topk_info_addr(next_idx_iteration, 1, 0));
-                reg_topk_weights_vec[1] = *reinterpret_cast<float4*>(compute_shared_topk_info_addr(next_idx_iteration, 1, 1));
             }
 
             // Write results
