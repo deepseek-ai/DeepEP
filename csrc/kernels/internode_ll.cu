@@ -558,66 +558,32 @@ combine(void* combined_x,
 
             // Read top-k indices and weights
 
-            // TODO align 16 to be castable?
             alignas(16) int reg_topk_idx[kNumMaxTopk];
             alignas(16) float reg_topk_weights[kNumMaxTopk];
-//             #pragma unroll
-//             for (int i = 0; i < num_topk; ++ i) {
-//                 reg_topk_idx[i] = static_cast<int>(__ldg(topk_idx + token_idx * num_topk + i));
-//                 reg_topk_weights[i] = __ldg(topk_weights + token_idx * num_topk + i);
-//             }
-            {
-                auto reg_topk_idx_vec = reinterpret_cast<int4*>(reg_topk_idx);
-                auto reg_topk_weights_vec = reinterpret_cast<float4*>(reg_topk_weights);
-
-//                 // TODO ensure GMEM is aligned?
-//                 // TODO is the aggressive ld PTX ok here?
-//                 reg_topk_idx_vec[0] = ld_nc_global(reinterpret_cast<const int4*>(topk_idx_i32 + token_idx * num_topk + 0));
-//                 reg_topk_idx_vec[1] = ld_nc_global(reinterpret_cast<const int4*>(topk_idx_i32 + token_idx * num_topk + 4));
-//                 reg_topk_weights_vec[0] = ld_nc_global(reinterpret_cast<const float4*>(topk_weights + token_idx * num_topk + 0));
-//                 reg_topk_weights_vec[1] = ld_nc_global(reinterpret_cast<const float4*>(topk_weights + token_idx * num_topk + 4));
-
-                reg_topk_idx_vec[0] = *compute_shared_topk_info_addr(shared_topk_info, idx_iteration, 0, 0);
-                reg_topk_idx_vec[1] = *compute_shared_topk_info_addr(shared_topk_info, idx_iteration, 0, 1);
-                reg_topk_weights_vec[0] = *reinterpret_cast<float4*>(compute_shared_topk_info_addr(shared_topk_info, idx_iteration, 1, 0));
-                reg_topk_weights_vec[1] = *reinterpret_cast<float4*>(compute_shared_topk_info_addr(shared_topk_info, idx_iteration, 1, 1));
-            }
+            auto reg_topk_idx_vec = reinterpret_cast<int4*>(reg_topk_idx);
+            auto reg_topk_weights_vec = reinterpret_cast<float4*>(reg_topk_weights);
+            reg_topk_idx_vec[0] = *compute_shared_topk_info_addr(shared_topk_info, idx_iteration, 0, 0);
+            reg_topk_idx_vec[1] = *compute_shared_topk_info_addr(shared_topk_info, idx_iteration, 0, 1);
+            reg_topk_weights_vec[0] = *reinterpret_cast<float4*>(compute_shared_topk_info_addr(shared_topk_info, idx_iteration, 1, 0));
+            reg_topk_weights_vec[1] = *reinterpret_cast<float4*>(compute_shared_topk_info_addr(shared_topk_info, idx_iteration, 1, 1));
 
             float combined_values[kNumElemsPerInt4] = {0.0f};
 
+            // Read from sources, Reduce
+            int4 zero4 = {0,0,0,0};
+            constexpr int UNROLL_NUM = 8; // TODO
+            int4 x_vec[UNROLL_NUM];
+            #pragma unroll
+            for (int i = 0; i < UNROLL_NUM; ++i) {
+                x_vec[i] = (reg_topk_idx[i] >= 0) ? ld_nc_global(reinterpret_cast<const int4*>(reinterpret_cast<const uint8_t*>(reinterpret_cast<const int*>(static_cast<uint8_t*>(rdma_recv_x) + (reg_topk_idx[i] * num_max_dispatch_tokens_per_rank + token_idx) * num_bytes_per_slot))) + thread_id) : zero4;
+            }
 
-//             #pragma unroll
-//             for (int i = 0; i < num_topk; ++ i) if (reg_topk_idx[i] >= 0) {
-//
-//                 // Read from sources
-//                 auto rdma_buffer_type = reinterpret_cast<const int*>(static_cast<uint8_t*>(rdma_recv_x) + (reg_topk_idx[i] * num_max_dispatch_tokens_per_rank + token_idx) * num_bytes_per_slot);
-//                 auto rdma_buffer_row = reinterpret_cast<const uint8_t*>(rdma_buffer_type);
-//
-//                 // Reduce
-//                 auto x_vec = ld_nc_global(reinterpret_cast<const int4*>(rdma_buffer_row) + thread_id);
-//                 const auto x_bf16 = reinterpret_cast<nv_bfloat16*>(&x_vec);
-//                 #pragma unroll
-//                 for (int j = 0; j < kNumElemsPerInt4; ++ j)
-//                     combined_values[j] += static_cast<float>(x_bf16[j]) * reg_topk_weights[i];
-//             }
-
-            {
-                // Read from sources, Reduce
-                int4 zero4 = {0,0,0,0};
-                constexpr int UNROLL_NUM = 8; // TODO
-                int4 x_vec[UNROLL_NUM];
-                #pragma unroll
-                for (int i = 0; i < UNROLL_NUM; ++i) {
-                    x_vec[i] = (reg_topk_idx[i] >= 0) ? ld_nc_global(reinterpret_cast<const int4*>(reinterpret_cast<const uint8_t*>(reinterpret_cast<const int*>(static_cast<uint8_t*>(rdma_recv_x) + (reg_topk_idx[i] * num_max_dispatch_tokens_per_rank + token_idx) * num_bytes_per_slot))) + thread_id) : zero4;
-                }
-
-                #pragma unroll
-                for (int i = 0; i < UNROLL_NUM; ++i) {
-                    if (reg_topk_idx[i] >= 0) {
-                        const auto x_bf16 = reinterpret_cast<nv_bfloat16*>(&x_vec[i]);
-                        #pragma unroll
-                        for (int j = 0; j < kNumElemsPerInt4; ++ j) combined_values[j] += static_cast<float>(x_bf16[j]) * reg_topk_weights[i];
-                    }
+            #pragma unroll
+            for (int i = 0; i < UNROLL_NUM; ++i) {
+                if (reg_topk_idx[i] >= 0) {
+                    const auto x_bf16 = reinterpret_cast<nv_bfloat16*>(&x_vec[i]);
+                    #pragma unroll
+                    for (int j = 0; j < kNumElemsPerInt4; ++ j) combined_values[j] += static_cast<float>(x_bf16[j]) * reg_topk_weights[i];
                 }
             }
 
