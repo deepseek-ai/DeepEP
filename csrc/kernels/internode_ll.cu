@@ -531,13 +531,20 @@ combine(void* combined_x,
     }
 
     // Wait all ranks to arrive
-    if (responsible_expert_idx < num_experts) {
-        EP_DEVICE_ASSERT(num_warps_per_group > 1);
-        if (sub_warp_id == 0 and lane_id == 0) {
+//     if (responsible_expert_idx < num_experts) {
+//         EP_DEVICE_ASSERT(num_warps_per_group > 1);
+//         if (sub_warp_id == 0 and lane_id == 0) {
+//             while (ld_acquire_sys_global(rdma_recv_flag + responsible_expert_idx) == 0);
+//         }
+//     }
+//     cg::this_grid().sync();
+    {
+        const int responsible_expert_idx = thread_id;
+        if (responsible_expert_idx < num_experts) {
             while (ld_acquire_sys_global(rdma_recv_flag + responsible_expert_idx) == 0);
         }
     }
-    cg::this_grid().sync();
+    // use syncthreads below...
 
     if (enable_prepare_topk) {
         int4* smem_addr = compute_shared_topk_info_addr(prepare_topk_idx_iteration, prepare_topk_idx_iow, prepare_topk_idx_topkdivfour);
