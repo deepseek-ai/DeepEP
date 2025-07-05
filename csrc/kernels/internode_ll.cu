@@ -543,11 +543,11 @@ combine(void* combined_x,
         *smem_addr = temp_buf;
     }
 
-    if (recv_flag_responsible_expert_idx < num_experts) {
-        while (recv_flag_value == 0) {
-            recv_flag_value = ld_acquire_sys_global(recv_flag_addr);
-        }
-    }
+//     if (recv_flag_responsible_expert_idx < num_experts) {
+//         while (recv_flag_value == 0) {
+//             recv_flag_value = ld_acquire_sys_global(recv_flag_addr);
+//         }
+//     }
 
     __syncthreads();
 
