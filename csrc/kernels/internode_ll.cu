@@ -553,7 +553,6 @@ combine(void* combined_x,
             const int token_idx = sm_id + idx_iteration * num_sms;
 
             // Read top-k indices and weights
-
             alignas(16) int reg_topk_idx[kNumMaxTopk];
             alignas(16) float reg_topk_weights[kNumMaxTopk];
             auto reg_topk_idx_vec = reinterpret_cast<int4*>(reg_topk_idx);
