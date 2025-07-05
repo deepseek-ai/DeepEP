@@ -219,13 +219,7 @@ def profile_kineto(fn, num_tests: int = 30, barrier_comm_profiling: bool = False
             lhs @ rhs
             dist.all_reduce(torch.ones(1, dtype=torch.float, device='cuda'))
         for test_index in range(num_tests):
-            if enable_cuda_profiler and i == 1 and test_index == 10:
-                print("call cudaProfilerStart")
-                torch.cuda.cudart().cudaProfilerStart()
-            fn()
-            if enable_cuda_profiler and i == 1 and test_index == 10:
-                print("call cudaProfilerStop")
-                torch.cuda.cudart().cudaProfilerStop()
+            fn(do_profile=enable_cuda_profiler and i == 1 and test_index == 10)
 
 
 def extract_detail_times_from_prof(prof, kernel_names, duplicate_name_period: int):

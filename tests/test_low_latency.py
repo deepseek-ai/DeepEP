@@ -129,7 +129,7 @@ def test_main(num_tokens: int, hidden: int, num_experts: int, num_topk: int,
         hook()
 
     # noinspection PyShadowingNames
-    def test_func(zero_copy: bool, return_recv_hook: bool):
+    def test_func(zero_copy: bool, return_recv_hook: bool, do_profile: bool = False):
         recv_x, recv_count, handle, event, hook = \
             buffer.low_latency_dispatch(x, topk_idx, num_tokens, num_experts,
                                         cumulative_local_expert_recv_stats=cumulative_local_expert_recv_stats,
@@ -137,8 +137,15 @@ def test_main(num_tokens: int, hidden: int, num_experts: int, num_topk: int,
         large_gemm_with_hook(hook) if return_recv_hook else None
         if zero_copy:
             buffer.get_next_low_latency_combine_buffer(handle)[:, :, :] = simulated_gemm_x
+
+        if do_profile:
+            print("call cudaProfilerStart")
+            torch.cuda.cudart().cudaProfilerStart()
         combined_x, event, hook = buffer.low_latency_combine(simulated_gemm_x, topk_idx, topk_weights, handle,
                                                              zero_copy=zero_copy, return_recv_hook=return_recv_hook)
+        if do_profile:
+            print("call cudaProfilerStop")
+            torch.cuda.cudart().cudaProfilerStop()
         large_gemm_with_hook(hook) if return_recv_hook else None
 
     # Calculate bandwidth
