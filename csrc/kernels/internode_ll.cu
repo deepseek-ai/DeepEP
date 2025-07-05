@@ -526,10 +526,10 @@ combine(void* combined_x,
     // TODO have issue when less than 1 wave?
     {
         const int init_token_idx = compute_token_idx(0);
-        reg_topk_idx_vec[0] = *compute_topk_gmem_addr(init_token_idx, 0, 0);
-        reg_topk_idx_vec[1] = *compute_topk_gmem_addr(init_token_idx, 0, 1);
-        reg_topk_weights_vec[0] = *reinterpret_cast<const float4*>(compute_topk_gmem_addr(init_token_idx, 1, 0));
-        reg_topk_weights_vec[1] = *reinterpret_cast<const float4*>(compute_topk_gmem_addr(init_token_idx, 1, 1));
+        reg_topk_idx_vec[0] = ld_nc_global(compute_topk_gmem_addr(init_token_idx, 0, 0));
+        reg_topk_idx_vec[1] = ld_nc_global(compute_topk_gmem_addr(init_token_idx, 0, 1));
+        reg_topk_weights_vec[0] = ld_nc_global(reinterpret_cast<const float4*>(compute_topk_gmem_addr(init_token_idx, 1, 0)));
+        reg_topk_weights_vec[1] = ld_nc_global(reinterpret_cast<const float4*>(compute_topk_gmem_addr(init_token_idx, 1, 1)));
     }
 
     int4 temp_buf;
