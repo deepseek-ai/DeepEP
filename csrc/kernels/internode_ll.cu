@@ -494,14 +494,6 @@ combine(void* combined_x,
     if ((phases & LOW_LATENCY_RECV_PHASE) == 0)
         return;
 
-    // Wait all ranks to arrive
-    const int recv_flag_responsible_expert_idx = thread_id;
-    const int* recv_flag_addr = rdma_recv_flag + recv_flag_responsible_expert_idx;
-    int recv_flag_value;
-    if (recv_flag_responsible_expert_idx < num_experts) {
-        recv_flag_value = ld_acquire_sys_global(recv_flag_addr);
-    }
-
     int self_num_iteration = (sm_id >= num_combined_tokens) ? 0 : (1 + (num_combined_tokens - sm_id - 1) / num_sms);
 
     // TODO generalize
@@ -538,16 +530,16 @@ combine(void* combined_x,
         temp_buf = ld_nc_global(src_addr);
     }
 
+    // Wait all ranks to arrive
+    const int recv_flag_responsible_expert_idx = thread_id;
+    if (recv_flag_responsible_expert_idx < num_experts) {
+        while (ld_acquire_sys_global(rdma_recv_flag + recv_flag_responsible_expert_idx) == 0);
+    }
+
     if (enable_prepare_topk) {
         int4* smem_addr = compute_shared_topk_info_addr(prepare_topk_idx_iteration, prepare_topk_idx_iow, prepare_topk_idx_topkdivfour);
         *smem_addr = temp_buf;
     }
-
-//     if (recv_flag_responsible_expert_idx < num_experts) {
-//         while (recv_flag_value == 0) {
-//             recv_flag_value = ld_acquire_sys_global(recv_flag_addr);
-//         }
-//     }
 
     __syncthreads();
 
