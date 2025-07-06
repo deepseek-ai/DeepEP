@@ -611,7 +611,9 @@ void combine(void* combined_x,
     EP_HOST_ASSERT(num_warp_groups > 0 and num_warps_per_group > 0);
 
     const auto num_warps = num_warp_groups * num_warps_per_group;
-    const auto num_sms = ceil_div(num_experts, num_warp_groups);
+
+//     const auto num_sms = ceil_div(num_experts, num_warp_groups);
+    const auto num_sms = (phases == LOW_LATENCY_RECV_PHASE) ? num_device_sms : ceil_div(num_experts, num_warp_groups);
 
     // Check workspace
     auto atomic_clean_flag = static_cast<int*>(workspace);
