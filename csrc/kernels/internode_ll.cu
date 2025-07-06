@@ -707,7 +707,7 @@ combine(void* combined_x,
                 int half_warp_flag = 0, popc_half_warp_flag = 0;
                 int64_t amax_infos;
                 #pragma unroll
-                for (int i = lane_id, channel_group_id_in_segment = lane_group_id; i < hidden_bf16_int4; i += 32, channel_group_id_in_segment += 2) {
+                for (int i = lane_id, k = 0; i < hidden_bf16_int4; i += 32, k++) {
                     // Read
                     auto int4_value = ld_nc_global(cpy_src_int4_ptr + i);
                     auto bf162_values = reinterpret_cast<const nv_bfloat162*>(&int4_value);
@@ -755,21 +755,19 @@ combine(void* combined_x,
                             out32[1] = (out[4] << (32 - kNumBits * 1)) + (out[5] << (32 - kNumBits * 2)) + (out[3] >> (10 - (32 - kNumBits * 3))) + (out[6] << (32 - kNumBits * 3));
                             uint16_t out16 = ((out[3] & 0b0011111100) << (10 - (32 - kNumBits * 3))) + out[7];
 
-                            st_na_global(reinterpret_cast<int64_t*>(cpy_dst_ptr + (channel_group_id_in_segment * 160 + sub_lane_id * sizeof(int64_t))), *reinterpret_cast<const int64_t*>(out32));
-                            st_na_global(reinterpret_cast<uint16_t*>(cpy_dst_ptr + (channel_group_id_in_segment * 160 + 16 * sizeof(int64_t) + sub_lane_id * sizeof(uint16_t))), out16);
+                            st_na_global(reinterpret_cast<int64_t*>(cpy_dst_ptr + (k * (2 * 160) + lane_id * sizeof(int64_t))), *reinterpret_cast<const int64_t*>(out32));
+                            st_na_global(reinterpret_cast<uint16_t*>(cpy_dst_ptr + (k * (2 * 160) + 32 * sizeof(int64_t) + lane_id * sizeof(uint16_t))), out16);
 
-                            if (channel_group_id_in_segment / 4 == sub_lane_id) {
-                                if (channel_group_id_in_segment / 2 == twice_sub_lane_id) {
-                                    reinterpret_cast<nv_bfloat16*>(&amax_infos)[0] = amax;
-                                    reinterpret_cast<nv_bfloat16*>(&amax_infos)[1] = amin;
-                                } else {
-                                    reinterpret_cast<nv_bfloat16*>(&amax_infos)[2] = amax;
-                                    reinterpret_cast<nv_bfloat16*>(&amax_infos)[3] = amin;
-                                }
+                            if (k == twice_sub_lane_id) {
+                                reinterpret_cast<nv_bfloat16*>(&amax_infos)[0] = amax;
+                                reinterpret_cast<nv_bfloat16*>(&amax_infos)[1] = amin;
+                            } else if (k == twice_sub_lane_id + 1) {
+                                reinterpret_cast<nv_bfloat16*>(&amax_infos)[2] = amax;
+                                reinterpret_cast<nv_bfloat16*>(&amax_infos)[3] = amin;
                             }
                         } else {
                             st_na_global(reinterpret_cast<int4*>(cpy_dst_ptr + (logfmt10_bytes_per_combine_msg + sizeof(int4) + amax_amin_bytes_per_combine_msg + popc_half_warp_flag * (32 * sizeof(int4)) + lane_id * sizeof(int4))), int4_value);
-                            half_warp_flag += 1 << (channel_group_id_in_segment / 2);
+                            half_warp_flag += 1 << k;
                             popc_half_warp_flag++;
                         }
                     } else {
