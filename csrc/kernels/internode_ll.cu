@@ -386,6 +386,7 @@ LAUNCH_KERNEL(&cfg, dispatch_func, \
 constexpr int kMaxNumTokensPerSm = 6;
 constexpr int kIdxOrWeightDim = 2;
 constexpr int kNumActualTopkDivFour = 2;
+constexpr int kNumActualTopk = kNumActualTopkDivFour * 4;
 
 template <int kHidden, int kNumMaxTopk>
 __global__ __launch_bounds__(1024, 1) void
@@ -562,16 +563,15 @@ combine(void* combined_x,
 
             // Read from sources, Reduce
             int4 zero4 = {0,0,0,0};
-            constexpr int UNROLL_NUM = 8; // TODO
-            int4 x_vec[UNROLL_NUM];
+            int4 x_vec[kNumActualTopk];
             #pragma unroll
-            for (int i = 0; i < UNROLL_NUM; ++i) {
+            for (int i = 0; i < kNumActualTopk; ++i) {
                 x_vec[i] = (reg_topk_idx[i] >= 0) ? ld_nc_global(reinterpret_cast<const int4*>(reinterpret_cast<const uint8_t*>(reinterpret_cast<const int*>(static_cast<uint8_t*>(rdma_recv_x) + (reg_topk_idx[i] * num_max_dispatch_tokens_per_rank + token_idx) * num_bytes_per_slot))) + thread_id) : zero4;
             }
 
             float combined_values[kNumElemsPerInt4] = {0.0f};
             #pragma unroll
-            for (int i = 0; i < UNROLL_NUM; ++i) {
+            for (int i = 0; i < kNumActualTopk; ++i) {
                 if (reg_topk_idx[i] >= 0) {
                     const auto x_bf16 = reinterpret_cast<nv_bfloat16*>(&x_vec[i]);
                     #pragma unroll
