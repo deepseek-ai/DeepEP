@@ -497,8 +497,6 @@ combine(void* combined_x,
 
     int self_num_iteration = (sm_id >= num_combined_tokens) ? 0 : (1 + (num_combined_tokens - sm_id - 1) / num_sms);
 
-    // TODO generalize
-    // (6 num_tokens_per_sm, 2 idx_or_weights, 2 topk_div_four, 16B elem_size)
     alignas(16) __shared__ int4 shared_topk_info[kMaxNumTokensPerSm * kIdxOrWeightDim * kNumActualTopkDivFour];
     const auto compute_shared_topk_info_addr = [=](int idx_iteration, int idx_iow, int idx_topkdivfour) {
         return shared_topk_info
@@ -509,7 +507,7 @@ combine(void* combined_x,
 
     int4 temp_buf;
     int prepare_topk_idx_iteration, prepare_topk_idx_iow, prepare_topk_idx_topkdivfour;
-    // TODO only support few tokens if only use warp 0
+    static_assert(sizeof(shared_topk_info) / sizeof(shared_topk_info[0]) <= warpSize);
     if (warp_id == 0) {
         int index = thread_id;
         prepare_topk_idx_topkdivfour = index % kNumActualTopkDivFour;
