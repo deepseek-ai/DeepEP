@@ -556,10 +556,14 @@ combine(void* combined_x,
             alignas(16) float reg_topk_weights[kNumMaxTopk];
             auto reg_topk_idx_vec = reinterpret_cast<int4*>(reg_topk_idx);
             auto reg_topk_weights_vec = reinterpret_cast<float4*>(reg_topk_weights);
-            reg_topk_idx_vec[0] = *compute_shared_topk_info_addr(idx_iteration, 0, 0);
-            reg_topk_idx_vec[1] = *compute_shared_topk_info_addr(idx_iteration, 0, 1);
-            reg_topk_weights_vec[0] = *reinterpret_cast<float4*>(compute_shared_topk_info_addr(idx_iteration, 1, 0));
-            reg_topk_weights_vec[1] = *reinterpret_cast<float4*>(compute_shared_topk_info_addr(idx_iteration, 1, 1));
+            #pragma unroll
+            for (int i = 0; i < kNumActualTopkDivFour; ++i) {
+                reg_topk_idx_vec[i] = *compute_shared_topk_info_addr(idx_iteration, 0, i);
+            }
+            #pragma unroll
+            for (int i = 0; i < kNumActualTopkDivFour; ++i) {
+                reg_topk_weights_vec[i] = *reinterpret_cast<float4*>(compute_shared_topk_info_addr(idx_iteration, 1, i));
+            }
 
             // Read from sources, Reduce
             int4 zero4 = {0,0,0,0};
