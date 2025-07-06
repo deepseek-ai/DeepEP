@@ -570,7 +570,9 @@ combine(void* combined_x,
             int4 x_vec[kNumActualTopk];
             #pragma unroll
             for (int i = 0; i < kNumActualTopk; ++i) {
-                x_vec[i] = (reg_topk_idx[i] >= 0) ? ld_nc_global(reinterpret_cast<const int4*>(reinterpret_cast<const uint8_t*>(reinterpret_cast<const int*>(static_cast<uint8_t*>(rdma_recv_x) + (reg_topk_idx[i] * num_max_dispatch_tokens_per_rank + token_idx) * num_bytes_per_slot))) + thread_id) : zero4;
+                auto rdma_buffer_type = reinterpret_cast<const int*>(static_cast<uint8_t*>(rdma_recv_x) + (reg_topk_idx[i] * num_max_dispatch_tokens_per_rank + token_idx) * num_bytes_per_slot);
+                auto rdma_buffer_row = reinterpret_cast<const uint8_t*>(rdma_buffer_type);
+                x_vec[i] = (reg_topk_idx[i] >= 0) ? ld_nc_global(reinterpret_cast<const int4*>(rdma_buffer_row) + thread_id) : zero4;
             }
 
             float combined_values[kNumElemsPerInt4] = {0.0f};
