@@ -706,9 +706,6 @@ combine(void* combined_x,
                 const auto cpy_dst_ptr = reinterpret_cast<uint8_t*>(cpy_dst_int4_ptr);
                 int half_warp_flag = 0, popc_half_warp_flag = 0;
                 int64_t amax_infos;
-                int4 out64x2;
-                int4 out16x8;
-                //int64_t out16x4;
                 #pragma unroll
                 for (int i = lane_id, k = 0; i < hidden_bf16_int4; i += 32, k++) {
                     // Read
@@ -719,8 +716,6 @@ combine(void* combined_x,
                         constexpr float kThreshold = 1.0f;
                         constexpr float kLogThreshold = 10000.0f; // __logf(kThreshold)
 
-                        int out64_phase = k % 2 * 2;
-                        int out16_phase = k % 4;
                         // Local log amax
                         nv_bfloat162 bf162_abs_values[kNumElemsPerInt4 / 2], amaxs, amins;
                         #pragma unroll
@@ -755,17 +750,13 @@ combine(void* combined_x,
                                 out[j * 2] = encode(bf162_values[j].x, __logf(abs_values.x));
                                 out[j * 2 + 1] = encode(bf162_values[j].y, __logf(abs_values.y));
                             }
-                            //int64_t out64;
-                            //uint32_t out32[2];
-                            reinterpret_cast<uint32_t*>(&out64x2)[out64_phase] = (out[0] << (kNumBits * 2)) + (out[1] << (kNumBits * 1)) + (out[3] << (kNumBits * 3)) + out[2];
-                            reinterpret_cast<uint32_t*>(&out64x2)[out64_phase+1] = (out[4] << (32 - kNumBits * 1)) + (out[5] << (32 - kNumBits * 2)) + (out[3] >> (10 - (32 - kNumBits * 3))) + (out[6] << (32 - kNumBits * 3));
+                            uint32_t out32[2];
+                            out32[0] = (out[0] << (kNumBits * 2)) + (out[1] << (kNumBits * 1)) + (out[3] << (kNumBits * 3)) + out[2];
+                            out32[1] = (out[4] << (32 - kNumBits * 1)) + (out[5] << (32 - kNumBits * 2)) + (out[3] >> (10 - (32 - kNumBits * 3))) + (out[6] << (32 - kNumBits * 3));
+                            uint16_t out16 = ((out[3] & 0b0011111100) << (10 - (32 - kNumBits * 3))) + out[7];
 
-                            if (out64_phase == 2)
-                            st_na_global(reinterpret_cast<int64_t*>(cpy_dst_ptr + (k/2 * (2 * 128 * 2) + (k/4*32 + lane_id) * sizeof(int64_t))), out64);//*reinterpret_cast<const int64_t*>(out32));
-                            reinterpret_cast<uint16_t*>(&out16x4)[out16_phase] = ((out[3] & 0b0011111100) << (10 - (32 - kNumBits * 3))) + out[7];
-                            if (out16_phase == 4 - 1)
-                            st_na_global(reinterpret_cast<int64_t*>(cpy_dst_ptr + (k * (2 * 128) + (k/4*32 + 32 + lane_id) * sizeof(int64_t))), out16x4);
-                            //st_na_global(reinterpret_cast<uint16_t*>(cpy_dst_ptr + (k * (2 * 160) + 32 * sizeof(int64_t) + lane_id * sizeof(uint16_t))), out16);
+                            st_na_global(reinterpret_cast<int64_t*>(cpy_dst_ptr + (k * (2 * 160) + lane_id * sizeof(int64_t))), *reinterpret_cast<const int64_t*>(out32));
+                            st_na_global(reinterpret_cast<uint16_t*>(cpy_dst_ptr + (k * (2 * 160) + 32 * sizeof(int64_t) + lane_id * sizeof(uint16_t))), out16);
 
                             if (k == twice_sub_lane_id) {
                                 reinterpret_cast<nv_bfloat16*>(&amax_infos)[0] = amax;
