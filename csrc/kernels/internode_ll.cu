@@ -630,6 +630,9 @@ combine(void* combined_x,
     const auto thread_id = static_cast<int>(threadIdx.x);
     const auto num_threads = static_cast<int>(blockDim.x);
     const auto warp_id = thread_id / 32, lane_id = get_lane_id();
+    const auto lane_group_id = lane_id / 16, sub_lane_id = lane_id % 16;
+    const auto twice_sub_lane_id = sub_lane_id * 2;
+    const unsigned int sync_mask = lane_id < 16 ? 0x0000ffff : 0xffff0000;
     const auto num_local_experts = num_experts / num_ranks;
     const auto warp_group_id = warp_id / num_warps_per_group;
     const auto sub_warp_id = warp_id % num_warps_per_group;
@@ -642,11 +645,15 @@ combine(void* combined_x,
     constexpr float kMinClip = 22.1807097779182499013514278f; // `== log(2 ^ (2 ^ 5))`
     constexpr int kNumBits = 10;
     constexpr unsigned int kNumValues = 1 << (kNumBits - 1);
+    EP_STATIC_ASSERT(kHidden % (kNumElemsPerInt4 * 32) == 0 and kNumElemsPerInt4 == 8, "Invalid hidden");
+    EP_STATIC_ASSERT(kHidden / (kNumElemsPerInt4 * 32) <= 32, "Invalid hidden");
+    EP_STATIC_ASSERT(kNumElemsPerInt4 * kNumBits == (sizeof(int64_t) + sizeof(int16_t)) * 8, "Invalid log format");
 
     // Message package
-    constexpr size_t half_log_amax_amin_bytes_per_combine_msg = kHidden / 2 / 128 * (2 * sizeof(nv_bfloat16));
-    constexpr size_t num_bytes_per_slot = kHidden * sizeof(nv_bfloat16) + sizeof(int4) + half_log_amax_amin_bytes_per_combine_msg * 2;
-    EP_STATIC_ASSERT(num_bytes_per_slot % sizeof(int4) == 0, "Invalid vectorization");
+    constexpr size_t logfmt10_bytes_per_combine_msg = kHidden * sizeof(nv_bfloat16) / 16 * kNumBits;
+    constexpr size_t amax_amin_bytes_per_combine_msg = kHidden / (kNumElemsPerInt4 * 32) * 2 * 2 * sizeof(nv_bfloat16);
+    constexpr size_t num_bytes_per_slot = logfmt10_bytes_per_combine_msg + sizeof(int4) + amax_amin_bytes_per_combine_msg + kHidden * sizeof(nv_bfloat16);
+    EP_STATIC_ASSERT(logfmt10_bytes_per_combine_msg % sizeof(int4) == 0 and amax_amin_bytes_per_combine_msg % sizeof(int4) == 0 and num_bytes_per_slot % sizeof(int4) == 0, "Invalid vectorization");
 
     // Sending phase
     if ((phases & LOW_LATENCY_SEND_PHASE) == 0)
@@ -691,37 +698,99 @@ combine(void* combined_x,
             const auto buf_ptr = reinterpret_cast<int64_t>(rdma_send_x_vec_row);
             const auto dst_ptr = reinterpret_cast<uint64_t>(rdma_recv_x) + (global_expert_idx * num_max_dispatch_tokens_per_rank + src_idx) * num_bytes_per_slot;
             const auto dst_p2p_ptr = nvshmemi_get_p2p_ptr(dst_ptr, rank, dst_rank);
-            size_t buf_bytes[2];
-            if constexpr (kUseLogFMT) {
-                int uncompressed_cnt;
-                if (lane_id < 2) {
-                    unsigned int flag = ld_nc_global(reinterpret_cast<const int*>(rank == dst_rank ? dst_ptr : buf_ptr) + lane_id);
-                    uncompressed_cnt = __popc(flag);
-                }
-                buf_bytes[0] = __shfl_sync(0xffffffff, uncompressed_cnt, 0) * (128 * sizeof(nv_bfloat16) - (128 * kNumBits / 8)) + (kHidden / 2 * kNumBits / 8 + sizeof(int4) + half_log_amax_amin_bytes_per_combine_msg);
-                buf_bytes[1] = __shfl_sync(0xffffffff, uncompressed_cnt, 1) * (128 * sizeof(nv_bfloat16) - (128 * kNumBits / 8)) + (kHidden / 2 * kNumBits / 8 + half_log_amax_amin_bytes_per_combine_msg);
-            }
-            if (dst_p2p_ptr == 0) {
-                const auto buf_int4_ptr = reinterpret_cast<int4*>(buf_ptr);
-                if constexpr (not kUseLogFMT) {
-                    if (not zero_copy)
-                        UNROLLED_WARP_COPY(7, lane_id, hidden_bf16_int4, buf_int4_ptr, x_int4, ld_nc_global, st_na_global);
-                    nvshmemi_ibgda_put_nbi_warp(dst_ptr, buf_ptr, hidden * sizeof(nv_bfloat16), dst_rank, local_expert_idx, lane_id, token_idx - offset);
-                } else {
-                    nvshmemi_ibgda_put_nbi_warp(dst_ptr, buf_ptr, buf_bytes[0], dst_rank, local_expert_idx, lane_id, 0);
-                    nvshmemi_ibgda_put_nbi_warp(dst_ptr + (kHidden / 2 * sizeof(nv_bfloat16) + sizeof(int4) + half_log_amax_amin_bytes_per_combine_msg), buf_ptr + (kHidden / 2 * sizeof(nv_bfloat16) + sizeof(int4) + half_log_amax_amin_bytes_per_combine_msg), buf_bytes[1], dst_rank, local_expert_idx, lane_id, token_idx - offset);
-                }
-            } else {
-                const auto dst_int4_ptr = reinterpret_cast<int4*>(dst_p2p_ptr);
-                if constexpr (not kUseLogFMT) {
-                    UNROLLED_WARP_COPY(7, lane_id, hidden_bf16_int4, dst_int4_ptr, x_int4, ld_nc_global, st_na_global);
-                } else {
-                    if (rank != dst_rank) {
-                        UNROLLED_WARP_COPY(7, lane_id, buf_bytes[0] / sizeof(int4), dst_int4_ptr, reinterpret_cast<int4*>(buf_ptr), ld_nc_global, st_na_global);
-                        UNROLLED_WARP_COPY(7, lane_id, buf_bytes[1] / sizeof(int4), dst_int4_ptr + (kHidden / 2 * sizeof(nv_bfloat16) + sizeof(int4) + half_log_amax_amin_bytes_per_combine_msg) / sizeof(int4), reinterpret_cast<int4*>(buf_ptr + (kHidden / 2 * sizeof(nv_bfloat16) + sizeof(int4) + half_log_amax_amin_bytes_per_combine_msg)), ld_nc_global, st_na_global);
+            int logfmt_send_bytes;
+            if ((kUseLogFMT or not zero_copy) or dst_p2p_ptr != 0) { // `kUseLogFMT` implies `not zero_copy`
+                // Read from `cpy_src_int4_ptr` and copy into `cpy_dst_int4_ptr`
+                const auto cpy_src_int4_ptr = zero_copy ? reinterpret_cast<int4*>(buf_ptr) : x_int4;
+                const auto cpy_dst_int4_ptr = dst_p2p_ptr == 0 ? reinterpret_cast<int4*>(buf_ptr) : reinterpret_cast<int4*>(dst_p2p_ptr);
+                const auto cpy_dst_ptr = reinterpret_cast<uint8_t*>(cpy_dst_int4_ptr);
+                int half_warp_flag = 0, popc_half_warp_flag = 0;
+                int64_t amax_infos;
+                #pragma unroll
+                for (int i = lane_id, channel_group_id_in_segment = lane_group_id; i < hidden_bf16_int4; i += 32, channel_group_id_in_segment += 2) {
+                    // Read
+                    auto int4_value = ld_nc_global(cpy_src_int4_ptr + i);
+                    auto bf162_values = reinterpret_cast<const nv_bfloat162*>(&int4_value);
+
+                    if constexpr (kUseLogFMT) {
+                        constexpr float kThreshold = 1.0f;
+                        constexpr float kLogThreshold = 10000.0f; // __logf(kThreshold)
+
+                        // Local log amax
+                        nv_bfloat162 bf162_abs_values[kNumElemsPerInt4 / 2], amaxs, amins;
+                        #pragma unroll
+                        for (int j = 0; j < kNumElemsPerInt4 / 2; ++ j) {
+                            bf162_abs_values[j] = __habs2(bf162_values[j]);
+                            amaxs = j == 0 ? bf162_abs_values[j] : __hmax2(amaxs, bf162_abs_values[j]);
+                            amins = j == 0 ? bf162_abs_values[j] : __hmin2(amins, bf162_abs_values[j]);
+                        }
+                        nv_bfloat16 amax = __hmax(amaxs.x, amaxs.y), amin = __hmin(amins.x, amins.y);
+
+                        // Reduce per 128 channels
+                        amax = half_warp_reduce_max(amax, sync_mask);
+                        amin = half_warp_reduce_min(amin, sync_mask);
+                        float log_amax = __logf(static_cast<float>(amax));
+                        float log_amin = fmaxf(__logf(static_cast<float>(amin)), log_amax - kMinClip);
+
+                        // Use LogFMT only with `amax <= kThreshold` (maybe not all half-warps)
+                        if (log_amax <= kLogThreshold) {
+                            //const auto step = (log_amax - log_amin) / static_cast<float>(kNumValues - 2);
+                            const auto inv_step = __fdividef(static_cast<float>(kNumValues - 2), log_amax - log_amin);
+                            const auto rounding = 1.5f;//2.0f - (__logf((1.0f + __expf(step)) / 2.0f) / step);
+
+                            // Encode
+                            auto encode = [=](const nv_bfloat16& value, const float& log_abs_value) -> unsigned int {
+                                const auto encoded = (static_cast<unsigned int>(fmaxf((log_abs_value - log_amin) * inv_step + rounding, 0.0f))) & (kNumValues - 1);
+                                return value < CUDART_ZERO_BF16 ? kNumValues + encoded : encoded;
+                            };
+                            unsigned int out[kNumElemsPerInt4];
+                            #pragma unroll
+                            for (int j = 0; j < kNumElemsPerInt4 / 2; ++ j) {
+                                float2 abs_values = __bfloat1622float2(bf162_abs_values[j]);
+                                out[j * 2] = encode(bf162_values[j].x, __logf(abs_values.x));
+                                out[j * 2 + 1] = encode(bf162_values[j].y, __logf(abs_values.y));
+                            }
+                            uint32_t out32[2];
+                            out32[0] = (out[0] << (kNumBits * 2)) + (out[1] << (kNumBits * 1)) + (out[3] << (kNumBits * 3)) + out[2];
+                            out32[1] = (out[4] << (32 - kNumBits * 1)) + (out[5] << (32 - kNumBits * 2)) + (out[3] >> (10 - (32 - kNumBits * 3))) + (out[6] << (32 - kNumBits * 3));
+                            uint16_t out16 = ((out[3] & 0b0011111100) << (10 - (32 - kNumBits * 3))) + out[7];
+
+                            st_na_global(reinterpret_cast<int64_t*>(cpy_dst_ptr + (channel_group_id_in_segment * 160 + sub_lane_id * sizeof(int64_t))), *reinterpret_cast<const int64_t*>(out32));
+                            st_na_global(reinterpret_cast<uint16_t*>(cpy_dst_ptr + (channel_group_id_in_segment * 160 + 16 * sizeof(int64_t) + sub_lane_id * sizeof(uint16_t))), out16);
+
+                            if (channel_group_id_in_segment / 4 == sub_lane_id) {
+                                if (channel_group_id_in_segment / 2 == twice_sub_lane_id) {
+                                    reinterpret_cast<nv_bfloat16*>(&amax_infos)[0] = amax;
+                                    reinterpret_cast<nv_bfloat16*>(&amax_infos)[1] = amin;
+                                } else {
+                                    reinterpret_cast<nv_bfloat16*>(&amax_infos)[2] = amax;
+                                    reinterpret_cast<nv_bfloat16*>(&amax_infos)[3] = amin;
+                                }
+                            }
+                        } else {
+                            st_na_global(reinterpret_cast<int4*>(cpy_dst_ptr + (logfmt10_bytes_per_combine_msg + sizeof(int4) + amax_amin_bytes_per_combine_msg + popc_half_warp_flag * (32 * sizeof(int4)) + lane_id * sizeof(int4))), int4_value);
+                            half_warp_flag += 1 << (channel_group_id_in_segment / 2);
+                            popc_half_warp_flag++;
+                        }
+                    } else {
+                        // Store
+                        st_na_global(cpy_dst_int4_ptr + i, int4_value);
                     }
                 }
+                if constexpr (kUseLogFMT) {
+                    if (sub_lane_id < hidden_bf16_int4 / 32 * 2 / 4) {
+                        st_na_global(reinterpret_cast<int64_t*>(cpy_dst_ptr + (logfmt10_bytes_per_combine_msg + sizeof(int4) + (sub_lane_id * 2 + lane_group_id) * sizeof(int64_t))), amax_infos);
+                    }
+                    if (sub_lane_id == 16 - 1) {
+                        st_na_global(reinterpret_cast<int*>(cpy_dst_ptr + (logfmt10_bytes_per_combine_msg + lane_group_id * sizeof(int))), half_warp_flag);
+                    }
+                    logfmt_send_bytes = logfmt10_bytes_per_combine_msg + sizeof(int4) + amax_amin_bytes_per_combine_msg + max(popc_half_warp_flag, __shfl_xor_sync(0xffffffff, popc_half_warp_flag, 16)) * (32 * sizeof(int4));
+                }
             }
+            // Issue RDMA
+            // NOTES: for zero-copy mode, we assume the data is already in the send buffer
+            if (dst_p2p_ptr == 0)
+                nvshmemi_ibgda_put_nbi_warp(dst_ptr, buf_ptr, kUseLogFMT ? logfmt_send_bytes : hidden * sizeof(nv_bfloat16), dst_rank, local_expert_idx, lane_id, token_idx - offset);
         }
 
         // Put the finishing flag
@@ -750,10 +819,9 @@ combine(void* combined_x,
     const auto sub_thread_id = thread_id % static_cast<int>(hidden_bf16_int4 / 2);
     const auto channel_group_id_in_segment = sub_thread_id / (128 / kNumElemsPerInt4);
     const auto thread_id_in_channel_group = sub_thread_id % (128 / kNumElemsPerInt4);
-    const unsigned int sync_mask = lane_id < 16 ? 0x0000ffff : 0xffff0000;
-    const int amax_amin_bf162_ptr_base_offset = sizeof(int4) / sizeof(nv_bfloat162) + ((half_log_amax_amin_bytes_per_combine_msg + kHidden / 2 * sizeof(nv_bfloat16)) / sizeof(nv_bfloat162)) * thread_group_id;
+    const int amax_amin_bf162_ptr_base_offset = sizeof(int4) / sizeof(nv_bfloat162) + ((amax_amin_bytes_per_combine_msg / 2 + kHidden / 2 * sizeof(nv_bfloat16)) / sizeof(nv_bfloat162)) * thread_group_id;
     const int amax_amin_bf162_ptr_offset = amax_amin_bf162_ptr_base_offset + channel_group_id_in_segment;
-    const int data_int64_ptr_base_offset = amax_amin_bf162_ptr_base_offset / (sizeof(int64_t) / sizeof(nv_bfloat162)) + half_log_amax_amin_bytes_per_combine_msg / sizeof(int64_t);
+    const int data_int64_ptr_base_offset = amax_amin_bf162_ptr_base_offset / (sizeof(int64_t) / sizeof(nv_bfloat162)) + amax_amin_bytes_per_combine_msg / 2 / sizeof(int64_t);
     const int data_int64_ptr_channel_group_offset_unfixed = data_int64_ptr_base_offset + channel_group_id_in_segment * (10 * 2);
     const unsigned int channel_group_mask = (1u << channel_group_id_in_segment);
     const unsigned int prefix_channel_group_mask = channel_group_mask - 1u;
@@ -783,7 +851,7 @@ combine(void* combined_x,
                 if constexpr (kUseLogFMT) {
                     if (local_reg_topk_idx >= 0) {
                         auto rdma_buffer_type = (static_cast<uint8_t*>(rdma_recv_x) + (local_reg_topk_idx * num_max_dispatch_tokens_per_rank + token_idx) * num_bytes_per_slot);
-                        local_flag = ld_nc_global(reinterpret_cast<const int*>(rdma_buffer_type) + thread_group_id);
+                        local_flag = ld_nc_global(reinterpret_cast<const int*>(rdma_buffer_type + (logfmt10_bytes_per_combine_msg + thread_group_id * sizeof(int))));
                         local_amax_amin_info = ld_nc_global(reinterpret_cast<const int*>(rdma_buffer_type) + amax_amin_bf162_ptr_offset);
                         //asm volatile("prefetch.global.L1 [%0];" :: "l"(reinterpret_cast<const int64_t*>(rdma_buffer_type) + (data_int64_ptr_channel_group_offset_unfixed)));
                     }

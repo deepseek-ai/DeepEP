@@ -413,19 +413,19 @@ __forceinline__ __device__ float half_warp_reduce_min(float value) {
     return value;
 }
 
-__forceinline__ __device__ nv_bfloat16 half_warp_reduce_max(nv_bfloat16 value) {
-    value = __hmax(value, __shfl_xor_sync(0xffffffff, value, 8));
-    value = __hmax(value, __shfl_xor_sync(0xffffffff, value, 4));
-    value = __hmax(value, __shfl_xor_sync(0xffffffff, value, 2));
-    value = __hmax(value, __shfl_xor_sync(0xffffffff, value, 1));
+__forceinline__ __device__ nv_bfloat16 half_warp_reduce_max(nv_bfloat16 value, unsigned int sync_mask) {
+    value = __hmax(value, __shfl_xor_sync(sync_mask, value, 8, 16));
+    value = __hmax(value, __shfl_xor_sync(sync_mask, value, 4, 16));
+    value = __hmax(value, __shfl_xor_sync(sync_mask, value, 2, 16));
+    value = __hmax(value, __shfl_xor_sync(sync_mask, value, 1, 16));
     return value;
 }
 
-__forceinline__ __device__ nv_bfloat16 half_warp_reduce_min(nv_bfloat16 value) {
-    value = __hmin(value, __shfl_xor_sync(0xffffffff, value, 8));
-    value = __hmin(value, __shfl_xor_sync(0xffffffff, value, 4));
-    value = __hmin(value, __shfl_xor_sync(0xffffffff, value, 2));
-    value = __hmin(value, __shfl_xor_sync(0xffffffff, value, 1));
+__forceinline__ __device__ nv_bfloat16 half_warp_reduce_min(nv_bfloat16 value, unsigned int sync_mask) {
+    value = __hmin(value, __shfl_xor_sync(sync_mask, value, 8, 16));
+    value = __hmin(value, __shfl_xor_sync(sync_mask, value, 4, 16));
+    value = __hmin(value, __shfl_xor_sync(sync_mask, value, 2, 16));
+    value = __hmin(value, __shfl_xor_sync(sync_mask, value, 1, 16));
     return value;
 }
 
