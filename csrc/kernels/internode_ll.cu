@@ -617,6 +617,7 @@ void combine(void* combined_x,
     auto atomic_clean_flag = static_cast<int*>(workspace);
     EP_HOST_ASSERT(sizeof(int) <= NUM_WORKSPACE_BYTES);
     EP_HOST_ASSERT(num_topk <= kNumMaxTopk);
+    EP_HOST_ASSERT(num_combined_tokens <= kMaxNumTokensPerSm * num_sms);
 
 #define COMBINE_LAUNCH_CASE(hidden) { \
 auto combine_func = combine<hidden, kNumMaxTopk>; \
