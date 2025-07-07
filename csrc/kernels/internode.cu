@@ -1250,8 +1250,8 @@ template<bool kLowLatencyMode,
          int kNumTopkRDMARanks = get_num_topk_rdma_ranks(kNumRDMARanks),
          int kNumWarpsPerForwarder = (kNumCombineForwarderWarps / kNumRDMARanks > 0) ? kNumCombineForwarderWarps / kNumRDMARanks : 1,
          int kNumForwarders = kNumRDMARanks * kNumWarpsPerForwarder,
-         int kNumRDMAReceivers = kNumForwarders + NUM_MAX_NVL_PEERS>
-__global__ void __launch_bounds__((NUM_MAX_NVL_PEERS + 1 + kNumForwarders) * 32, 1)
+         int kNumRDMAReceivers = kNumForwarders - NUM_MAX_NVL_PEERS>
+__global__ void __launch_bounds__((kNumForwarders + 1) * 32, 1)
 combine(int4* combined_x, float* combined_topk_weights,
         const bool* is_combined_token_in_rank,
         const int4* x, const float* topk_weights,
@@ -1273,7 +1273,7 @@ combine(int4* combined_x, float* combined_topk_weights,
     const auto num_threads = static_cast<int>(blockDim.x), num_warps = num_threads / 32;
     const auto thread_id = static_cast<int>(threadIdx.x), lane_id = get_lane_id();
     const auto num_channels = static_cast<int>(gridDim.x) / 2, channel_id = sm_id / 2;
-    const bool is_rdma_receiver_sm = sm_id % 2 == 1;
+    const bool is_forwarder_sm = sm_id % 2 == 1;
 
     EP_DEVICE_ASSERT(num_topk <= 32);
     EP_DEVICE_ASSERT(hidden % (sizeof(int4) / sizeof(dtype_t)) == 0);
@@ -1283,21 +1283,20 @@ combine(int4* combined_x, float* combined_topk_weights,
     const auto rdma_rank = rank / NUM_MAX_NVL_PEERS, nvl_rank = rank % NUM_MAX_NVL_PEERS;
     auto role_meta = [=]() -> std::pair<WarpRole, int> {
         auto warp_id = thread_id / 32;
-        if (not is_rdma_receiver_sm) {
+        if (not is_forwarder_sm) {
             if (warp_id < NUM_MAX_NVL_PEERS) {
                 auto shuffled_warp_id = warp_id;
                 shuffled_warp_id = (shuffled_warp_id + channel_id) % NUM_MAX_NVL_PEERS;
                 return {WarpRole::kNVLSender, shuffled_warp_id};
-            } else if (warp_id < NUM_MAX_NVL_PEERS + kNumForwarders) {
-                auto shuffled_warp_id = warp_id - NUM_MAX_NVL_PEERS;
-                shuffled_warp_id = (shuffled_warp_id + channel_id) % kNumForwarders;
-                return {WarpRole::kNVLAndRDMAForwarder, shuffled_warp_id};
+            } else if (warp_id < kNumForwarders) {
+                return {WarpRole::kRDMAReceiver, warp_id - NUM_MAX_NVL_PEERS};
             } else {
                 return {WarpRole::kCoordinator, 0};
             }
         } else {
-            if (warp_id < NUM_MAX_NVL_PEERS + kNumForwarders) {
-                return {WarpRole::kRDMAReceiver, warp_id};
+            if (warp_id < kNumForwarders) {
+                auto shuffled_warp_id = (warp_id + channel_id) % kNumForwarders;
+                return {WarpRole::kNVLAndRDMAForwarder, shuffled_warp_id};
             } else {
                 return {WarpRole::kCoordinator, 0};
             }
@@ -1306,7 +1305,7 @@ combine(int4* combined_x, float* combined_topk_weights,
     auto warp_role = role_meta.first;
     auto warp_id = role_meta.second;
 
-    EP_DEVICE_ASSERT(num_warps == NUM_MAX_NVL_PEERS + kNumForwarders + 1);
+    EP_DEVICE_ASSERT(num_warps == kNumForwarders + 1);
     auto num_max_nvl_chunked_recv_tokens_per_rdma = num_max_nvl_chunked_recv_tokens / kNumRDMARanks;
 
     if (warp_role == WarpRole::kNVLSender) {
@@ -1612,7 +1611,7 @@ combine(int4* combined_x, float* combined_topk_weights,
         } else {
             // Coordinator
             // Sync shared memory status
-            is_rdma_receiver_sm ? sync_rdma_receiver_smem() : sync_forwarder_smem();
+            is_forwarder_sm ? sync_forwarder_smem() : sync_rdma_receiver_smem();
             const auto num_warps_per_rdma_rank = kNumForwarders / kNumRDMARanks;
 
             int last_rdma_head = 0;
@@ -1622,13 +1621,13 @@ combine(int4* combined_x, float* combined_topk_weights,
             EP_STATIC_ASSERT(kNumCombineForwarderWarps <= 32, "Invalid number of forwarder warps");
             while (true) {
                 // Retired
-                if (is_rdma_receiver_sm and __all_sync(0xffffffff, lane_id >= kNumRDMAReceivers or rdma_receiver_retired[lane_id]))
+                if (not is_forwarder_sm and __all_sync(0xffffffff, lane_id >= kNumRDMAReceivers or rdma_receiver_retired[lane_id]))
                     break;
-                if (not is_rdma_receiver_sm and __all_sync(0xffffffff, lane_id >= kNumForwarders or forwarder_retired[lane_id]))
+                if (is_forwarder_sm and __all_sync(0xffffffff, lane_id >= kNumForwarders or forwarder_retired[lane_id]))
                     break;
 
                 // Find minimum head for RDMA ranks
-                if (is_rdma_receiver_sm) {
+                if (not is_forwarder_sm) {
                     int min_head = std::numeric_limits<int>::max();
                     #pragma unroll
                     for (int i = 0; i < kNumRDMAReceivers; ++ i) if (not rdma_receiver_retired[i])
@@ -1688,12 +1687,12 @@ void combine(cudaDataType_t type,
     int num_rdma_ranks = num_ranks / NUM_MAX_NVL_PEERS;
     auto num_warps_per_forwarder = std::max(kNumCombineForwarderWarps / num_rdma_ranks, 1);
     int num_forwarder_warps = num_rdma_ranks * num_warps_per_forwarder;
-    EP_HOST_ASSERT(num_forwarder_warps > 0 and num_forwarder_warps % num_rdma_ranks == 0);
+    EP_HOST_ASSERT(num_forwarder_warps > NUM_MAX_NVL_PEERS and num_forwarder_warps % num_rdma_ranks == 0);
     EP_HOST_ASSERT(num_max_nvl_chunked_recv_tokens % num_rdma_ranks == 0);
     EP_HOST_ASSERT(num_max_nvl_chunked_recv_tokens / num_rdma_ranks > std::max(num_max_rdma_chunked_send_tokens, num_max_nvl_chunked_send_tokens));
     EP_HOST_ASSERT(type == CUDA_R_16BF);
 
-    SETUP_LAUNCH_CONFIG(num_channels * 2, (NUM_MAX_NVL_PEERS + num_forwarder_warps + 1) * 32, stream);
+    SETUP_LAUNCH_CONFIG(num_channels * 2, (num_forwarder_warps + 1) * 32, stream);
     SWITCH_RDMA_RANKS(COMBINE_LAUNCH_CASE);
 #undef COMBINE_LAUNCH_CASE
 }
