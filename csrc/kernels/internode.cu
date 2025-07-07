@@ -1335,6 +1335,7 @@ combine(int4* combined_x, float* combined_topk_weights,
         EP_STATIC_ASSERT(kNumRDMARanks <= 32, "Invalid number of RDMA peers");
 
         // Iterate over all tokens and send by chunks
+        int current_rdma_idx = 0;
         while (true) {
             // Exit if possible
             if (__all_sync(0xffffffff, token_start_idx >= token_end_idx))
@@ -1363,7 +1364,8 @@ combine(int4* combined_x, float* combined_topk_weights,
             }
 
             // Sync token start index and count
-            for (int current_rdma_idx = 0; current_rdma_idx < kNumRDMARanks; ++ current_rdma_idx) {
+            for (int i = 0; i < kNumRDMARanks; ++ i) {
+                current_rdma_idx = (current_rdma_idx + 1) % kNumRDMARanks;
                 if (__shfl_sync(0xffffffff, (token_start_idx >= token_end_idx) or (not is_lane_ready), current_rdma_idx))
                     continue;
 
