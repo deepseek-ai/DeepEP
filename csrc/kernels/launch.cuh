@@ -7,11 +7,15 @@
 #ifndef DISABLE_SM90_FEATURES
 #define SETUP_LAUNCH_CONFIG(num_sms, num_threads, stream) \
     cudaLaunchConfig_t cfg = {(num_sms), (num_threads), 0, stream, nullptr, 0}; \
-    cudaLaunchAttribute attr[1]; \
+    cudaLaunchAttribute attr[2]; \
     attr[0].id = cudaLaunchAttributeCooperative; \
     attr[0].val.cooperative = 1; \
+    attr[1].id = cudaLaunchAttributeClusterDimension; \
+    attr[1].val.clusterDim.x = (num_sms % 2 == 0 ? 2 : 1); \
+    attr[1].val.clusterDim.y = 1; \
+    attr[1].val.clusterDim.z = 1; \
     cfg.attrs = attr; \
-    cfg.numAttrs = 1
+    cfg.numAttrs = 2
 #else
 #define SETUP_LAUNCH_CONFIG(sms, threads, stream) \
     int __num_sms = (sms); \
@@ -69,13 +73,13 @@ cfg.dynamicSmemBytes = smem_size;
         case 2: case_macro(dtype, 2); \
         case 4: case_macro(dtype, 4); \
         case 8: case_macro(dtype, 8); \
-        default: EP_HOST_ASSERT(false && "Unsupported ranks"); \
+        default: EP_HOST_ASSERT(false and "Unsupported ranks"); \
     } while (false)
 
 #define SWITCH_TYPES(case_macro) \
     switch (type) { \
         case CUDA_R_16BF: case_macro(nv_bfloat16); \
-        default: EP_HOST_ASSERT(false && "Unsupported type"); \
+        default: EP_HOST_ASSERT(false and "Unsupported type"); \
     } while (false)
 
 #define SWITCH_HIDDEN(case_macro) \
@@ -86,5 +90,5 @@ cfg.dynamicSmemBytes = smem_size;
         case 5120: case_macro(5120); \
         case 7168: case_macro(7168); \
         case 8192: case_macro(8192); \
-        default: EP_HOST_ASSERT(false && "Unsupported hidden"); \
+        default: EP_HOST_ASSERT(false and "Unsupported hidden"); \
     } while (false)
