@@ -1247,6 +1247,7 @@ __device__ int combine_token(bool is_token_in_rank, int head_idx,
 template<bool kLowLatencyMode,
          int kNumRDMARanks, typename dtype_t,
          int kNumCombineForwarderWarps,
+         int kNumTMABytesPerWarp,
          int kNumTopkRDMARanks = get_num_topk_rdma_ranks(kNumRDMARanks),
          int kNumWarpsPerForwarder = (kNumCombineForwarderWarps / kNumRDMARanks > 0) ? kNumCombineForwarderWarps / kNumRDMARanks : 1,
          int kNumForwarders = kNumRDMARanks * kNumWarpsPerForwarder,
@@ -1320,6 +1321,20 @@ combine(int4* combined_x, float* combined_topk_weights,
         auto nvl_channel_topk_weights = AsymBuffer<float>(dst_buffer_ptr, num_max_nvl_chunked_recv_tokens * num_topk, NUM_MAX_NVL_PEERS, channel_id, num_channels, nvl_rank).advance_also(local_buffer_ptr);
         auto nvl_channel_head = AsymBuffer<int>(local_buffer_ptr, kNumRDMARanks, NUM_MAX_NVL_PEERS, channel_id, num_channels, dst_nvl_rank).advance_also(dst_buffer_ptr);
         auto nvl_channel_tail = AsymBuffer<int>(dst_buffer_ptr, kNumRDMARanks, NUM_MAX_NVL_PEERS, channel_id, num_channels, nvl_rank).advance_also(local_buffer_ptr);
+        int hidden_bytes = hidden_int4 * sizeof(int4);
+
+        // TMA stuffs
+        extern __shared__ __align__(1024) uint8_t smem_tma_buffer[];
+        auto tma_buffer = smem_tma_buffer + dst_nvl_rank * kNumTMABytesPerWarp;
+        auto tma_mbarrier = reinterpret_cast<uint64_t*>(tma_buffer + hidden_bytes);
+        uint32_t tma_phase = 0;
+        if (lane_id == 0) {
+            mbarrier_init(tma_mbarrier, 1);
+            fence_view_async_shared();
+            fence_barrier_init();
+            EP_DEVICE_ASSERT(hidden_bytes + sizeof(uint64_t) <= kNumTMABytesPerWarp);
+        }
+        __syncwarp();
 
         // Get tasks for each RDMA lane
         int token_start_idx = 0, token_end_idx = 0;
@@ -1386,7 +1401,14 @@ combine(int4* combined_x, float* combined_topk_weights,
                     // Copy data
                     auto shifted_x_buffers = nvl_channel_x.buffer() + dst_slot_idx * hidden_int4;
                     auto shifted_x = x + token_idx * hidden_int4;
-                    UNROLLED_WARP_COPY(5, lane_id, hidden_int4, shifted_x_buffers, shifted_x, ld_nc_global, st_na_global);
+                    if (lane_id == 0) {
+                        tma_load_1d(tma_buffer, shifted_x, tma_mbarrier, hidden_bytes);
+                        mbarrier_arrive_and_expect_tx(tma_mbarrier, hidden_bytes);
+                    }
+                    __syncwarp();
+                    mbarrier_wait(tma_mbarrier, tma_phase);
+                    if (lane_id == 0)
+                        tma_store_1d(tma_buffer, shifted_x_buffers, hidden_bytes, false);
 
                     // Copy source meta
                     if (lane_id == 0)
@@ -1395,6 +1417,10 @@ combine(int4* combined_x, float* combined_topk_weights,
                     // Copy `topk_weights`
                     if (lane_id < num_topk)
                         st_na_global(nvl_channel_topk_weights.buffer() + dst_slot_idx * num_topk + lane_id, ld_nc_global(topk_weights + token_idx * num_topk + lane_id));
+
+                    // Wait TMA to be finished
+                    tma_store_wait();
+                    __syncwarp();
                 }
                 lane_id == current_rdma_idx ? (token_start_idx = static_cast<int>(token_idx)) : 0;
             }
@@ -1671,10 +1697,13 @@ void combine(cudaDataType_t type,
              void** buffer_ptrs, int num_max_nvl_chunked_send_tokens, int num_max_nvl_chunked_recv_tokens,
              int rank, int num_ranks, cudaStream_t stream, int num_channels, bool low_latency_mode) {
     constexpr int kNumCombineForwarderWarps = 16;
+    constexpr int kNumTMABytesPerWarp = 16384;
+    constexpr int smem_size = kNumTMABytesPerWarp * NUM_MAX_NVL_PEERS;
 
 #define COMBINE_LAUNCH_CASE(num_rdma_ranks) { \
     auto combine_func = low_latency_mode ? \
-        combine<true, num_rdma_ranks, nv_bfloat16, kNumCombineForwarderWarps> : combine<false, num_rdma_ranks, nv_bfloat16, kNumCombineForwarderWarps>; \
+        combine<true, num_rdma_ranks, nv_bfloat16, kNumCombineForwarderWarps, kNumTMABytesPerWarp> : combine<false, num_rdma_ranks, nv_bfloat16, kNumCombineForwarderWarps, kNumTMABytesPerWarp>; \
+    SET_SHARED_MEMORY_FOR_TMA(combine_func); \
     LAUNCH_KERNEL(&cfg, combine_func, \
                   reinterpret_cast<int4*>(combined_x), combined_topk_weights, is_combined_token_in_rank, \
                   reinterpret_cast<const int4*>(x), topk_weights, \
