@@ -814,11 +814,11 @@ combine(void* combined_x,
         return;
 
     const auto thread_group_id = __shfl_sync(0xffffffff, thread_id / static_cast<int>(hidden_bf16_int4 / 2), 0);
-    const auto sub_thread_id = thread_id % static_cast<int>(hidden_bf16_int4 / 2);
-    const auto channel_group_id_in_segment = sub_thread_id / (128 / kNumElemsPerInt4);
-    const auto thread_id_in_channel_group = sub_thread_id % (128 / kNumElemsPerInt4);
     const int amax_amin_bf162_ptr_base_offset = sizeof(int4) / sizeof(nv_bfloat162) + ((amax_amin_bytes_per_combine_msg / 2 + kHidden / 2 * sizeof(nv_bfloat16)) / sizeof(nv_bfloat162)) * thread_group_id;
-    const int amax_amin_bf162_ptr_offset = amax_amin_bf162_ptr_base_offset + channel_group_id_in_segment;
+    const auto channel_group_id_in_segment = thread_id / (128 / kNumElemsPerInt4);
+    const auto thread_id_in_channel_group = thread_id % (128 / kNumElemsPerInt4);
+    const auto channel_group_parity = channel_group_id_in_segment % 2;
+    const int amax_amin_bytes_offset = logfmt10_bytes_per_combine_msg + sizeof(int4) + channel_group_id_in_segment / 4 * 4 * sizeof(nv_bfloat162) + channel_group_parity * 2 * sizeof(nv_bfloat162) + channel_group_id_in_segment % 4 / 2 * sizeof(nv_bfloat162);
     const int data_int64_ptr_base_offset = amax_amin_bf162_ptr_base_offset / (sizeof(int64_t) / sizeof(nv_bfloat162)) + amax_amin_bytes_per_combine_msg / 2 / sizeof(int64_t);
     const int data_int64_ptr_channel_group_offset_unfixed = data_int64_ptr_base_offset + channel_group_id_in_segment * (10 * 2);
     const unsigned int channel_group_mask = (1u << channel_group_id_in_segment);
@@ -849,8 +849,8 @@ combine(void* combined_x,
                 if constexpr (kUseLogFMT) {
                     if (local_reg_topk_idx >= 0) {
                         auto rdma_buffer_type = (static_cast<uint8_t*>(rdma_recv_x) + (local_reg_topk_idx * num_max_dispatch_tokens_per_rank + token_idx) * num_bytes_per_slot);
-                        local_flag = ld_nc_global(reinterpret_cast<const int*>(rdma_buffer_type + (logfmt10_bytes_per_combine_msg + thread_group_id * sizeof(int))));
-                        local_amax_amin_info = ld_nc_global(reinterpret_cast<const int*>(rdma_buffer_type) + amax_amin_bf162_ptr_offset);
+                        local_amax_amin_info = ld_nc_global(reinterpret_cast<const int*>(rdma_buffer_type + amax_amin_bytes_offset));
+                        local_flag = ld_nc_global(reinterpret_cast<const int*>(rdma_buffer_type + (logfmt10_bytes_per_combine_msg + channel_group_parity * sizeof(int))));
                         //asm volatile("prefetch.global.L1 [%0];" :: "l"(reinterpret_cast<const int64_t*>(rdma_buffer_type) + (data_int64_ptr_channel_group_offset_unfixed)));
                     }
                 }
@@ -866,6 +866,7 @@ combine(void* combined_x,
             for (int i = 0; i < num_topk; ++ i) if (int reg_topk_idx_i = __shfl_sync(sync_mask, local_reg_topk_idx, i, 16); reg_topk_idx_i >= 0) {
                 // Read from sources
                 auto rdma_buffer_type = reinterpret_cast<const int64_t*>(static_cast<uint8_t*>(rdma_recv_x) + (reg_topk_idx_i * num_max_dispatch_tokens_per_rank + token_idx) * num_bytes_per_slot);
+                //if constexpr (kUseLogFMT) {
                 int flag;
                 int data_int64_ptr_offset;
                 if constexpr (kUseLogFMT) {
