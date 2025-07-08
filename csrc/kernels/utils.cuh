@@ -394,14 +394,8 @@ __forceinline__ __device__ float half_warp_reduce_max(float value) {
     return value;
 }
 
-__forceinline__ __device__ float quarter_warp_reduce_max(float value) {
-    value = max(value, __shfl_xor_sync(0xffffffff, value, 4));
-    value = max(value, __shfl_xor_sync(0xffffffff, value, 2));
-    value = max(value, __shfl_xor_sync(0xffffffff, value, 1));
-    return value;
-}
-
-__forceinline__ __device__ float quarter_warp_reduce_min(float value) {
+__forceinline__ __device__ float half_warp_reduce_min(float value) {
+    value = min(value, __shfl_xor_sync(0xffffffff, value, 8));
     value = min(value, __shfl_xor_sync(0xffffffff, value, 4));
     value = min(value, __shfl_xor_sync(0xffffffff, value, 2));
     value = min(value, __shfl_xor_sync(0xffffffff, value, 1));

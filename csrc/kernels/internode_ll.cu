@@ -471,7 +471,7 @@ combine(void* combined_x,
 
                     // Simulated cast
                     if constexpr (kUseLogFMT) {
-                        constexpr float kThreshold = 2;
+                        constexpr float kThreshold = 1;
                         constexpr float kMinClip = 22.1807097779182499013514278f; // `== log(2 ^ (2 ^ 5))`
                         constexpr int kNumBits = 10;
                         constexpr int kNumValues = 1 << (kNumBits - 1);
@@ -482,20 +482,20 @@ combine(void* combined_x,
                         #pragma unroll
                         for (int j = 0; j < kNumElemsPerInt4; ++ j) {
                             auto value = static_cast<float>(bf16_values[j]);
-                            log_abs_values[j] = logf(fabsf(value));
+                            log_abs_values[j] = __logf(fabsf(value));
                             amax = j == 0 ? value : fmaxf(amax, fabsf(value));
                             log_amax = j == 0 ? log_abs_values[j] : fmaxf(log_amax, log_abs_values[j]);
                             log_amin = j == 0 ? log_abs_values[j] : fminf(log_amin, log_abs_values[j]);
                         }
 
-                        // Reduce per 64 channels
-                        log_amax = quarter_warp_reduce_max(log_amax);
-                        log_amin = fmaxf(quarter_warp_reduce_min(log_amin), log_amax - kMinClip);
+                        // Reduce per 128 channels
+                        log_amax = half_warp_reduce_max(log_amax);
+                        log_amin = fmaxf(half_warp_reduce_min(log_amin), log_amax - kMinClip);
 
                         // Use LogFMT only with `amax <= kThreshold` (maybe not all quarter-warps)
                         if (amax <= kThreshold) {
                             const auto step = (log_amax - log_amin) / static_cast<float>(kNumValues - 2);
-                            const auto rounding = logf((1.0f + expf(step)) / 2.0f) / step + 1.0f;
+                            const auto rounding = __logf((1.0f + __expf(step)) / 2.0f) / step + 1.0f;
 
                             // Transform
                             auto transform = [=](const float& value, const float& log_abs_value) -> nv_bfloat16 {
@@ -506,7 +506,7 @@ combine(void* combined_x,
                                 if (encoded == 0)
                                     return 0;
 
-                                const auto decoded = expf((encoded - 1) * step + log_amin);
+                                const auto decoded = __expf((encoded - 1) * step + log_amin);
                                 return value < 0 ? -decoded : decoded;
                             };
                             #pragma unroll
