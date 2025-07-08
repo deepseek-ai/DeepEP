@@ -175,6 +175,7 @@ def test_loop(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
 
 if __name__ == '__main__':
     # TODO: you may modify NUMA binding for less CPU overhead
+    # TODO: buggy with `num_tokens=512`
     parser = argparse.ArgumentParser(description='Test low-latency EP kernels')
     parser.add_argument('--num-processes', type=int, default=8,
                        help='Number of processes to spawn (default: 8)')
