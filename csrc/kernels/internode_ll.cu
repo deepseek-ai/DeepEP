@@ -454,7 +454,7 @@ combine(void* combined_x,
             const auto rdma_send_x_vec_row = reinterpret_cast<uint8_t*>(rdma_send_type_row);
 
             // Copy directly to local rank, or copy to buffer and issue RDMA
-            auto src_idx = __ldg(local_src_info + token_idx);
+            const auto src_idx = __shfl_sync(0xffffffff, __ldg(local_src_info + token_idx), 0);
             const auto buf_ptr = reinterpret_cast<int64_t>(rdma_send_x_vec_row);
             const auto dst_ptr = reinterpret_cast<uint64_t>(rdma_recv_x) + (global_expert_idx * num_max_dispatch_tokens_per_rank + src_idx) * num_bytes_per_slot;
             const auto dst_p2p_ptr = nvshmemi_get_p2p_ptr(dst_ptr, rank, dst_rank);
