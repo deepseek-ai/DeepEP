@@ -31,7 +31,7 @@ class Buffer:
 
     def __init__(self, group: dist.ProcessGroup,
                  num_nvl_bytes: int = 0, num_rdma_bytes: int = 0,
-                 low_latency_mode: bool = False, num_qps_per_rank: int = 12,
+                 low_latency_mode: bool = False, num_qps_per_rank: int = 24,
                  allow_nvlink_for_low_latency_mode: bool = True,
                  allow_mnnvl: bool = False) -> None:
         """
@@ -147,6 +147,16 @@ class Buffer:
             size: the RDMA buffer size recommended.
         """
         return deep_ep_cpp.get_low_latency_rdma_size_hint(num_max_dispatch_tokens_per_rank, hidden, num_ranks, num_experts)
+    
+    def get_comm_stream(self) -> torch.Stream:
+        """
+        Get the communication stream.
+
+        Returns:
+            stream: the communication stream. 
+        """
+        ts: torch.Stream = self.runtime.get_comm_stream()
+        return torch.cuda.Stream(stream_id=ts.stream_id, device_index=ts.device_index, device_type=ts.device_type)
 
     def get_local_buffer_tensor(self, dtype: torch.dtype, size: Optional[torch.Size] = None,
                                 offset: int = 0, use_rdma_buffer: bool = False) -> torch.Tensor:
@@ -167,6 +177,16 @@ class Buffer:
         return tensor[:size.numel()].view(size)
 
     @staticmethod
+    def _unpack_bias(bias: Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]):
+        bias_0, bias_1 = None, None
+        if isinstance(bias, torch.Tensor):
+            bias_0 = bias
+        elif isinstance(bias, tuple):
+            assert len(bias) == 2
+            bias_0, bias_1 = bias
+        return bias_0, bias_1
+
+    @staticmethod
     def get_dispatch_config(num_ranks: int) -> Config:
         """
         Get a recommended dispatch config.
@@ -183,9 +203,9 @@ class Buffer:
             2: Config(Buffer.num_sms, 24, 256, 6, 128),
             4: Config(Buffer.num_sms, 6, 256, 6, 128),
             8: Config(Buffer.num_sms, 6, 256, 6, 128),
-            16: Config(Buffer.num_sms, 16, 288, 20, 128),
+            16: Config(Buffer.num_sms, 36, 288, 20, 128),
             24: Config(Buffer.num_sms, 8, 288, 32, 128),
-            32: Config(Buffer.num_sms, 8, 288, 32, 128),
+            32: Config(Buffer.num_sms, 32, 288, 32, 128),
             64: Config(Buffer.num_sms, 20, 288, 28, 128),
             128: Config(Buffer.num_sms, 20, 560, 32, 128),
             144: Config(Buffer.num_sms, 32, 720, 12, 128),
@@ -336,6 +356,7 @@ class Buffer:
     # noinspection PyTypeChecker
     def combine(self, x: torch.Tensor, handle: Tuple,
                 topk_weights: Optional[torch.Tensor] = None,
+                bias: Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]] = None,
                 config: Optional[Config] = None,
                 previous_event: Optional[EventOverlap] = None, async_finish: bool = False,
                 allocate_on_comm_stream: bool = False) -> \
@@ -366,14 +387,15 @@ class Buffer:
 
         # Internode
         if self.runtime.get_num_rdma_ranks() > 1:
-            return self.internode_combine(x, handle, topk_weights, config, previous_event, async_finish, allocate_on_comm_stream)
+            return self.internode_combine(x, handle, topk_weights, bias, config, previous_event, async_finish, allocate_on_comm_stream)
 
         # NOTES: the second `_` is for the sending side, so we should use the third one
         rank_prefix_matrix, _, channel_prefix_matrix, src_idx, is_recv_token_in_rank, send_head = handle
+        bias_0, bias_1 = Buffer._unpack_bias(bias)
 
         # Launch the kernel
         recv_x, recv_topk_weights, event = self.runtime.intranode_combine(
-            x, topk_weights,
+            x, topk_weights, bias_0, bias_1,
             src_idx, rank_prefix_matrix, channel_prefix_matrix, send_head, config,
             getattr(previous_event, 'event', None), async_finish, allocate_on_comm_stream)
         return recv_x, recv_topk_weights, EventOverlap(event)
@@ -432,6 +454,7 @@ class Buffer:
     # noinspection PyTypeChecker
     def internode_combine(self, x: torch.Tensor, handle: Union[tuple, list],
                           topk_weights: Optional[torch.Tensor] = None,
+                          bias: Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]] = None,
                           config: Optional[Config] = None,
                           previous_event: Optional[EventOverlap] = None, async_finish: bool = False,
                           allocate_on_comm_stream: bool = False) -> \
@@ -442,15 +465,16 @@ class Buffer:
         """
         assert config is not None
 
-        # Unpack handle
+        # Unpack handle and bias
         is_combined_token_in_rank, \
             _, _, \
             rdma_channel_prefix_matrix, rdma_rank_prefix_sum, gbl_channel_prefix_matrix, gbl_rank_prefix_sum, \
             src_meta, send_rdma_head, send_nvl_head = handle
+        bias_0, bias_1 = Buffer._unpack_bias(bias)
 
         # Launch the kernel
         combined_x, combined_topk_weights, event = self.runtime.internode_combine(
-            x, topk_weights,
+            x, topk_weights, bias_0, bias_1,
             src_meta, is_combined_token_in_rank,
             rdma_channel_prefix_matrix, rdma_rank_prefix_sum, gbl_channel_prefix_matrix,
             send_rdma_head, send_nvl_head, config, getattr(previous_event, 'event', None),

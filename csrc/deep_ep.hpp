@@ -94,6 +94,8 @@ public:
 
     torch::Tensor get_local_buffer_tensor(const pybind11::object& dtype, int64_t offset, bool use_rdma_buffer) const;
 
+    torch::Stream get_comm_stream() const;
+
     void sync(const std::vector<int>& device_ids, const std::vector<std::optional<pybind11::bytearray>>& all_gathered_handles, const std::optional<pybind11::bytearray>& root_unique_id_opt);
 
     std::tuple<torch::Tensor, std::optional<torch::Tensor>, torch::Tensor, torch::Tensor, std::optional<EventHandle>>
@@ -110,6 +112,7 @@ public:
 
     std::tuple<torch::Tensor, std::optional<torch::Tensor>, std::optional<EventHandle>>
     intranode_combine(const torch::Tensor& x, const std::optional<torch::Tensor>& topk_weights,
+                      const std::optional<torch::Tensor>& bias_0, const std::optional<torch::Tensor>& bias_1,
                       const torch::Tensor& src_idx, const torch::Tensor& rank_prefix_matrix, const torch::Tensor& channel_prefix_matrix,
                       const torch::Tensor& send_head, const Config& config, std::optional<EventHandle>& previous_event, bool async, bool allocate_on_comm_stream);
 
@@ -125,6 +128,7 @@ public:
 
     std::tuple<torch::Tensor, std::optional<torch::Tensor>, std::optional<EventHandle>>
     internode_combine(const torch::Tensor& x, const std::optional<torch::Tensor>& topk_weights,
+                      const std::optional<torch::Tensor>& bias_0, const std::optional<torch::Tensor>& bias_1,
                       const torch::Tensor& src_meta, const torch::Tensor& is_combined_token_in_rank,
                       const torch::Tensor& rdma_channel_prefix_matrix, const torch::Tensor& rdma_rank_prefix_sum, const torch::Tensor& gbl_channel_prefix_matrix,
                       const torch::Tensor& combined_rdma_head, const torch::Tensor& combined_nvl_head,

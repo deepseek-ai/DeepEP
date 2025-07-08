@@ -145,7 +145,7 @@ __device__  __forceinline__ int64_t ld_volatile_global(const uint64_t *ptr) {
 #ifndef DISABLE_AGGRESSIVE_PTX_INSTRS
 #define LD_NC_FUNC "ld.global.nc.L1::no_allocate.L2::256B"
 #else
-#define LD_NC_FUNC "ld.volatile.global"
+#define LD_NC_FUNC "ld.volatile.global.L2::256B"
 #endif
 
 // `ld.global.nc.L1::no_allocate` will be translated into `LDG.E.NA.[width].CONSTANT` in SASS
@@ -451,15 +451,20 @@ __forceinline__ __device__ out_dtype_t extract_required_scale_format(float value
     }
 }
 
-template <int kNumRanks>
+template <int kNumRanks, bool kSyncOnly = false>
 __forceinline__ __device__ void
 barrier_block(int** barrier_signal_ptrs, int rank) {
     auto thread_id = static_cast<int>(threadIdx.x);
 
+    // For non-sync-only cases, the memory operations by other threads in the block must be visible to the `sys` scope
+    if constexpr (not kSyncOnly) {
+        memory_fence();
+        __syncthreads();
+    }
+
     // Add self-ranks, sub other ranks
     if (thread_id < kNumRanks) {
         atomicAdd_system(barrier_signal_ptrs[rank] + thread_id, FINISHED_SUM_TAG);
-        memory_fence();
         atomicSub_system(barrier_signal_ptrs[thread_id] + rank, FINISHED_SUM_TAG);
     }
     EP_DEVICE_ASSERT(kNumRanks <= blockDim.x);
@@ -471,12 +476,34 @@ barrier_block(int** barrier_signal_ptrs, int rank) {
         if (__all_sync(0xffffffff, value <= 0))
             break;
 
-        if (clock64() - start_time > NUM_TIMEOUT_CYCLES and get_lane_id() == 0) {
-            printf("DeepEP timeout check failed: rank = %d, thread = %d)\n", rank, thread_id);
+        if (clock64() - start_time > NUM_TIMEOUT_CYCLES and thread_id < kNumRanks) {
+            printf("DeepEP timeout check failed: rank = %d, thread = %d, value = %d)\n", rank, thread_id, value);
             trap();
         }
     }
     __syncthreads();
+}
+
+__forceinline__ __device__ int atomic_cas_cta_acquire(int* addr, int x, int y) {
+    int ret;
+    asm volatile("atom.acquire.cta.shared::cta.cas.b32 %0, [%1], %2, %3;" : "=r"(ret) : "l"(addr), "r"(x), "r"(y) : "memory");
+    return ret;
+}
+
+__forceinline__ __device__ int atomic_exch_cta_release(int* addr, int x) {
+    int ret;
+    asm volatile("atom.release.cta.shared::cta.exch.b32 %0, [%1], %2;" : "=r"(ret) : "l"(addr), "r"(x) : "memory");
+    return ret;
+}
+
+__forceinline__ __device__ void acquire_lock(int* mutex) {
+    // To make later memory operations valid, we must use `acquire` for memory semantics
+    while (atomic_cas_cta_acquire(mutex, 0, 1) != 0);
+}
+
+__forceinline__ __device__ void release_lock(int* mutex) {
+    // To make previous memory operations visible to other threads, we must use `release` for memory semantics
+    atomic_exch_cta_release(mutex, 0);
 }
 
 } // namespace deep_ep

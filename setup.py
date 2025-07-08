@@ -42,10 +42,6 @@ if __name__ == '__main__':
 
         # Disable internode and low-latency kernels
         assert disable_nvshmem
-
-        # Disable LD/ST tricks, as some CUDA version does not support `.L1::no_allocate`
-        assert int(os.getenv('DISABLE_AGGRESSIVE_PTX_INSTRS', 1)) == 1
-        os.environ['DISABLE_AGGRESSIVE_PTX_INSTRS'] = '1'
     else:
         # Prefer H800 series
         os.environ['TORCH_CUDA_ARCH_LIST'] = os.getenv('TORCH_CUDA_ARCH_LIST', '9.0')
@@ -53,8 +49,13 @@ if __name__ == '__main__':
         # CUDA 12 flags
         nvcc_flags.extend(['-rdc=true', '--ptxas-options=--register-usage-level=10'])
 
+    # Disable LD/ST tricks, as some CUDA version does not support `.L1::no_allocate`
+    if os.environ['TORCH_CUDA_ARCH_LIST'].strip() != '9.0':
+        assert int(os.getenv('DISABLE_AGGRESSIVE_PTX_INSTRS', 1)) == 1
+        os.environ['DISABLE_AGGRESSIVE_PTX_INSTRS'] = '1'
+
     # Disable aggressive PTX instructions
-    if int(os.getenv('DISABLE_AGGRESSIVE_PTX_INSTRS', '0')):
+    if int(os.getenv('DISABLE_AGGRESSIVE_PTX_INSTRS', '1')):
         cxx_flags.append('-DDISABLE_AGGRESSIVE_PTX_INSTRS')
         nvcc_flags.append('-DDISABLE_AGGRESSIVE_PTX_INSTRS')
 

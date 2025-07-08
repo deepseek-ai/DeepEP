@@ -35,7 +35,7 @@ Buffer::Buffer(int rank, int num_ranks, int64_t num_nvl_bytes, int64_t num_rdma_
     rdma_rank = rank / NUM_MAX_NVL_PEERS, nvl_rank = rank % NUM_MAX_NVL_PEERS;
     num_rdma_ranks = std::max(1, num_ranks / NUM_MAX_NVL_PEERS), num_nvl_ranks = std::min(num_ranks, NUM_MAX_NVL_PEERS);
 #ifdef DISABLE_NVSHMEM
-    EP_HOST_ASSERT(num_rdma_ranks == 1 and not low_latency_mode and "NVSHMEM is disable during compilation");
+    EP_HOST_ASSERT(num_rdma_ranks == 1 and not low_latency_mode and "NVSHMEM is disabled during compilation");
 #endif
 
     // Get device info
@@ -151,7 +151,7 @@ pybind11::bytearray Buffer::get_local_nvshmem_unique_id() const {
     auto unique_id = internode::get_unique_id();
     return {reinterpret_cast<const char*>(unique_id.data()), unique_id.size()};
 #else
-    EP_HOST_ASSERT(false and "NVSHMEM is disable during compilation");
+    EP_HOST_ASSERT(false and "NVSHMEM is disabled during compilation");
 #endif
 }
 
@@ -161,6 +161,10 @@ torch::Tensor Buffer::get_local_buffer_tensor(const pybind11::object& dtype, int
     auto base_ptr = static_cast<uint8_t*>(use_rdma_buffer ? rdma_buffer_ptr : buffer_ptrs[nvl_rank]) + offset;
     auto num_bytes = use_rdma_buffer ? num_rdma_bytes : num_nvl_bytes;
     return torch::from_blob(base_ptr, num_bytes / element_bytes, torch::TensorOptions().dtype(casted_dtype).device(at::kCUDA));
+}
+
+torch::Stream Buffer::get_comm_stream() const {
+    return comm_stream;
 }
 
 void Buffer::sync(const std::vector<int> &device_ids,
@@ -522,6 +526,7 @@ Buffer::intranode_dispatch(const torch::Tensor& x, const std::optional<torch::Te
 
 std::tuple<torch::Tensor, std::optional<torch::Tensor>, std::optional<EventHandle>>
 Buffer::intranode_combine(const torch::Tensor& x, const std::optional<torch::Tensor>& topk_weights,
+                          const std::optional<torch::Tensor>& bias_0, const std::optional<torch::Tensor>& bias_1,
                           const torch::Tensor& src_idx, const torch::Tensor& rank_prefix_matrix, const torch::Tensor& channel_prefix_matrix,
                           const torch::Tensor& send_head, const Config& config, std::optional<EventHandle>& previous_event, bool async, bool allocate_on_comm_stream) {
     EP_HOST_ASSERT(x.dim() == 2 and x.is_contiguous());
@@ -577,6 +582,17 @@ Buffer::intranode_combine(const torch::Tensor& x, const std::optional<torch::Ten
                                      num_channels, num_recv_tokens, num_channels * num_ranks * 2,
                                      barrier_signal_ptrs_gpu, rank, num_ranks,
                                      comm_stream);
+    
+    // Assign bias pointers
+    auto bias_opts = std::vector<std::optional<torch::Tensor>>({bias_0, bias_1});
+    void* bias_ptrs[2] = {nullptr, nullptr};
+    for (int i = 0; i < 2; ++ i) if (bias_opts[i].has_value()) {
+        auto bias = bias_opts[i].value();
+        EP_HOST_ASSERT(bias.dim() == 2 and bias.is_contiguous());
+        EP_HOST_ASSERT(bias.scalar_type() == x.scalar_type());
+        EP_HOST_ASSERT(bias.size(0) == num_recv_tokens and bias.size(1) == hidden);
+        bias_ptrs[i] = bias.data_ptr();
+    }
 
     // Combine data
     auto recv_x = torch::empty({num_recv_tokens, hidden}, x.options());
@@ -587,7 +603,7 @@ Buffer::intranode_combine(const torch::Tensor& x, const std::optional<torch::Ten
                    <= num_nvl_bytes);
     intranode::combine(at::cuda::ScalarTypeToCudaDataType(x.scalar_type()),
                        recv_x.data_ptr(), recv_topk_weights_ptr,
-                       x.data_ptr(), topk_weights_ptr,
+                       x.data_ptr(), topk_weights_ptr, bias_ptrs[0], bias_ptrs[1],
                        src_idx.data_ptr<int>(), rank_prefix_matrix.data_ptr<int>(), channel_prefix_matrix.data_ptr<int>(),
                        send_head.data_ptr<int>(), num_tokens, num_recv_tokens, hidden, num_topk,
                        buffer_ptrs_gpu, rank, num_ranks,
@@ -603,7 +619,7 @@ Buffer::intranode_combine(const torch::Tensor& x, const std::optional<torch::Ten
             if (allocate_on_comm_stream)
                 t.record_stream(compute_stream);
         }
-        for (auto& to: {topk_weights, recv_topk_weights}) {
+        for (auto& to: {topk_weights, recv_topk_weights, bias_0, bias_1}) {
             to.has_value() ? to->record_stream(comm_stream) : void();
             if (allocate_on_comm_stream)
                 to.has_value() ? to->record_stream(compute_stream) : void();
@@ -895,13 +911,14 @@ Buffer::internode_dispatch(const torch::Tensor& x, const std::optional<torch::Te
             recv_gbl_channel_prefix_matrix, recv_gbl_rank_prefix_sum,
             recv_src_meta, send_rdma_head, send_nvl_head, event};
 #else
-    EP_HOST_ASSERT(false and "NVSHMEM is disable during compilation");
+    EP_HOST_ASSERT(false and "NVSHMEM is disabled during compilation");
     return {};
 #endif
 }
 
 std::tuple<torch::Tensor, std::optional<torch::Tensor>, std::optional<EventHandle>>
 Buffer::internode_combine(const torch::Tensor& x, const std::optional<torch::Tensor>& topk_weights,
+                          const std::optional<torch::Tensor>& bias_0, const std::optional<torch::Tensor>& bias_1,
                           const torch::Tensor& src_meta, const torch::Tensor& is_combined_token_in_rank,
                           const torch::Tensor& rdma_channel_prefix_matrix, const torch::Tensor& rdma_rank_prefix_sum, const torch::Tensor& gbl_channel_prefix_matrix,
                           const torch::Tensor& combined_rdma_head, const torch::Tensor& combined_nvl_head,
@@ -975,13 +992,24 @@ Buffer::internode_combine(const torch::Tensor& x, const std::optional<torch::Ten
                              barrier_signal_ptrs_gpu, rank, comm_stream,
                              config.get_rdma_buffer_size_hint(hidden_int4 * sizeof(int4), num_ranks),
                              num_nvl_bytes, false, low_latency_mode);
+    
+    // Assign bias pointers
+    auto bias_opts = std::vector<std::optional<torch::Tensor>>({bias_0, bias_1});
+    void* bias_ptrs[2] = {nullptr, nullptr};
+    for (int i = 0; i < 2; ++ i) if (bias_opts[i].has_value()) {
+        auto bias = bias_opts[i].value();
+        EP_HOST_ASSERT(bias.dim() == 2 and bias.is_contiguous());
+        EP_HOST_ASSERT(bias.scalar_type() == x.scalar_type());
+        EP_HOST_ASSERT(bias.size(0) == num_combined_tokens and bias.size(1) == hidden);
+        bias_ptrs[i] = bias.data_ptr();
+    }
 
     // Launch data combine
     auto combined_x = torch::empty({num_combined_tokens, hidden}, x.options());
     internode::combine(at::cuda::ScalarTypeToCudaDataType(x.scalar_type()),
                        combined_x.data_ptr(), combined_topk_weights_ptr,
                        is_combined_token_in_rank.data_ptr<bool>(),
-                       x.data_ptr(), topk_weights_ptr,
+                       x.data_ptr(), topk_weights_ptr, bias_ptrs[0], bias_ptrs[1],
                        combined_rdma_head.data_ptr<int>(), combined_nvl_head.data_ptr<int>(),
                        src_meta.data_ptr(), rdma_channel_prefix_matrix.data_ptr<int>(), rdma_rank_prefix_sum.data_ptr<int>(), gbl_channel_prefix_matrix.data_ptr<int>(),
                        num_tokens, num_combined_tokens, hidden, num_topk,
@@ -1000,7 +1028,7 @@ Buffer::internode_combine(const torch::Tensor& x, const std::optional<torch::Ten
             if (allocate_on_comm_stream)
                 t.record_stream(compute_stream);
         }
-        for (auto& to: {topk_weights, combined_topk_weights}) {
+        for (auto& to: {topk_weights, combined_topk_weights, bias_0, bias_1}) {
             to.has_value() ? to->record_stream(comm_stream) : void();
             if (allocate_on_comm_stream)
                 to.has_value() ? to->record_stream(compute_stream) : void();
@@ -1016,7 +1044,7 @@ Buffer::internode_combine(const torch::Tensor& x, const std::optional<torch::Ten
     // Return values
     return {combined_x, combined_topk_weights, event};
 #else
-    EP_HOST_ASSERT(false and "NVSHMEM is disable during compilation");
+    EP_HOST_ASSERT(false and "NVSHMEM is disabled during compilation");
     return {};
 #endif
 }
@@ -1040,7 +1068,7 @@ void Buffer::clean_low_latency_buffer(int num_max_dispatch_tokens_per_rank, int 
                                            clean_meta_1.first, clean_meta_1.second,
                                            at::cuda::getCurrentCUDAStream());
 #else
-    EP_HOST_ASSERT(false and "NVSHMEM is disable during compilation");
+    EP_HOST_ASSERT(false and "NVSHMEM is disabled during compilation");
 #endif
 }
 
@@ -1068,7 +1096,7 @@ Buffer::low_latency_dispatch(const torch::Tensor& x, const torch::Tensor& topk_i
     }
 
     auto num_tokens = static_cast<int>(x.size(0)), hidden = static_cast<int>(x.size(1));
-    auto num_scales = hidden / 128, num_topk = static_cast<int>(topk_idx.size(1));
+    auto num_topk = static_cast<int>(topk_idx.size(1));
     auto num_local_experts = num_experts / num_ranks;
 
     // Buffer control
@@ -1149,7 +1177,7 @@ Buffer::low_latency_dispatch(const torch::Tensor& x, const torch::Tensor& topk_i
     // Return values
     return {packed_recv_x, packed_recv_x_scales, packed_recv_count, packed_recv_src_info, packed_recv_layout_range, event, recv_hook};
 #else
-    EP_HOST_ASSERT(false and "NVSHMEM is disable during compilation");
+    EP_HOST_ASSERT(false and "NVSHMEM is disabled during compilation");
     return {};
 #endif
 }
@@ -1243,7 +1271,7 @@ Buffer::low_latency_combine(const torch::Tensor& x, const torch::Tensor& topk_id
     // Return values
     return {combined_x, event, recv_hook};
 #else
-    EP_HOST_ASSERT(false and "NVSHMEM is disable during compilation");
+    EP_HOST_ASSERT(false and "NVSHMEM is disabled during compilation");
     return {};
 #endif
 }
@@ -1263,7 +1291,7 @@ Buffer::get_next_low_latency_combine_buffer(int num_max_dispatch_tokens_per_rank
                             {num_ranks * num_max_dispatch_tokens_per_rank * num_msg_elems, num_msg_elems, 1},
                             torch::TensorOptions().dtype(dtype).device(torch::kCUDA));
 #else
-    EP_HOST_ASSERT(false and "NVSHMEM is disable during compilation");
+    EP_HOST_ASSERT(false and "NVSHMEM is disabled during compilation");
     return {};
 #endif
 }
@@ -1304,6 +1332,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         .def("get_local_ipc_handle", &deep_ep::Buffer::get_local_ipc_handle)
         .def("get_local_nvshmem_unique_id", &deep_ep::Buffer::get_local_nvshmem_unique_id)
         .def("get_local_buffer_tensor", &deep_ep::Buffer::get_local_buffer_tensor)
+        .def("get_comm_stream", &deep_ep::Buffer::get_comm_stream)
         .def("sync", &deep_ep::Buffer::sync)
         .def("get_dispatch_layout", &deep_ep::Buffer::get_dispatch_layout)
         .def("intranode_dispatch", &deep_ep::Buffer::intranode_dispatch)

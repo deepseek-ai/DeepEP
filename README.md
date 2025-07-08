@@ -82,7 +82,7 @@ NVSHMEM_DIR=/path/to/installed/nvshmem python setup.py install
 - `NVSHMEM_DIR`: the path to the NVSHMEM directory, disable all internode and low-latency features if not specified 
 - `DISABLE_SM90_FEATURES`: 0 or 1, whether to disable SM90 features, it is required for SM90 devices or CUDA 11
 - `TORCH_CUDA_ARCH_LIST`: the list of target architectures, e.g. `TORCH_CUDA_ARCH_LIST="9.0"`
-- `DISABLE_AGGRESSIVE_PTX_INSTRS`: 0 or 1, whether to disable aggressive load/store instructions, see [Undefine behavior PTX usage](#undefined-behavior-ptx-usage) for more details
+- `DISABLE_AGGRESSIVE_PTX_INSTRS`: 0 or 1, whether to disable aggressive load/store instructions, see [Undefined-behavior PTX usage](#undefined-behavior-ptx-usage) for more details
 
 Then, import `deep_ep` in your Python project, and enjoy!
 
@@ -303,6 +303,7 @@ For two-micro-batch overlapping, you can refer to the following figure. With our
   - [ ] Internode kernels
   - [ ] Low-latency kernels
 - [ ] SM-free kernels and refactors
+- [ ] Fully remove undefined-behavior PTX instructions
 
 ## Notices
 
