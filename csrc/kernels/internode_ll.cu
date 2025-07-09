@@ -409,7 +409,7 @@ combine(void* combined_x,
 
     // Data type staffs
     constexpr int kNumElemsPerInt4 = sizeof(int4) / sizeof(nv_bfloat16);
-    constexpr int hidden_bf16_int4 = kHidden / kNumElemsPerInt4;
+    const size_t hidden_bf16_int4 = kHidden / kNumElemsPerInt4;
 
     // Message package
     constexpr size_t num_bytes_per_slot = kHidden * sizeof(nv_bfloat16);
