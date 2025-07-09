@@ -333,12 +333,12 @@ __device__ __forceinline__ void tma_store_wait() {
 #endif
 
 template <typename dtype_t>
-__host__ __device__ dtype_t ceil_div(dtype_t a, dtype_t b) {
+__host__ __device__ constexpr dtype_t ceil_div(dtype_t a, dtype_t b) {
     return (a + b - 1) / b;
 }
 
 template <typename dtype_t>
-__host__ __device__ dtype_t align(dtype_t a, dtype_t b) {
+__host__ __device__ constexpr dtype_t align(dtype_t a, dtype_t b) {
     return ceil_div<dtype_t>(a, b) * b;
 }
 
@@ -386,19 +386,23 @@ __forceinline__ __device__ int warp_reduce_sum(int value) {
     return value;
 }
 
-__forceinline__ __device__ float half_warp_reduce_max(float value) {
-    value = max(value, __shfl_xor_sync(0xffffffff, value, 8));
-    value = max(value, __shfl_xor_sync(0xffffffff, value, 4));
-    value = max(value, __shfl_xor_sync(0xffffffff, value, 2));
-    value = max(value, __shfl_xor_sync(0xffffffff, value, 1));
+template <uint32_t num_lanes>
+__forceinline__ __device__ float lanes_reduce_max(float value) {
+    EP_STATIC_ASSERT(num_lanes == 16 or num_lanes == 8 or num_lanes == 4 or num_lanes == 2 or num_lanes == 1, "Invalid num_lanes");
+    if constexpr (num_lanes >= 16) value = max(value, __shfl_xor_sync(0xffffffff, value, 8));
+    if constexpr (num_lanes >=  8) value = max(value, __shfl_xor_sync(0xffffffff, value, 4));
+    if constexpr (num_lanes >=  4) value = max(value, __shfl_xor_sync(0xffffffff, value, 2));
+    if constexpr (num_lanes >=  2) value = max(value, __shfl_xor_sync(0xffffffff, value, 1));
     return value;
 }
 
-__forceinline__ __device__ float half_warp_reduce_min(float value) {
-    value = min(value, __shfl_xor_sync(0xffffffff, value, 8));
-    value = min(value, __shfl_xor_sync(0xffffffff, value, 4));
-    value = min(value, __shfl_xor_sync(0xffffffff, value, 2));
-    value = min(value, __shfl_xor_sync(0xffffffff, value, 1));
+template <uint32_t num_lanes>
+__forceinline__ __device__ float lanes_reduce_min(float value) {
+    EP_STATIC_ASSERT(num_lanes == 16 or num_lanes == 8 or num_lanes == 4 or num_lanes == 2 or num_lanes == 1, "Invalid num_lanes");
+    if constexpr (num_lanes >= 16) value = min(value, __shfl_xor_sync(0xffffffff, value, 8));
+    if constexpr (num_lanes >=  8) value = min(value, __shfl_xor_sync(0xffffffff, value, 4));
+    if constexpr (num_lanes >=  4) value = min(value, __shfl_xor_sync(0xffffffff, value, 2));
+    if constexpr (num_lanes >=  2) value = min(value, __shfl_xor_sync(0xffffffff, value, 1));
     return value;
 }
 

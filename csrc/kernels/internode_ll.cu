@@ -127,7 +127,7 @@ dispatch(void* packed_recv_x, void* packed_recv_x_scales,
 
                     // Reduce amax and scale
                     EP_STATIC_ASSERT(kNumElemsPerRead * 32 / kNumPerChannels == 2, "Invalid vectorization");
-                    amax = half_warp_reduce_max(amax);
+                    amax = lanes_reduce_max<16>(amax);
                     calculate_fp8_scales(amax, scale, scale_inv, round_scale);
                     if (lane_id == 0 or lane_id == 16)
                         rdma_x_scales[i * kNumElemsPerRead / 128] = scale_inv;
@@ -409,7 +409,7 @@ combine(void* combined_x,
 
     // Data type staffs
     constexpr int kNumElemsPerInt4 = sizeof(int4) / sizeof(nv_bfloat16);
-    const size_t hidden_bf16_int4 = kHidden / kNumElemsPerInt4;
+    constexpr int hidden_bf16_int4 = kHidden / kNumElemsPerInt4;
 
     // Message package
     constexpr size_t num_bytes_per_slot = kHidden * sizeof(nv_bfloat16);
@@ -463,11 +463,19 @@ combine(void* combined_x,
                 // Read from `cpy_src_int4_ptr` and copy into `cpy_dst_int4_ptr`
                 const auto cpy_src_int4_ptr = zero_copy ? reinterpret_cast<int4*>(buf_ptr) : x_int4;
                 const auto cpy_dst_int4_ptr = dst_p2p_ptr == 0 ? reinterpret_cast<int4*>(buf_ptr) : reinterpret_cast<int4*>(dst_p2p_ptr);
+                constexpr int unroll = 4;
+                constexpr auto hidden_bf16_int4_pad = align(static_cast<int>(hidden_bf16_int4), 32 * unroll);
                 #pragma unroll
-                for (int i = lane_id; i < hidden_bf16_int4; i += 32) {
+                for (int i = lane_id * unroll; i < hidden_bf16_int4_pad; i += 32 * unroll) {
                     // Read
-                    auto int4_value = ld_nc_global(cpy_src_int4_ptr + i);
-                    auto bf16_values = reinterpret_cast<nv_bfloat16*>(&int4_value);
+                    int4 int4_values[unroll];
+                    if (i < hidden_bf16_int4) {
+                        #pragma unroll
+                        for (int k = 0; k < unroll; ++ k)
+                            int4_values[k] = ld_nc_global(cpy_src_int4_ptr + i + k);
+                    }
+                    auto bf16_values = reinterpret_cast<nv_bfloat16*>(int4_values);
+                    auto uint32_values = reinterpret_cast<uint32_t*>(int4_values);
 
                     // Simulated cast
                     if constexpr (kUseLogFMT) {
@@ -478,9 +486,9 @@ combine(void* combined_x,
                         EP_STATIC_ASSERT(kHidden % (kNumElemsPerInt4 * 32) == 0 and kNumElemsPerInt4 == 8, "Invalid hidden");
 
                         // Local log amax
-                        float log_abs_values[kNumElemsPerInt4], log_amax, log_amin, amax;
+                        float log_abs_values[kNumElemsPerInt4 * unroll], log_amax, log_amin, amax;
                         #pragma unroll
-                        for (int j = 0; j < kNumElemsPerInt4; ++ j) {
+                        for (int j = 0; j < kNumElemsPerInt4 * unroll; ++ j) {
                             auto value = static_cast<float>(bf16_values[j]);
                             log_abs_values[j] = __logf(fabsf(value));
                             amax = j == 0 ? value : fmaxf(amax, fabsf(value));
@@ -489,36 +497,37 @@ combine(void* combined_x,
                         }
 
                         // Reduce per 128 channels
-                        log_amax = half_warp_reduce_max(log_amax);
-                        log_amin = fmaxf(half_warp_reduce_min(log_amin), log_amax - kMinClip);
+                        log_amax = lanes_reduce_max<(16 / unroll)>(log_amax);
+                        log_amin = fmaxf(lanes_reduce_min<(16 / unroll)>(log_amin), log_amax - kMinClip);
 
                         // Use LogFMT only with `amax <= kThreshold` (maybe not all quarter-warps)
-                        if (amax <= kThreshold) {
+                        if (amax <= kThreshold and log_amin < log_amax) {
                             const auto step = (log_amax - log_amin) / static_cast<float>(kNumValues - 2);
                             const auto rounding = __logf((1.0f + __expf(step)) / 2.0f) / step + 1.0f;
 
                             // Transform
-                            auto transform = [=](const float& value, const float& log_abs_value) -> nv_bfloat16 {
-                                if (log_amin == log_amax or value == 0)
-                                    return value;
-
-                                const auto encoded = floorf(fmaxf((log_abs_value - log_amin) / step + rounding, 0));
-                                if (encoded == 0)
-                                    return 0;
-
+                            auto transform = [=](const float& log_abs_value) -> nv_bfloat16 {
+                                const auto encoded = floorf((log_abs_value - log_amin) / step + rounding);
                                 const auto decoded = __expf((encoded - 1) * step + log_amin);
-                                return value < 0 ? -decoded : decoded;
+                                return decoded; 
                             };
                             #pragma unroll
-                            for (int j = 0; j < kNumElemsPerInt4; ++ j)
-                                bf16_values[j] = transform(bf16_values[j], log_abs_values[j]);
+                            for (int j = 0; j < kNumElemsPerInt4 * unroll; j += 2) {
+                                auto bf162_pack = __nv_bfloat162(transform(log_abs_values[j]), transform(log_abs_values[j + 1]));
+                                auto uint32_pack = *reinterpret_cast<uint32_t*>(&bf162_pack);
+                                uint32_values[j / 2] = (uint32_values[j / 2] & 0x80008000) | uint32_pack;
+                            }   
                         }
-                        __syncwarp();
                     }
 
                     // Store
-                    st_na_global(cpy_dst_int4_ptr + i, int4_value);
+                    if (i < hidden_bf16_int4) {
+                        #pragma unroll
+                        for (int k = 0; k < unroll; ++ k)
+                            st_na_global(cpy_dst_int4_ptr + i + k, int4_values[k]);
+                    }
                 }
+                __syncwarp();
             }
 
             // Issue RDMA
