@@ -1868,10 +1868,10 @@ template <int kNumRanks,
 __global__ void __launch_bounds__(((kNumDispatchRDMASenderWarps + 1 + kNumDispatchReceiverWarps + kNumDispatchReceiverCoordinatorWarps) * 32), 1)
 dispatch_pcie(int4* recv_x, float* recv_x_scales, int64_t* recv_topk_idx, float* recv_topk_weights, SourceMeta* recv_src_meta,
          const int4* x, const float* x_scales, const int64_t* topk_idx, const float* topk_weights,
-	 const int* rdma_channel_prefix_matrix,//[kNumRanks*num_channels] for sender
-         const int* recv_gbl_rank_prefix_sum,
-         const int* recv_rdma_rank_prefix_sum,
-	 const bool* is_token_in_rank,//[num_tokens*kNumRanks] for sender
+	     const int* rdma_channel_prefix_matrix,//[kNumRanks*num_channels] for sender
+	     const bool* is_token_in_rank,//[num_tokens*kNumRanks] for sender
+         const int* recv_gbl_rank_prefix_sum, // notify dispatch传入的，逻辑上[num_ranks]
+         int* recv_gbl_channel_prefix_matrix, // 在函数中构造的，给combine用的, 逻辑上[num_ranks, num_channels]
          int num_tokens, int hidden_int4, int num_scales, int num_topk, int num_experts,
          int scale_token_stride, int scale_hidden_stride,
 	 void* rdma_buffer_ptr, int num_max_rdma_chunked_send_tokens, int num_max_rdma_chunked_recv_tokens,
@@ -1915,8 +1915,9 @@ dispatch_pcie(int4* recv_x, float* recv_x_scales, int64_t* recv_topk_idx, float*
     // RDMA symmetric layout
     auto num_bytes_per_rdma_token = get_num_bytes_per_rdma_token(hidden_int4, num_scales, num_topk, num_topk);
     auto rdma_channel_data = SymBuffer<int8_t>(rdma_buffer_ptr, num_max_rdma_chunked_recv_tokens * num_bytes_per_rdma_token, kNumRanks, channel_id, num_channels);
-    // 这个meta data要修改吗？
-    auto rdma_channel_meta = SymBuffer<int>(rdma_buffer_ptr, 1, kNumRanks, channel_id, num_channels);
+    // meta记录了这个channel发送过来的prefix sum的两个相邻值
+    auto rdma_channel_meta = SymBuffer<int>(rdma_buffer_ptr, 2, kNumRanks, channel_id, num_channels);
+    // 这个head和tail要修改吗？
     auto rdma_channel_head = SymBuffer<uint64_t, false>(rdma_buffer_ptr, 1, kNumRanks, channel_id, num_channels);
     auto rdma_channel_tail = SymBuffer<uint64_t, false>(rdma_buffer_ptr, 1, kNumRanks, channel_id, num_channels);
 
@@ -1929,7 +1930,7 @@ dispatch_pcie(int4* recv_x, float* recv_x_scales, int64_t* recv_topk_idx, float*
     auto sync_rdma_sender_smem = []() { asm volatile("bar.sync 0, %0;" :: "r"((kNumDispatchRDMASenderWarps + 1) * 32)); };
 
     // Receiver warp synchronization
-    __shared__ volatile int receiver_channel_head[kNumRanks];
+    __shared__ int receiver_channel_head[kNumRanks];
     auto sync_receiver_smem = []() { asm volatile("bar.sync 1, %0;" :: "r"((kNumDispatchReceiverWarps + kNumDispatchReceiverCoordinatorWarps) * 32)); };
 
     if (warp_role == WarpRole::kRDMASender) {
@@ -2165,25 +2166,30 @@ dispatch_pcie(int4* recv_x, float* recv_x_scales, int64_t* recv_topk_idx, float*
         int cached_rdma_channel_head = 0;
         int cached_rdma_channel_tail = 0;
         
-        // Step 1: 接受各个rank发来的meta data,这一段是不是不需要？
-        int num_tokens_to_recv_from_rank = 0;
+        // Step 1: 接受各个rank发来的meta data, 用来
+        // 1.得到这个channel总共接受的数据量
+        // 2.定位在最后recv x中的位置, rank_offset + channel_offset + token_idx
+        int num_tokens_to_recv_from_rank = 0, channel_offset = 0;
         auto start_time = clock64();
         if (lane_id < num_target_ranks) {
             while (true) {
-                auto meta_status = ld_volatile_global(rdma_channel_meta.recv_buffer(start_rank + lane_id));
+                auto meta_0 = ld_volatile_global(rdma_channel_meta.recv_buffer(start_rank + lane_id));
+                auto meta_1 = ld_volatile_global(rdma_channel_meta.recv_buffer(start_rank + lane_id) + 1);
                 
-                if (meta_status < 0) {
+                if (meta_0 < 0 && meta_1 < 0) {
                     // Meta data ready (using negative value as ready signal)
-                    num_tokens_to_recv_from_rank = -meta_status - 1;
-                    // Store expected tokens for this rank
-                    // This could be stored in a shared array if needed
+                    channel_offset = -meta_0 - 1;
+                    int channel_offset_1 = -meta_1 - 1;
+                    num_tokens_to_recv_from_rank = channel_offset_1 - channel_offset;
+                    // 给coordinator用, 存储每个channel的end，节省一个元素
+                    st_relaxed_sys_global(recv_gbl_channel_prefix_matrix + (start_rank + lane_id) * num_channels + channel_id, channel_offset_1);
                     break;
                 }
                 
                 // Timeout check
                 if (clock64() - start_time > NUM_TIMEOUT_CYCLES) {
-                    printf("DeepEP RDMA receiver timeout (meta), rank: %d, meta_status: %d\n",
-                           lane_id, meta_status);
+                    printf("DeepEP RDMA receiver timeout (meta), rank: %d, meta_status: %d, %d\n",
+                           start_rank + lane_id, meta_0, meta_1);
                     trap();
                 }
             }
@@ -2192,17 +2198,17 @@ dispatch_pcie(int4* recv_x, float* recv_x_scales, int64_t* recv_topk_idx, float*
         sync_receiver_smem();
 
         // Main processing loop
-        int src_rank = start_rank - 1;  // Round-robin starting point
+        int src_rank = -1;  // Round-robin starting point
         // Step 2: 轮询各个rank，直到找到一个有数据的 rank
         while (__any_sync(0xffffffff, num_tokens_to_recv_from_rank > 0)) {
             start_time = clock64();
       
             while (true) {
-                src_rank = start_rank + (src_rank + 1 - start_rank) % num_target_ranks;
+                src_rank = (src_rank + 1) % num_target_ranks;
                 
                 if (__shfl_sync(0xffffffff, num_tokens_to_recv_from_rank, src_rank) > 0) {
                     if (lane_id == src_rank and cached_rdma_channel_head == cached_rdma_channel_tail)
-                        cached_rdma_channel_tail = static_cast<int>(ld_acquire_sys_global(rdma_channel_tail.buffer(src_rank)));
+                        cached_rdma_channel_tail = static_cast<int>(ld_acquire_sys_global(rdma_channel_tail.buffer(start_rank + src_rank)));
                     if (__shfl_sync(0xffffffff, cached_rdma_channel_tail > cached_rdma_channel_head, src_rank))
                         break;
                 }
@@ -2217,19 +2223,17 @@ dispatch_pcie(int4* recv_x, float* recv_x_scales, int64_t* recv_topk_idx, float*
             auto src_rdma_head = __shfl_sync(0xffffffff, cached_rdma_channel_head, src_rank);
             auto src_rdma_tail = __shfl_sync(0xffffffff, cached_rdma_channel_tail, src_rank);
             int num_recv_tokens = src_rdma_tail - src_rdma_head;
-            auto dst_rank_expert_begin = src_rank * (num_experts / kNumRanks);
-            auto dst_rank_expert_end = dst_rank_expert_begin + (num_experts / kNumRanks);
+            auto dst_rank_expert_begin = (start_rank + src_rank) * (num_experts / kNumRanks);
+            auto dst_rank_expert_end = min(num_experts, dst_rank_expert_begin + (num_experts / kNumRanks));
             
-            // Get rank offset, 用法不一定对，需要修改
-            int rank_offset = recv_rdma_rank_prefix_sum[src_rank];
-            int channel_offset = 0; // 修正：需要正确计算channel offset
+            int rank_offset = recv_gbl_channel_prefix_matrix[start_rank + src_rank];
             
             // Process tokens one by one (similar to reference code)
             for (int token_idx = src_rdma_head; token_idx < src_rdma_tail; token_idx++) {
                 // 余上buffer大小得到位置
                 int src_slot_idx = token_idx % num_max_rdma_chunked_recv_tokens;
-                int dst_slot_idx = rank_offset + channel_offset + (token_idx - src_rdma_head);
-                void* shifted = rdma_channel_data.recv_buffer(src_rank) + src_slot_idx * num_bytes_per_rdma_token;
+                int dst_slot_idx = rank_offset + channel_offset + token_idx;
+                void* shifted = rdma_channel_data.recv_buffer(start_rank + src_rank) + src_slot_idx * num_bytes_per_rdma_token;
                 UNROLLED_WARP_COPY(5, lane_id, hidden_int4,
                                     recv_x + dst_slot_idx * hidden_int4,
                                     reinterpret_cast<int4*>(shifted),
@@ -2264,7 +2268,7 @@ dispatch_pcie(int4* recv_x, float* recv_x_scales, int64_t* recv_topk_idx, float*
                 cached_rdma_channel_head = cached_rdma_channel_tail;
                 num_tokens_to_recv_from_rank -= num_recv_tokens;
                 // Update progress, 给coordinator看的
-                receiver_channel_head[src_rank] = cached_rdma_channel_head;
+                st_release_cta(receiver_channel_head + start_rank + src_rank, cached_rdma_channel_head);
             }
             __syncwarp();
         }
@@ -2273,35 +2277,35 @@ dispatch_pcie(int4* recv_x, float* recv_x_scales, int64_t* recv_topk_idx, float*
         const int lane_id = threadIdx.x % 32;
         const int sub_warp_id = warp_id - kNumDispatchReceiverWarps;
 
-        const int ranks_per_warp = (kNumRanks + kNumDispatchReceiverCoordinatorWarps - 1) / kNumDispatchReceiverCoordinatorWarps;
+        constexpr int ranks_per_warp = (kNumRanks + kNumDispatchReceiverCoordinatorWarps - 1) / kNumDispatchReceiverCoordinatorWarps;
         const int start_rank = sub_warp_id * ranks_per_warp;
         const int end_rank = min(start_rank + ranks_per_warp, kNumRanks);
         const int num_target_ranks= end_rank - start_rank;
         EP_DEVICE_ASSERT(num_target_ranks <= 32);
 
         int last_head = 0, target_rank = lane_id < num_target_ranks ? lane_id + start_rank : -1;
-
-        int num_tokens_to_recv = target_rank > 0 ? recv_rdma_rank_prefix_sum[target_rank] - recv_rdma_rank_prefix_sum[target_rank - 1] : recv_rdma_rank_prefix_sum[0];
+        auto offset = recv_gbl_channel_prefix_matrix + target_rank * num_channels + channel_id;
+        int num_tokens_to_recv = target_rank > 0 ? ld_volatile_global(offset) - (channel_id == 0 ? 0 : ld_volatile_global(offset - 1)) : -1;
     
         // Initialize shared state
-        if (lane_id < num_target_ranks) {
-            receiver_channel_head[start_rank + lane_id] = 0;
+        if (target_rank >= 0) {
+            receiver_channel_head[target_rank] = 0;
         }
         sync_receiver_smem();
         
         // Iterate all responsible ranks
         while (__any_sync(0xffffffff, num_tokens_to_recv > 0)) {
-            for (int i = start_rank, synced_num_tokens_to_receive = 0; i < end_rank; ++ i) {
+            for (int i = 0, synced_num_tokens_to_receive = 0; i < num_target_ranks; ++ i) {
                 // To mitigate incast congestion between channels
-                int dst_rank = start_rank + (i - start_rank + channel_id + rank) % num_target_ranks;
+                int dst_rank = (i + channel_id + rank) % num_target_ranks;
                 synced_num_tokens_to_receive = __shfl_sync(0xffffffff, num_tokens_to_recv, dst_rank);
                 if (synced_num_tokens_to_receive == 0)
                     continue;
 
                 auto synced_last_head = __shfl_sync(0xffffffff, last_head, dst_rank);
-                auto processed_head = ld_acquire_cta(const_cast<const int*>(receiver_channel_head + dst_rank));
-                if (processed_head >= synced_last_head + num_max_rdma_chunked_send_tokens || processed_head == synced_num_tokens_to_receive) {
-                    if (dst_rank == target_rank) {
+                auto processed_head = __shfl_sync(0xffffffff, ld_acquire_cta(const_cast<const int*>(receiver_channel_head + start_rank + dst_rank)), 0);
+                if (processed_head >= synced_last_head + num_max_rdma_chunked_send_tokens || processed_head >= synced_last_head + synced_num_tokens_to_receive) {
+                    if (dst_rank + start_rank == target_rank) {
                         // 这里应该没有本地的流量，lcoal在sender中会copy给自己
                         // 更新远端的head
                         nvshmemi_ibgda_amo_nonfetch_add(rdma_channel_head.buffer(target_rank), processed_head - last_head,
@@ -2320,11 +2324,12 @@ dispatch_pcie(int4* recv_x, float* recv_x_scales, int64_t* recv_topk_idx, float*
 void dispatch_pcie(void* recv_x, float* recv_x_scales, int64_t* recv_topk_idx, float* recv_topk_weights, void* recv_src_meta,
                    const void* x, const float* x_scales, const int64_t* topk_idx, const float* topk_weights,
                    const int* rdma_channel_prefix_matrix,
-		   const int* recv_gbl_rank_prefix_sum, const int* recv_rdma_rank_prefix_sum,
                    const bool* is_token_in_rank,
-		   int num_tokens, int hidden_int4, int num_scales, int num_topk, int num_experts,
+                   const int* recv_gbl_rank_prefix_sum,
+                   int* recv_gbl_channel_prefix_matrix,    // 新增参数
+                   int num_tokens, int hidden_int4, int num_scales, int num_topk, int num_experts,
                    int scale_token_stride, int scale_hidden_stride,
-		   void* rdma_buffer_ptr, int num_max_rdma_chunked_send_tokens, int num_max_rdma_chunked_recv_tokens,
+                   void* rdma_buffer_ptr, int num_max_rdma_chunked_send_tokens, int num_max_rdma_chunked_recv_tokens,
                    void** buffer_ptrs, int rank, int num_ranks,
                    cudaStream_t stream, int num_channels) {
     constexpr int kNumDispatchRDMASenderWarps = 4;
@@ -2337,11 +2342,11 @@ void dispatch_pcie(void* recv_x, float* recv_x_scales, int64_t* recv_topk_idx, f
                   reinterpret_cast<int4*>(recv_x), recv_x_scales, recv_topk_idx, recv_topk_weights, reinterpret_cast<internode::SourceMeta*>(recv_src_meta), \
                   reinterpret_cast<const int4*>(x), x_scales, topk_idx, topk_weights, \
                   rdma_channel_prefix_matrix, \
-		  recv_gbl_rank_prefix_sum, recv_rdma_rank_prefix_sum, \
                   is_token_in_rank, \
-		  num_tokens, hidden_int4, num_scales, num_topk, num_experts, \
+                  recv_gbl_rank_prefix_sum, recv_gbl_channel_prefix_matrix, \
+                  num_tokens, hidden_int4, num_scales, num_topk, num_experts, \
                   scale_token_stride, scale_hidden_stride, \
-		  rdma_buffer_ptr, num_max_rdma_chunked_send_tokens, num_max_rdma_chunked_recv_tokens, \
+                  rdma_buffer_ptr, num_max_rdma_chunked_send_tokens, num_max_rdma_chunked_recv_tokens, \
                   buffer_ptrs, rank); } break
 
     SETUP_LAUNCH_CONFIG(num_channels * 2, (kNumDispatchRDMASenderWarps + 1 + kNumDispatchReceiverWarps + kNumDispatchReceiverCoordinatorWarps) * 32, stream);
