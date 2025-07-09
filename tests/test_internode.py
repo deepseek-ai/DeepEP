@@ -209,7 +209,7 @@ def test_main(args: argparse.Namespace, num_sms: int,
 
     # Tune combine performance
     best_time, best_results = 1e10, None
-    for nvl_chunk_size in range(1, 5, 1):
+    for nvl_chunk_size in range(4, 13, 1):
         for rdma_chunk_size in range(8, 33, 4):
             config = deep_ep.Config(num_sms, nvl_chunk_size, nvl_buffer_size, rdma_chunk_size, rdma_buffer_size)
             tune_args = {'x': recv_x, 'handle': handle, 'config': config}
