@@ -493,7 +493,7 @@ combine(void* combined_x,
                             log_abs_values[j] = _lg2f(fabsf(value));
                             amax = j == 0 ? value : fmaxf(amax, fabsf(value));
                             log_amax = j == 0 ? log_abs_values[j] : fmaxf(log_amax, log_abs_values[j]);
-                            log_amin = j == 0 ? log_abs_values[j] : fminf(log_amin, log_abs_values[j]);
+                            log_amin = value != 0 ? (j == 0 ? log_abs_values[j] : fminf(log_amin, log_abs_values[j])) : log_amin;
                         }
 
                         // Reduce per 128 channels
