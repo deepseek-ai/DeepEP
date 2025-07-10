@@ -1398,6 +1398,7 @@ combine(int4* combined_x, float* combined_topk_weights,
                     auto shifted_x_buffers = nvl_channel_x.buffer() + dst_slot_idx * num_bytes_per_token;
                     auto shifted_x = x + token_idx * hidden_int4;
                     if (lane_id == 0) {
+                        tma_store_wait();
                         tma_load_1d(tma_buffer, shifted_x, tma_mbarrier, hidden_bytes);
                         mbarrier_arrive_and_expect_tx(tma_mbarrier, hidden_bytes);
                     }
@@ -1417,15 +1418,12 @@ combine(int4* combined_x, float* combined_topk_weights,
                     __syncwarp();
                     if (lane_id == 0)
                         tma_store_1d(tma_buffer, shifted_x_buffers, num_bytes_per_token, false);
-
-                    // Wait TMA to be finished
-                    tma_store_wait();
-                    __syncwarp();
                 }
                 lane_id == current_rdma_idx ? (token_start_idx = static_cast<int>(token_idx)) : 0;
             }
 
             // Move queue tail
+            tma_store_wait();
             __syncwarp();
             if (lane_id < kNumRDMARanks and is_lane_ready)
                 st_release_sys_global(nvl_channel_tail.buffer() + lane_id, cached_channel_tail_idx);
