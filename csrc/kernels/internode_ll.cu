@@ -81,7 +81,7 @@ dispatch(void* packed_recv_x, void* packed_recv_x_scales,
     // Expert counts
     constexpr int kNumMaxWarpGroups = 32;
     __shared__ int shared_num_tokens_sent_per_expert[kNumMaxWarpGroups];
-    
+
     // TMA shared memory and barrier initialization
     extern __shared__ __align__(1024) uint8_t smem_tma_buffer[];
     auto quarter_hidden_int4 = hidden_int4 / 4;
@@ -353,7 +353,6 @@ dispatch(void* packed_recv_x, void* packed_recv_x_scales,
                     // auto scale = extract_required_scale_format<kUseUE8M0>(smem_scales[lane_id + 32]);
                     recv_x_scales[token_idx * token_stride + pack_idx * pack_stride + elem_idx] = scale;
                 }
-
             }
         }
     }
@@ -380,7 +379,7 @@ void dispatch(void* packed_recv_x, void* packed_recv_x_scales,
     const auto num_warps = num_warp_groups * num_warps_per_group;
     const auto num_sms = ceil_div(num_experts, num_warp_groups);
     EP_HOST_ASSERT(num_topk <= kNumMaxTopK);
-    constexpr int kNumTMABytesPerWarp = 4096; // 16KB per warp
+    constexpr int kNumTMABytesPerWarp = 4096; 
     const int smem_size = kNumTMABytesPerWarp * num_warps;
 
     // Workspace checks
@@ -444,19 +443,6 @@ combine(void* combined_x,
     // Data type staffs
     constexpr int kNumElemsPerInt4 = sizeof(int4) / sizeof(nv_bfloat16);
     const size_t hidden_bf16_int4 = kHidden / kNumElemsPerInt4;
-    const size_t num_bytes_per_token = kHidden * sizeof(nv_bfloat16);
-    // TMA shared memory and barrier initialization
-    // extern __shared__ __align__(1024) uint8_t smem_tma_buffer[];
-    // auto tma_buffer = smem_tma_buffer + warp_id * kNumTMABytesPerWarp;
-    // auto tma_mbarrier = reinterpret_cast<uint64_t*>(tma_buffer + num_bytes_per_token);
-    // uint32_t tma_phase = 0;
-    // if ( lane_id == 0) {
-    //     mbarrier_init(tma_mbarrier, 1);
-    //     fence_view_async_shared();
-    //     fence_barrier_init();
-    //     EP_DEVICE_ASSERT(num_bytes_per_token + sizeof(uint64_t) <= kNumTMABytesPerWarp);
-    // }
-    // __syncwarp();
 
     // Message package
     constexpr size_t num_bytes_per_slot = kHidden * sizeof(nv_bfloat16);
@@ -507,33 +493,12 @@ combine(void* combined_x,
             const auto dst_p2p_ptr = nvshmemi_get_p2p_ptr(dst_ptr, rank, dst_rank);
             if (dst_p2p_ptr == 0) {
                 const auto buf_int4_ptr = reinterpret_cast<int4*>(buf_ptr);
-                if (not zero_copy) {
-                    
+                if (not zero_copy)
                     UNROLLED_WARP_COPY(7, lane_id, hidden_bf16_int4, buf_int4_ptr, x_int4, ld_nc_global, st_na_global);
-
-                    // TMA load from global to shared memory
-                    // if (lane_id == 0) {
-                    //     tma_load_1d(tma_buffer, x_int4, tma_mbarrier, hidden * sizeof(nv_bfloat16));
-                    //     mbarrier_arrive_and_expect_tx(tma_mbarrier,hidden * sizeof(nv_bfloat16));
-                    //     mbarrier_wait(tma_mbarrier, tma_phase);
-                    //     tma_store_1d(buf_int4_ptr, tma_buffer, hidden * sizeof(nv_bfloat16));
-                    //     tma_store_wait();
-                    // }
-                    // __syncwarp();
-                }
                 nvshmemi_ibgda_put_nbi_warp(dst_ptr, buf_ptr, hidden * sizeof(nv_bfloat16), dst_rank, local_expert_idx, lane_id, token_idx - offset);
             } else {
                 const auto dst_int4_ptr = reinterpret_cast<int4*>(dst_p2p_ptr);
                 UNROLLED_WARP_COPY(7, lane_id, hidden_bf16_int4, dst_int4_ptr, x_int4, ld_nc_global, st_na_global);
-                // TMA load from global to shared memory
-                // if (lane_id == 0) {
-                //     tma_load_1d(tma_buffer, x_int4, tma_mbarrier, hidden * sizeof(nv_bfloat16));
-                //     mbarrier_arrive_and_expect_tx(tma_mbarrier,hidden * sizeof(nv_bfloat16));
-                //     mbarrier_wait(tma_mbarrier, tma_phase);
-                //     tma_store_1d(dst_int4_ptr, tma_buffer, hidden * sizeof(nv_bfloat16));
-                //     tma_store_wait();
-                // }
-                // __syncwarp();
             }
         }
 
