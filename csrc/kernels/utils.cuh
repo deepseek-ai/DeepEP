@@ -266,14 +266,13 @@ __device__  __forceinline__ void st_na_global(const int4 *ptr, const int4& value
             ::"l"(ptr), "r"(value.x), "r"(value.y), "r"(value.z), "r"(value.w));
 }
 
-// Fast log2 / exp2
-__device__  __forceinline__ float _lg2f(const float &x) {
+__device__  __forceinline__ float log2f_approx(const float &x) {
     float ret;
     asm volatile("lg2.approx.f32 %0, %1;" : "=f"(ret) : "f"(x));
     return ret;
 }
 
-__device__  __forceinline__ float _ex2f(const float &x) {
+__device__  __forceinline__ float exp2f_approx(const float &x) {
     float ret;
     asm volatile("ex2.approx.f32 %0, %1;" : "=f"(ret) : "f"(x));
     return ret;
@@ -389,36 +388,6 @@ __device__ __forceinline__ dtype_t broadcast(dtype_t& ptr, int src_lane_idx) {
     return *reinterpret_cast<dtype_t*>(recv_int_values);
 }
 
-// TODO: make a unified function
-__forceinline__ __device__ int warp_reduce_sum(int value) {
-    value += __shfl_xor_sync(0xffffffff, value, 16);
-    value += __shfl_xor_sync(0xffffffff, value, 8);
-    value += __shfl_xor_sync(0xffffffff, value, 4);
-    value += __shfl_xor_sync(0xffffffff, value, 2);
-    value += __shfl_xor_sync(0xffffffff, value, 1);
-    return value;
-}
-
-template <uint32_t num_lanes>
-__forceinline__ __device__ float lanes_reduce_max(float value) {
-    EP_STATIC_ASSERT(num_lanes == 16 or num_lanes == 8 or num_lanes == 4 or num_lanes == 2 or num_lanes == 1, "Invalid num_lanes");
-    if constexpr (num_lanes >= 16) value = max(value, __shfl_xor_sync(0xffffffff, value, 8));
-    if constexpr (num_lanes >=  8) value = max(value, __shfl_xor_sync(0xffffffff, value, 4));
-    if constexpr (num_lanes >=  4) value = max(value, __shfl_xor_sync(0xffffffff, value, 2));
-    if constexpr (num_lanes >=  2) value = max(value, __shfl_xor_sync(0xffffffff, value, 1));
-    return value;
-}
-
-template <uint32_t num_lanes>
-__forceinline__ __device__ float lanes_reduce_min(float value) {
-    EP_STATIC_ASSERT(num_lanes == 16 or num_lanes == 8 or num_lanes == 4 or num_lanes == 2 or num_lanes == 1, "Invalid num_lanes");
-    if constexpr (num_lanes >= 16) value = min(value, __shfl_xor_sync(0xffffffff, value, 8));
-    if constexpr (num_lanes >=  8) value = min(value, __shfl_xor_sync(0xffffffff, value, 4));
-    if constexpr (num_lanes >=  4) value = min(value, __shfl_xor_sync(0xffffffff, value, 2));
-    if constexpr (num_lanes >=  2) value = min(value, __shfl_xor_sync(0xffffffff, value, 1));
-    return value;
-}
-
 __forceinline__ __device__ int get_lane_id() {
     int lane_id;
     asm("mov.s32 %0, %laneid;" : "=r"(lane_id));
@@ -515,6 +484,42 @@ __forceinline__ __device__ void acquire_lock(int* mutex) {
 __forceinline__ __device__ void release_lock(int* mutex) {
     // To make previous memory operations visible to other threads, we must use `release` for memory semantics
     atomic_exch_cta_release(mutex, 0);
+}
+
+// Operation functors
+template <typename T> struct ReduceSum { __device__ T operator()(T a, T b) const { return a + b; } };
+template <typename T> struct ReduceMax { __device__ T operator()(T a, T b) const { return a > b ? a : b; } };
+template <typename T> struct ReduceMin { __device__ T operator()(T a, T b) const { return a < b ? a : b; } };
+
+// Unified reduction function
+template <uint32_t kNumLanes, typename T, typename Op>
+__forceinline__ __device__ T warp_reduce(T value, Op op) {
+    EP_STATIC_ASSERT(kNumLanes == 32 or kNumLanes == 16 or kNumLanes == 8 or
+                     kNumLanes ==  4 or kNumLanes == 2  or kNumLanes == 1,
+                     "Invalid number of lanes");
+
+    if constexpr (kNumLanes >= 32) value = op(value, __shfl_xor_sync(0xffffffff, value, 16));
+    if constexpr (kNumLanes >= 16) value = op(value, __shfl_xor_sync(0xffffffff, value,  8));
+    if constexpr (kNumLanes >=  8) value = op(value, __shfl_xor_sync(0xffffffff, value,  4));
+    if constexpr (kNumLanes >=  4) value = op(value, __shfl_xor_sync(0xffffffff, value,  2));
+    if constexpr (kNumLanes >=  2) value = op(value, __shfl_xor_sync(0xffffffff, value,  1));
+    return value;
+}
+
+// Convenience aliases
+template < uint32_t kNumLanes = 32, typename T>
+__forceinline__ __device__ T warp_reduce_sum(T value) {
+    return warp_reduce<kNumLanes, T>(value, ReduceSum<T>{});
+}
+
+template <uint32_t kNumLanes = 32, typename T>
+__forceinline__ __device__ T warp_reduce_max(T value) {
+    return warp_reduce<kNumLanes, T>(value, ReduceMax<T>{});
+}
+
+template <uint32_t kNumLanes = 32, typename T>
+__forceinline__ __device__ T warp_reduce_min(T value) {
+    return warp_reduce<kNumLanes, T>(value, ReduceMin<T>{});
 }
 
 } // namespace deep_ep

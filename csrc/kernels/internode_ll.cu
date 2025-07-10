@@ -91,7 +91,7 @@ dispatch(void* packed_recv_x, void* packed_recv_x_scales,
     // 2. The last warp for reading `topk_idx` and count for per-expert information
     if (warp_id < num_warps - 1) {
         constexpr int kNumElemsPerRead = sizeof(int4) / sizeof(nv_bfloat16);
-        EP_DEVICE_ASSERT(kHidden % kNumElemsPerRead == 0);
+        EP_STATIC_ASSERT(kHidden % (32 * kNumElemsPerRead) == 0, "Invalid hidden");
         EP_STATIC_ASSERT(kNumElemsPerRead * 32 % kNumPerChannels == 0, "Invalid vectorization");
         const auto num_threads = (num_warps - 1) * 32;
         const size_t hidden_bf16_int4 = kHidden / kNumElemsPerRead;
@@ -113,8 +113,6 @@ dispatch(void* packed_recv_x, void* packed_recv_x_scales,
                 auto int4_value = __ldg(x_int4 + i);
 
                 if constexpr (kUseFP8) {
-                    EP_STATIC_ASSERT(kHidden % (32 * kNumElemsPerRead) == 0, "Invalid hidden");
-
                     // Calculate local amax
                     auto bf16_values = reinterpret_cast<nv_bfloat16*>(&int4_value);
                     float fp32_values[kNumElemsPerRead];
@@ -127,7 +125,7 @@ dispatch(void* packed_recv_x, void* packed_recv_x_scales,
 
                     // Reduce amax and scale
                     EP_STATIC_ASSERT(kNumElemsPerRead * 32 / kNumPerChannels == 2, "Invalid vectorization");
-                    amax = lanes_reduce_max<16>(amax);
+                    amax = warp_reduce_max<16>(amax);
                     calculate_fp8_scales(amax, scale, scale_inv, round_scale);
                     if (lane_id == 0 or lane_id == 16)
                         rdma_x_scales[i * kNumElemsPerRead / 128] = scale_inv;
@@ -460,18 +458,19 @@ combine(void* combined_x,
             const auto dst_p2p_ptr = nvshmemi_get_p2p_ptr(dst_ptr, rank, dst_rank);
 
             if (not zero_copy or dst_p2p_ptr != 0) {
+                constexpr int kNumUnrolls = 4;
+                constexpr int hidden_bf16_int4_pad = align(static_cast<int>(hidden_bf16_int4), 32 * kNumUnrolls);
+
                 // Read from `cpy_src_int4_ptr` and copy into `cpy_dst_int4_ptr`
                 const auto cpy_src_int4_ptr = zero_copy ? reinterpret_cast<int4*>(buf_ptr) : x_int4;
                 const auto cpy_dst_int4_ptr = dst_p2p_ptr == 0 ? reinterpret_cast<int4*>(buf_ptr) : reinterpret_cast<int4*>(dst_p2p_ptr);
-                constexpr int unroll = 4;
-                constexpr auto hidden_bf16_int4_pad = align(static_cast<int>(hidden_bf16_int4), 32 * unroll);
                 #pragma unroll
-                for (int i = lane_id * unroll; i < hidden_bf16_int4_pad; i += 32 * unroll) {
+                for (int i = lane_id * kNumUnrolls; i < hidden_bf16_int4_pad; i += 32 * kNumUnrolls) {
                     // Read
-                    int4 int4_values[unroll];
+                    int4 int4_values[kNumUnrolls];
                     if (i < hidden_bf16_int4) {
                         #pragma unroll
-                        for (int k = 0; k < unroll; ++ k)
+                        for (int k = 0; k < kNumUnrolls; ++ k)
                             int4_values[k] = ld_nc_global(cpy_src_int4_ptr + i + k);
                     }
                     auto bf16_values = reinterpret_cast<nv_bfloat16*>(int4_values);
@@ -486,35 +485,35 @@ combine(void* combined_x,
                         EP_STATIC_ASSERT(kHidden % (kNumElemsPerInt4 * 32) == 0 and kNumElemsPerInt4 == 8, "Invalid hidden");
 
                         // Local log amax
-                        float log_abs_values[kNumElemsPerInt4 * unroll], log_amax, log_amin, amax;
+                        float log_abs_values[kNumElemsPerInt4 * kNumUnrolls], log_amax, log_amin, amax;
                         #pragma unroll
-                        for (int j = 0; j < kNumElemsPerInt4 * unroll; ++ j) {
+                        for (int j = 0; j < kNumElemsPerInt4 * kNumUnrolls; ++ j) {
                             auto value = static_cast<float>(bf16_values[j]);
-                            log_abs_values[j] = _lg2f(fabsf(value));
+                            log_abs_values[j] = log2f_approx(fabsf(value));
                             amax = j == 0 ? value : fmaxf(amax, fabsf(value));
                             log_amax = j == 0 ? log_abs_values[j] : fmaxf(log_amax, log_abs_values[j]);
                             log_amin = value != 0 ? (j == 0 ? log_abs_values[j] : fminf(log_amin, log_abs_values[j])) : log_amin;
                         }
 
                         // Reduce per 128 channels
-                        amax = lanes_reduce_max<(16 / unroll)>(amax);
-                        log_amax = lanes_reduce_max<(16 / unroll)>(log_amax);
-                        log_amin = fmaxf(lanes_reduce_min<(16 / unroll)>(log_amin), log_amax - kMinClip);
+                        amax = warp_reduce_max<(16 / kNumUnrolls)>(amax);
+                        log_amax = warp_reduce_max<(16 / kNumUnrolls)>(log_amax);
+                        log_amin = fmaxf(warp_reduce_min<(16 / kNumUnrolls)>(log_amin), log_amax - kMinClip);
 
                         const auto step = (log_amax - log_amin) / static_cast<float>(kNumValues - 2);
-                        const auto rounding = _lg2f((1.0f + _ex2f(step)) / 2.0f) / step + 1.0f;
                         const auto step_inv = 1.0f / step;
+                        const auto rounding = 2.0f - log2f_approx((1.0f + exp2f_approx(step)) * 0.5f) * step_inv;
 
                         // Use LogFMT only with `amax <= kThreshold` (maybe not all quarter-warps)
                         if (amax <= kThreshold and log_amin < log_amax) {
                             // Transform
                             auto transform = [=](const float& log_abs_value) -> nv_bfloat16 {
                                 const auto encoded = floorf((log_abs_value - log_amin) * step_inv + rounding);
-                                const auto decoded = _ex2f((encoded - 1) * step + log_amin);
+                                const auto decoded = exp2f_approx((encoded - 1) * step + log_amin);
                                 return decoded; 
                             };
                             #pragma unroll
-                            for (int j = 0; j < kNumElemsPerInt4 * unroll; j += 2) {
+                            for (int j = 0; j < kNumElemsPerInt4 * kNumUnrolls; j += 2) {
                                 auto bf162_pack = __nv_bfloat162(transform(log_abs_values[j]), transform(log_abs_values[j + 1]));
                                 auto uint32_pack = *reinterpret_cast<uint32_t*>(&bf162_pack);
                                 uint32_values[j / 2] = (uint32_values[j / 2] & 0x80008000) | uint32_pack;
@@ -524,9 +523,10 @@ combine(void* combined_x,
                     }
 
                     // Store
+                    EP_STATIC_ASSERT(hidden_bf16_int4 % kNumUnrolls == 0, "Invalid hidden");
                     if (i < hidden_bf16_int4) {
                         #pragma unroll
-                        for (int k = 0; k < unroll; ++ k)
+                        for (int k = 0; k < kNumUnrolls; ++ k)
                             st_na_global(cpy_dst_int4_ptr + i + k, int4_values[k]);
                     }
                 }
