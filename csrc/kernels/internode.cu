@@ -1346,7 +1346,7 @@ combine(int4* combined_x, float* combined_topk_weights,
         EP_STATIC_ASSERT(kNumRDMARanks <= 32, "Invalid number of RDMA peers");
 
         // Iterate over all tokens and send by chunks
-        int current_rdma_idx = 0;
+        int current_rdma_idx = channel_id % kNumRDMARanks;
         while (true) {
             // Exit if possible
             if (__all_sync(0xffffffff, token_start_idx >= token_end_idx))
