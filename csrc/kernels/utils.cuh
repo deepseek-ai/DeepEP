@@ -266,6 +266,19 @@ __device__  __forceinline__ void st_na_global(const int4 *ptr, const int4& value
             ::"l"(ptr), "r"(value.x), "r"(value.y), "r"(value.z), "r"(value.w));
 }
 
+// Fast log2 / exp2
+__device__  __forceinline__ float _lg2f(const float &x) {
+    float ret;
+    asm volatile("lg2.approx.f32 %0, %1;" : "=f"(ret) : "f"(x));
+    return ret;
+}
+
+__device__  __forceinline__ float _ex2f(const float &x) {
+    float ret;
+    asm volatile("ex2.approx.f32 %0, %1;" : "=f"(ret) : "f"(x));
+    return ret;
+}
+
 // TMA PTX instructions
 #ifndef DISABLE_SM90_FEATURES
 
