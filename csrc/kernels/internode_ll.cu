@@ -7,7 +7,6 @@ namespace deep_ep {
 
 namespace internode_ll {
 
-
 template <int kNumThreads> __launch_bounds__(kNumThreads, 1)
 __global__ void clean_low_latency_buffer(int* clean_0, int num_clean_int_0,
                                          int* clean_1, int num_clean_int_1) {
@@ -82,8 +81,21 @@ dispatch(void* packed_recv_x, void* packed_recv_x_scales,
     // Expert counts
     constexpr int kNumMaxWarpGroups = 32;
     __shared__ int shared_num_tokens_sent_per_expert[kNumMaxWarpGroups];
-
-
+    
+    // TMA shared memory and barrier initialization
+    extern __shared__ __align__(1024) uint8_t smem_tma_buffer[];
+    auto quarter_hidden_int4 = hidden_int4 / 4;
+    auto quarter_hidden_bytes = quarter_hidden_int4 * static_cast<int>(sizeof(int4));
+    auto tma_buffer_for_warp = smem_tma_buffer + warp_id * kNumTMABytesPerWarp;
+    auto tma_mbarrier = reinterpret_cast<uint64_t*>(tma_buffer_for_warp +  quarter_hidden_bytes);
+    uint32_t tma_phase = 0;
+    if (lane_id == 0) {
+        mbarrier_init(tma_mbarrier, 1);
+        fence_view_async_shared();
+        fence_barrier_init();
+        EP_DEVICE_ASSERT(quarter_hidden_bytes + sizeof(uint64_t) <= kNumTMABytesPerWarp);
+    }
+    __syncwarp();
 
     // Sending phase
     if ((phases & LOW_LATENCY_SEND_PHASE) == 0)
@@ -168,14 +180,6 @@ dispatch(void* packed_recv_x, void* packed_recv_x_scales,
                     const auto* src_int4_ptr = reinterpret_cast<const int4*>(src_ptr);
                     const auto* dst_int4_ptr = reinterpret_cast<int4*>(dst_p2p_ptr);
                     UNROLLED_WARP_COPY(8, lane_id, num_int4_per_msg, dst_int4_ptr, src_int4_ptr, ld_nc_global, st_na_global);
-                    // if (lane_id == 0) {
-                    //     tma_load_1d(tma_buffer, src_int4_ptr, tma_mbarrier, num_int4_per_msg * sizeof(int4));
-                    //     mbarrier_arrive_and_expect_tx(tma_mbarrier, num_int4_per_msg * sizeof(int4));
-                    //     mbarrier_wait(tma_mbarrier, tma_phase);
-                    //     tma_store_1d(dst_int4_ptr, tma_buffer, num_int4_per_msg * sizeof(int4));
-                    //     tma_store_wait();
-                    // }
-                    // __syncwarp();
                 }
 
                 // Increase counter after finishing
@@ -296,21 +300,6 @@ dispatch(void* packed_recv_x, void* packed_recv_x_scales,
         num_recv_tokens = shared_num_recv_tokens[warp_group_id];
         recv_token_begin_idx = shared_recv_token_begin_idx[warp_group_id];
 
-        // TMA shared memory and barrier initialization
-        extern __shared__ __align__(1024) uint8_t smem_tma_buffer[];
-        auto quarter_hidden_int4 = hidden_int4 / 4;
-        auto quarter_hidden_bytes = quarter_hidden_int4 * static_cast<int>(sizeof(int4));
-        auto tma_buffer_for_warp = smem_tma_buffer + warp_id * kNumTMABytesPerWarp;
-        auto tma_mbarrier = reinterpret_cast<uint64_t*>(tma_buffer_for_warp +  quarter_hidden_bytes);
-        uint32_t tma_phase = 0;
-        if (lane_id == 0) {
-            mbarrier_init(tma_mbarrier, 1);
-            fence_view_async_shared();
-            fence_barrier_init();
-            EP_DEVICE_ASSERT(quarter_hidden_bytes + sizeof(uint64_t) <= kNumTMABytesPerWarp);
-        }
-        __syncwarp();
-
         // Copy tokens
         EP_DEVICE_ASSERT(num_scales <= 64);
         for (int i = sub_warp_id; i < num_recv_tokens; i += num_warps_per_group) {
@@ -324,11 +313,6 @@ dispatch(void* packed_recv_x, void* packed_recv_x_scales,
             // NOTES: only 2 load iterations for 7K hidden with 7 unrolls
             const auto src_data = reinterpret_cast<int4*>(reinterpret_cast<uint8_t*>(src_src_idx) + sizeof(int4));
             const auto dst_data = recv_x_int4 + (recv_token_begin_idx + i) * hidden_int4;
-
-            // if (lane_id == 0) {
-            //     printf("Before copy - Iteration %d, src_data[0]: (%d, %d, %d, %d)\n", i, src_data[0].x, src_data[0].y, src_data[0].z, src_data[0].w);
-            //     printf("Before copy - Iteration %d, dst_data[0]: (%d, %d, %d, %d)\n", i, dst_data[0].x, dst_data[0].y, dst_data[0].z, dst_data[0].w);
-            // }
             // UNROLLED_WARP_COPY(7, lane_id, hidden_int4, dst_data, src_data, ld_nc_global, st_na_global);
             // __syncwarp();
             #pragma unroll
@@ -347,13 +331,6 @@ dispatch(void* packed_recv_x, void* packed_recv_x_scales,
                 __syncwarp();
 
             }
-            // if (lane_id == 0) {
-            //     printf("After copy - Iteration %d, src_data[0]: (%d, %d, %d, %d)\n", i, src_data[0].x, src_data[0].y, src_data[0].z, src_data[0].w);
-            //     printf("After copy - Iteration %d, dst_data[0]: (%d, %d, %d, %d)\n", i, dst_data[0].x, dst_data[0].y, dst_data[0].z, dst_data[0].w);
-            // }
-            // __syncwarp();
-
-
             if constexpr (kUseFP8) {
                 // 3. Scatter scales from shared memory to global memory
                 const auto src_scales = reinterpret_cast<float*>(reinterpret_cast<uint8_t*>(src_data) + hidden_bytes);
