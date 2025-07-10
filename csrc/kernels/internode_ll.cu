@@ -463,7 +463,7 @@ combine(void* combined_x,
                 // Read from `cpy_src_int4_ptr` and copy into `cpy_dst_int4_ptr`
                 const auto cpy_src_int4_ptr = zero_copy ? reinterpret_cast<int4*>(buf_ptr) : x_int4;
                 const auto cpy_dst_int4_ptr = dst_p2p_ptr == 0 ? reinterpret_cast<int4*>(buf_ptr) : reinterpret_cast<int4*>(dst_p2p_ptr);
-                constexpr int unroll = 2;
+                constexpr int unroll = 4;
                 constexpr auto hidden_bf16_int4_pad = align(static_cast<int>(hidden_bf16_int4), 32 * unroll);
                 #pragma unroll
                 for (int i = lane_id * unroll; i < hidden_bf16_int4_pad; i += 32 * unroll) {
