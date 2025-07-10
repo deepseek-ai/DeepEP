@@ -106,6 +106,14 @@ class Buffer:
         self.runtime.sync(device_ids, ipc_handles, root_unique_id)
         assert self.runtime.is_available()
 
+    def destory(self):
+        """
+        Destroy the cpp runtime and release resources.
+        
+        """
+
+        self.runtime.destroy()
+
     @staticmethod
     def is_sm90_compiled():
         return deep_ep_cpp.is_sm90_compiled()

@@ -249,7 +249,8 @@ def test_loop(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
         buffer.clean_low_latency_buffer(ll_num_tokens, ll_hidden, ll_num_experts)
         test_low_latency.test_main(ll_num_tokens, ll_hidden, ll_num_experts, ll_num_topk, rank, num_ranks, group, buffer, seed=1)
 
-    # Destroy the communication group
+    # Destroy the buffer runtime and communication group
+    buffer.destory()
     dist.barrier()
     dist.destroy_process_group()
 

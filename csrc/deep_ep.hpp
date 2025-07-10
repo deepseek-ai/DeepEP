@@ -51,6 +51,8 @@ private:
 
     // After IPC/NVSHMEM synchronization, this flag will be true
     bool available = false;
+    // After `destory()` be called, this flag will be true
+    bool destroyed = false;
 
     // Barrier signals
     int* barrier_signal_ptrs[NUM_MAX_NVL_PEERS] = {nullptr};
@@ -97,6 +99,8 @@ public:
     torch::Stream get_comm_stream() const;
 
     void sync(const std::vector<int>& device_ids, const std::vector<std::optional<pybind11::bytearray>>& all_gathered_handles, const std::optional<pybind11::bytearray>& root_unique_id_opt);
+
+    void destroy();
 
     std::tuple<torch::Tensor, std::optional<torch::Tensor>, torch::Tensor, torch::Tensor, std::optional<EventHandle>>
     get_dispatch_layout(const torch::Tensor& topk_idx, int num_experts, std::optional<EventHandle>& previous_event,

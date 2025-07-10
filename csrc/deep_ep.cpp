@@ -81,40 +81,10 @@ Buffer::Buffer(int rank, int num_ranks, int64_t num_nvl_bytes, int64_t num_rdma_
 }
 
 Buffer::~Buffer() noexcept(false) {
-    // Synchronize
-    CUDA_CHECK(cudaDeviceSynchronize());
-
-    if (num_nvl_bytes > 0) {
-        // Barrier
-        intranode::barrier(barrier_signal_ptrs_gpu, nvl_rank, num_nvl_ranks, comm_stream);
-        CUDA_CHECK(cudaDeviceSynchronize());
-
-        // Close remote IPC
-        if (is_available()) {
-            for (int i = 0; i < num_nvl_ranks; ++ i) if (i != nvl_rank)
-                CUDA_CHECK(cudaIpcCloseMemHandle(buffer_ptrs[i]));
-        }
-
-        // Free local buffer and error flag
-        CUDA_CHECK(cudaFree(buffer_ptrs[nvl_rank]));
+    if (!destroyed) {
+        printf("WARNING: destroy() was not called before DeepEP buffer destruction, which can leak resources.\n");
+        fflush(stdout);
     }
-
-    // Free NVSHMEM
-#ifndef DISABLE_NVSHMEM
-    if (num_rdma_bytes > 0) {
-        CUDA_CHECK(cudaDeviceSynchronize());
-        internode::barrier();
-        internode::free(rdma_buffer_ptr);
-        internode::finalize();
-    }
-#endif
-
-    // Free workspace and MoE counter
-    CUDA_CHECK(cudaFree(workspace));
-    CUDA_CHECK(cudaFreeHost(const_cast<int*>(moe_recv_counter)));
-
-    // Free chunked mode staffs
-    CUDA_CHECK(cudaFreeHost(const_cast<int*>(moe_recv_expert_counter)));
 }
 
 bool Buffer::is_available() const {
@@ -165,6 +135,48 @@ torch::Tensor Buffer::get_local_buffer_tensor(const pybind11::object& dtype, int
 
 torch::Stream Buffer::get_comm_stream() const {
     return comm_stream;
+}
+
+void Buffer::destroy() {
+    EP_HOST_ASSERT(not destroyed);
+
+    // Synchronize
+    CUDA_CHECK(cudaDeviceSynchronize());
+
+    if (num_nvl_bytes > 0) {
+        // Barrier
+        intranode::barrier(barrier_signal_ptrs_gpu, nvl_rank, num_nvl_ranks, comm_stream);
+        CUDA_CHECK(cudaDeviceSynchronize());
+
+        // Close remote IPC
+        if (is_available()) {
+            for (int i = 0; i < num_nvl_ranks; ++ i) if (i != nvl_rank)
+                CUDA_CHECK(cudaIpcCloseMemHandle(buffer_ptrs[i]));
+        }
+
+        // Free local buffer and error flag
+        CUDA_CHECK(cudaFree(buffer_ptrs[nvl_rank]));
+    }
+
+    // Free NVSHMEM
+#ifndef DISABLE_NVSHMEM
+    if (is_available() and num_rdma_bytes > 0) {
+        CUDA_CHECK(cudaDeviceSynchronize());
+        internode::barrier();
+        internode::free(rdma_buffer_ptr);
+        internode::finalize();
+    }
+#endif
+
+    // Free workspace and MoE counter
+    CUDA_CHECK(cudaFree(workspace));
+    CUDA_CHECK(cudaFreeHost(const_cast<int*>(moe_recv_counter)));
+
+    // Free chunked mode staffs
+    CUDA_CHECK(cudaFreeHost(const_cast<int*>(moe_recv_expert_counter)));
+
+    destroyed = true;
+    available = false;
 }
 
 void Buffer::sync(const std::vector<int> &device_ids,
@@ -1334,6 +1346,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         .def("get_local_buffer_tensor", &deep_ep::Buffer::get_local_buffer_tensor)
         .def("get_comm_stream", &deep_ep::Buffer::get_comm_stream)
         .def("sync", &deep_ep::Buffer::sync)
+        .def("destroy", &deep_ep::Buffer::destroy)
         .def("get_dispatch_layout", &deep_ep::Buffer::get_dispatch_layout)
         .def("intranode_dispatch", &deep_ep::Buffer::intranode_dispatch)
         .def("intranode_combine", &deep_ep::Buffer::intranode_combine)
