@@ -9,7 +9,8 @@ from utils import init_dist, bench, bench_kineto, calc_diff, hash_tensor, per_to
 
 
 def test_main(num_tokens: int, hidden: int, num_experts: int, num_topk: int,
-              rank: int, num_ranks: int, group: dist.ProcessGroup, buffer: deep_ep.Buffer, seed: int = 0):
+              rank: int, num_ranks: int, group: dist.ProcessGroup, buffer: deep_ep.Buffer,
+              use_logfmt: bool = False, seed: int = 0):
     torch.manual_seed(seed + rank)
     random.seed(seed + rank)
 
@@ -87,21 +88,20 @@ def test_main(num_tokens: int, hidden: int, num_experts: int, num_topk: int,
                                 hash_value ^= hash_tensor(packed_recv_x[i, :num_valid_tokens])
 
                         # Check combine correctness
-                        for use_logfmt in (False, True):
-                            for zero_copy in (False, ) if use_logfmt else (False, True):
-                                if zero_copy:
-                                    buffer.get_next_low_latency_combine_buffer(handle)[:, :, :] = simulated_gemm_x
-                                out = torch.empty((num_tokens, hidden), dtype=torch.bfloat16, device='cuda')
-                                combined_x, event, hook = buffer.low_latency_combine(simulated_gemm_x, topk_idx, topk_weights, handle,
-                                                                                    use_logfmt=use_logfmt,
-                                                                                    async_finish=not return_recv_hook, zero_copy=zero_copy,
-                                                                                    return_recv_hook=return_recv_hook, out=out)
-                                hook() if return_recv_hook else event.current_stream_wait()
-                                if do_check:
-                                    diff = calc_diff(current_x * topk_weights.masked_fill(topk_idx == -1, 0).sum(dim=1).view(-1, 1), combined_x)
-                                    assert torch.isnan(combined_x).sum().item() == 0
-                                    assert diff < (7e-4 if dispatch_use_fp8 else 1e-5), f'Error: {diff=}, {zero_copy=}'
-                                    hash_value ^= hash_tensor(combined_x)
+                        for zero_copy in (False, ) if use_logfmt else (False, True):
+                            if zero_copy:
+                                buffer.get_next_low_latency_combine_buffer(handle)[:, :, :] = simulated_gemm_x
+                            out = torch.empty((num_tokens, hidden), dtype=torch.bfloat16, device='cuda')
+                            combined_x, event, hook = buffer.low_latency_combine(simulated_gemm_x, topk_idx, topk_weights, handle,
+                                                                                use_logfmt=use_logfmt,
+                                                                                async_finish=not return_recv_hook, zero_copy=zero_copy,
+                                                                                return_recv_hook=return_recv_hook, out=out)
+                            hook() if return_recv_hook else event.current_stream_wait()
+                            if do_check:
+                                diff = calc_diff(current_x * topk_weights.masked_fill(topk_idx == -1, 0).sum(dim=1).view(-1, 1), combined_x)
+                                assert torch.isnan(combined_x).sum().item() == 0
+                                assert diff < (7e-4 if dispatch_use_fp8 else 1e-5), f'Error: {diff=}, {zero_copy=}'
+                                hash_value ^= hash_tensor(combined_x)
 
     # noinspection PyShadowingNames
     def large_gemm_with_hook(hook):
@@ -111,7 +111,7 @@ def test_main(num_tokens: int, hidden: int, num_experts: int, num_topk: int,
         hook()
 
     # noinspection PyShadowingNames
-    def test_func(use_logfmt: bool, return_recv_hook: bool):
+    def test_func(return_recv_hook: bool):
         recv_x, recv_count, handle, event, hook = \
             buffer.low_latency_dispatch(x_pure_rand, topk_idx, num_tokens, num_experts,
                                         cumulative_local_expert_recv_stats=cumulative_local_expert_recv_stats,
@@ -130,30 +130,22 @@ def test_main(num_tokens: int, hidden: int, num_experts: int, num_topk: int,
         num_combine_comm_bytes += num_bf16_bytes * num_selections
 
     # Dispatch + combine testing
-    for use_logfmt in (False, True):
-        avg_t, min_t, max_t = bench(partial(test_func, use_logfmt=use_logfmt,return_recv_hook=False))
-        print(f'[rank {rank}] Dispatch + combine bandwidth ({use_logfmt=}): {(num_dispatch_comm_bytes + num_combine_comm_bytes) / 1e9 / avg_t:.2f} GB/s, '
-            f'avg_t={avg_t * 1e6:.2f} us, min_t={min_t * 1e6:.2f} us, max_t={max_t * 1e6:.2f} us', flush=True)
+    avg_t, min_t, max_t = bench(partial(test_func, return_recv_hook=False))
+    print(f'[rank {rank}] Dispatch + combine bandwidth: {(num_dispatch_comm_bytes + num_combine_comm_bytes) / 1e9 / avg_t:.2f} GB/s, '
+          f'avg_t={avg_t * 1e6:.2f} us, min_t={min_t * 1e6:.2f} us, max_t={max_t * 1e6:.2f} us', flush=True)
 
     # Separate profiling
-    for use_logfmt in (False, True):
-        for return_recv_hook in (False, True):
-            group.barrier()
-            dispatch_t, combine_t = bench_kineto(partial(test_func, use_logfmt=use_logfmt, return_recv_hook=return_recv_hook),
-                                                kernel_names=('dispatch', 'combine'), barrier_comm_profiling=True,
-                                                suppress_kineto_output=True, num_kernels_per_period=2 if return_recv_hook else 1)
-            if not return_recv_hook:
-                output = f'[rank {rank}] '
-                if not use_logfmt:
-                    output += f'Dispatch bandwidth: {num_dispatch_comm_bytes / 1e9 / dispatch_t:.2f} GB/s, avg_t={dispatch_t * 1e6:.2f} us | '
-                output += f'Combine bandwidth ({use_logfmt=}): {num_combine_comm_bytes / 1e9 / combine_t:.2f} GB/s, avg_t={combine_t * 1e6:.2f} us'
-                print(output, flush=True)
-            else:
-                output = f'[rank {rank}] '
-                if not use_logfmt:
-                    output += f'Dispatch send/recv time: {dispatch_t[0] * 1e6:.2f} + {dispatch_t[1] * 1e6:.2f} us | '
-                output += f'Combine send/recv time ({use_logfmt=}): {combine_t[0] * 1e6:.2f} + {combine_t[1] * 1e6:.2f} us'
-                print(output, flush=True)
+    for return_recv_hook in (False, True):
+        group.barrier()
+        dispatch_t, combine_t = bench_kineto(partial(test_func, return_recv_hook=return_recv_hook),
+                                             kernel_names=('dispatch', 'combine'), barrier_comm_profiling=True,
+                                             suppress_kineto_output=True, num_kernels_per_period=2 if return_recv_hook else 1)
+        if not return_recv_hook:
+            print(f'[rank {rank}] Dispatch bandwidth: {num_dispatch_comm_bytes / 1e9 / dispatch_t:.2f} GB/s, avg_t={dispatch_t * 1e6:.2f} us | '
+                  f'Combine bandwidth: {num_combine_comm_bytes / 1e9 / combine_t:.2f} GB/s, avg_t={combine_t * 1e6:.2f} us', flush=True)
+        else:
+            print(f'[rank {rank}] Dispatch send/recv time: {dispatch_t[0] * 1e6:.2f} + {dispatch_t[1] * 1e6:.2f} us | '
+                  f'Combine send/recv time: {combine_t[0] * 1e6:.2f} + {combine_t[1] * 1e6:.2f} us', flush=True)
     return hash_value
 
 
@@ -169,15 +161,18 @@ def test_loop(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
     buffer = deep_ep.Buffer(group, num_rdma_bytes=num_rdma_bytes, low_latency_mode=True,
                             num_qps_per_rank=num_experts // num_ranks,
                             allow_nvlink_for_low_latency_mode=not args.disable_nvlink)
-    test_main(num_tokens, hidden, num_experts, num_topk, rank, num_ranks, group, buffer, seed=1)
+    test_main(num_tokens, hidden, num_experts, num_topk, rank, num_ranks, group, buffer,
+              use_logfmt=args.use_logfmt, seed=1)
 
     do_pressure_test = False
     for seed in range(int(1e9) if do_pressure_test else 0):
         if local_rank == 0:
             print(f'Testing with seed {seed} ...', flush=True)
-        ref_hash = test_main(num_tokens, hidden, num_experts, num_topk, rank, num_ranks, group, buffer, seed=seed)
+        ref_hash = test_main(num_tokens, hidden, num_experts, num_topk, rank, num_ranks, group, buffer,
+                             use_logfmt=args.use_logfmt, seed=seed)
         for i in range(20):
-            assert test_main(num_tokens, hidden, num_experts, num_topk, rank, num_ranks, group, buffer, seed=seed) == ref_hash, f'Error: seed={seed}'
+            assert test_main(num_tokens, hidden, num_experts, num_topk, rank, num_ranks, group, buffer,
+                             use_logfmt=args.use_logfmt, seed=seed) == ref_hash, f'Error: seed={seed}'
 
     # Destroy the communication group
     dist.barrier()
@@ -200,6 +195,8 @@ if __name__ == '__main__':
                        help='Number of experts (default: 288)')
     parser.add_argument('--disable-nvlink', action='store_true',
                         help='Whether to disable NVLink for testing')
+    parser.add_argument('--use-logfmt', action='store_true',
+                        help='Whether to test LogFMT combine')
     args = parser.parse_args()
 
     num_processes = args.num_processes
