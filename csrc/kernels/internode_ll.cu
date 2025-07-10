@@ -91,7 +91,7 @@ dispatch(void* packed_recv_x, void* packed_recv_x_scales,
     // 2. The last warp for reading `topk_idx` and count for per-expert information
     if (warp_id < num_warps - 1) {
         constexpr int kNumElemsPerRead = sizeof(int4) / sizeof(nv_bfloat16);
-        EP_DEVICE_ASSERT(kHidden % kNumElemsPerRead == 0);
+        EP_STATIC_ASSERT(kHidden % (32 * kNumElemsPerRead) == 0, "Invalid hidden");
         EP_STATIC_ASSERT(kNumElemsPerRead * 32 % kNumPerChannels == 0, "Invalid vectorization");
         const auto num_threads = (num_warps - 1) * 32;
         const size_t hidden_bf16_int4 = kHidden / kNumElemsPerRead;
@@ -125,7 +125,7 @@ dispatch(void* packed_recv_x, void* packed_recv_x_scales,
 
                     // Reduce amax and scale
                     EP_STATIC_ASSERT(kNumElemsPerRead * 32 / kNumPerChannels == 2, "Invalid vectorization");
-                    amax = half_warp_reduce_max(amax);
+                    amax = warp_reduce_max<16>(amax);
                     calculate_fp8_scales(amax, scale, scale_inv, round_scale);
                     if (lane_id == 0 or lane_id == 16)
                         rdma_x_scales[i * kNumElemsPerRead / 128] = scale_inv;
@@ -382,7 +382,7 @@ LAUNCH_KERNEL(&cfg, dispatch_func, \
 #undef DISPATCH_LAUNCH_CASE
 }
 
-template <int kHidden, int kNumMaxTopk>
+template <bool kUseLogFMT, int kHidden, int kNumMaxTopk>
 __global__ __launch_bounds__(1024, 1) void
 combine(void* combined_x,
         void* rdma_recv_x, int* rdma_recv_flag, void* rdma_send_x,
@@ -452,19 +452,90 @@ combine(void* combined_x,
             const auto rdma_send_x_vec_row = reinterpret_cast<uint8_t*>(rdma_send_type_row);
 
             // Copy directly to local rank, or copy to buffer and issue RDMA
-            auto src_idx = __ldg(local_src_info + token_idx);
+            const auto src_idx = __shfl_sync(0xffffffff, __ldg(local_src_info + token_idx), 0);
             const auto buf_ptr = reinterpret_cast<int64_t>(rdma_send_x_vec_row);
             const auto dst_ptr = reinterpret_cast<uint64_t>(rdma_recv_x) + (global_expert_idx * num_max_dispatch_tokens_per_rank + src_idx) * num_bytes_per_slot;
             const auto dst_p2p_ptr = nvshmemi_get_p2p_ptr(dst_ptr, rank, dst_rank);
-            if (dst_p2p_ptr == 0) {
-                const auto buf_int4_ptr = reinterpret_cast<int4*>(buf_ptr);
-                if (not zero_copy)
-                    UNROLLED_WARP_COPY(7, lane_id, hidden_bf16_int4, buf_int4_ptr, x_int4, ld_nc_global, st_na_global);
-                nvshmemi_ibgda_put_nbi_warp(dst_ptr, buf_ptr, hidden * sizeof(nv_bfloat16), dst_rank, local_expert_idx, lane_id, token_idx - offset);
-            } else {
-                const auto dst_int4_ptr = reinterpret_cast<int4*>(dst_p2p_ptr);
-                UNROLLED_WARP_COPY(7, lane_id, hidden_bf16_int4, dst_int4_ptr, x_int4, ld_nc_global, st_na_global);
+
+            if (not zero_copy or dst_p2p_ptr != 0) {
+                constexpr int kNumUnrolls = 4;
+                constexpr int hidden_bf16_int4_pad = align(static_cast<int>(hidden_bf16_int4), 32 * kNumUnrolls);
+
+                // Read from `cpy_src_int4_ptr` and copy into `cpy_dst_int4_ptr`
+                const auto cpy_src_int4_ptr = zero_copy ? reinterpret_cast<int4*>(buf_ptr) : x_int4;
+                const auto cpy_dst_int4_ptr = dst_p2p_ptr == 0 ? reinterpret_cast<int4*>(buf_ptr) : reinterpret_cast<int4*>(dst_p2p_ptr);
+                #pragma unroll
+                for (int i = lane_id * kNumUnrolls; i < hidden_bf16_int4_pad; i += 32 * kNumUnrolls) {
+                    // Read
+                    int4 int4_values[kNumUnrolls];
+                    if (i < hidden_bf16_int4) {
+                        #pragma unroll
+                        for (int k = 0; k < kNumUnrolls; ++ k)
+                            int4_values[k] = ld_nc_global(cpy_src_int4_ptr + i + k);
+                    }
+                    auto bf16_values = reinterpret_cast<nv_bfloat16*>(int4_values);
+                    auto uint32_values = reinterpret_cast<uint32_t*>(int4_values);
+
+                    // Simulated cast
+                    if constexpr (kUseLogFMT) {
+                        constexpr float kThreshold = 1;
+                        constexpr float kMinClip = 32; // `== log_2(2 ^ (2 ^ 5))`
+                        constexpr int kNumBits = 10;
+                        constexpr int kNumValues = 1 << (kNumBits - 1);
+                        EP_STATIC_ASSERT(kHidden % (kNumElemsPerInt4 * 32) == 0 and kNumElemsPerInt4 == 8, "Invalid hidden");
+
+                        // Local log amax
+                        float log_abs_values[kNumElemsPerInt4 * kNumUnrolls], log_amax, log_amin, amax;
+                        #pragma unroll
+                        for (int j = 0; j < kNumElemsPerInt4 * kNumUnrolls; ++ j) {
+                            auto value = static_cast<float>(bf16_values[j]);
+                            log_abs_values[j] = log2f_approx(fabsf(value));
+                            amax = j == 0 ? value : fmaxf(amax, fabsf(value));
+                            log_amax = j == 0 ? log_abs_values[j] : fmaxf(log_amax, log_abs_values[j]);
+                            log_amin = value != 0 ? (j == 0 ? log_abs_values[j] : fminf(log_amin, log_abs_values[j])) : log_amin;
+                        }
+
+                        // Reduce per 128 channels
+                        amax = warp_reduce_max<(16 / kNumUnrolls)>(amax);
+                        log_amax = warp_reduce_max<(16 / kNumUnrolls)>(log_amax);
+                        log_amin = fmaxf(warp_reduce_min<(16 / kNumUnrolls)>(log_amin), log_amax - kMinClip);
+
+                        const auto step = (log_amax - log_amin) / static_cast<float>(kNumValues - 2);
+                        const auto step_inv = 1.0f / step;
+                        const auto rounding = 2.0f - log2f_approx((1.0f + exp2f_approx(step)) * 0.5f) * step_inv;
+
+                        // Use LogFMT only with `amax <= kThreshold` (maybe not all quarter-warps)
+                        if (amax <= kThreshold and log_amin < log_amax) {
+                            // Transform
+                            auto transform = [=](const float& log_abs_value) -> nv_bfloat16 {
+                                const auto encoded = floorf((log_abs_value - log_amin) * step_inv + rounding);
+                                const auto decoded = exp2f_approx((encoded - 1) * step + log_amin);
+                                return decoded; 
+                            };
+                            #pragma unroll
+                            for (int j = 0; j < kNumElemsPerInt4 * kNumUnrolls; j += 2) {
+                                auto bf162_pack = __nv_bfloat162(transform(log_abs_values[j]), transform(log_abs_values[j + 1]));
+                                auto uint32_pack = *reinterpret_cast<uint32_t*>(&bf162_pack);
+                                uint32_values[j / 2] = (uint32_values[j / 2] & 0x80008000) | uint32_pack;
+                            }   
+                        }
+                        __syncwarp();
+                    }
+
+                    // Store
+                    EP_STATIC_ASSERT(hidden_bf16_int4 % kNumUnrolls == 0, "Invalid hidden");
+                    if (i < hidden_bf16_int4) {
+                        #pragma unroll
+                        for (int k = 0; k < kNumUnrolls; ++ k)
+                            st_na_global(cpy_dst_int4_ptr + i + k, int4_values[k]);
+                    }
+                }
             }
+
+            // Issue RDMA
+            // NOTES: for zero-copy mode, we assume the data is already in the send buffer
+            if (dst_p2p_ptr == 0)
+                nvshmemi_ibgda_put_nbi_warp(dst_ptr, buf_ptr, hidden * sizeof(nv_bfloat16), dst_rank, local_expert_idx, lane_id, token_idx - offset);
         }
 
         // Put the finishing flag
@@ -545,6 +616,7 @@ void combine(void* combined_x,
              int* next_clean, int num_next_clean_int,
              int num_combined_tokens, int hidden, int num_max_dispatch_tokens_per_rank,
              int num_topk, int num_experts, int rank, int num_ranks,
+             bool use_logfmt,
              void* workspace, int num_device_sms,
              cudaStream_t stream, int phases, bool zero_copy) {
     constexpr int kNumMaxTopk = 9;
@@ -560,8 +632,13 @@ void combine(void* combined_x,
     EP_HOST_ASSERT(sizeof(int) <= NUM_WORKSPACE_BYTES);
     EP_HOST_ASSERT(num_topk <= kNumMaxTopk);
 
+    // Online cast cannot use zero-copy
+    EP_HOST_ASSERT(not (zero_copy and use_logfmt));
+
 #define COMBINE_LAUNCH_CASE(hidden) { \
-auto combine_func = combine<hidden, kNumMaxTopk>; \
+auto combine_func = use_logfmt ? \
+    combine<true, hidden, kNumMaxTopk> : \
+    combine<false, hidden, kNumMaxTopk>; \
 LAUNCH_KERNEL(&cfg, combine_func, \
               combined_x, \
               rdma_recv_x, rdma_recv_flag, rdma_send_x, \

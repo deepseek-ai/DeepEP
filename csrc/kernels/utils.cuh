@@ -266,6 +266,18 @@ __device__  __forceinline__ void st_na_global(const int4 *ptr, const int4& value
             ::"l"(ptr), "r"(value.x), "r"(value.y), "r"(value.z), "r"(value.w));
 }
 
+__device__  __forceinline__ float log2f_approx(const float &x) {
+    float ret;
+    asm volatile("lg2.approx.f32 %0, %1;" : "=f"(ret) : "f"(x));
+    return ret;
+}
+
+__device__  __forceinline__ float exp2f_approx(const float &x) {
+    float ret;
+    asm volatile("ex2.approx.f32 %0, %1;" : "=f"(ret) : "f"(x));
+    return ret;
+}
+
 // TMA PTX instructions
 #ifndef DISABLE_SM90_FEATURES
 
@@ -333,12 +345,12 @@ __device__ __forceinline__ void tma_store_wait() {
 #endif
 
 template <typename dtype_t>
-__host__ __device__ dtype_t ceil_div(dtype_t a, dtype_t b) {
+__host__ __device__ constexpr dtype_t ceil_div(dtype_t a, dtype_t b) {
     return (a + b - 1) / b;
 }
 
 template <typename dtype_t>
-__host__ __device__ dtype_t align(dtype_t a, dtype_t b) {
+__host__ __device__ constexpr dtype_t align(dtype_t a, dtype_t b) {
     return ceil_div<dtype_t>(a, b) * b;
 }
 
@@ -374,25 +386,6 @@ __device__ __forceinline__ dtype_t broadcast(dtype_t& ptr, int src_lane_idx) {
     for (int i = 0; i < sizeof(dtype_t) / sizeof(int); ++ i)
         recv_int_values[i] = __shfl_sync(0xffffffff, send_int_values[i], src_lane_idx);
     return *reinterpret_cast<dtype_t*>(recv_int_values);
-}
-
-__forceinline__ __device__ int warp_reduce_sum(int value) {
-    value += __shfl_xor_sync(0xffffffff, value, 16);
-    value += __shfl_xor_sync(0xffffffff, value, 8);
-    value += __shfl_xor_sync(0xffffffff, value, 4);
-    value += __shfl_xor_sync(0xffffffff, value, 2);
-    value += __shfl_xor_sync(0xffffffff, value, 1);
-    return value;
-}
-
-__forceinline__ __device__ float half_warp_reduce_max(float value) {
-    auto mask = __activemask();
-    // The mask be in `{0xffffffff, 0xffff}`
-    value = max(value, __shfl_xor_sync(mask, value, 8));
-    value = max(value, __shfl_xor_sync(mask, value, 4));
-    value = max(value, __shfl_xor_sync(mask, value, 2));
-    value = max(value, __shfl_xor_sync(mask, value, 1));
-    return value;
 }
 
 __forceinline__ __device__ int get_lane_id() {
@@ -491,6 +484,42 @@ __forceinline__ __device__ void acquire_lock(int* mutex) {
 __forceinline__ __device__ void release_lock(int* mutex) {
     // To make previous memory operations visible to other threads, we must use `release` for memory semantics
     atomic_exch_cta_release(mutex, 0);
+}
+
+// Operation functors
+template <typename T> struct ReduceSum { __device__ T operator()(T a, T b) const { return a + b; } };
+template <typename T> struct ReduceMax { __device__ T operator()(T a, T b) const { return a > b ? a : b; } };
+template <typename T> struct ReduceMin { __device__ T operator()(T a, T b) const { return a < b ? a : b; } };
+
+// Unified reduction function
+template <uint32_t kNumLanes, typename T, typename Op>
+__forceinline__ __device__ T warp_reduce(T value, Op op) {
+    EP_STATIC_ASSERT(kNumLanes == 32 or kNumLanes == 16 or kNumLanes == 8 or
+                     kNumLanes ==  4 or kNumLanes == 2  or kNumLanes == 1,
+                     "Invalid number of lanes");
+
+    if constexpr (kNumLanes >= 32) value = op(value, __shfl_xor_sync(0xffffffff, value, 16));
+    if constexpr (kNumLanes >= 16) value = op(value, __shfl_xor_sync(0xffffffff, value,  8));
+    if constexpr (kNumLanes >=  8) value = op(value, __shfl_xor_sync(0xffffffff, value,  4));
+    if constexpr (kNumLanes >=  4) value = op(value, __shfl_xor_sync(0xffffffff, value,  2));
+    if constexpr (kNumLanes >=  2) value = op(value, __shfl_xor_sync(0xffffffff, value,  1));
+    return value;
+}
+
+// Convenience aliases
+template < uint32_t kNumLanes = 32, typename T>
+__forceinline__ __device__ T warp_reduce_sum(T value) {
+    return warp_reduce<kNumLanes, T>(value, ReduceSum<T>{});
+}
+
+template <uint32_t kNumLanes = 32, typename T>
+__forceinline__ __device__ T warp_reduce_max(T value) {
+    return warp_reduce<kNumLanes, T>(value, ReduceMax<T>{});
+}
+
+template <uint32_t kNumLanes = 32, typename T>
+__forceinline__ __device__ T warp_reduce_min(T value) {
+    return warp_reduce<kNumLanes, T>(value, ReduceMin<T>{});
 }
 
 } // namespace deep_ep
