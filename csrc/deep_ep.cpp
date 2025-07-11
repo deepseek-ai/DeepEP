@@ -81,7 +81,7 @@ Buffer::Buffer(int rank, int num_ranks, int64_t num_nvl_bytes, int64_t num_rdma_
 }
 
 Buffer::~Buffer() noexcept(false) {
-    if (!destroyed) {
+    if (not destroyed) {
         printf("WARNING: destroy() was not called before DeepEP buffer destruction, which can leak resources.\n");
         fflush(stdout);
     }

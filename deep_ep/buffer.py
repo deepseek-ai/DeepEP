@@ -106,13 +106,15 @@ class Buffer:
         self.runtime.sync(device_ids, ipc_handles, root_unique_id)
         assert self.runtime.is_available()
 
-    def destory(self):
+    def destroy(self):
         """
         Destroy the cpp runtime and release resources.
         
         """
 
         self.runtime.destroy()
+        self.runtime = None
+
 
     @staticmethod
     def is_sm90_compiled():

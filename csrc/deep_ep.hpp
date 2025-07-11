@@ -51,7 +51,7 @@ private:
 
     // After IPC/NVSHMEM synchronization, this flag will be true
     bool available = false;
-    // After `destory()` be called, this flag will be true
+    // After `destroy()` be called, this flag will be true
     bool destroyed = false;
 
     // Barrier signals
