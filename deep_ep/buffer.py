@@ -31,7 +31,7 @@ class Buffer:
 
     def __init__(self, group: Optional[dist.ProcessGroup],
                  num_nvl_bytes: int = 0, num_rdma_bytes: int = 0,
-                 low_latency_mode: bool = False, num_qps_per_rank: int = 24,
+                 low_latency_mode: bool = False, pcie_mode: bool = False, num_qps_per_rank: int = 24,
                  allow_nvlink_for_low_latency_mode: bool = True,
                  allow_mnnvl: bool = False,
                  explicitly_destroy: bool = False,
@@ -44,6 +44,7 @@ class Buffer:
             num_nvl_bytes: the buffer size for intranode NVLink communication.
             num_rdma_bytes: the buffer size for internode (also for intranode with low-latency mode) RDMA communication.
             low_latency_mode: whether to enable low-latency mode.
+            pcie_mode: whether to enable PCIe mode.
             num_qps_per_rank: the number of QPs for RDMA, the low-latency mode requires that this number equals
                 to the number of local experts.
             allow_nvlink_for_low_latency_mode: whether allow NVLink traffic for low-latency mode, you should notice
@@ -78,8 +79,9 @@ class Buffer:
         self.num_nvl_bytes = num_nvl_bytes
         self.num_rdma_bytes = num_rdma_bytes
         self.low_latency_mode = low_latency_mode
+        self.pcie_mode = pcie_mode
         self.explicitly_destroy = explicitly_destroy
-        self.runtime = deep_ep_cpp.Buffer(self.rank, self.group_size, num_nvl_bytes, num_rdma_bytes, low_latency_mode, explicitly_destroy)
+        self.runtime = deep_ep_cpp.Buffer(self.rank, self.group_size, num_nvl_bytes, num_rdma_bytes, low_latency_mode, explicitly_destroy, pcie_mode)
 
         # Synchronize device IDs
         local_device_id = self.runtime.get_local_device_id()
@@ -91,8 +93,8 @@ class Buffer:
 
         # Synchronize NVSHMEM unique IDs
         root_unique_id = None
-        if self.runtime.get_num_rdma_ranks() > 1 or low_latency_mode:
-            # Enable IBGDA
+        if self.runtime.get_num_rdma_ranks() > 1 or low_latency_mode or pcie_mode:
+            # Enable IBGDA 
             assert num_qps_per_rank > 0
             os.environ['NVSHMEM_DISABLE_P2P'] = '0' if allow_nvlink_for_low_latency_mode else '1'
             os.environ['NVSHMEM_IB_ENABLE_IBGDA'] = '1'
@@ -113,10 +115,10 @@ class Buffer:
                 os.environ['NVSHMEM_DISABLE_MNNVL'] = '1'
 
             # Synchronize using the root ID
-            if (low_latency_mode and self.rank == 0) or (not low_latency_mode and self.runtime.get_rdma_rank() == 0):
+            if (low_latency_mode and self.rank == 0) or (not low_latency_mode and self.runtime.get_rdma_rank() == 0) or (pcie_mode and self.rank == 0):
                 root_unique_id = self.runtime.get_local_nvshmem_unique_id()
             nvshmem_unique_ids = all_gather_object(root_unique_id)
-            root_unique_id = nvshmem_unique_ids[0 if low_latency_mode else self.runtime.get_root_rdma_rank(True)]
+            root_unique_id = nvshmem_unique_ids[0 if low_latency_mode or pcie_mode else self.runtime.get_root_rdma_rank(True)]
 
         # Make CPP runtime available
         self.runtime.sync(device_ids, ipc_handles, root_unique_id)
@@ -508,6 +510,57 @@ class Buffer:
             send_rdma_head, send_nvl_head, config, getattr(previous_event, 'event', None),
             async_finish, allocate_on_comm_stream)
         return combined_x, combined_topk_weights, EventOverlap(event)
+
+    def internode_dispatch_pcie(self, x: Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]],
+                           handle: Optional[Tuple] = None,
+                           num_tokens_per_rank: Optional[torch.Tensor] = None, num_tokens_per_rdma_rank: Optional[torch.Tensor] = None,
+                           is_token_in_rank: Optional[torch.Tensor] = None, num_tokens_per_expert: Optional[torch.Tensor] = None,
+                           topk_idx: Optional[torch.Tensor] = None, topk_weights: Optional[torch.Tensor] = None, expert_alignment: int = 1,
+                           config: Optional[Config] = None,
+                           previous_event: Optional[EventOverlap] = None, async_finish: bool = False,
+                           allocate_on_comm_stream: bool = False) -> \
+            Tuple[Union[Tuple[torch.Tensor, torch.Tensor], torch.Tensor], Optional[torch.Tensor],
+            Optional[torch.Tensor], List[int], Tuple, EventOverlap]:
+        """
+        Internode dispatch implementation, for more details, please refer to the `dispatch` docs.
+        Normally, you should not directly call this function.
+        """
+        assert config is not None
+
+        # Launch the kernel with cached or non-cached mode
+        x, x_scales = x if isinstance(x, tuple) else (x, None)
+        if handle is not None:
+            assert topk_idx is None and topk_weights is None
+            is_token_in_rank, \
+                rdma_channel_prefix_matrix, gbl_channel_prefix_matrix, \
+                recv_rdma_channel_prefix_matrix, recv_rdma_rank_prefix_sum, recv_gbl_channel_prefix_matrix, recv_gbl_rank_prefix_sum, \
+                recv_src_meta, send_rdma_head, send_nvl_head = handle
+            num_recv_tokens = recv_src_meta.size(0)
+            num_rdma_recv_tokens = send_nvl_head.size(0)
+            recv_x, recv_x_scales, _, _, _, _, _, _, _, _, _, _, _, _, event = self.runtime.internode_dispatch(
+                x, x_scales, topk_idx, topk_weights,
+                None, None, is_token_in_rank, None,
+                num_recv_tokens, num_rdma_recv_tokens,
+                rdma_channel_prefix_matrix, recv_rdma_rank_prefix_sum, gbl_channel_prefix_matrix, recv_gbl_rank_prefix_sum,
+                expert_alignment, config, getattr(previous_event, 'event', None), async_finish, allocate_on_comm_stream)
+            return (recv_x, recv_x_scales) if x_scales is not None else recv_x, None, None, None, None, EventOverlap(event)
+        else:
+            assert num_tokens_per_rank is not None and is_token_in_rank is not None and num_tokens_per_expert is not None
+            recv_x, recv_x_scales, recv_topk_idx, recv_topk_weights, num_recv_tokens_per_expert_list, \
+                rdma_channel_prefix_matrix, gbl_channel_prefix_matrix, \
+                recv_rdma_channel_prefix_matrix, recv_rdma_rank_prefix_sum, \
+                recv_gbl_channel_prefix_matrix, recv_gbl_rank_prefix_sum, \
+                recv_src_meta, send_rdma_head, send_nvl_head, event = self.runtime.internode_dispatch(
+                x, x_scales, topk_idx, topk_weights,
+                num_tokens_per_rank, num_tokens_per_rdma_rank, is_token_in_rank, num_tokens_per_expert,
+                0, 0, None, None, None, None,
+                expert_alignment, config, getattr(previous_event, 'event', None), async_finish, allocate_on_comm_stream)
+            handle = (is_token_in_rank,
+                      rdma_channel_prefix_matrix, gbl_channel_prefix_matrix,
+                      recv_rdma_channel_prefix_matrix, recv_rdma_rank_prefix_sum, recv_gbl_channel_prefix_matrix, recv_gbl_rank_prefix_sum,
+                      recv_src_meta, send_rdma_head, send_nvl_head)
+            return (recv_x, recv_x_scales) if x_scales is not None else recv_x, recv_topk_idx, recv_topk_weights, num_recv_tokens_per_expert_list, handle, EventOverlap(event)
+
 
     def clean_low_latency_buffer(self, num_max_dispatch_tokens_per_rank: int, hidden: int, num_experts: int) -> None:
         """

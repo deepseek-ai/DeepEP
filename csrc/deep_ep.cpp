@@ -268,7 +268,7 @@ Buffer::get_dispatch_layout(const torch::Tensor& topk_idx, int num_experts,
     auto is_token_in_rank = torch::empty({num_tokens, num_ranks}, dtype(torch::kBool).device(torch::kCUDA));
     if (is_internode_available())
         num_tokens_per_rdma_rank = torch::empty({num_rdma_ranks}, dtype(torch::kInt32).device(torch::kCUDA));
-
+    
     layout::get_dispatch_layout(topk_idx.data_ptr<int64_t>(),
                                 num_tokens_per_rank.data_ptr<int>(),
                                 num_tokens_per_rdma_rank.has_value() ? num_tokens_per_rdma_rank.value().data_ptr<int>() : nullptr,
@@ -1352,6 +1352,24 @@ Buffer::pcie_dispatch(const torch::Tensor& x, const std::optional<torch::Tensor>
     const int num_channels = config.num_sms / 2;
     EP_HOST_ASSERT(config.num_sms % 2 == 0);
 
+    // --------Check only for NOT CACHED mode----------
+    EP_HOST_ASSERT(num_tokens_per_rank.has_value());
+    EP_HOST_ASSERT(num_tokens_per_rdma_rank.has_value());
+    //// Type Check
+    EP_HOST_ASSERT(num_tokens_per_expert.has_value());
+    EP_HOST_ASSERT(num_tokens_per_rank->scalar_type() == torch::kInt32);
+    EP_HOST_ASSERT(num_tokens_per_rdma_rank->scalar_type() == torch::kInt32);
+    EP_HOST_ASSERT(num_tokens_per_expert->scalar_type() == torch::kInt32);
+    ////Shape and contiguous checks
+    EP_HOST_ASSERT(num_tokens_per_rank->dim() == 1 and num_tokens_per_rank->is_contiguous());
+    EP_HOST_ASSERT(num_tokens_per_rdma_rank->dim() == 1 and num_tokens_per_rdma_rank->is_contiguous());
+    EP_HOST_ASSERT(num_tokens_per_expert->dim() == 1 and num_tokens_per_expert->is_contiguous());
+    EP_HOST_ASSERT(num_tokens_per_rank->size(0) == num_ranks);
+    EP_HOST_ASSERT(num_tokens_per_rdma_rank->size(0) == num_rdma_ranks);
+    EP_HOST_ASSERT(num_tokens_per_expert->size(0) % num_ranks == 0);
+    EP_HOST_ASSERT(num_tokens_per_expert->size(0) / num_ranks <= NUM_MAX_LOCAL_EXPERTS);
+    // --------Check only for NOT CACHED mode----------
+
     // Input Tensor Checks
     EP_HOST_ASSERT(x.dim() == 2 && x.is_contiguous());
     EP_HOST_ASSERT((x.size(1) * x.element_size()) % sizeof(int4) == 0);
@@ -1409,12 +1427,14 @@ Buffer::pcie_dispatch(const torch::Tensor& x, const std::optional<torch::Tensor>
     // Create handles (only return for non-cached mode)
     int num_recv_tokens = -1, num_rdma_recv_tokens = -1;
     auto rdma_channel_prefix_matrix = torch::Tensor();
+    auto recv_gbl_rank_prefix_sum = torch::Tensor();
+    std::vector<int> num_recv_tokens_per_expert_list;
+
     // TODO: delete below 2 tensors
     auto recv_rdma_rank_prefix_sum = torch::Tensor();
     auto gbl_channel_prefix_matrix = torch::Tensor();
 
-    auto recv_gbl_rank_prefix_sum = torch::Tensor();
-    std::vector<int> num_recv_tokens_per_expert_list;
+
 
     // Barrier or send sizes
     // TODO: use new notify_dispatch   
@@ -1473,6 +1493,7 @@ Buffer::pcie_dispatch(const torch::Tensor& x, const std::optional<torch::Tensor>
     // 需要dispatch函数填的
     auto recv_gbl_channel_prefix_matrix = std::optional<torch::Tensor>();
     // not cache mode
+    // TODO: check recv_src_meta usage
     recv_src_meta = torch::empty({num_recv_tokens, internode::get_source_meta_bytes()}, dtype(torch::kByte).device(torch::kCUDA));
     recv_gbl_channel_prefix_matrix = torch::empty({num_ranks, num_channels}, dtype(torch::kInt32).device(torch::kCUDA));
 
@@ -1499,10 +1520,9 @@ Buffer::pcie_dispatch(const torch::Tensor& x, const std::optional<torch::Tensor>
         recv_x.data_ptr(), recv_x_scales_ptr, recv_topk_idx_ptr, recv_topk_weights_ptr, recv_src_meta->data_ptr(),
         x.data_ptr(), x_scales_ptr, topk_idx_ptr, topk_weights_ptr,
         rdma_channel_prefix_matrix.data_ptr<int>(),
-        topk_ranks_idx.data_ptr<int>(),
         recv_gbl_rank_prefix_sum.data_ptr<int>(),
         recv_gbl_channel_prefix_matrix->data_ptr<int>(),
-        num_tokens, hidden_int4, num_scales, num_topk, num_experts,
+        num_tokens, hidden_int4, num_scales, num_topk, num_experts,num_local_experts,
         scale_token_stride, scale_hidden_stride,
         rdma_buffer_ptr, config.num_max_rdma_chunked_send_tokens, config.num_max_rdma_chunked_recv_tokens,
         buffer_ptrs_gpu, rank, num_ranks, comm_stream, num_channels
