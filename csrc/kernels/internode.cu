@@ -347,6 +347,193 @@ void notify_dispatch(const int* num_tokens_per_rank, int* moe_recv_counter_mappe
 #undef NOTIFY_DISPATCH_LAUNCH_CASE
 }
 
+template <bool kLowLatencyMode, int kNumRDMARanks>
+__global__ void
+notify_dispatch_pcie(const int* num_tokens_per_rank, int* moe_recv_counter_mapped, int num_ranks,
+                const int* num_tokens_per_rdma_rank, int* moe_recv_rdma_counter_mapped,
+                const int* num_tokens_per_expert, int* moe_recv_expert_counter_mapped, int num_experts,
+                const bool* is_token_in_rank, int num_tokens, int num_channels, int expert_alignment,
+                const int rdma_clean_offset, const int rdma_num_int_clean,
+                const int nvl_clean_offset, const int nvl_num_int_clean,
+                int* rdma_channel_prefix_matrix, int* recv_rdma_rank_prefix_sum,
+                int* gbl_channel_prefix_matrix, int* recv_gbl_rank_prefix_sum,
+                void* rdma_buffer_ptr,
+                void** buffer_ptrs, int** barrier_signal_ptrs, int rank,
+                const nvshmem_team_t rdma_team) {
+    auto sm_id = static_cast<int>(blockIdx.x);
+    auto thread_id = static_cast<int>(threadIdx.x), warp_id = thread_id / 32, lane_id = get_lane_id();
+    auto num_threads = static_cast<int>(blockDim.x), num_warps = num_threads / 32;
+
+    auto rdma_rank = rank / NUM_MAX_NVL_PEERS, nvl_rank = rank % NUM_MAX_NVL_PEERS;
+    auto num_rdma_experts = num_experts / kNumRDMARanks, num_nvl_experts = num_rdma_experts / NUM_MAX_NVL_PEERS;
+
+    if (sm_id == 0) {
+        // Communication with others
+        // Global barrier: the first warp does intra-node sync, the second warp does internode sync
+        EP_DEVICE_ASSERT(num_warps > 1);
+        EP_DEVICE_ASSERT(kNumRDMARanks <= num_threads);
+        if (thread_id == 32)
+            nvshmem_sync_with_same_gpu_idx<kLowLatencyMode>(rdma_team);
+        barrier_block<NUM_MAX_NVL_PEERS, true>(barrier_signal_ptrs, nvl_rank);
+
+        // Send numbers of tokens per rank/expert to RDMA ranks
+        auto rdma_buffer_ptr_int = static_cast<int*>(rdma_buffer_ptr);
+        // TODO use AsymBuffer to save memory
+        auto rdma_recv_num_tokens_mixed = SymBuffer<int>(rdma_buffer_ptr, NUM_MAX_NVL_PEERS + num_rdma_experts + 1, kNumRDMARanks);
+        auto rdma_recv_num_tokens_per_rank = Buffer<int>(rdma_buffer_ptr, num_ranks);
+        auto rdma_recv_num_tokens_per_expert = Buffer<int>(rdma_buffer_ptr, num_experts);
+
+        // Clean up for later data dispatch
+        EP_DEVICE_ASSERT(rdma_recv_num_tokens_mixed.total_bytes <= rdma_clean_offset * sizeof(int));
+        rdma_num_int_clean += (num_ranks + num_experts);
+        #pragma unroll
+        for (int i = thread_id; i < rdma_num_int_clean; i += num_threads)
+            rdma_buffer_ptr_int[rdma_clean_offset + i] = 0;
+
+        // Copy to send buffer
+        #pragma unroll
+        for (int i = thread_id; i < num_ranks; i += num_threads)
+            rdma_recv_num_tokens_mixed.send_buffer(i / NUM_MAX_NVL_PEERS)[i % NUM_MAX_NVL_PEERS] = num_tokens_per_rank[i];
+        #pragma unroll
+        for (int i = thread_id; i < num_experts; i += num_threads)
+            rdma_recv_num_tokens_mixed.send_buffer(i / num_rdma_experts)[NUM_MAX_NVL_PEERS + i % num_rdma_experts] = num_tokens_per_expert[i];
+        if (thread_id < kNumRDMARanks)
+            rdma_recv_num_tokens_mixed.send_buffer(thread_id)[NUM_MAX_NVL_PEERS + num_rdma_experts] = num_tokens_per_rdma_rank[thread_id];
+        __syncthreads();
+
+
+        if (thread_id < num_ranks) {
+            nvshmemi_ibgda_put_nbi_warp<true>(reinterpret_cast<uint64_t>(&rdma_recv_num_tokens_per_rank[rank]), reinterpret_cast<uint64_t>(&rdma_recv_num_tokens_mixed.send_buffer(thread_id / NUM_MAX_NVL_PEERS)[thread_id % NUM_MAX_NVL_PEERS]), sizeof(int), thread_id, 0, lane_id, 0);
+            nvshmemi_ibgda_put_nbi_warp<true>(reinterpret_cast<uint64_t>(&rdma_recv_num_tokens_per_expert[rank * num_nvl_experts]), reinterpret_cast<uint64_t>(&rdma_recv_num_tokens_mixed.send_buffer(thread_id / num_rdma_experts)[NUM_MAX_NVL_PEERS + (thread_id % num_rdma_experts) * num_nvl_experts]), num_nvl_experts * sizeof(int), thread_id, 0, lane_id, 0);
+	}
+        __syncthreads();
+        if (thread_id < kNumRDMARanks and thread_id != rdma_rank)
+            nvshmemi_ibgda_quiet(translate_dst_rdma_rank<kLowLatencyMode>(thread_id, nvl_rank), 0);
+
+        // Reduce the number of tokens per rank/expert
+        EP_DEVICE_ASSERT(num_nvl_experts <= num_threads);
+        if (thread_id == 0) {
+            int sum = 0;
+            #pragma unroll
+            for (int i = 0; i < num_ranks; ++ i) {
+                sum += rdma_recv_num_tokens_per_rank[i];
+                recv_gbl_rank_prefix_sum[i] = sum;
+            }
+            while (ld_volatile_global(moe_recv_counter_mapped) != -1);
+            *moe_recv_counter_mapped = sum;
+        }
+        if (thread_id < num_nvl_experts) {
+            int sum = 0;
+            #pragma unroll
+            for (int i = 0; i < NUM_MAX_NVL_PEERS; ++ i)
+                sum += rdma_recv_num_tokens_per_expert[i + num_nvl_experts * rank];
+            sum = (sum + expert_alignment - 1) / expert_alignment * expert_alignment;
+            while (ld_volatile_global(moe_recv_expert_counter_mapped + thread_id) != -1);
+            moe_recv_expert_counter_mapped[thread_id] = sum;
+        }
+
+        // Finally barrier
+        if (thread_id == 32)
+            nvshmem_sync_with_same_gpu_idx<kLowLatencyMode>(rdma_team);
+        barrier_block<NUM_MAX_NVL_PEERS>(barrier_signal_ptrs, nvl_rank);
+    } else {
+        // Calculate meta data
+        int dst_rdma_rank = sm_id - 1;
+        for (int channel_id = warp_id; channel_id < num_channels; channel_id += num_warps) {
+            int token_start_idx, token_end_idx;
+            get_channel_task_range(num_tokens, num_channels, channel_id, token_start_idx, token_end_idx);
+
+            // Iterate over tokens
+            int total_count = 0, per_nvl_rank_count[NUM_MAX_NVL_PEERS] = {0};
+            for (int64_t i = token_start_idx + lane_id; i < token_end_idx; i += 32) {
+                EP_STATIC_ASSERT(NUM_MAX_NVL_PEERS * sizeof(bool) == sizeof(uint64_t), "Invalid number of NVL peers");
+                auto is_token_in_rank_uint64 = *reinterpret_cast<const uint64_t*>(is_token_in_rank + i * num_ranks + dst_rdma_rank * NUM_MAX_NVL_PEERS);
+                auto is_token_in_rank_values = reinterpret_cast<const bool*>(&is_token_in_rank_uint64);
+                #pragma unroll
+                for (int j = 0; j < NUM_MAX_NVL_PEERS; ++ j)
+                    per_nvl_rank_count[j] += is_token_in_rank_values[j];
+                total_count += (is_token_in_rank_uint64 != 0);
+            }
+
+            // Warp reduce
+            total_count = warp_reduce_sum(total_count);
+            #pragma unroll
+            for (int i = 0; i < NUM_MAX_NVL_PEERS; ++ i)
+                per_nvl_rank_count[i] = warp_reduce_sum(per_nvl_rank_count[i]);
+
+            // Write into channel matrix
+            if (lane_id == 0) {
+                #pragma unroll
+                for (int i = 0; i < NUM_MAX_NVL_PEERS; ++ i)
+                    gbl_channel_prefix_matrix[(dst_rdma_rank * NUM_MAX_NVL_PEERS + i) * num_channels + channel_id] = per_nvl_rank_count[i];
+                rdma_channel_prefix_matrix[dst_rdma_rank * num_channels + channel_id] = total_count;
+            }
+        }
+
+        // Calculate prefix sum
+        __syncthreads();
+        if (thread_id == 0) {
+            auto prefix_row = rdma_channel_prefix_matrix + dst_rdma_rank * num_channels;
+            #pragma unroll
+            for (int i = 1; i < num_channels; ++ i)
+                prefix_row[i] += prefix_row[i - 1];
+        }
+
+        EP_STATIC_ASSERT(NUM_MAX_NVL_PEERS <= 32, "Invalid number of NVL peers");
+        if (thread_id < NUM_MAX_NVL_PEERS) {
+            auto prefix_row = gbl_channel_prefix_matrix + (dst_rdma_rank * NUM_MAX_NVL_PEERS + thread_id) * num_channels;
+            #pragma unroll
+            for (int i = 1; i < num_channels; ++ i)
+                prefix_row[i] += prefix_row[i - 1];
+        }
+    }
+}
+
+void notify_dispatch_pcie(const int* num_tokens_per_rank, int* moe_recv_counter_mapped, int num_ranks,
+                     const int* num_tokens_per_rdma_rank, int* moe_recv_rdma_counter_mapped,
+                     const int* num_tokens_per_expert, int* moe_recv_expert_counter_mapped, int num_experts,
+                     const bool* is_token_in_rank, int num_tokens, int num_channels,
+                     int hidden_int4, int num_scales, int num_topk, int expert_alignment,
+                     int* rdma_channel_prefix_matrix, int* recv_rdma_rank_prefix_sum,
+                     int* gbl_channel_prefix_matrix, int* recv_gbl_rank_prefix_sum,
+                     void* rdma_buffer_ptr, int num_max_rdma_chunked_recv_tokens,
+                     void** buffer_ptrs, int num_max_nvl_chunked_recv_tokens,
+                     int** barrier_signal_ptrs, int rank,
+                     cudaStream_t stream, int64_t num_rdma_bytes, int64_t num_nvl_bytes,
+                     bool low_latency_mode) {
+#define NOTIFY_DISPATCH_LAUNCH_CASE(num_rdma_ranks) { \
+    auto notify_dispatch_func = low_latency_mode ? \
+        notify_dispatch_pcie<true, num_rdma_ranks> : notify_dispatch_pcie<false, num_rdma_ranks>; \
+    LAUNCH_KERNEL(&cfg, notify_dispatch_func, \
+                  num_tokens_per_rank, moe_recv_counter_mapped, num_ranks, \
+                  num_tokens_per_rdma_rank, moe_recv_rdma_counter_mapped, \
+                  num_tokens_per_expert, moe_recv_expert_counter_mapped, num_experts, \
+                  is_token_in_rank, num_tokens, num_channels, expert_alignment, \
+                  rdma_clean_meta.first, rdma_clean_meta.second, \
+                  nvl_clean_meta.first, nvl_clean_meta.second, \
+                  rdma_channel_prefix_matrix, recv_rdma_rank_prefix_sum, \
+                  gbl_channel_prefix_matrix, recv_gbl_rank_prefix_sum, \
+                  rdma_buffer_ptr, \
+                  buffer_ptrs, barrier_signal_ptrs, rank, \
+                  cpu_rdma_team); } break
+
+    constexpr int kNumThreads = 512;
+    const auto num_rdma_ranks = num_ranks / NUM_MAX_NVL_PEERS;
+
+    // Get clean meta
+    auto rdma_clean_meta = get_rdma_clean_meta(hidden_int4, num_scales, num_topk, num_topk, num_rdma_ranks, num_max_rdma_chunked_recv_tokens, num_channels);
+    auto nvl_clean_meta = get_nvl_clean_meta(hidden_int4, num_scales, num_topk, num_topk, num_rdma_ranks, NUM_MAX_NVL_PEERS, num_max_nvl_chunked_recv_tokens, num_channels);
+    EP_HOST_ASSERT((rdma_clean_meta.first + rdma_clean_meta.second) * sizeof(int) <= num_rdma_bytes);
+    EP_HOST_ASSERT((nvl_clean_meta.first + nvl_clean_meta.second) * sizeof(int) <= num_nvl_bytes);
+    EP_HOST_ASSERT(num_rdma_bytes < std::numeric_limits<int>::max());
+    EP_HOST_ASSERT(num_nvl_bytes < std::numeric_limits<int>::max());
+
+    // Launch kernel
+    SETUP_LAUNCH_CONFIG(1 + num_rdma_ranks, kNumThreads, stream);
+    SWITCH_RDMA_RANKS(NOTIFY_DISPATCH_LAUNCH_CASE);
+#undef NOTIFY_DISPATCH_LAUNCH_CASE
+}
+
 // At most 8 RDMA ranks to be sent
 constexpr int get_num_topk_rdma_ranks(int num_rdma_ranks) {
     return num_rdma_ranks < 8 ? num_rdma_ranks : 8;
