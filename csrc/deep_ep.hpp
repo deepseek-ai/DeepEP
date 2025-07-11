@@ -51,6 +51,9 @@ private:
 
     // After IPC/NVSHMEM synchronization, this flag will be true
     bool available = false;
+
+    // Whether explicit `destroy()` is required.
+    bool explicitly_destroy;
     // After `destroy()` be called, this flag will be true
     bool destroyed = false;
 
@@ -74,7 +77,7 @@ private:
     int* moe_recv_rdma_counter_mapped = nullptr;
 
 public:
-    Buffer(int rank, int num_ranks, int64_t num_nvl_bytes, int64_t num_rdma_bytes, bool low_latency_mode);
+    Buffer(int rank, int num_ranks, int64_t num_nvl_bytes, int64_t num_rdma_bytes, bool low_latency_mode, bool explicitly_destroy);
 
     ~Buffer() noexcept(false);
 
