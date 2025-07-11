@@ -175,7 +175,7 @@ def test_loop(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
                              use_logfmt=args.use_logfmt, seed=seed) == ref_hash, f'Error: seed={seed}'
 
     # Destroy the buffer runtime and communication group
-    buffer.destory()
+    buffer.destroy()
     dist.barrier()
     dist.destroy_process_group()
 
