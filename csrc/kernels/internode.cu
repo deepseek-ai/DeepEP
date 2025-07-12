@@ -2056,12 +2056,11 @@ __global__ void __launch_bounds__(((kNumDispatchRDMASenderWarps + 1 + kNumDispat
 dispatch_pcie(int4* recv_x, float* recv_x_scales, int64_t* recv_topk_idx, float* recv_topk_weights, SourceMeta* recv_src_meta,
          const int4* x, const float* x_scales, const int64_t* topk_idx, const float* topk_weights,
 	     const int* rdma_channel_prefix_matrix,//[num_ranks,num_channels] for sender
-	     const int* topk_ranks_idx,//[num_tokens,num_topks] for sender
          const int* recv_gbl_rank_prefix_sum, // notify dispatch传入的，逻辑上[num_ranks]
          int* recv_gbl_channel_prefix_matrix, // 在函数中构造的，给combine用的, 逻辑上[num_ranks, num_channels]
-         int num_tokens, int hidden_int4, int num_scales, int num_topk, int num_experts,
+         int num_tokens, int hidden_int4, int num_scales, int num_topk, int num_experts,int num_local_experts,
          int scale_token_stride, int scale_hidden_stride,
-	 void* rdma_buffer_ptr, int num_max_rdma_chunked_send_tokens, int num_max_rdma_chunked_recv_tokens,
+	     void* rdma_buffer_ptr, int num_max_rdma_chunked_send_tokens, int num_max_rdma_chunked_recv_tokens,
          void** buffer_ptrs,
          int rank) {
     enum class WarpRole {
@@ -2154,7 +2153,9 @@ dispatch_pcie(int4* recv_x, float* recv_x_scales, int64_t* recv_topk_idx, float*
             // Read RDMA rank existence
             uint64_t is_token_in_rank_uint64 = 0;
             for(int i = 0; i < num_topk; ++i) {
-                int target_rank = __ldg(reinterpret_cast<const int*>(topk_ranks_idx + token_idx * num_topk + i));
+                //TODO: 暂时用topk计算，后续根据性能考虑是否在get dispatch layout中实现topk_ranks_idx替换减少计算
+                int target_expert = __ldg(reinterpret_cast<const int*>(topk_idx + token_idx * num_topk + i));
+                int target_rank = target_expert % num_local_experts;
                 if(lane_id == target_rank) {
                     is_token_in_rank_uint64 = 1;
                     global_rdma_tail_idx++;
@@ -2183,13 +2184,14 @@ dispatch_pcie(int4* recv_x, float* recv_x_scales, int64_t* recv_topk_idx, float*
             __syncwarp();
 
             // Store RDMA head for combine
-            //待修改，kCachedMode是什么场景？？
+            // TODO：kCachedMode是什么场景？？ 接口参数添加send_rdma_head
             // if (lane_id < kNumRDMARanks and not kCachedMode)
             //     send_rdma_head[token_idx * kNumRDMARanks + lane_id] = rdma_tail_idx;
 
             // Broadcast tails
             SourceMeta src_meta;
-            int num_topk_ranks = 0, topk_ranks[kNumTopkRanks];
+            int num_topk_ranks = 0;
+            // int topk_ranks[kNumTopkRanks];
             void* dst_send_buffers[kNumTopkRanks];
             #pragma unroll
             for (int i = 0, slot_idx; i < kNumRanks; ++ i) if ((slot_idx = __shfl_sync(0xffffffff, rdma_tail_idx, i)) >= 0) {
@@ -2515,10 +2517,9 @@ dispatch_pcie(int4* recv_x, float* recv_x_scales, int64_t* recv_topk_idx, float*
 void dispatch_pcie(void* recv_x, float* recv_x_scales, int64_t* recv_topk_idx, float* recv_topk_weights, void* recv_src_meta,
                    const void* x, const float* x_scales, const int64_t* topk_idx, const float* topk_weights,
                    const int* rdma_channel_prefix_matrix,
-                   const int* topk_ranks_idx,
                    const int* recv_gbl_rank_prefix_sum,
                    int* recv_gbl_channel_prefix_matrix,    // 新增参数
-                   int num_tokens, int hidden_int4, int num_scales, int num_topk, int num_experts,
+                   int num_tokens, int hidden_int4, int num_scales, int num_topk, int num_experts,int num_local_experts,
                    int scale_token_stride, int scale_hidden_stride,
                    void* rdma_buffer_ptr, int num_max_rdma_chunked_send_tokens, int num_max_rdma_chunked_recv_tokens,
                    void** buffer_ptrs, int rank, int num_ranks,
@@ -2533,9 +2534,8 @@ void dispatch_pcie(void* recv_x, float* recv_x_scales, int64_t* recv_topk_idx, f
                   reinterpret_cast<int4*>(recv_x), recv_x_scales, recv_topk_idx, recv_topk_weights, reinterpret_cast<internode::SourceMeta*>(recv_src_meta), \
                   reinterpret_cast<const int4*>(x), x_scales, topk_idx, topk_weights, \
                   rdma_channel_prefix_matrix, \
-                  topk_ranks_idx, \
                   recv_gbl_rank_prefix_sum, recv_gbl_channel_prefix_matrix, \
-                  num_tokens, hidden_int4, num_scales, num_topk, num_experts, \
+                  num_tokens, hidden_int4, num_scales, num_topk, num_experts,num_local_experts, \
                   scale_token_stride, scale_hidden_stride, \
                   rdma_buffer_ptr, num_max_rdma_chunked_send_tokens, num_max_rdma_chunked_recv_tokens, \
                   buffer_ptrs, rank); } break
