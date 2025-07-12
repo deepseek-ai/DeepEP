@@ -29,25 +29,41 @@ if __name__ == '__main__':
         sources.extend(['csrc/kernels/internode.cu', 'csrc/kernels/internode_ll.cu'])
         include_dirs.extend([f'{nvshmem_dir}/include'])
         library_dirs.extend([f'{nvshmem_dir}/lib'])
-        nvcc_dlink.extend(['-dlink', f'-L{nvshmem_dir}/lib', '-lnvshmem'])
-        extra_link_args.extend(['-l:libnvshmem.a', '-l:nvshmem_bootstrap_uid.so', f'-Wl,-rpath,{nvshmem_dir}/lib'])
+        nvcc_dlink.extend(['-dlink', f'-L{nvshmem_dir}/lib', '-lnvshmem_device'])
+        extra_link_args.extend(['-l:libnvshmem_host.so', '-l:libnvshmem_device.a', f'-Wl,-rpath,{nvshmem_dir}/lib'])
 
     if int(os.getenv('DISABLE_SM90_FEATURES', 0)):
         # Prefer A100
+        print("Not using SM_90")
         os.environ['TORCH_CUDA_ARCH_LIST'] = os.getenv('TORCH_CUDA_ARCH_LIST', '8.0')
 
         # Disable some SM90 features: FP8, launch methods, and TMA
         cxx_flags.append('-DDISABLE_SM90_FEATURES')
         nvcc_flags.append('-DDISABLE_SM90_FEATURES')
 
+        # Add architecture flags to nvcc_dlink for the final linking step
+        if len(nvcc_dlink) > 0:
+            nvcc_dlink.extend([
+                '-gencode=arch=compute_80,code=sm_80',
+                '-gencode=arch=compute_80,code=compute_80'
+            ])
+
         # Disable internode and low-latency kernels
         assert disable_nvshmem
     else:
         # Prefer H800 series
         os.environ['TORCH_CUDA_ARCH_LIST'] = os.getenv('TORCH_CUDA_ARCH_LIST', '9.0')
+        print("Using SM_90")
 
         # CUDA 12 flags
         nvcc_flags.extend(['-rdc=true', '--ptxas-options=--register-usage-level=10'])
+
+        # Add architecture flags to nvcc_dlink for the final linking step
+        if len(nvcc_dlink) > 0:
+            nvcc_dlink.extend([
+                '-gencode=arch=compute_90,code=sm_90',
+                '-gencode=arch=compute_90,code=compute_90'
+            ])
 
     # Disable LD/ST tricks, as some CUDA version does not support `.L1::no_allocate`
     if os.environ['TORCH_CUDA_ARCH_LIST'].strip() != '9.0':
