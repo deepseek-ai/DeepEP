@@ -385,9 +385,9 @@ notify_dispatch_pcie(const int* num_tokens_per_rank, int* moe_recv_counter_mappe
 
         // Clean up for later data dispatch
         EP_DEVICE_ASSERT(rdma_recv_num_tokens_mixed.total_bytes <= rdma_clean_offset * sizeof(int));
-        rdma_num_int_clean += (num_ranks + num_experts);
+        
         #pragma unroll
-        for (int i = thread_id; i < rdma_num_int_clean; i += num_threads)
+        for (int i = thread_id; i < rdma_num_int_clean + num_ranks + num_experts; i += num_threads)
             rdma_buffer_ptr_int[rdma_clean_offset + i] = 0;
 
         // Copy to send buffer
