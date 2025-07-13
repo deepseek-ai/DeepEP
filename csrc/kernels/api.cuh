@@ -130,6 +130,32 @@ void combine(cudaDataType_t type,
              void** buffer_ptrs, int num_max_nvl_chunked_send_tokens, int num_max_nvl_chunked_recv_tokens,
              int rank, int num_ranks, cudaStream_t stream, int num_channels, bool low_latency_mode);
 
+void notify_dispatch_pcie(const int* num_tokens_per_rank, int* moe_recv_counter_mapped, int num_ranks,
+                     const int* num_tokens_per_rdma_rank, int* moe_recv_rdma_counter_mapped,
+                     const int* num_tokens_per_expert, int* moe_recv_expert_counter_mapped, int num_experts,
+                     const bool* is_token_in_rank, int num_tokens, int num_channels,
+                     int hidden_int4, int num_scales, int num_topk, int expert_alignment,
+                     int* rdma_channel_prefix_matrix, int* recv_rdma_rank_prefix_sum,
+                     int* gbl_channel_prefix_matrix, int* recv_gbl_rank_prefix_sum,
+                     void* rdma_buffer_ptr, int num_max_rdma_chunked_recv_tokens,
+                     void** buffer_ptrs, int num_max_nvl_chunked_recv_tokens,
+                     int** barrier_signal_ptrs, int rank,
+                     cudaStream_t stream, int64_t num_rdma_bytes, int64_t num_nvl_bytes,
+                     bool low_latency_mode);
+
+void notify_dispatch(const int* num_tokens_per_rank, int* moe_recv_counter_mapped, int num_ranks,
+                     const int* num_tokens_per_rdma_rank, int* moe_recv_rdma_counter_mapped,
+                     const int* num_tokens_per_expert, int* moe_recv_expert_counter_mapped, int num_experts,
+                     const bool* is_token_in_rank, int num_tokens, int num_channels,
+                     int hidden_int4, int num_scales, int num_topk, int expert_alignment,
+                     int* rdma_channel_prefix_matrix, int* recv_rdma_rank_prefix_sum,
+                     int* gbl_channel_prefix_matrix, int* recv_gbl_rank_prefix_sum,
+                     void* rdma_buffer_ptr, int num_max_rdma_chunked_recv_tokens,
+                     void** buffer_ptrs, int num_max_nvl_chunked_recv_tokens,
+                     int** barrier_signal_ptrs, int rank,
+                     cudaStream_t stream, int64_t num_rdma_bytes, int64_t num_nvl_bytes,
+                     bool low_latency_mode);
+
 void dispatch_pcie(void* recv_x, float* recv_x_scales, int64_t* recv_topk_idx, float* recv_topk_weights, void* recv_src_meta,
                    const void* x, const float* x_scales, const int64_t* topk_idx, const float* topk_weights,
                    const int* rdma_channel_prefix_matrix,

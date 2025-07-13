@@ -1448,7 +1448,7 @@ Buffer::pcie_dispatch(const torch::Tensor& x, const std::optional<torch::Tensor>
     int num_local_experts = num_experts / num_ranks;
     for (int i = 0; i < num_local_experts; ++ i)
         moe_recv_expert_counter[i] = -1;
-    internode::notify_dispatch(num_tokens_per_rank->data_ptr<int>(), moe_recv_counter_mapped, num_ranks,
+    internode::notify_dispatch_pcie(num_tokens_per_rank->data_ptr<int>(), moe_recv_counter_mapped, num_ranks,
                                 num_tokens_per_rdma_rank->data_ptr<int>(), moe_recv_rdma_counter_mapped,
                                 num_tokens_per_expert->data_ptr<int>(), moe_recv_expert_counter_mapped, num_experts,
                                 is_token_in_rank.data_ptr<bool>(), num_tokens, num_channels,
