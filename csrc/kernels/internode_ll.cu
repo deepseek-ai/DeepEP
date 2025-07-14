@@ -326,6 +326,65 @@ dispatch(void* packed_recv_x, void* packed_recv_x_scales,
     }
 }
 
+template <int kNumUnrolls, int kHidden>
+__device__ void logfmt_simulate(uint32_t* uint32_buffer, const int lane_id) {
+    constexpr int kNumElemsPerInt4 = sizeof(int4) / sizeof(nv_bfloat16);
+    constexpr int hidden_bf16_int4 = kHidden / kNumElemsPerInt4;
+    constexpr int hidden_bf16_int4_pad = align(static_cast<int>(hidden_bf16_int4), 32 * kNumUnrolls);
+
+    constexpr float kThreshold = 1;
+    constexpr float kMinClip = 32; // `== log_2(2 ^ (2 ^ 5))`
+    constexpr int kNumBits = 10;
+    constexpr int kNumValues = 1 << (kNumBits - 1);
+    EP_STATIC_ASSERT(kHidden % (kNumElemsPerInt4 * 32) == 0 and kNumElemsPerInt4 == 8, "Invalid hidden");
+
+    int4 int4_values[kNumUnrolls] = {0};
+    auto uint32_values = reinterpret_cast<uint32_t*>(int4_values);
+
+    // Local log amax
+    float log_abs_values[kNumElemsPerInt4 * kNumUnrolls], log_amax, log_amin, amax;
+    auto log_aminmax = [&](const int &j, const float& value) {
+        log_abs_values[j] = log2f_approx(fabsf(value));
+        amax = j == 0 ? value : fmaxf(amax, fabsf(value));
+        log_amax = j == 0 ? log_abs_values[j] : fmaxf(log_amax, log_abs_values[j]);
+        log_amin = value != 0 ? (j == 0 ? log_abs_values[j] : fminf(log_amin, log_abs_values[j])) : log_amin;
+    };
+    #pragma unroll
+    for (int k = 0; k < kNumUnrolls * 4; ++ k) {
+        uint32_values[k] = uint32_buffer[k ^ (lane_id * kNumUnrolls / 8)];
+        auto bf162_values = *reinterpret_cast<__nv_bfloat162*>(uint32_values + k);
+        auto float2_values = __bfloat1622float2(bf162_values);
+        log_aminmax(k * 2, float2_values.x);
+        log_aminmax(k * 2 + 1, float2_values.y);
+    }
+
+    // Reduce per 128 channels
+    amax = warp_reduce_max<(16 / kNumUnrolls)>(amax);
+    log_amax = warp_reduce_max<(16 / kNumUnrolls)>(log_amax);
+    log_amin = fmaxf(warp_reduce_min<(16 / kNumUnrolls)>(log_amin), log_amax - kMinClip);
+
+    const auto step = (log_amax - log_amin) / static_cast<float>(kNumValues - 2);
+    const auto step_inv = 1.0f / step;
+    const auto rounding = 2.0f - log2f_approx((1.0f + exp2f_approx(step)) * 0.5f) * step_inv;
+
+    // Use LogFMT only with `amax <= kThreshold` (maybe not all quarter-warps)
+    if (amax <= kThreshold and log_amin < log_amax) {
+        // Transform
+        auto transform = [=](const float& log_abs_value) -> nv_bfloat16 {
+            const auto encoded = floorf((log_abs_value - log_amin) * step_inv + rounding);
+            const auto decoded = exp2f_approx((encoded - 1) * step + log_amin);
+            return decoded; 
+        };
+        #pragma unroll
+        for (int k = 0; k < kNumUnrolls * 4; ++ k) {
+            auto bf162_pack = __nv_bfloat162(transform(log_abs_values[k * 2]), transform(log_abs_values[k * 2 + 1]));
+            auto uint32_pack = *reinterpret_cast<uint32_t*>(&bf162_pack);
+            uint32_buffer[k ^ (lane_id * kNumUnrolls / 8)] = (uint32_values[k] & 0x80008000) | uint32_pack;
+        }
+    }
+    tma_store_fence();
+}
+
 void dispatch(void* packed_recv_x, void* packed_recv_x_scales,
               int* packed_recv_src_info, int64_t* packed_recv_layout_range,
               int* packed_recv_count,
@@ -503,10 +562,6 @@ combine(void* combined_x,
 
                 #pragma unroll
                 for (int i = lane_id * kNumUnrolls, iter_idx = 0; i < hidden_bf16_int4_pad; i += 32 * kNumUnrolls, ++ iter_idx) {
-                    // Read
-                    int4 int4_values[kNumUnrolls] = {0};
-                    auto uint32_values = reinterpret_cast<uint32_t*>(int4_values);
-
                     // Load the next iteration
                     // TODO: try `elect_one_sync`
                     const int& stage_idx = iter_idx % kNumStages;
@@ -523,56 +578,8 @@ combine(void* combined_x,
                     const auto& uint32_buffer = reinterpret_cast<uint32_t*>(tma_buffer[stage_idx] + lane_id * kNumUnrolls);
 
                     // Simulated cast
-                    if constexpr (kUseLogFMT) {
-                        constexpr float kThreshold = 1;
-                        constexpr float kMinClip = 32; // `== log_2(2 ^ (2 ^ 5))`
-                        constexpr int kNumBits = 10;
-                        constexpr int kNumValues = 1 << (kNumBits - 1);
-                        EP_STATIC_ASSERT(kHidden % (kNumElemsPerInt4 * 32) == 0 and kNumElemsPerInt4 == 8, "Invalid hidden");
-
-                        // Local log amax
-                        float log_abs_values[kNumElemsPerInt4 * kNumUnrolls], log_amax, log_amin, amax;
-                        auto log_aminmax = [&](const int &j, const float& value) {
-                            log_abs_values[j] = log2f_approx(fabsf(value));
-                            amax = j == 0 ? value : fmaxf(amax, fabsf(value));
-                            log_amax = j == 0 ? log_abs_values[j] : fmaxf(log_amax, log_abs_values[j]);
-                            log_amin = value != 0 ? (j == 0 ? log_abs_values[j] : fminf(log_amin, log_abs_values[j])) : log_amin;
-                        };
-                        #pragma unroll
-                        for (int k = 0; k < kNumUnrolls * 4; ++ k) {
-                            uint32_values[k] = uint32_buffer[k ^ (lane_id * kNumUnrolls / 8)];
-                            auto bf162_values = *reinterpret_cast<__nv_bfloat162*>(uint32_values + k);
-                            auto float2_values = __bfloat1622float2(bf162_values);
-                            log_aminmax(k * 2, float2_values.x);
-                            log_aminmax(k * 2 + 1, float2_values.y);
-                        }
-
-                        // Reduce per 128 channels
-                        amax = warp_reduce_max<(16 / kNumUnrolls)>(amax);
-                        log_amax = warp_reduce_max<(16 / kNumUnrolls)>(log_amax);
-                        log_amin = fmaxf(warp_reduce_min<(16 / kNumUnrolls)>(log_amin), log_amax - kMinClip);
-
-                        const auto step = (log_amax - log_amin) / static_cast<float>(kNumValues - 2);
-                        const auto step_inv = 1.0f / step;
-                        const auto rounding = 2.0f - log2f_approx((1.0f + exp2f_approx(step)) * 0.5f) * step_inv;
-
-                        // Use LogFMT only with `amax <= kThreshold` (maybe not all quarter-warps)
-                        if (amax <= kThreshold and log_amin < log_amax) {
-                            // Transform
-                            auto transform = [=](const float& log_abs_value) -> nv_bfloat16 {
-                                const auto encoded = floorf((log_abs_value - log_amin) * step_inv + rounding);
-                                const auto decoded = exp2f_approx((encoded - 1) * step + log_amin);
-                                return decoded; 
-                            };
-                            #pragma unroll
-                            for (int k = 0; k < kNumUnrolls * 4; ++ k) {
-                                auto bf162_pack = __nv_bfloat162(transform(log_abs_values[k * 2]), transform(log_abs_values[k * 2 + 1]));
-                                auto uint32_pack = *reinterpret_cast<uint32_t*>(&bf162_pack);
-                                uint32_buffer[k ^ (lane_id * kNumUnrolls / 8)] = (uint32_values[k] & 0x80008000) | uint32_pack;
-                            }
-                        }
-                        tma_store_fence();
-                    }
+                    if constexpr (kUseLogFMT)
+                        logfmt_simulate<kNumUnrolls, kHidden>(uint32_buffer, lane_id);
                     __syncwarp();
 
                     // Store
