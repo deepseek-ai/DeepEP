@@ -1052,7 +1052,7 @@ __global__ void cached_notify(const int rdma_clean_offset, const int rdma_num_in
             nvshmem_sync_with_same_gpu_idx<kLowLatencyMode>(rdma_team);
         __syncthreads();
 
-        // Clean
+        // Clean rdma buffer
         auto rdma_buffer_ptr_int = static_cast<int*>(rdma_buffer_ptr);
         #pragma unroll
         for (int i = thread_id; i < rdma_num_int_clean; i += num_threads)
@@ -1066,15 +1066,18 @@ __global__ void cached_notify(const int rdma_clean_offset, const int rdma_num_in
         // Barrier for NVL
         barrier_block<NUM_MAX_NVL_PEERS, true>(barrier_signal_ptrs, nvl_rank);
 
-        // Clean
+        // Clean NVL buffer
         auto nvl_buffer_ptr_int = static_cast<int*>(buffer_ptrs[nvl_rank]);
         #pragma unroll
         for (int i = thread_id; i < nvl_num_int_clean; i += num_threads)
             nvl_buffer_ptr_int[nvl_clean_offset + i] = 0;
 
+        __syncthreads();
         // Barrier again
+        if (warp_id == 1)
+            nvshmem_sync_with_same_gpu_idx_warp<kLowLatencyMode>(rdma_team, rank, lane_id);
         barrier_block<NUM_MAX_NVL_PEERS>(barrier_signal_ptrs, nvl_rank);
-    } else if (sm_id == 2) {
+    } else if (sm_id == 1) {
         if (is_cached_dispatch)
             return;
 
@@ -1106,7 +1109,7 @@ __global__ void cached_notify(const int rdma_clean_offset, const int rdma_num_in
         EP_STATIC_ASSERT(NUM_MAX_NVL_PEERS <= 32, "Too many NVL peers");
 
         if (lane_id < NUM_MAX_NVL_PEERS and warp_id < num_channels) {
-            for (int dst_rdma_rank = sm_id - 3; dst_rdma_rank < num_rdma_ranks; dst_rdma_rank += num_channels * 2 - 3) {
+            for (int dst_rdma_rank = sm_id - 2; dst_rdma_rank < num_rdma_ranks; dst_rdma_rank += num_channels * 2 - 2) {
                 // Iterate in reverse order
                 int token_start_idx = warp_id == 0 ? 0 : rdma_channel_prefix_matrix[dst_rdma_rank * num_channels + warp_id - 1];
                 int token_end_idx = rdma_channel_prefix_matrix[dst_rdma_rank * num_channels + warp_id];
