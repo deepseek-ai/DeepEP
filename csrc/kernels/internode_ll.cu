@@ -453,7 +453,7 @@ combine(void* combined_x,
         constexpr int kNumTMABufferBytes = sizeof(int4) * 32 * kNumUnrolls;
         constexpr int kNumStages = 3;
         constexpr int kNumPrefetch = 1;
-        EP_STATIC_ASSERT(kNumStages == 3, "Invalid stages");
+        EP_STATIC_ASSERT(kNumStages == 3 and kNumPrefetch == 1, "Invalid stages");
 
         extern __shared__ __align__(1024) uint8_t smem_buffer[];
         auto smem_ptr = smem_buffer + warp_id * kNumStages * (kNumTMABufferBytes + 16);
@@ -497,8 +497,7 @@ combine(void* combined_x,
                 const auto cpy_dst_int4_ptr = dst_p2p_ptr == 0 ? reinterpret_cast<int4*>(buf_ptr) : reinterpret_cast<int4*>(dst_p2p_ptr);
 
                 // Prefetch
-                // TODO: try `elect_one_sync`
-                if (lane_id == 0)
+                if (elect_one_sync(lane_id))
                     tma_load_and_arrive(0, cpy_src_int4_ptr, get_num_tma_bytes(0));
                 __syncwarp();
 
@@ -512,8 +511,8 @@ combine(void* combined_x,
                     // TODO: try `elect_one_sync`
                     const int& stage_idx = iter_idx % kNumStages;
                     const int& next_stage_idx = (iter_idx + 1) % kNumStages;
-                    tma_store_wait<1>();
-                    if (lane_id == 0 and iter_idx + 1 < kNumIters) {
+                    tma_store_wait<kNumStages - kNumPrefetch - 1>();
+                    if (iter_idx + 1 < kNumIters and elect_one_sync(lane_id)) {
                         const auto& offset_int4 = i + 32 * kNumUnrolls;
                         tma_load_and_arrive(next_stage_idx, cpy_src_int4_ptr + offset_int4, get_num_tma_bytes(offset_int4));
                     }
@@ -577,7 +576,7 @@ combine(void* combined_x,
                     __syncwarp();
 
                     // Store
-                    if (lane_id == 0)
+                    if (elect_one_sync(lane_id))
                         tma_store_1d(tma_buffer[stage_idx], cpy_dst_int4_ptr + i, get_num_tma_bytes(i));
                     __syncwarp();
                 }

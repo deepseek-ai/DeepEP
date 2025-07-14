@@ -294,6 +294,25 @@ __device__  __forceinline__ float exp2f_approx(const float &x) {
 // TMA PTX instructions
 #ifndef DISABLE_SM90_FEATURES
 
+__device__ __forceinline__ uint32_t elect_one_sync(int lane_id) {
+#ifndef DISABLE_SM90_FEATURES
+    uint32_t pred = 0;
+    asm volatile(
+      "{\n"
+      ".reg .b32 %%rx;\n"
+      ".reg .pred %%px;\n"
+      "      elect.sync %%rx|%%px, %2;\n"
+      "@%%px mov.s32 %1, 1;\n"
+      "      mov.s32 %0, %%rx;\n"
+      "}\n"
+      : "+r"(lane_id), "+r"(pred)
+      : "r"(0xffffffff));
+    return pred;
+#else
+    return lane_id == 0;
+#endif
+}
+
 __device__ __forceinline__ void fence_view_async_shared() {
     asm volatile("fence.proxy.async.shared::cta; \n" :: );
 }
