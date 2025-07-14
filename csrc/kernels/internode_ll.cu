@@ -407,7 +407,11 @@ combine(void* combined_x,
 
     // Data type staffs
     constexpr int kNumElemsPerInt4 = sizeof(int4) / sizeof(nv_bfloat16);
-    const size_t hidden_bf16_int4 = kHidden / kNumElemsPerInt4;
+    constexpr size_t hidden_bf16_int4 = kHidden / kNumElemsPerInt4;
+    constexpr int kNumUnrolls = 4;
+    constexpr int hidden_bf16_int4_pad = align(static_cast<int>(hidden_bf16_int4), 32 * kNumUnrolls);
+    EP_STATIC_ASSERT(hidden_bf16_int4 % kNumUnrolls == 0, "Invalid hidden");
+    EP_STATIC_ASSERT(kNumUnrolls == 1 or kNumUnrolls == 2 or kNumUnrolls == 4, "Only supports kNumUnrolls == 1, 2 or 4");
 
     // Message package
     constexpr size_t num_bytes_per_slot = kHidden * sizeof(nv_bfloat16);
@@ -445,6 +449,40 @@ combine(void* combined_x,
         int offset, num_tokens_to_send;
         unpack2(layout, num_tokens_to_send, offset);
 
+        // TMA stuffs
+        constexpr int kNumTMABufferBytes = 512 * kNumUnrolls;
+        constexpr int kNumStages = 3;
+        constexpr int kNumPrefetch = 1;
+        extern __shared__ __align__(1024) uint8_t smem_buffer[];
+        int4* tma_buffer[kNumStages];
+        uint64_t* tma_mbarrier[kNumStages];
+        uint32_t tma_phase[kNumStages];
+        EP_STATIC_ASSERT(kNumUnrolls * kNumStages <= 12, "TMA Buffer Size Exceed Limit");
+
+        #pragma unroll
+        for (int k = 0; k < kNumStages; ++ k) {
+            auto ptr = smem_buffer + (warp_id * kNumStages + k) * (kNumTMABufferBytes + 16);
+            tma_buffer[k] = reinterpret_cast<int4*>(ptr);
+            tma_mbarrier[k] = reinterpret_cast<uint64_t*>(ptr + kNumTMABufferBytes);
+            tma_phase[k] = 0;
+        }
+        if (lane_id == 0) {
+            #pragma unroll
+            for (int k = 0; k < kNumStages; ++ k)
+                mbarrier_init(tma_mbarrier[k], 1);
+            fence_view_async_shared();
+            fence_barrier_init();
+        }
+        __syncwarp();
+
+        constexpr int kNumIters = hidden_bf16_int4_pad / (32 * kNumUnrolls);
+        auto tma_load_and_mbarrier = [&](int iter, const int4* gmem_ptr, int tma_bytes) {
+            int s = iter % kNumStages;
+            tma_store_wait<kNumStages - 1 - kNumPrefetch>();
+            tma_load_1d(tma_buffer[s], gmem_ptr, tma_mbarrier[s], tma_bytes);
+            mbarrier_arrive_and_expect_tx(tma_mbarrier[s], tma_bytes);
+        };
+
         // Issue IBGDA send
         for (int token_idx = offset + sub_warp_id; token_idx < offset + num_tokens_to_send; token_idx += num_warps_per_group) {
             const auto x_int4 = local_x + token_idx * hidden_bf16_int4;
@@ -458,23 +496,35 @@ combine(void* combined_x,
             const auto dst_p2p_ptr = nvshmemi_get_p2p_ptr(dst_ptr, rank, dst_rank);
 
             if (not zero_copy or dst_p2p_ptr != 0) {
-                constexpr int kNumUnrolls = 4;
-                constexpr int hidden_bf16_int4_pad = align(static_cast<int>(hidden_bf16_int4), 32 * kNumUnrolls);
-
                 // Read from `cpy_src_int4_ptr` and copy into `cpy_dst_int4_ptr`
                 const auto cpy_src_int4_ptr = zero_copy ? reinterpret_cast<int4*>(buf_ptr) : x_int4;
                 const auto cpy_dst_int4_ptr = dst_p2p_ptr == 0 ? reinterpret_cast<int4*>(buf_ptr) : reinterpret_cast<int4*>(dst_p2p_ptr);
-                #pragma unroll
-                for (int i = lane_id * kNumUnrolls; i < hidden_bf16_int4_pad; i += 32 * kNumUnrolls) {
-                    // Read
-                    int4 int4_values[kNumUnrolls];
-                    if (i < hidden_bf16_int4) {
-                        #pragma unroll
-                        for (int k = 0; k < kNumUnrolls; ++ k)
-                            int4_values[k] = ld_nc_global(cpy_src_int4_ptr + i + k);
+
+                // Prefetch
+                if (lane_id == 0) {
+                    #pragma unroll
+                    for (int iter = 0, i = 0; iter < kNumPrefetch and i < hidden_bf16_int4_pad; ++ iter, i += 32 * kNumUnrolls) {
+                        auto tma_bytes = min(kNumTMABufferBytes, static_cast<int>((hidden_bf16_int4 - i) * sizeof(int4)));
+                        tma_load_and_mbarrier(iter, cpy_src_int4_ptr + i, tma_bytes);
                     }
-                    auto bf16_values = reinterpret_cast<nv_bfloat16*>(int4_values);
+                }
+                __syncwarp();
+
+                #pragma unroll
+                for (int i = lane_id * kNumUnrolls, iter = 0; i < hidden_bf16_int4_pad; i += 32 * kNumUnrolls, ++ iter) {
+                    // Read
+                    int4 int4_values[kNumUnrolls] = {0};
                     auto uint32_values = reinterpret_cast<uint32_t*>(int4_values);
+
+                    // Load
+                    if (lane_id == 0 and iter + kNumPrefetch < kNumIters) {
+                        auto tma_bytes = min(kNumTMABufferBytes, static_cast<int>((hidden_bf16_int4 - 32 * kNumUnrolls * kNumPrefetch - i) * sizeof(int4)));
+                        tma_load_and_mbarrier(iter + kNumPrefetch, cpy_src_int4_ptr + i + 32 * kNumUnrolls * kNumPrefetch, tma_bytes);
+                    }
+                    __syncwarp();
+
+                    mbarrier_wait(tma_mbarrier[iter % kNumStages], tma_phase[iter % kNumStages]);
+                    auto uint32_buffer = reinterpret_cast<uint32_t*>(tma_buffer[iter % kNumStages] + lane_id * kNumUnrolls);
 
                     // Simulated cast
                     if constexpr (kUseLogFMT) {
@@ -486,13 +536,19 @@ combine(void* combined_x,
 
                         // Local log amax
                         float log_abs_values[kNumElemsPerInt4 * kNumUnrolls], log_amax, log_amin, amax;
-                        #pragma unroll
-                        for (int j = 0; j < kNumElemsPerInt4 * kNumUnrolls; ++ j) {
-                            auto value = static_cast<float>(bf16_values[j]);
+                        auto log_aminmax = [&](const int &j, const float& value) {
                             log_abs_values[j] = log2f_approx(fabsf(value));
                             amax = j == 0 ? value : fmaxf(amax, fabsf(value));
                             log_amax = j == 0 ? log_abs_values[j] : fmaxf(log_amax, log_abs_values[j]);
                             log_amin = value != 0 ? (j == 0 ? log_abs_values[j] : fminf(log_amin, log_abs_values[j])) : log_amin;
+                        };
+                        #pragma unroll
+                        for (int k = 0; k < kNumUnrolls * 4; ++ k) {
+                            uint32_values[k] = uint32_buffer[k ^ (lane_id * kNumUnrolls / 8)];
+                            auto bf162_values = *reinterpret_cast<__nv_bfloat162*>(uint32_values + k);
+                            auto float2_values = __bfloat1622float2(bf162_values);
+                            log_aminmax(k * 2, float2_values.x);
+                            log_aminmax(k * 2 + 1, float2_values.y);
                         }
 
                         // Reduce per 128 channels
@@ -513,24 +569,29 @@ combine(void* combined_x,
                                 return decoded; 
                             };
                             #pragma unroll
-                            for (int j = 0; j < kNumElemsPerInt4 * kNumUnrolls; j += 2) {
-                                auto bf162_pack = __nv_bfloat162(transform(log_abs_values[j]), transform(log_abs_values[j + 1]));
+                            for (int k = 0; k < kNumUnrolls * 4; ++ k) {
+                                auto bf162_pack = __nv_bfloat162(transform(log_abs_values[k * 2]), transform(log_abs_values[k * 2 + 1]));
                                 auto uint32_pack = *reinterpret_cast<uint32_t*>(&bf162_pack);
-                                uint32_values[j / 2] = (uint32_values[j / 2] & 0x80008000) | uint32_pack;
-                            }   
+                                uint32_buffer[k ^ (lane_id * kNumUnrolls / 8)] = (uint32_values[k] & 0x80008000) | uint32_pack;
+                            }
                         }
                         __syncwarp();
                     }
 
                     // Store
-                    EP_STATIC_ASSERT(hidden_bf16_int4 % kNumUnrolls == 0, "Invalid hidden");
-                    if (i < hidden_bf16_int4) {
-                        #pragma unroll
-                        for (int k = 0; k < kNumUnrolls; ++ k)
-                            st_na_global(cpy_dst_int4_ptr + i + k, int4_values[k]);
+                    tma_store_fence();
+                    __syncwarp();
+                    if (lane_id == 0) {
+                        auto tma_bytes = min(kNumTMABufferBytes, static_cast<int>((hidden_bf16_int4 - i) * sizeof(int4)));
+                        tma_store_1d(tma_buffer[iter % kNumStages], cpy_dst_int4_ptr + i, tma_bytes);
                     }
+                    __syncwarp();
                 }
             }
+
+            if (lane_id == 0)
+                tma_store_wait();
+            __syncwarp();
 
             // Issue RDMA
             // NOTES: for zero-copy mode, we assume the data is already in the send buffer
@@ -635,10 +696,14 @@ void combine(void* combined_x,
     // Online cast cannot use zero-copy
     EP_HOST_ASSERT(not (zero_copy and use_logfmt));
 
+    constexpr int kNumTMABytesPerWarp = 12 * (512 + 16);
+    const int smem_size = kNumTMABytesPerWarp * num_warps;
+
 #define COMBINE_LAUNCH_CASE(hidden) { \
 auto combine_func = use_logfmt ? \
     combine<true, hidden, kNumMaxTopk> : \
     combine<false, hidden, kNumMaxTopk>; \
+SET_SHARED_MEMORY_FOR_TMA(combine_func); \
 LAUNCH_KERNEL(&cfg, combine_func, \
               combined_x, \
               rdma_recv_x, rdma_recv_flag, rdma_send_x, \
