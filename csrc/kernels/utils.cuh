@@ -30,6 +30,19 @@ template<> struct VecInt<4> { using vec_t = int; };
 template<> struct VecInt<8> { using vec_t = int64_t; };
 template<> struct VecInt<16> { using vec_t = int4; };
 
+template <typename FuncT>
+struct PatternVisitor {
+    FuncT func;
+
+    __device__ __host__
+    explicit PatternVisitor(FuncT&& func): func(std::forward<FuncT>(func)) {}
+
+    __device__ __host__
+    auto operator [](const uint32_t& i) {
+        return func(i);
+    }
+};
+
 __device__ __forceinline__ void trap() {
     asm("trap;");
 }

@@ -454,18 +454,16 @@ combine(void* combined_x,
         constexpr int kNumStages = 3;
         constexpr int kNumPrefetch = 1;
         extern __shared__ __align__(1024) uint8_t smem_buffer[];
-        int4* tma_buffer[kNumStages];
-        uint64_t* tma_mbarrier[kNumStages];
-        uint32_t tma_phase[kNumStages];
+        auto smem_ptr = smem_buffer + warp_id * kNumStages * (kNumTMABufferBytes + 16);
+        uint32_t tma_phase[kNumStages] = {0};
+        auto tma_buffer = PatternVisitor([=](const uint32_t& i) { 
+            return reinterpret_cast<int4*>(smem_ptr + i * (kNumTMABufferBytes + 16));
+        });
+        auto tma_mbarrier = PatternVisitor([=](const uint32_t& i) { 
+            return reinterpret_cast<uint64_t*>(smem_ptr + i * (kNumTMABufferBytes + 16) + kNumTMABufferBytes);
+        });
         EP_STATIC_ASSERT(kNumUnrolls * kNumStages <= 12, "TMA Buffer Size Exceed Limit");
 
-        #pragma unroll
-        for (int k = 0; k < kNumStages; ++ k) {
-            auto ptr = smem_buffer + (warp_id * kNumStages + k) * (kNumTMABufferBytes + 16);
-            tma_buffer[k] = reinterpret_cast<int4*>(ptr);
-            tma_mbarrier[k] = reinterpret_cast<uint64_t*>(ptr + kNumTMABufferBytes);
-            tma_phase[k] = 0;
-        }
         if (lane_id == 0) {
             #pragma unroll
             for (int k = 0; k < kNumStages; ++ k)
