@@ -1073,6 +1073,7 @@ __global__ void cached_notify(const int rdma_clean_offset, const int rdma_num_in
             nvl_buffer_ptr_int[nvl_clean_offset + i] = 0;
 
         __syncthreads();
+
         // Barrier again
         if (warp_id == 1)
             nvshmem_sync_with_same_gpu_idx_warp<kLowLatencyMode>(rdma_team, rank, lane_id);
