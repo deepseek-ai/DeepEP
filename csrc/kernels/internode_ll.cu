@@ -407,11 +407,11 @@ combine(void* combined_x,
 
     // Data type staffs
     constexpr int kNumElemsPerInt4 = sizeof(int4) / sizeof(nv_bfloat16);
-    constexpr size_t hidden_bf16_int4 = kHidden / kNumElemsPerInt4;
+    constexpr int64_t hidden_bf16_int4 = kHidden / kNumElemsPerInt4;
     constexpr int kNumUnrolls = 4;
     constexpr int hidden_bf16_int4_pad = align(static_cast<int>(hidden_bf16_int4), 32 * kNumUnrolls);
     EP_STATIC_ASSERT(hidden_bf16_int4 % kNumUnrolls == 0, "Invalid hidden");
-    EP_STATIC_ASSERT(kNumUnrolls == 1 or kNumUnrolls == 2 or kNumUnrolls == 4, "Only supports kNumUnrolls == 1, 2 or 4");
+    EP_STATIC_ASSERT(kNumUnrolls == 1 or kNumUnrolls == 2 or kNumUnrolls == 4, "Invalid unrolling factors");
 
     // Message package
     constexpr size_t num_bytes_per_slot = kHidden * sizeof(nv_bfloat16);
@@ -450,35 +450,33 @@ combine(void* combined_x,
         unpack2(layout, num_tokens_to_send, offset);
 
         // TMA stuffs
-        constexpr int kNumTMABufferBytes = 512 * kNumUnrolls;
+        constexpr int kNumTMABufferBytes = sizeof(int4) * 32 * kNumUnrolls;
         constexpr int kNumStages = 3;
         constexpr int kNumPrefetch = 1;
+        EP_STATIC_ASSERT(kNumStages == 3, "Invalid stages");
+
         extern __shared__ __align__(1024) uint8_t smem_buffer[];
         auto smem_ptr = smem_buffer + warp_id * kNumStages * (kNumTMABufferBytes + 16);
-        uint32_t tma_phase[kNumStages] = {0};
-        auto tma_buffer = PatternVisitor([=](const uint32_t& i) { 
-            return reinterpret_cast<int4*>(smem_ptr + i * (kNumTMABufferBytes + 16));
-        });
-        auto tma_mbarrier = PatternVisitor([=](const uint32_t& i) { 
-            return reinterpret_cast<uint64_t*>(smem_ptr + i * (kNumTMABufferBytes + 16) + kNumTMABufferBytes);
-        });
-        EP_STATIC_ASSERT(kNumUnrolls * kNumStages <= 12, "TMA Buffer Size Exceed Limit");
+        uint32_t tma_phase[kNumStages] = {};
+        auto tma_buffer   = PatternVisitor([=](const int& i) { return reinterpret_cast<int4*>(smem_ptr + i * (kNumTMABufferBytes + 16)); });
+        auto tma_mbarrier = PatternVisitor([=](const int& i) { return reinterpret_cast<uint64_t*>(smem_ptr + i * (kNumTMABufferBytes + 16) + kNumTMABufferBytes); });
+        EP_STATIC_ASSERT(kNumUnrolls * kNumStages <= 12, "TMA buffer size exceed limit");
 
-        if (lane_id == 0) {
-            #pragma unroll
-            for (int k = 0; k < kNumStages; ++ k)
-                mbarrier_init(tma_mbarrier[k], 1);
+        // Initialize m-barriers
+        if (lane_id < kNumStages) {
+            mbarrier_init(tma_mbarrier[lane_id], 1);
             fence_view_async_shared();
             fence_barrier_init();
         }
         __syncwarp();
 
         constexpr int kNumIters = hidden_bf16_int4_pad / (32 * kNumUnrolls);
-        auto tma_load_and_mbarrier = [&](int iter, const int4* gmem_ptr, int tma_bytes) {
-            int s = iter % kNumStages;
-            tma_store_wait<kNumStages - 1 - kNumPrefetch>();
-            tma_load_1d(tma_buffer[s], gmem_ptr, tma_mbarrier[s], tma_bytes);
-            mbarrier_arrive_and_expect_tx(tma_mbarrier[s], tma_bytes);
+        auto tma_load_and_arrive = [&](const int& stage_idx, const int4* gmem_ptr, const int& num_bytes) {
+            tma_load_1d(tma_buffer[stage_idx], gmem_ptr, tma_mbarrier[stage_idx], num_bytes);
+            mbarrier_arrive_and_expect_tx(tma_mbarrier[stage_idx], num_bytes);
+        };
+        auto get_num_tma_bytes = [&](const int& offset_int4) {
+            return min(kNumTMABufferBytes, static_cast<int>((hidden_bf16_int4 - offset_int4) * sizeof(int4)));
         };
 
         // Issue IBGDA send
@@ -499,30 +497,31 @@ combine(void* combined_x,
                 const auto cpy_dst_int4_ptr = dst_p2p_ptr == 0 ? reinterpret_cast<int4*>(buf_ptr) : reinterpret_cast<int4*>(dst_p2p_ptr);
 
                 // Prefetch
-                if (lane_id == 0) {
-                    #pragma unroll
-                    for (int iter = 0, i = 0; iter < kNumPrefetch and i < hidden_bf16_int4_pad; ++ iter, i += 32 * kNumUnrolls) {
-                        auto tma_bytes = min(kNumTMABufferBytes, static_cast<int>((hidden_bf16_int4 - i) * sizeof(int4)));
-                        tma_load_and_mbarrier(iter, cpy_src_int4_ptr + i, tma_bytes);
-                    }
-                }
+                // TODO: try `elect_one_sync`
+                if (lane_id == 0)
+                    tma_load_and_arrive(0, cpy_src_int4_ptr, get_num_tma_bytes(0));
                 __syncwarp();
 
                 #pragma unroll
-                for (int i = lane_id * kNumUnrolls, iter = 0; i < hidden_bf16_int4_pad; i += 32 * kNumUnrolls, ++ iter) {
+                for (int i = lane_id * kNumUnrolls, iter_idx = 0; i < hidden_bf16_int4_pad; i += 32 * kNumUnrolls, ++ iter_idx) {
                     // Read
                     int4 int4_values[kNumUnrolls] = {0};
                     auto uint32_values = reinterpret_cast<uint32_t*>(int4_values);
 
-                    // Load
-                    if (lane_id == 0 and iter + kNumPrefetch < kNumIters) {
-                        auto tma_bytes = min(kNumTMABufferBytes, static_cast<int>((hidden_bf16_int4 - 32 * kNumUnrolls * kNumPrefetch - i) * sizeof(int4)));
-                        tma_load_and_mbarrier(iter + kNumPrefetch, cpy_src_int4_ptr + i + 32 * kNumUnrolls * kNumPrefetch, tma_bytes);
+                    // Load the next iteration
+                    // TODO: try `elect_one_sync`
+                    const int& stage_idx = iter_idx % kNumStages;
+                    const int& next_stage_idx = (iter_idx + 1) % kNumStages;
+                    tma_store_wait<1>();
+                    if (lane_id == 0 and iter_idx + 1 < kNumIters) {
+                        const auto& offset_int4 = i + 32 * kNumUnrolls;
+                        tma_load_and_arrive(next_stage_idx, cpy_src_int4_ptr + offset_int4, get_num_tma_bytes(offset_int4));
                     }
                     __syncwarp();
 
-                    mbarrier_wait(tma_mbarrier[iter % kNumStages], tma_phase[iter % kNumStages]);
-                    auto uint32_buffer = reinterpret_cast<uint32_t*>(tma_buffer[iter % kNumStages] + lane_id * kNumUnrolls);
+                    // Wait the current TMA arrival
+                    mbarrier_wait(tma_mbarrier[stage_idx], tma_phase[stage_idx]);
+                    const auto& uint32_buffer = reinterpret_cast<uint32_t*>(tma_buffer[stage_idx] + lane_id * kNumUnrolls);
 
                     // Simulated cast
                     if constexpr (kUseLogFMT) {
@@ -573,22 +572,19 @@ combine(void* combined_x,
                                 uint32_buffer[k ^ (lane_id * kNumUnrolls / 8)] = (uint32_values[k] & 0x80008000) | uint32_pack;
                             }
                         }
-                        __syncwarp();
+                        tma_store_fence();
                     }
+                    __syncwarp();
 
                     // Store
-                    tma_store_fence();
-                    __syncwarp();
-                    if (lane_id == 0) {
-                        auto tma_bytes = min(kNumTMABufferBytes, static_cast<int>((hidden_bf16_int4 - i) * sizeof(int4)));
-                        tma_store_1d(tma_buffer[iter % kNumStages], cpy_dst_int4_ptr + i, tma_bytes);
-                    }
+                    if (lane_id == 0)
+                        tma_store_1d(tma_buffer[stage_idx], cpy_dst_int4_ptr + i, get_num_tma_bytes(i));
                     __syncwarp();
                 }
             }
 
-            if (lane_id == 0)
-                tma_store_wait();
+            // Flush all stores
+            tma_store_wait();
             __syncwarp();
 
             // Issue RDMA
