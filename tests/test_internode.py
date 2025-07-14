@@ -185,7 +185,7 @@ def test_main(args: argparse.Namespace, num_sms: int,
             for rdma_chunk_size in range(4, 33, 4):
                 config = deep_ep.Config(num_sms, nvl_chunk_size, nvl_buffer_size, rdma_chunk_size, rdma_buffer_size)
                 tune_args = {'x': current_x, 'handle': handle, 'config': config}
-                t, notify_t = bench_kineto(lambda: buffer.dispatch(**tune_args), ("dispatch", "notify"))
+                t, notify_t = bench_kineto(lambda: buffer.dispatch(**tune_args), ('dispatch', 'notify'))
                 if t < best_time:
                     best_time, best_results = t, (num_sms, nvl_chunk_size, rdma_chunk_size, notify_t)
                 if local_rank == 0:
@@ -213,7 +213,7 @@ def test_main(args: argparse.Namespace, num_sms: int,
         for rdma_chunk_size in range(8, 33, 4):
             config = deep_ep.Config(num_sms, nvl_chunk_size, nvl_buffer_size, rdma_chunk_size, rdma_buffer_size)
             tune_args = {'x': recv_x, 'handle': handle, 'config': config}
-            t, notify_t = bench_kineto(lambda: buffer.combine(**tune_args), ("combine", "notify"))
+            t, notify_t = bench_kineto(lambda: buffer.combine(**tune_args), ('combine', 'notify'))
             if local_rank == 0:
                 print(f'[tuning] SMs {num_sms}, NVL chunk {nvl_chunk_size}, RDMA chunk {rdma_chunk_size}, transmit: {t * 1e6:.2f} us, notify: {notify_t * 1e6:.2f} us, BW: {combine_bf16_rdma_recv_bytes / 1e9 / t:.2f} GB/s (RDMA), {combine_bf16_nvl_send_bytes / 1e9 / t:.2f} GB/s (NVL) ', flush=True)
                 if t < best_time:
