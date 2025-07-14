@@ -30,6 +30,9 @@ private:
     int low_latency_buffer_idx = 0;
     bool low_latency_mode = false;
 
+    // PCIe mode buffer
+    bool pcie_mode = false;
+
     // NVLink Buffer
     int64_t num_nvl_bytes;
     void* buffer_ptrs[NUM_MAX_NVL_PEERS] = {nullptr};
@@ -77,7 +80,7 @@ private:
     int* moe_recv_rdma_counter_mapped = nullptr;
 
 public:
-    Buffer(int rank, int num_ranks, int64_t num_nvl_bytes, int64_t num_rdma_bytes, bool low_latency_mode, bool explicitly_destroy);
+    Buffer(int rank, int num_ranks, int64_t num_nvl_bytes, int64_t num_rdma_bytes, bool low_latency_mode, bool explicitly_destroy,bool pcie_mode);
 
     ~Buffer() noexcept(false);
 
