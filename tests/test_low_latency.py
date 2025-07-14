@@ -160,7 +160,7 @@ def test_loop(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
         print(f'Allocating buffer size: {num_rdma_bytes / 1e6} MB ...', flush=True)
     buffer = deep_ep.Buffer(group, num_rdma_bytes=num_rdma_bytes, low_latency_mode=True,
                             num_qps_per_rank=num_experts // num_ranks,
-                            allow_nvlink_for_low_latency_mode=not args.disable_nvlink)
+                            allow_nvlink_for_low_latency_mode=not args.disable_nvlink, explicitly_destroy=True)
     test_main(num_tokens, hidden, num_experts, num_topk, rank, num_ranks, group, buffer,
               use_logfmt=args.use_logfmt, seed=1)
 
@@ -174,7 +174,8 @@ def test_loop(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
             assert test_main(num_tokens, hidden, num_experts, num_topk, rank, num_ranks, group, buffer,
                              use_logfmt=args.use_logfmt, seed=seed) == ref_hash, f'Error: seed={seed}'
 
-    # Destroy the communication group
+    # Destroy the buffer runtime and communication group
+    buffer.destroy()
     dist.barrier()
     dist.destroy_process_group()
 

@@ -33,7 +33,8 @@ class Buffer:
                  num_nvl_bytes: int = 0, num_rdma_bytes: int = 0,
                  low_latency_mode: bool = False, num_qps_per_rank: int = 24,
                  allow_nvlink_for_low_latency_mode: bool = True,
-                 allow_mnnvl: bool = False) -> None:
+                 allow_mnnvl: bool = False,
+                 explicitly_destroy: bool = False) -> None:
         """
         Initialize the communication buffer.
 
@@ -49,6 +50,9 @@ class Buffer:
                 Warning: PCIe connections may lead to errors due to memory ordering issues,
                 please make sure all connections are via NVLink.
             allow_mnnvl: whether to allow MNNVL
+            explicitly_destroy: If this flag is set to True, you need to explicitly call `destroy()` to release resources;
+                otherwise, the resources will be released by the destructor.
+                Note: Releasing resources in the destructor may cause Python's exception handling process to hang.
         """
         check_nvlink_connections(group)
 
@@ -59,7 +63,8 @@ class Buffer:
         self.num_nvl_bytes = num_nvl_bytes
         self.num_rdma_bytes = num_rdma_bytes
         self.low_latency_mode = low_latency_mode
-        self.runtime = deep_ep_cpp.Buffer(self.rank, self.group_size, num_nvl_bytes, num_rdma_bytes, low_latency_mode)
+        self.explicitly_destroy = explicitly_destroy
+        self.runtime = deep_ep_cpp.Buffer(self.rank, self.group_size, num_nvl_bytes, num_rdma_bytes, low_latency_mode, explicitly_destroy)
 
         # Synchronize device IDs
         device_ids = [None, ] * self.group_size
@@ -105,6 +110,18 @@ class Buffer:
         # Make CPP runtime available
         self.runtime.sync(device_ids, ipc_handles, root_unique_id)
         assert self.runtime.is_available()
+
+    def destroy(self):
+        """
+        Destroy the cpp runtime and release resources.
+        
+        """
+
+        assert self.explicitly_destroy, '`explicitly_destroy` flag must be set'
+
+        self.runtime.destroy()
+        self.runtime = None
+
 
     @staticmethod
     def is_sm90_compiled():

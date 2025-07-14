@@ -18,9 +18,11 @@ Hardware requirements:
 
 ### 1. Acquiring NVSHMEM source code
 
-Download NVSHMEM v3.2.5 from the [NVIDIA NVSHMEM OPEN SOURCE PACKAGES](https://developer.nvidia.com/downloads/assets/secure/nvshmem/nvshmem_src_3.2.5-1.txz).
+Download NVSHMEM source code from the [NVIDIA NVSHMEM OPEN SOURCE PACKAGES](https://developer.nvidia.com/downloads/assets/secure/nvshmem/nvshmem_src_cuda12-all).
 
-### 2. Apply our custom patch
+### 2. [Optional] apply our custom patch
+
+**NOTE: After NVSHMEM v3.3.9, it is no longer necessary to apply our patch to achieve optimal performance.**
 
 Navigate to your NVSHMEM source directory and apply our provided patch:
 
