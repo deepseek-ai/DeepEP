@@ -1346,8 +1346,7 @@ Buffer::pcie_dispatch(const torch::Tensor& x, const std::optional<torch::Tensor>
                       const std::optional<torch::Tensor>& topk_idx, const std::optional<torch::Tensor>& topk_weights,
                       const std::optional<torch::Tensor>& num_tokens_per_rank, const std::optional<torch::Tensor>& num_tokens_per_rdma_rank,
                       const torch::Tensor& is_token_in_rank, const std::optional<torch::Tensor>& num_tokens_per_expert,
-                      int num_experts, int expert_alignment,
-                      const Config& config, std::optional<EventHandle>& previous_event, bool async, bool allocate_on_comm_stream) {
+                      int expert_alignment,const Config& config, std::optional<EventHandle>& previous_event, bool async, bool allocate_on_comm_stream) {
 #ifndef DISABLE_NVSHMEM
     pybind11::gil_scoped_release release;
 
@@ -1379,6 +1378,7 @@ Buffer::pcie_dispatch(const torch::Tensor& x, const std::optional<torch::Tensor>
     auto num_tokens = static_cast<int>(x.size(0));
     auto hidden = static_cast<int>(x.size(1));
     auto hidden_int4 = static_cast<int>(x.size(1) * x.element_size() / sizeof(int4));
+    auto num_experts = static_cast<int>(num_tokens_per_expert->size(0));
 
     // Top-k checks
     int num_topk = 0;

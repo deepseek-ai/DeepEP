@@ -143,8 +143,7 @@ public:
                   const std::optional<torch::Tensor>& topk_idx, const std::optional<torch::Tensor>& topk_weights,
                   const std::optional<torch::Tensor>& num_tokens_per_rank, const std::optional<torch::Tensor>& num_tokens_per_rdma_rank,
                   const torch::Tensor& is_token_in_rank, const std::optional<torch::Tensor>& num_tokens_per_expert,
-                  int num_experts, int expert_alignment,
-                  const Config& config, std::optional<EventHandle>& previous_event, bool async, bool allocate_on_comm_stream);
+                  int expert_alignment,const Config& config, std::optional<EventHandle>& previous_event, bool async, bool allocate_on_comm_stream);
 
     std::tuple<torch::Tensor, std::optional<torch::Tensor>, std::optional<EventHandle>>
     internode_combine(const torch::Tensor& x, const std::optional<torch::Tensor>& topk_weights,
