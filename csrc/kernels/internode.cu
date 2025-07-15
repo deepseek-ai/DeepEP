@@ -1589,10 +1589,8 @@ combine(int4* combined_x, float* combined_topk_weights,
                 // Read expected head
                 EP_STATIC_ASSERT(kNumRDMARanks <= 32, "Invalid number of RDMA peers");
                 int expected_head = -1;
-                if (lane_id < kNumRDMARanks) {
+                if (lane_id < kNumRDMARanks)
                     expected_head = ld_nc_global(combined_rdma_head + token_idx * kNumRDMARanks + lane_id);
-                    (expected_head < 0) ? (rdma_receiver_rdma_head[warp_id][lane_id] = -expected_head - 1) : (rdma_receiver_rdma_head[warp_id][lane_id] = expected_head);
-                }
 
                 // Wait lanes to be ready
                 auto start_time = clock64();
@@ -1619,6 +1617,9 @@ combine(int4* combined_x, float* combined_topk_weights,
                                                                          bias_0 == nullptr ? nullptr : bias_0 + token_idx * hidden_int4,
                                                                          bias_1 == nullptr ? nullptr : bias_1 + token_idx * hidden_int4,
                                                                          num_max_rdma_chunked_recv_tokens, recv_fn, recv_tw_fn);
+                
+                if (lane_id < kNumRDMARanks)
+                    (expected_head < 0) ? (rdma_receiver_rdma_head[warp_id][lane_id] = -expected_head - 1) : (rdma_receiver_rdma_head[warp_id][lane_id] = expected_head);
             }
 
             // Retired
