@@ -2528,8 +2528,8 @@ void dispatch_pcie(void* recv_x, float* recv_x_scales, int64_t* recv_topk_idx, f
     constexpr int kNumDispatchReceiverWarps = 4;
     constexpr int kNumDispatchReceiverCoordinatorWarps = 1;
 
-#define DISPATCH_PCIE_LAUNCH_CASE(num_ranks_val) { \
-    auto dispatch_func = internode::dispatch_pcie<num_ranks_val, kNumDispatchRDMASenderWarps, kNumDispatchReceiverWarps, kNumDispatchReceiverCoordinatorWarps>; \
+#define DISPATCH_PCIE_LAUNCH_CASE(num_ranks) { \
+    auto dispatch_func = internode::dispatch_pcie<num_ranks, kNumDispatchRDMASenderWarps, kNumDispatchReceiverWarps, kNumDispatchReceiverCoordinatorWarps>; \
     LAUNCH_KERNEL(&cfg, dispatch_func, \
                   reinterpret_cast<int4*>(recv_x), recv_x_scales, recv_topk_idx, recv_topk_weights, reinterpret_cast<internode::SourceMeta*>(recv_src_meta), \
                   reinterpret_cast<const int4*>(x), x_scales, topk_idx, topk_weights, \
