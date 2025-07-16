@@ -1103,10 +1103,10 @@ __global__ void cached_notify(const int rdma_clean_offset, const int rdma_num_in
         EP_STATIC_ASSERT(NUM_MAX_NVL_PEERS <= 32, "Too many NVL peers");
 
         if (warp_id < num_channels) {
-            constexpr int tma_batch_size = kNumTMABytesPerWarp - sizeof(int4);
+            constexpr int tma_batch_size = kNumTMABytesPerWarp - sizeof(uint64_t);
             constexpr int num_bytes_per_token = sizeof(int) * NUM_MAX_NVL_PEERS;
             constexpr int num_tokens_per_batch = tma_batch_size / num_bytes_per_token;
-            EP_STATIC_ASSERT(tma_batch_size % num_bytes_per_token == 0, "tma_batch_size should be divisible by num_bytes_per_token");
+            EP_STATIC_ASSERT(num_bytes_per_token % 16 == 0, "num_bytes_per_token should be divisible by 16");
             
             // TMA stuffs
             extern __shared__ __align__(1024) uint8_t smem_tma_buffer[];
@@ -1136,8 +1136,8 @@ __global__ void cached_notify(const int rdma_clean_offset, const int rdma_num_in
                         tma_load_1d(tma_buffer, combined_nvl_head + batch_start_idx * NUM_MAX_NVL_PEERS, tma_mbarrier, (batch_end_idx - batch_start_idx) * num_bytes_per_token);
                         mbarrier_arrive_and_expect_tx(tma_mbarrier, (batch_end_idx - batch_start_idx) * num_bytes_per_token);
                     }
-                    __syncwarp();
                     mbarrier_wait(tma_mbarrier, tma_phase);
+                    __syncwarp();
 
                     for (int token_idx = batch_end_idx - 1; token_idx >= batch_start_idx; -- token_idx) {
                         if (lane_id < NUM_MAX_NVL_PEERS) {
@@ -1154,8 +1154,8 @@ __global__ void cached_notify(const int rdma_clean_offset, const int rdma_num_in
 
                     if (lane_id == 0) 
                         tma_store_1d(tma_buffer, combined_nvl_head + batch_start_idx * NUM_MAX_NVL_PEERS, (batch_end_idx - batch_start_idx) * num_bytes_per_token);
-                    __syncwarp();
                     tma_store_wait();
+                    __syncwarp();
                 }
             }
         }
@@ -1173,7 +1173,7 @@ void cached_notify(int hidden_int4, int num_scales, int num_topk_idx, int num_to
     const int num_threads = std::max(128, 32 * num_channels);
     const int num_warps = num_threads / 32;
     const auto num_rdma_ranks = num_ranks / NUM_MAX_NVL_PEERS;
-    const int kNumTMABytesPerWarp = 8192 + sizeof(int4);
+    const int kNumTMABytesPerWarp = 8192;
     const int smem_size = kNumTMABytesPerWarp * num_warps;
 
     // Get clean meta
