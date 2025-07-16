@@ -355,6 +355,12 @@ class Buffer:
         # Default config
         config = self.get_dispatch_config(self.group_size) if config is None else config
 
+        # pcie
+        if self.pcie_mode:
+            assert num_worst_tokens == 0, 'Internode dispatch does not support `num_worst_tokens > 0`'
+            return self.pcie_dispatch(x, handle, num_tokens_per_rank, num_tokens_per_rdma_rank, is_token_in_rank, num_tokens_per_expert,
+                                     topk_idx, topk_weights, expert_alignment, config, previous_event, async_finish, allocate_on_comm_stream)
+
         # Internode
         if self.runtime.get_num_rdma_ranks() > 1:
             assert num_worst_tokens == 0, 'Internode dispatch does not support `num_worst_tokens > 0`'
@@ -429,6 +435,39 @@ class Buffer:
             src_idx, rank_prefix_matrix, channel_prefix_matrix, send_head, config,
             getattr(previous_event, 'event', None), async_finish, allocate_on_comm_stream)
         return recv_x, recv_topk_weights, EventOverlap(event)
+
+    # noinspection PyTypeChecker
+    def pcie_dispatch(self, x: Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]],
+                           handle: Optional[Tuple] = None,
+                           num_tokens_per_rank: Optional[torch.Tensor] = None, num_tokens_per_rdma_rank: Optional[torch.Tensor] = None,
+                           is_token_in_rank: Optional[torch.Tensor] = None, num_tokens_per_expert: Optional[torch.Tensor] = None,
+                           topk_idx: Optional[torch.Tensor] = None, topk_weights: Optional[torch.Tensor] = None, expert_alignment: int = 1,
+                           config: Optional[Config] = None,
+                           previous_event: Optional[EventOverlap] = None, async_finish: bool = False,
+                           allocate_on_comm_stream: bool = False) -> \
+            Tuple[Union[Tuple[torch.Tensor, torch.Tensor], torch.Tensor], Optional[torch.Tensor],
+            Optional[torch.Tensor], List[int], Tuple, EventOverlap]:
+        """
+        PCIe dispatch implementation, for more details, please refer to the `dispatch` docs.
+        Normally, you should not directly call this function.
+        """
+        assert config is not None
+
+        # Launch the kernel with cached or non-cached mode
+        x, x_scales = x if isinstance(x, tuple) else (x, None)
+        # if handle is not None:
+        #     NotImplementedError('PCIE dispatch with handle is not implemented')
+        # else:
+        assert num_tokens_per_rank is not None and is_token_in_rank is not None and num_tokens_per_expert is not None
+        recv_x, recv_x_scales, recv_topk_idx, recv_topk_weights, recv_src_meta, \
+            recv_gbl_channel_prefix_matrix, recv_gbl_rank_prefix_sum, \
+            num_recv_tokens_per_expert_list, event = self.runtime.pcie_dispatch(
+            x, x_scales, topk_idx, topk_weights,
+            num_tokens_per_rank, num_tokens_per_rdma_rank, is_token_in_rank, num_tokens_per_expert,
+            expert_alignment, config, getattr(previous_event, 'event', None), async_finish, allocate_on_comm_stream)
+        handle = (recv_src_meta, recv_gbl_channel_prefix_matrix, recv_gbl_rank_prefix_sum)
+        return (recv_x, recv_x_scales) if x_scales is not None else recv_x, recv_topk_idx, recv_topk_weights, num_recv_tokens_per_expert_list, handle, EventOverlap(event)
+
 
     # noinspection PyTypeChecker
     def internode_dispatch(self, x: Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]],
