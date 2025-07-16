@@ -1103,21 +1103,23 @@ __global__ void cached_notify(const int rdma_clean_offset, const int rdma_num_in
         EP_STATIC_ASSERT(NUM_MAX_NVL_PEERS <= 32, "Too many NVL peers");
 
         if (warp_id < num_channels) {
+            constexpr int tma_batch_size = kNumTMABytesPerWarp - sizeof(int4);
+            constexpr int num_bytes_per_token = sizeof(int) * NUM_MAX_NVL_PEERS;
+            constexpr int num_tokens_per_batch = tma_batch_size / num_bytes_per_token;
+            EP_STATIC_ASSERT(tma_batch_size % num_bytes_per_token == 0, "tma_batch_size should be divisible by num_bytes_per_token");
+            
             // TMA stuffs
             extern __shared__ __align__(1024) uint8_t smem_tma_buffer[];
             auto tma_buffer = smem_tma_buffer + warp_id * kNumTMABytesPerWarp;
-            auto tma_mbarrier = reinterpret_cast<uint64_t*>(smem_tma_buffer + num_channels * kNumTMABytesPerWarp + warp_id * sizeof(uint64_t));
+            auto tma_mbarrier = reinterpret_cast<uint64_t*>(tma_buffer + tma_batch_size);
             uint32_t tma_phase = 0;
             if (lane_id == 0) {
                 mbarrier_init(tma_mbarrier, 1);
                 fence_view_async_shared();
                 fence_barrier_init();
             }
+            __syncwarp();
 
-            constexpr int num_bytes_per_token = sizeof(int) * NUM_MAX_NVL_PEERS;
-            constexpr int num_tokens_per_batch = kNumTMABytesPerWarp / num_bytes_per_token;
-            EP_STATIC_ASSERT(kNumTMABytesPerWarp % num_bytes_per_token == 0, "kNumTMABytesPerWarp should be divisible by num_bytes_per_token");
-            
             for (int dst_rdma_rank = sm_id - 2; dst_rdma_rank < num_rdma_ranks; dst_rdma_rank += num_channels * 2 - 2) {
                 // Iterate in reverse order
                 int token_start_idx = warp_id == 0 ? 0 : rdma_channel_prefix_matrix[dst_rdma_rank * num_channels + warp_id - 1];
@@ -1129,9 +1131,6 @@ __global__ void cached_notify(const int rdma_clean_offset, const int rdma_num_in
                 int last_head = 1 << 25;
                 for (int batch_end_idx = token_end_idx; batch_end_idx > token_start_idx; batch_end_idx -= num_tokens_per_batch)  {
                     auto batch_start_idx = max(token_start_idx, batch_end_idx - num_tokens_per_batch);
-
-                    tma_store_wait();
-                    __syncwarp();
 
                     if (lane_id == 0) {
                         tma_load_1d(tma_buffer, combined_nvl_head + batch_start_idx * NUM_MAX_NVL_PEERS, tma_mbarrier, (batch_end_idx - batch_start_idx) * num_bytes_per_token);
@@ -1155,9 +1154,9 @@ __global__ void cached_notify(const int rdma_clean_offset, const int rdma_num_in
 
                     if (lane_id == 0) 
                         tma_store_1d(tma_buffer, combined_nvl_head + batch_start_idx * NUM_MAX_NVL_PEERS, (batch_end_idx - batch_start_idx) * num_bytes_per_token);
+                    __syncwarp();
+                    tma_store_wait();
                 }
-
-                tma_store_wait();
             }
         }
     }
@@ -1174,8 +1173,8 @@ void cached_notify(int hidden_int4, int num_scales, int num_topk_idx, int num_to
     const int num_threads = std::max(128, 32 * num_channels);
     const int num_warps = num_threads / 32;
     const auto num_rdma_ranks = num_ranks / NUM_MAX_NVL_PEERS;
-    constexpr int kNumTMABytesPerWarp = 8192;
-    const int smem_size = (kNumTMABytesPerWarp + sizeof(uint64_t)) * num_warps;
+    const int kNumTMABytesPerWarp = 8192 + sizeof(int4);
+    const int smem_size = kNumTMABytesPerWarp * num_warps;
 
     // Get clean meta
     auto rdma_clean_meta = get_rdma_clean_meta(hidden_int4, num_scales, num_topk_idx, num_topk_weights, num_rdma_ranks, num_max_rdma_chunked_recv_tokens, num_channels);
@@ -1630,8 +1629,10 @@ combine(int4* combined_x, float* combined_topk_weights,
                 // Read expected head
                 EP_STATIC_ASSERT(kNumRDMARanks <= 32, "Invalid number of RDMA peers");
                 int expected_head = -1;
-                if (lane_id < kNumRDMARanks)
+                if (lane_id < kNumRDMARanks) {
                     expected_head = ld_nc_global(combined_rdma_head + token_idx * kNumRDMARanks + lane_id);
+                    (expected_head < 0) ? (rdma_receiver_rdma_head[warp_id][lane_id] = -expected_head - 1) : (rdma_receiver_rdma_head[warp_id][lane_id] = expected_head);
+                }
 
                 // Wait lanes to be ready
                 auto start_time = clock64();
@@ -1658,9 +1659,6 @@ combine(int4* combined_x, float* combined_topk_weights,
                                                                          bias_0 == nullptr ? nullptr : bias_0 + token_idx * hidden_int4,
                                                                          bias_1 == nullptr ? nullptr : bias_1 + token_idx * hidden_int4,
                                                                          num_max_rdma_chunked_recv_tokens, recv_fn, recv_tw_fn);
-                
-                if (lane_id < kNumRDMARanks)
-                    (expected_head < 0) ? (rdma_receiver_rdma_head[warp_id][lane_id] = -expected_head - 1) : (rdma_receiver_rdma_head[warp_id][lane_id] = expected_head);
             }
 
             // Retired
