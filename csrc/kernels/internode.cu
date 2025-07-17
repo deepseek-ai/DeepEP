@@ -2123,7 +2123,6 @@ dispatch_pcie(int4* recv_x, float* recv_x_scales, int64_t* recv_topk_idx, float*
         // Get tasks
         int token_start_idx, token_end_idx;
         get_channel_task_range(num_tokens, num_channels, channel_id, token_start_idx, token_end_idx);
-
         // Send number of tokens in this channel by `-value - 1`
         for (int dst_rdma_rank = warp_id; dst_rdma_rank < kNumRanks; dst_rdma_rank += kNumDispatchRDMASenderWarps) {
             auto dst_ptr = dst_rdma_rank == rank ? rdma_channel_meta.recv_buffer(dst_rdma_rank) : rdma_channel_meta.send_buffer(dst_rdma_rank);
@@ -2138,7 +2137,7 @@ dispatch_pcie(int4* recv_x, float* recv_x_scales, int64_t* recv_topk_idx, float*
             if (dst_rdma_rank != rank) {
                 nvshmemi_ibgda_put_nbi_warp<true>(reinterpret_cast<uint64_t>(rdma_channel_meta.recv_buffer(rank)),
                                                   reinterpret_cast<uint64_t>(rdma_channel_meta.send_buffer(dst_rdma_rank)),
-                                                  sizeof(int) * (NUM_MAX_NVL_PEERS * 2 + 2),
+                                                  sizeof(int) * 2,
                                                   dst_rdma_rank,
                                                   channel_id, lane_id, 0);
             }
@@ -2149,13 +2148,14 @@ dispatch_pcie(int4* recv_x, float* recv_x_scales, int64_t* recv_topk_idx, float*
         int64_t token_idx;
         int cached_rdma_channel_head = 0, global_rdma_tail_idx = 0;
         auto send_buffer = lane_id == rank ? rdma_channel_data.recv_buffer(lane_id) : rdma_channel_data.send_buffer(lane_id);
+
         for (token_idx = token_start_idx; token_idx < token_end_idx; ++ token_idx) {
             // Read RDMA rank existence
             uint64_t is_token_in_rank_uint64 = 0;
             for(int i = 0; i < num_topk; ++i) {
                 //TODO: 暂时用topk计算，后续根据性能考虑是否在get dispatch layout中实现topk_ranks_idx替换减少计算
                 int target_expert = __ldg(reinterpret_cast<const int*>(topk_idx + token_idx * num_topk + i));
-                int target_rank = target_expert % num_local_experts;
+                int target_rank = target_expert / num_local_experts;
                 if(lane_id == target_rank) {
                     is_token_in_rank_uint64 = 1;
                     global_rdma_tail_idx++;
@@ -2163,12 +2163,10 @@ dispatch_pcie(int4* recv_x, float* recv_x_scales, int64_t* recv_topk_idx, float*
                 }
             }  
             __syncwarp();
-
             // Skip the token which does not belong to this warp
             if ((token_idx - token_start_idx) % kNumDispatchRDMASenderWarps != warp_id)
                 continue;
             auto rdma_tail_idx = is_token_in_rank_uint64 == 0 ? -1 : global_rdma_tail_idx - 1;
-
             // Wait the remote buffer to be released
             auto start_time = clock64();
             while (is_token_in_rank_uint64 != 0 and rdma_tail_idx - cached_rdma_channel_head >= num_max_rdma_chunked_recv_tokens) {
