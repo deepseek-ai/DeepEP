@@ -171,7 +171,7 @@ def test_main(num_tokens: int, hidden: int, num_experts: int, num_topk: int,
                     test_diagnose,
                     test_dispatch_slow=test_dispatch_slow,
                     slow_rank=slow_rank[i]))
-        time.sleep(5)
+        time.sleep(int(os.getenv("DEEPEP_DIAGNOSE_INTERVAL", 1)) + 5)
         if rank == 0:
             for i, name in enumerate(["Dispatch", "Combine"]):
                 res = deep_ep.Diagnose.diagnose_matrix(
