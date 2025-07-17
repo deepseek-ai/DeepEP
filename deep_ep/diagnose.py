@@ -13,12 +13,22 @@ from logging.handlers import TimedRotatingFileHandler
 
 class Diagnose:
     """
-    Diagnose collects statistics on the average time spent waiting to receive each token, enabling effective detection and precise localization of slow anomalies in distributed computation.
+    Distributed large-scale EP is gradually becoming the main deployment strategy for MOE models. However, as the
+        scale of EP increases, the risk of slowdowns in the Dispatch and Combine communication operators also rises.
+    There are many factors, ranging from GPU hardware anomalies and imbalanced MOE computation to issues with communication
+        links, all of which make the detection and localization of the DeepEP slow problems extremely challenging.
+    To address this, we have designed a diagnosis module. Each rank collects the average waiting time for receiving each token
+        from other ranks and reports these statistics to rank 0. Based on the mean-normalized characteristics of the resulting
+        analysis matrix, rank 0 can effectively detect and precisely localize slow anomalies in distributed communication.
+    In addition, the impact of the overhead of this diagnostic module on performance can be ignored.
+
     Supports identifying:
         - 1. Slowdown caused by the destination rank.
         - 2. Slowdown caused by the source rank.
         - 3. Slowdown caused by the communication path between a specific source and destination rank.
-    Maintains a statistical matrix of average receive wait times: Matrix[src_rank, dst_rank], where each row represents a source rank and each column represents a destination rank.
+
+    Maintains a statistical matrix of average receive wait times: Matrix[src_rank, dst_rank], where each row represents a
+        source rank and each column represents a destination rank.
 
     Example anomaly localization:
     1. Abnormal column 3: indicates destination rank 3 is slow.
