@@ -1,5 +1,7 @@
 import argparse
 import random
+import time
+import os
 import torch
 import torch.distributed as dist
 from functools import partial
@@ -10,7 +12,7 @@ from utils import init_dist, bench, bench_kineto, calc_diff, hash_tensor, per_to
 
 def test_main(num_tokens: int, hidden: int, num_experts: int, num_topk: int,
               rank: int, num_ranks: int, group: dist.ProcessGroup, buffer: deep_ep.Buffer,
-              use_logfmt: bool = False, seed: int = 0):
+              use_logfmt: bool = False, seed: int = 0, enable_test_diagnose: bool = False):
     torch.manual_seed(seed + rank)
     random.seed(seed + rank)
 
@@ -121,6 +123,19 @@ def test_main(num_tokens: int, hidden: int, num_experts: int, num_topk: int,
                                                              use_logfmt=use_logfmt, return_recv_hook=return_recv_hook)
         large_gemm_with_hook(hook) if return_recv_hook else None
 
+    # noinspection PyShadowingNames
+    def test_diagnose(test_dispatch_slow: bool, slow_rank: int):
+        if test_dispatch_slow:
+            if rank == slow_rank:
+                time.sleep(0.001)
+            buffer.low_latency_dispatch(x_pure_rand, topk_idx, num_tokens, num_experts,
+                                        cumulative_local_expert_recv_stats=cumulative_local_expert_recv_stats,
+                                        use_fp8=True, async_finish=False)
+        else:
+            if rank == slow_rank:
+                time.sleep(0.001)
+            buffer.low_latency_combine(simulated_gemm_x, topk_idx, topk_weights, handle,
+                                                             use_logfmt=use_logfmt, return_recv_hook=False)
     # Calculate bandwidth
     num_fp8_bytes, num_bf16_bytes = (hidden + hidden / 128 * 4 + 16), hidden * 2
     num_dispatch_comm_bytes, num_combine_comm_bytes = 0, 0
@@ -146,6 +161,25 @@ def test_main(num_tokens: int, hidden: int, num_experts: int, num_topk: int,
         else:
             print(f'[rank {rank}] Dispatch send/recv time: {dispatch_t[0] * 1e6:.2f} + {dispatch_t[1] * 1e6:.2f} us | '
                   f'Combine send/recv time: {combine_t[0] * 1e6:.2f} + {combine_t[1] * 1e6:.2f} us', flush=True)
+
+    # Diagnose test
+    if enable_test_diagnose:
+        slow_rank = [2, 3]
+        for i, test_dispatch_slow in enumerate([True, False]):
+            bench(
+                partial(
+                    test_diagnose,
+                    test_dispatch_slow=test_dispatch_slow,
+                    slow_rank=slow_rank[i]))
+        time.sleep(5)
+        if rank == 0:
+            for i, name in enumerate(["Dispatch", "Combine"]):
+                res = deep_ep.Diagnose.diagnose_matrix(
+                    buffer.diagnose.get_all_stats_tensor()[:, i, :])
+                assert slow_rank[i] in res[
+                    'abnormal_cols'], f"[Diagnose] test failure, slow_rank {slow_rank[i]} not found in abnormal_cols {res['abnormal_cols']}"
+                print(
+                    f'[Diagnose] test successful!!! [{name}] slow_rank: {slow_rank[i]} diagnose info: {res}')
     return hash_value
 
 
@@ -155,6 +189,10 @@ def test_loop(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
     num_tokens, hidden = args.num_tokens, args.hidden
     num_topk, num_experts = args.num_topk, args.num_experts
 
+    if args.enable_diagnose:
+        os.environ['DEEPEP_DIAGNOSE_ENABLE'] = '1'
+        os.environ['DEEPEP_DIAGNOSE_INTERVAL'] = '1'
+
     num_rdma_bytes = deep_ep.Buffer.get_low_latency_rdma_size_hint(num_tokens, hidden, num_ranks, num_experts)
     if local_rank == 0:
         print(f'Allocating buffer size: {num_rdma_bytes / 1e6} MB ...', flush=True)
@@ -162,7 +200,7 @@ def test_loop(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
                             num_qps_per_rank=num_experts // num_ranks,
                             allow_nvlink_for_low_latency_mode=not args.disable_nvlink, explicitly_destroy=True)
     test_main(num_tokens, hidden, num_experts, num_topk, rank, num_ranks, group, buffer,
-              use_logfmt=args.use_logfmt, seed=1)
+              use_logfmt=args.use_logfmt, seed=1, enable_test_diagnose=args.enable_diagnose)
 
     do_pressure_test = False
     for seed in range(int(1e9) if do_pressure_test else 0):
@@ -198,6 +236,8 @@ if __name__ == '__main__':
                         help='Whether to disable NVLink for testing')
     parser.add_argument('--use-logfmt', action='store_true',
                         help='Whether to test LogFMT combine')
+    parser.add_argument('--enable-diagnose', action='store_true',
+                        help='Whether to enable diagnose for testing')
     args = parser.parse_args()
 
     num_processes = args.num_processes
