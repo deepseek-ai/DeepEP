@@ -146,20 +146,26 @@ template <bool kAlwaysDoPostSend>
 __device__ static __forceinline__
 void ibgda_submit_requests(nvshmemi_ibgda_device_qp_t *qp, uint64_t base_wqe_idx,
                            uint32_t num_wqes, int message_idx = 0) {
+    auto state = ibgda_get_state();
     nvshmemi_ibgda_device_qp_management_t *mvars = &qp->mvars;
     uint64_t new_wqe_idx = base_wqe_idx + num_wqes;
 
     // WQE writes must be finished first
     __threadfence();
 
+    unsigned long long int *ready_idx =
+        (unsigned long long int *)(state->use_async_postsend ? qp->tx_wq.prod_idx
+                                                             : &mvars->tx_wq.ready_head);
+
     // Wait for prior WQE slots to be filled first
-    auto *ready_idx = reinterpret_cast<unsigned long long int*>(&mvars->tx_wq.ready_head);
     while (atomicCAS(ready_idx, base_wqe_idx, new_wqe_idx) != base_wqe_idx);
 
     // Always post, not in batch
-    constexpr int kNumRequestInBatch = 4;
-    if (kAlwaysDoPostSend or (message_idx + 1) % kNumRequestInBatch == 0)
-        ibgda_post_send(qp, new_wqe_idx);
+    if (!state->use_async_postsend) {
+        constexpr int kNumRequestInBatch = 4;
+        if (kAlwaysDoPostSend or (message_idx + 1) % kNumRequestInBatch == 0)
+            ibgda_post_send(qp, new_wqe_idx);
+    }
 }
 
 __device__ static __forceinline__ void
@@ -370,9 +376,10 @@ nvshmemi_ibgda_put_nbi_warp(uint64_t req_rptr, uint64_t req_lptr, size_t bytes, 
         base_wqe_idx = ibgda_reserve_wqe_slots(qp, num_wqes);
     base_wqe_idx = __shfl_sync(0xffffffff, base_wqe_idx, 0);
     if (lane_id < num_wqes) {
-        auto wqe_ptr = ibgda_get_wqe_ptr(qp, base_wqe_idx + lane_id);
+        auto wqe_idx = base_wqe_idx + lane_id;
+        auto wqe_ptr = ibgda_get_wqe_ptr(qp, wqe_idx);
         ibgda_write_rdma_write_wqe(qp, my_laddr, my_lkey, my_raddr, my_rkey, my_chunk_size,
-                                   base_wqe_idx, &wqe_ptr);
+                                   wqe_idx, &wqe_ptr);
     }
     __syncwarp();
 
@@ -487,7 +494,8 @@ ibgda_poll_cq(nvshmemi_ibgda_device_cq_t *cq, uint64_t idx) {
 __device__ static __forceinline__ void
 nvshmemi_ibgda_quiet(int dst_pe, int qp_id) {
     auto qp = ibgda_get_rc(dst_pe, qp_id);
-    uint64_t prod_idx = ld_na_relaxed(qp->tx_wq.prod_idx);
+    auto state = ibgda_get_state();
+    uint64_t prod_idx = state->use_async_postsend ? ld_na_relaxed(qp->tx_wq.prod_idx) : ld_na_relaxed(&qp->mvars.tx_wq.ready_head);
     ibgda_poll_cq(qp->tx_wq.cq, prod_idx);
 }
 

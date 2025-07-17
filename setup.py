@@ -1,16 +1,34 @@
 import os
 import subprocess
 import setuptools
+import importlib
+import importlib.resources
 from torch.utils.cpp_extension import BuildExtension, CUDAExtension
 
+# Wheel specific: The wheels only include the soname of the host library (libnvshmem_host.so.X)
+def get_nvshmem_host_lib_name():
+    for path in importlib.resources.files('nvidia.nvshmem').iterdir():
+        for file in path.rglob('libnvshmem_host.so.*'):
+            return file.name
+    raise ModuleNotFoundError('libnvshmem_host.so not found')
 
 if __name__ == '__main__':
+    disable_nvshmem = False
     nvshmem_dir = os.getenv('NVSHMEM_DIR', None)
-    disable_nvshmem = nvshmem_dir is None
-    if disable_nvshmem:
-        print('Warning: `NVSHMEM_DIR` is not specified, all internode and low-latency features are disabled\n')
+    nvshmem_host_lib = 'libnvshmem_host.so'
+    if nvshmem_dir is None:
+        try:
+            nvshmem_dir = importlib.util.find_spec("nvidia.nvshmem").submodule_search_locations[0]
+            nvshmem_host_lib = get_nvshmem_host_lib_name()
+            import nvidia.nvshmem as nvshmem
+        except (ModuleNotFoundError, AttributeError, IndexError):
+            print('Warning: `NVSHMEM_DIR` is not specified, and the NVSHMEM module is not installed. All internode and low-latency features are disabled\n')
+            disable_nvshmem = True
     else:
-        assert os.path.exists(nvshmem_dir), f'Failed to find NVSHMEM: {nvshmem_dir}'
+        disable_nvshmem = False
+
+    if not disable_nvshmem:
+        assert os.path.exists(nvshmem_dir), f'The specified NVSHMEM directory does not exist: {nvshmem_dir}'
 
     cxx_flags = ['-O3', '-Wno-deprecated-declarations', '-Wno-unused-variable',
                  '-Wno-sign-compare', '-Wno-reorder', '-Wno-attributes']
@@ -29,8 +47,8 @@ if __name__ == '__main__':
         sources.extend(['csrc/kernels/internode.cu', 'csrc/kernels/internode_ll.cu'])
         include_dirs.extend([f'{nvshmem_dir}/include'])
         library_dirs.extend([f'{nvshmem_dir}/lib'])
-        nvcc_dlink.extend(['-dlink', f'-L{nvshmem_dir}/lib', '-lnvshmem'])
-        extra_link_args.extend(['-l:libnvshmem.a', '-l:nvshmem_bootstrap_uid.so', f'-Wl,-rpath,{nvshmem_dir}/lib'])
+        nvcc_dlink.extend(['-dlink', f'-L{nvshmem_dir}/lib', '-lnvshmem_device'])
+        extra_link_args.extend([f'-l:{nvshmem_host_lib}', '-l:libnvshmem_device.a', f'-Wl,-rpath,{nvshmem_dir}/lib'])
 
     if int(os.getenv('DISABLE_SM90_FEATURES', 0)):
         # Prefer A100

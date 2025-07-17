@@ -14,25 +14,30 @@ Hardware requirements:
    - InfiniBand GPUDirect Async (IBGDA) support, see [IBGDA Overview](https://developer.nvidia.com/blog/improving-network-performance-of-hpc-systems-using-nvidia-magnum-io-nvshmem-and-gpudirect-async/)
    - For more detailed requirements, see [NVSHMEM Hardware Specifications](https://docs.nvidia.com/nvshmem/release-notes-install-guide/install-guide/abstract.html#hardware-requirements)
 
+Software requirements:
+   - NVSHMEM v3.3.9 or later
+
 ## Installation procedure
 
-### 1. Acquiring NVSHMEM source code
+### 1. Install NVSHMEM binaries
 
-Download NVSHMEM source code from the [NVIDIA NVSHMEM OPEN SOURCE PACKAGES](https://developer.nvidia.com/downloads/assets/secure/nvshmem/nvshmem_src_cuda12-all).
+NVSHMEM 3.3.9 binaries are available in several formats:
+   - Tarballs for  [x86_64](https://developer.download.nvidia.com/compute/nvshmem/redist/libnvshmem/linux-x86_64/libnvshmem-linux-x86_64-3.3.9_cuda12-archive.tar.xz) and [aarch64](https://developer.download.nvidia.com/compute/nvshmem/redist/libnvshmem/linux-sbsa/libnvshmem-linux-sbsa-3.3.9_cuda12-archive.tar.xz)
+   - RPM and deb packages: instructions can be found on the [NVHSMEM installer page](https://developer.nvidia.com/nvshmem-downloads?target_os=Linux)
+   - Conda packages through conda-forge
+   - pip wheels through PyPI: `pip install nvidia-nvshmem-cu12`
+DeepEP is compatible with upstream NVSHMEM 3.3.9 and later.
 
-### 2. [Optional] apply our custom patch
 
-**NOTE: After NVSHMEM v3.3.9, it is no longer necessary to apply our patch to achieve optimal performance.**
+### 2. Enable NVSHMEM IBGDA support
 
-Navigate to your NVSHMEM source directory and apply our provided patch:
+NVSHMEM Supports two modes with different requirements. Either of the following methods can be used to enable IBGDA support.
 
-```bash
-git apply /path/to/deep_ep/dir/third-party/nvshmem.patch
-```
+#### 2.1 Configure NVIDIA driver
 
-### 3. Configure NVIDIA driver (required by inter-node communication)
+This configuration enables traditional IBGDA support.
 
-Enable IBGDA by modifying `/etc/modprobe.d/nvidia.conf`:
+Modify `/etc/modprobe.d/nvidia.conf`:
 
 ```bash
 options nvidia NVreg_EnableStreamMemOPs=1 NVreg_RegistryDwords="PeerMappingOverride=1;"
@@ -45,38 +50,19 @@ sudo update-initramfs -u
 sudo reboot
 ```
 
-For more detailed configurations, please refer to the [NVSHMEM Installation Guide](https://docs.nvidia.com/nvshmem/release-notes-install-guide/install-guide/abstract.html).
+#### 2.2 Install GDRCopy and load the gdrdrv kernel module
 
-### 4. Build and installation
+This configuration enables IBGDA through asynchronous post-send operations assisted by the CPU. More information about CPU-assisted IBGDA can be found in [this blog](https://developer.nvidia.com/blog/enhancing-application-portability-and-compatibility-across-new-platforms-using-nvidia-magnum-io-nvshmem-3-0/#cpu-assisted_infiniband_gpu_direct_async%C2%A0).
+It comes with a small performance penalty, but can be used when modifying the driver regkeys is not an option.
 
-DeepEP uses NVLink for intra-node communication and IBGDA for inter-node communication. All the other features are disabled to reduce the dependencies.
+Download GDRCopy
+GDRCopy is available as prebuilt deb and rpm packages [here](https://developer.download.nvidia.com/compute/redist/gdrcopy/). or as source code on the [GDRCopy github repository](https://github.com/NVIDIA/gdrcopy).
 
-```bash
-export CUDA_HOME=/path/to/cuda
-# disable all features except IBGDA
-export NVSHMEM_IBGDA_SUPPORT=1
-
-export NVSHMEM_SHMEM_SUPPORT=0
-export NVSHMEM_UCX_SUPPORT=0
-export NVSHMEM_USE_NCCL=0
-export NVSHMEM_PMIX_SUPPORT=0
-export NVSHMEM_TIMEOUT_DEVICE_POLLING=0
-export NVSHMEM_USE_GDRCOPY=0
-export NVSHMEM_IBRC_SUPPORT=0
-export NVSHMEM_BUILD_TESTS=0
-export NVSHMEM_BUILD_EXAMPLES=0
-export NVSHMEM_MPI_SUPPORT=0
-export NVSHMEM_BUILD_HYDRA_LAUNCHER=0
-export NVSHMEM_BUILD_TXZ_PACKAGE=0
-export NVSHMEM_TIMEOUT_DEVICE_POLLING=0
-
-cmake -G Ninja -S . -B build -DCMAKE_INSTALL_PREFIX=/path/to/your/dir/to/install
-cmake --build build/ --target install
-```
+Install GDRCopy following the instructions on the [GDRCopy github repository](https://github.com/NVIDIA/gdrcopy?tab=readme-ov-file#build-and-installation).
 
 ## Post-installation configuration
 
-Set environment variables in your shell configuration:
+When not installing NVSHMEM from RPM or deb packages, set the following environment variables in your shell configuration:
 
 ```bash
 export NVSHMEM_DIR=/path/to/your/dir/to/install  # Use for DeepEP installation
