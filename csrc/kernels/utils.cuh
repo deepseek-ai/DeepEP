@@ -550,4 +550,17 @@ __forceinline__ __device__ T warp_reduce_min(T value) {
     return warp_reduce<kNumLanes, T>(value, ReduceMin<T>{});
 }
 
+__forceinline__ __device__ unsigned long long atomicAverage(unsigned long long* address, unsigned long long val,
+                                                            bool force = false) {
+    unsigned long long old = *address;
+    unsigned long long assumed;
+    unsigned long long newval;
+    do {
+        assumed = old;
+        newval = (assumed + val) / 2;
+        old = atomicCAS(address, assumed, newval);
+    } while (force && old != assumed);
+
+    return old;
+}
 } // namespace deep_ep
