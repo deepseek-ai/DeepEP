@@ -696,17 +696,17 @@ combine(void* combined_x,
 
         // TMA stuffs
         constexpr int kNumDivisions = kHidden / 128;
-        constexpr int kNumMetaBytes = kNumDivisions * sizeof(uint32_t);
+        constexpr int kNumMetaBytes = kUseLogFMT ? kNumDivisions * sizeof(uint32_t) : 0;
         constexpr int kNumTMABufferBytes = sizeof(int4) * 32 * kNumUnrolls;
         constexpr int kNumStages = 3;
         constexpr int kNumPrefetch = 1;
         EP_STATIC_ASSERT(kNumStages == 3 and kNumPrefetch == 1, "Invalid stages");
 
-        auto smem_ptr = smem_buffer + warp_id * (kNumStages * (kNumTMABufferBytes + 8) + kNumMetaBytes);
+        auto smem_ptr = smem_buffer + warp_id * (kNumStages * (kNumTMABufferBytes + 16) + kNumMetaBytes);
         uint32_t tma_phase[kNumStages] = {};
-        auto tma_buffer   = PatternVisitor([=](const int& i) { return reinterpret_cast<int4*>(smem_ptr + i * (kNumTMABufferBytes + 8)); });
-        auto tma_mbarrier = PatternVisitor([=](const int& i) { return reinterpret_cast<uint64_t*>(smem_ptr + i * (kNumTMABufferBytes + 8) + kNumTMABufferBytes); });
-        auto meta_buffer  = reinterpret_cast<uint32_t*>(smem_ptr + kNumStages * (kNumTMABufferBytes + 8));
+        auto tma_buffer   = PatternVisitor([=](const int& i) { return reinterpret_cast<int4*>(smem_ptr + i * (kNumTMABufferBytes + 16)); });
+        auto tma_mbarrier = PatternVisitor([=](const int& i) { return reinterpret_cast<uint64_t*>(smem_ptr + i * (kNumTMABufferBytes + 16) + kNumTMABufferBytes); });
+        auto meta_buffer  = kUseLogFMT ? reinterpret_cast<uint32_t*>(smem_ptr + kNumStages * (kNumTMABufferBytes + 8)) : nullptr;
         EP_STATIC_ASSERT(kNumUnrolls * kNumStages <= 12, "TMA buffer size exceed limit");
 
         // Initialize m-barriers
@@ -737,6 +737,7 @@ combine(void* combined_x,
             const auto buf_ptr = reinterpret_cast<int64_t>(rdma_send_x_vec_row);
             const auto dst_ptr = reinterpret_cast<uint64_t>(rdma_recv_x) + (global_expert_idx * num_max_dispatch_tokens_per_rank + src_idx) * num_bytes_per_slot;
             const auto dst_p2p_ptr = nvshmemi_get_p2p_ptr(dst_ptr, rank, dst_rank);
+            int send_bytes = hidden * sizeof(nv_bfloat16);
 
             if (not zero_copy or dst_p2p_ptr != 0) {
                 // Read from `cpy_src_int4_ptr` and copy into `cpy_dst_int4_ptr`
@@ -748,7 +749,7 @@ combine(void* combined_x,
                     tma_load_and_arrive(0, cpy_src_int4_ptr, get_num_tma_bytes(0));
                 __syncwarp();
 
-                int send_offset_bytes = kNumMetaBytes;
+                int tma_offset_bytes = kNumMetaBytes;
                 #pragma unroll
                 for (int i = lane_id * kNumUnrolls, iter_idx = 0; i < hidden_bf16_int4_pad; i += 32 * kNumUnrolls, ++ iter_idx) {
                     // Load the next iteration
@@ -771,9 +772,9 @@ combine(void* combined_x,
                         int tma_bytes = 32 * kNumUnrolls * kNumElemsPerInt4 * (enable_cast ? 10 : 16) / 8;
                         // Store
                         if (elect_one_sync(lane_id))
-                            tma_store_1d(tma_buffer[stage_idx], reinterpret_cast<uint8_t*>(cpy_dst_int4_ptr) + send_offset_bytes, tma_bytes);
+                            tma_store_1d(tma_buffer[stage_idx], reinterpret_cast<uint8_t*>(cpy_dst_int4_ptr) + tma_offset_bytes, tma_bytes);
                         __syncwarp();
-                        send_offset_bytes += tma_bytes;
+                        tma_offset_bytes += tma_bytes;
                     }
                     else {
                         if constexpr (kUseSimulatedLogFMT)
@@ -786,6 +787,7 @@ combine(void* combined_x,
                 }
 
                 if constexpr (kUseLogFMT) {
+                    send_bytes = tma_offset_bytes;
                     if (elect_one_sync(lane_id))
                         tma_store_1d(meta_buffer, cpy_dst_int4_ptr, kNumMetaBytes);
                     __syncwarp();
@@ -794,12 +796,12 @@ combine(void* combined_x,
                 // Flush all stores
                 tma_store_wait();
                 __syncwarp();
-
-                // Issue RDMA
-                // NOTES: for zero-copy mode, we assume the data is already in the send buffer
-                if (dst_p2p_ptr == 0)
-                    nvshmemi_ibgda_put_nbi_warp(dst_ptr, buf_ptr, kUseLogFMT ? send_offset_bytes : hidden * sizeof(nv_bfloat16), dst_rank, local_expert_idx, lane_id, token_idx - offset);
             }
+            
+            // Issue RDMA
+            // NOTES: for zero-copy mode, we assume the data is already in the send buffer
+            if (dst_p2p_ptr == 0)
+                nvshmemi_ibgda_put_nbi_warp(dst_ptr, buf_ptr, send_bytes, dst_rank, local_expert_idx, lane_id, token_idx - offset);
         }
 
         // Put the finishing flag
@@ -847,11 +849,11 @@ combine(void* combined_x,
 
         // 控制 Stage 数量（需要比较大防止 warp 不均衡，取 4/8？），同时有 full barrier 和 empty barrier
         constexpr int kNumStages = 4;
-        constexpr int kNumTMABufferBytes = 8 * 2 + kHidden * 2;
+        constexpr int kNumTMABufferBytes = 16 * 2 + kHidden * 2;
         uint32_t tma_phase[kNumStages] = {0};
         auto full_barrier  = PatternVisitor([=](const int& k) { return reinterpret_cast<uint64_t*>(smem_buffer + k * kNumTMABufferBytes); });
-        auto empty_barrier = PatternVisitor([=](const int& k) { return reinterpret_cast<uint64_t*>(smem_buffer + k * kNumTMABufferBytes + 8); });
-        auto tma_ld_buffer = PatternVisitor([=](const int& k) { return reinterpret_cast<uint32_t*>(smem_buffer + k * kNumTMABufferBytes + 16); });
+        auto empty_barrier = PatternVisitor([=](const int& k) { return reinterpret_cast<uint64_t*>(smem_buffer + k * kNumTMABufferBytes + 16); });
+        auto tma_ld_buffer = PatternVisitor([=](const int& k) { return reinterpret_cast<uint32_t*>(smem_buffer + k * kNumTMABufferBytes + 32); });
         auto tma_st_buffer = PatternVisitor([=](const int& i) { return reinterpret_cast<uint32_t*>(smem_buffer + kNumStages * kNumTMABufferBytes + i * sizeof(int4) * kNumUnrolls); });
 
         // barrier 初始化
@@ -995,7 +997,7 @@ void combine(void* combined_x,
     // Online cast cannot use zero-copy
     EP_HOST_ASSERT(not (zero_copy and use_logfmt));
 
-    constexpr int kNumTMABytesPerWarp = 12 * (512 + 16);
+    constexpr int kNumTMABytesPerWarp = 12 * (512 + 16) + 256;
     const int smem_size = kNumTMABytesPerWarp * num_warps;
 
 #define COMBINE_LAUNCH_CASE(hidden) { \
