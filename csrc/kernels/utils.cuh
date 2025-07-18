@@ -340,6 +340,11 @@ __device__ __forceinline__ void mbarrier_arrive_and_expect_tx(uint64_t* mbar_ptr
     asm volatile("mbarrier.arrive.expect_tx.shared::cta.b64 _, [%1], %0; \n\t" :: "r"(num_bytes), "r"(mbar_int_ptr));
 }
 
+__device__ __forceinline__ void mbarrier_arrive(uint64_t* mbar_ptr) {
+    auto mbar_int_ptr = static_cast<uint32_t>(__cvta_generic_to_shared(mbar_ptr));
+    asm volatile("mbarrier.arrive.shared::cta.b64 _, [%0]; \n\t" :: "r"(mbar_int_ptr));
+}
+
 __device__ __forceinline__ void tma_store_fence() {
     asm volatile ("fence.proxy.async.shared::cta;");
 }
