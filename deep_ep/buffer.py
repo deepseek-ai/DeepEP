@@ -85,7 +85,7 @@ class Buffer:
             os.environ['NVSHMEM_IB_ENABLE_IBGDA'] = '1'
             os.environ['NVSHMEM_IBGDA_NUM_RC_PER_PE'] = f'{num_qps_per_rank}'
             # Make sure QP depth is always larger than the number of on-flight WRs, so that we can skip WQ slot check
-            os.environ['NVSHMEM_QP_DEPTH'] = '1024'
+            os.environ['NVSHMEM_QP_DEPTH'] = os.environ.get('NVSHMEM_QP_DEPTH', '1024')
 
             # Reduce gpu memory usage
             # 6 default teams + 1 extra team
