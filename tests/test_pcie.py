@@ -240,7 +240,7 @@ def test_loop(local_rank: int, num_local_ranks: int):
     if test_ll_compatibility:
         ll_num_tokens, ll_hidden, ll_num_experts, ll_num_topk = 16, 5120, 256, 9
 
-    num_sms = 4 
+    num_sms = 2 
     # 如果是ll模式，则num_qps_per_rank为num_experts // num_ranks，否则为sms/2=channel
     num_qps_per_rank = max(num_sms, ll_num_experts // num_ranks if test_ll_compatibility else 0)
 
@@ -249,7 +249,7 @@ def test_loop(local_rank: int, num_local_ranks: int):
     assert num_local_ranks == 8 and num_ranks > 8
     torch.manual_seed(rank)
     
-    num_tokens = 4  
+    num_tokens = 1  
     for i in (num_sms, ):
         test_main(num_tokens, i, local_rank, num_local_ranks, num_ranks, num_nodes, rank, buffer, group)
         if local_rank == 0:

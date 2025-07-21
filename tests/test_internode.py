@@ -12,6 +12,7 @@ from utils import init_dist, bench, bench_kineto, calc_diff, create_grouped_scor
 import test_low_latency
 
 
+<<<<<<< HEAD
 # noinspection PyShadowingNames
 def test_main(args: argparse.Namespace, num_sms: int,
               local_rank: int, num_local_ranks: int, num_ranks: int, num_nodes: int, rank: int,
@@ -20,6 +21,11 @@ def test_main(args: argparse.Namespace, num_sms: int,
     num_tokens, hidden = args.num_tokens, args.hidden
     num_topk_groups, num_topk, num_experts = args.num_topk_groups, args.num_topk, args.num_experts
 
+=======
+def test_main(num_tokens,num_sms: int, local_rank: int, num_local_ranks: int, num_ranks: int, num_nodes: int, rank: int, buffer: deep_ep.Buffer, group: dist.ProcessGroup):
+    # Settings
+    num_tokens, hidden, num_topk_groups, num_topk, num_experts = num_tokens, 128, min(num_nodes, 4), 8, (16 // num_ranks) * num_ranks
+>>>>>>> ede07de (workable version)
     assert num_experts % num_ranks == 0 and num_local_ranks == 8
     if local_rank == 0:
         print(f'[config] num_tokens={num_tokens}, hidden={hidden}, num_topk_groups={num_topk_groups}, num_topk={num_topk}', flush=True)
@@ -236,16 +242,25 @@ def test_loop(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
     if args.test_ll_compatibility:
         ll_num_tokens, ll_hidden, ll_num_experts, ll_num_topk = 16, 5120, 256, 9
 
+<<<<<<< HEAD
     num_sms = 24
     num_qps_per_rank = max(num_sms, ll_num_experts // num_ranks if args.test_ll_compatibility else 0)
+=======
+    num_sms = 16
+    num_qps_per_rank = max(num_sms, ll_num_experts // num_ranks if test_ll_compatibility else 0)
+>>>>>>> ede07de (workable version)
 
     buffer = deep_ep.Buffer(group, int(2e9), int(1e9), low_latency_mode=args.test_ll_compatibility,
                             num_qps_per_rank=num_qps_per_rank, explicitly_destroy=True)
     assert num_local_ranks == 8 and num_ranks > 8
     torch.manual_seed(rank)
-
+    num_tokens = 8  
     for i in (num_sms, ):
+<<<<<<< HEAD
         test_main(args, i, local_rank, num_local_ranks, num_ranks, num_nodes, rank, buffer, group)
+=======
+        test_main(num_tokens,i, local_rank, num_local_ranks, num_ranks, num_nodes, rank, buffer, group)
+>>>>>>> ede07de (workable version)
         if local_rank == 0:
             print('', flush=True)
 
