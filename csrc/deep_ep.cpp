@@ -841,6 +841,29 @@ Buffer::internode_dispatch(const torch::Tensor& x, const std::optional<torch::Te
         num_recv_tokens_per_expert_list = std::vector<int>(moe_recv_expert_counter, moe_recv_expert_counter + num_local_experts);
     }
 
+    // auto rdma_channel_prefix_matrix_cpu = rdma_channel_prefix_matrix.cpu(); //num_rdma_ranks, num_channels
+    // auto recv_gbl_rank_prefix_sum_cpu = recv_gbl_rank_prefix_sum.cpu(); // num_ranks
+    // // print rdma_channel_prefix_matrix
+    // if (rank == 1 or rank == 15) {
+    //     printf("rank: %d, rdma_channel_prefix_matrix:\n", rank);
+    //     int32_t* data = rdma_channel_prefix_matrix_cpu.data_ptr<int32_t>();
+    //     for (int i = 0; i < num_rdma_ranks; ++i) {
+    //         printf("row %d: ", i);
+    //         for (int j = 0; j < num_channels; ++j) {
+    //             // 按行主序 row-major
+    //             printf("%d ", data[i * num_channels + j]);
+    //         }
+    //         printf("\n");
+    //     }
+    //     // print recv_gbl_rank_prefix_sum
+    //     printf("rank: %d, recv_gbl_rank_prefix_sum:\n", rank);
+    //     data = recv_gbl_rank_prefix_sum_cpu.data_ptr<int32_t>();
+    //     for (int i = 0; i < num_ranks; ++i) {
+    //         printf(" %d: %d\n", i, data[i]);
+    //     }
+    //     printf("rank: %d, num_recv_tokens: %d\n", rank, num_recv_tokens);
+    // }
+
     // Allocate new tensors
     auto recv_x = torch::empty({num_recv_tokens, hidden}, x.options());
     auto recv_topk_idx = std::optional<torch::Tensor>(), recv_topk_weights = std::optional<torch::Tensor>(), recv_x_scales = std::optional<torch::Tensor>();
@@ -1440,7 +1463,7 @@ Buffer::pcie_dispatch(const torch::Tensor& x, const std::optional<torch::Tensor>
 
     // Barrier or send sizes
     // TODO: use new notify_dispatch   
-    rdma_channel_prefix_matrix = torch::empty({num_rdma_ranks, num_channels}, dtype(torch::kInt32).device(torch::kCUDA));
+    rdma_channel_prefix_matrix = torch::empty({num_ranks, num_channels}, dtype(torch::kInt32).device(torch::kCUDA));
     recv_rdma_rank_prefix_sum = torch::empty({num_rdma_ranks}, dtype(torch::kInt32).device(torch::kCUDA));
     gbl_channel_prefix_matrix = torch::empty({num_ranks, num_channels}, dtype(torch::kInt32).device(torch::kCUDA));
     recv_gbl_rank_prefix_sum = torch::empty({num_ranks}, dtype(torch::kInt32).device(torch::kCUDA));
@@ -1450,43 +1473,93 @@ Buffer::pcie_dispatch(const torch::Tensor& x, const std::optional<torch::Tensor>
     int num_local_experts = num_experts / num_ranks;
     for (int i = 0; i < num_local_experts; ++ i)
         moe_recv_expert_counter[i] = -1;
-    internode::notify_dispatch_pcie(num_tokens_per_rank->data_ptr<int>(), moe_recv_counter_mapped, num_ranks,
-                                num_tokens_per_rdma_rank->data_ptr<int>(), moe_recv_rdma_counter_mapped,
-                                num_tokens_per_expert->data_ptr<int>(), moe_recv_expert_counter_mapped, num_experts,
-                                is_token_in_rank.data_ptr<bool>(), num_tokens, num_channels,
-                                hidden_int4, num_scales, num_topk, expert_alignment,
-                                rdma_channel_prefix_matrix.data_ptr<int>(), recv_rdma_rank_prefix_sum.data_ptr<int>(),
-                                gbl_channel_prefix_matrix.data_ptr<int>(), recv_gbl_rank_prefix_sum.data_ptr<int>(),
-                                rdma_buffer_ptr, config.num_max_rdma_chunked_recv_tokens,
-                                buffer_ptrs_gpu, config.num_max_nvl_chunked_recv_tokens,
-                                barrier_signal_ptrs_gpu, rank, comm_stream,
-                                config.get_pcie_buffer_size_hint(hidden_int4 * sizeof(int4), num_ranks),
-                                num_nvl_bytes, false);
-
+    // internode::notify_dispatch_pcie(num_tokens_per_rank->data_ptr<int>(), moe_recv_counter_mapped, num_ranks,
+    //                             num_tokens_per_rdma_rank->data_ptr<int>(), moe_recv_rdma_counter_mapped,
+    //                             num_tokens_per_expert->data_ptr<int>(), moe_recv_expert_counter_mapped, num_experts,
+    //                             is_token_in_rank.data_ptr<bool>(), num_tokens, num_channels,
+    //                             hidden_int4, num_scales, num_topk, expert_alignment,
+    //                             rdma_channel_prefix_matrix.data_ptr<int>(), recv_rdma_rank_prefix_sum.data_ptr<int>(),
+    //                             gbl_channel_prefix_matrix.data_ptr<int>(), recv_gbl_rank_prefix_sum.data_ptr<int>(),
+    //                             rdma_buffer_ptr, config.num_max_rdma_chunked_recv_tokens,
+    //                             buffer_ptrs_gpu, config.num_max_nvl_chunked_recv_tokens,
+    //                             barrier_signal_ptrs_gpu, rank, comm_stream,
+    //                             config.get_pcie_buffer_size_hint(hidden_int4 * sizeof(int4), num_ranks),
+    //                             num_nvl_bytes, false);
+    
     // Synchronize total received tokens and tokens per expert
-    auto start_time = std::chrono::high_resolution_clock::now();
-    while (true) {
-        // Read total count
-        num_recv_tokens = static_cast<int>(*moe_recv_counter);
-        num_rdma_recv_tokens = static_cast<int>(*moe_recv_rdma_counter);
+    // auto start_time = std::chrono::high_resolution_clock::now();
+    // while (true) {
+    //     // Read total count
+    //     num_recv_tokens = static_cast<int>(*moe_recv_counter);
+    //     // num_rdma_recv_tokens = static_cast<int>(*moe_recv_rdma_counter);
 
-        // Read per-expert count
-        bool ready = (num_recv_tokens >= 0) and (num_rdma_recv_tokens >= 0);
-        for (int i = 0; i < num_local_experts and ready; ++ i)
-            ready &= moe_recv_expert_counter[i] >= 0;
+    //     // Read per-expert count
+    //     bool ready = (num_recv_tokens >= 0);
+    //     // bool ready = (num_recv_tokens >= 0) and (num_rdma_recv_tokens >= 0);
+    //     for (int i = 0; i < num_local_experts and ready; ++ i)
+    //         ready &= moe_recv_expert_counter[i] >= 0;
 
-        if (ready)
-            break;
+    //     if (ready)
+    //         break;
 
-        // Timeout check
-        if (std::chrono::duration_cast<std::chrono::seconds>(std::chrono::high_resolution_clock::now() - start_time).count() > NUM_CPU_TIMEOUT_SECS) {
-            printf("Global rank: %d, num_recv_tokens: %d, num_rdma_recv_tokens: %d\n", rank, num_recv_tokens, num_rdma_recv_tokens);
-            for (int i = 0; i < num_local_experts; ++ i)
-                printf("moe_recv_expert_counter[%d]: %d\n", i, moe_recv_expert_counter[i]);
-            throw std::runtime_error("DeepEP error: timeout (dispatch CPU)");
+    //     // Timeout check
+    //     if (std::chrono::duration_cast<std::chrono::seconds>(std::chrono::high_resolution_clock::now() - start_time).count() > NUM_CPU_TIMEOUT_SECS) {
+    //         printf("Global rank: %d, num_recv_tokens: %d\n", rank, num_recv_tokens);
+    //         for (int i = 0; i < num_local_experts; ++ i)
+    //             printf("moe_recv_expert_counter[%d]: %d\n", i, moe_recv_expert_counter[i]);
+    //         throw std::runtime_error("DeepEP error: timeout (dispatch CPU)");
+    //     }
+    // }
+    // num_recv_tokens_per_expert_list = std::vector<int>(moe_recv_expert_counter, moe_recv_expert_counter + num_local_experts);
+
+    //--------------dummy data--------------
+    int target_rank = (rank + NUM_MAX_NVL_PEERS)%num_ranks;
+    // set rdma_channel_prefix_matrix
+    torch::Tensor cpu_mat = torch::zeros({num_ranks, num_channels}, torch::kInt32);
+    auto accessor = cpu_mat.accessor<int32_t, 2>();
+    for(int j=0; j<num_channels; ++j) {
+        accessor[target_rank][j] = (j+1)*(num_tokens/num_channels);
+    }
+    rdma_channel_prefix_matrix.copy_(cpu_mat.to(rdma_channel_prefix_matrix.device()));
+    // set recv_gbl_rank_prefix_sum
+    torch::Tensor cpu_sum = torch::zeros({num_ranks}, torch::kInt32);
+    auto accessor_sum = cpu_sum.accessor<int32_t, 1>();
+    for(int i=target_rank; i<num_ranks; ++i) {
+        accessor_sum[i] = num_tokens;
+    }
+    recv_gbl_rank_prefix_sum.copy_(cpu_sum.to(recv_gbl_rank_prefix_sum.device()));
+    // set num_recv_tokens
+    num_recv_tokens = num_tokens;
+
+    //set num_recv_tokens_per_expert_list
+    num_recv_tokens_per_expert_list.resize(num_local_experts);
+    num_recv_tokens_per_expert_list[0] = num_tokens;
+    //--------------dummy data--------------
+
+    if(rank == 1 or rank == 15) {
+        auto rdma_channel_prefix_matrix_cpu = rdma_channel_prefix_matrix.cpu(); //num_rdma_ranks, num_channels
+        auto recv_gbl_rank_prefix_sum_cpu = recv_gbl_rank_prefix_sum.cpu(); // num_ranks
+        // print rdma_channel_prefix_matrix
+        if (rank == 1 or rank == 15) {
+            printf("rank: %d, rdma_channel_prefix_matrix:\n", rank);
+            int32_t* data = rdma_channel_prefix_matrix_cpu.data_ptr<int32_t>();
+            for (int i = 0; i < num_ranks; ++i) {
+                printf("row %d: ", i);
+                for (int j = 0; j < num_channels; ++j) {
+                    // 按行主序 row-major
+                    printf("%d ", data[i * num_channels + j]);
+                }
+                printf("\n");
+            }
+            // print recv_gbl_rank_prefix_sum
+            printf("rank: %d, recv_gbl_rank_prefix_sum:\n", rank);
+            data = recv_gbl_rank_prefix_sum_cpu.data_ptr<int32_t>();
+            for (int i = 0; i < num_ranks; ++i) {
+                printf(" %d: %d\n", i, data[i]);
+            }
+            printf("rank: %d, num_recv_tokens: %d\n", rank, num_recv_tokens);
         }
     }
-    num_recv_tokens_per_expert_list = std::vector<int>(moe_recv_expert_counter, moe_recv_expert_counter + num_local_experts);
 
     // Allocate new tensors
     auto recv_x = torch::empty({num_recv_tokens, hidden}, x.options());
@@ -1529,7 +1602,6 @@ Buffer::pcie_dispatch(const torch::Tensor& x, const std::optional<torch::Tensor>
         rdma_buffer_ptr, config.num_max_rdma_chunked_send_tokens, config.num_max_rdma_chunked_recv_tokens,
         buffer_ptrs_gpu, rank, num_ranks, comm_stream, num_channels
     );
-
     // Stream Sync and Return
     std::optional<EventHandle> event;
     if (async) {

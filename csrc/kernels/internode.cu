@@ -2317,6 +2317,9 @@ dispatch_pcie(int4* recv_x, float* recv_x_scales, int64_t* recv_topk_idx, float*
                     const auto src_ptr = reinterpret_cast<uint64_t>(rdma_channel_data.send_buffer(dst_rdma_rank) + dst_slot_idx * num_bytes_per_rdma_token);
                     nvshmemi_ibgda_put_nbi_warp<true>(dst_ptr, src_ptr, num_bytes_per_msg,
                                                         dst_rdma_rank, channel_id, lane_id, 0);
+                    if(lane_id == 0) {
+                        printf("!!!!!! rank=%d lane_id=%d dst_rdma_rank=%d dst_slot_idx=%d num_tokens_to_issue=%d\n", rank, lane_id, dst_rdma_rank, dst_slot_idx, num_tokens_to_issue);
+                    }
                 }else{
                     memory_fence();
                 }
@@ -2352,7 +2355,11 @@ dispatch_pcie(int4* recv_x, float* recv_x_scales, int64_t* recv_topk_idx, float*
             while (true) {
                 auto meta_0 = ld_volatile_global(rdma_channel_meta.recv_buffer(start_rank + lane_id));
                 auto meta_1 = ld_volatile_global(rdma_channel_meta.recv_buffer(start_rank + lane_id) + 1);
-                
+
+                // int src_rank = start_rank + lane_id;
+                // if(rank == 1 or rank == 9) {
+                //     printf("!!!!!! src_rank=%d lane_id=%d meta_0=%d meta_1=%d\n", src_rank, lane_id, meta_0, meta_1);
+                // }
                 if (meta_0 < 0 && meta_1 < 0) {
                     // Meta data ready (using negative value as ready signal)
                     channel_offset = -meta_0 - 1;
@@ -2462,7 +2469,7 @@ dispatch_pcie(int4* recv_x, float* recv_x_scales, int64_t* recv_topk_idx, float*
 
         int last_head = 0, target_rank = lane_id < num_target_ranks ? lane_id + start_rank : -1;
         auto offset = recv_gbl_channel_prefix_matrix + target_rank * num_channels + channel_id;
-        int num_tokens_to_recv = target_rank > 0 ? ld_volatile_global(offset) - (channel_id == 0 ? 0 : ld_volatile_global(offset - 1)) : -1;
+        int num_tokens_to_recv = target_rank >= 0 ? ld_volatile_global(offset) - (channel_id == 0 ? 0 : ld_volatile_global(offset - 1)) : -1;
     
         // Initialize shared state
         if (target_rank >= 0) {
@@ -2476,19 +2483,21 @@ dispatch_pcie(int4* recv_x, float* recv_x_scales, int64_t* recv_topk_idx, float*
                 // To mitigate incast congestion between channels
                 int dst_rank = (i + channel_id + rank) % num_target_ranks;
                 synced_num_tokens_to_receive = __shfl_sync(0xffffffff, num_tokens_to_recv, dst_rank);
-                if (synced_num_tokens_to_receive == 0)
+                if (synced_num_tokens_to_receive <= 0)
                     continue;
-
+                
                 auto synced_last_head = __shfl_sync(0xffffffff, last_head, dst_rank);
                 auto processed_head = __shfl_sync(0xffffffff, ld_acquire_cta(const_cast<const int*>(receiver_channel_head + start_rank + dst_rank)), 0);
+                
                 if (processed_head >= synced_last_head + num_max_rdma_chunked_send_tokens || processed_head >= synced_last_head + synced_num_tokens_to_receive) {
                     if (dst_rank + start_rank == target_rank) {
                         // 这里应该没有本地的流量，lcoal在sender中会copy给自己
                         // 更新远端的head
-                        nvshmemi_ibgda_amo_nonfetch_add(rdma_channel_head.buffer(target_rank), processed_head - last_head,
+                        nvshmemi_ibgda_amo_nonfetch_add(rdma_channel_head.buffer(rank), processed_head - last_head,
                                                         target_rank, channel_id, target_rank == rank);
                         num_tokens_to_recv -= (processed_head - last_head);
                         last_head = processed_head;
+                        printf("--------- rank=%d lane_id=%d target_rank=%d num_tokens_to_recv=%d last_head=%d\n", rank, lane_id, target_rank, num_tokens_to_recv, last_head );
                     }
                 }
             }
