@@ -8,7 +8,6 @@ import deep_ep_cpp
 # noinspection PyUnresolvedReferences
 from deep_ep_cpp import Config, EventHandle
 from .utils import EventOverlap, check_nvlink_connections
-from .diagnose import Diagnose
 
 
 class Buffer:
@@ -106,10 +105,6 @@ class Buffer:
                 root_unique_id = self.runtime.get_local_nvshmem_unique_id()
             dist.all_gather_object(nvshmem_unique_ids, root_unique_id, group)
             root_unique_id = nvshmem_unique_ids[0 if low_latency_mode else self.runtime.get_root_rdma_rank(True)]
-
-        # Start diagnose
-        self.diagnose = Diagnose(group)
-        self.diagnose.start_daemon()
 
         # Make CPP runtime available
         self.runtime.sync(device_ids, ipc_handles, root_unique_id)
@@ -520,6 +515,7 @@ class Buffer:
     def low_latency_dispatch(self, x: torch.Tensor, topk_idx: torch.Tensor,
                              num_max_dispatch_tokens_per_rank: int, num_experts: int,
                              cumulative_local_expert_recv_stats: Optional[torch.Tensor] = None,
+                             dispatch_wait_recv_cost_per_token_stats: Optional[torch.Tensor] = None,
                              use_fp8: bool = True, round_scale: bool = False, use_ue8m0: bool = False,
                              async_finish: bool = False, return_recv_hook: bool = False) -> \
             Tuple[Tuple[torch.Tensor, torch.Tensor], torch.Tensor, Tuple, EventOverlap, Callable]:
@@ -540,6 +536,9 @@ class Buffer:
             cumulative_local_expert_recv_stats: a cumulative expert count tensor for statistics, which should have shape
                 `[num_local_experts]` and be typed as `torch.int`. This is useful for online service EP load balance
                 monitoring.
+            dispatch_wait_recv_cost_per_token_stats: a average time spent waiting to receive each token tensor for statistics,
+                which should have shape `[num_ranks, num_ranks]` and be typed as `torch.int64`.
+                This is useful for detecting and pre-cisely localizing slow anomalies.
             use_fp8: whether to enable FP8 casting, with this, the received data will be a tuple of FP8 tensor and scaling factors.
             round_scale: whether round the scaling factors into power of 2.
             use_ue8m0: whether use UE8M0 as scaling factor format (available only with `round_scale=True`).
@@ -567,7 +566,6 @@ class Buffer:
             event: the event after executing the kernel (valid only if `async_finish` is set).
             hook: the receiving hook function (valid only if `return_recv_hook` is set).
         """
-        dispatch_wait_recv_cost_per_token_stats = self.diagnose.get_stats_ll_stats_tensor()[0]
         packed_recv_x, packed_recv_x_scales, packed_recv_count, packed_recv_src_info, packed_recv_layout_range, event, hook = \
             self.runtime.low_latency_dispatch(x, topk_idx,
                                               cumulative_local_expert_recv_stats,
@@ -586,7 +584,8 @@ class Buffer:
     # noinspection PyTypeChecker
     def low_latency_combine(self, x: torch.Tensor, topk_idx: torch.Tensor, topk_weights: torch.Tensor,
                             handle: tuple, use_logfmt: bool = False, zero_copy: bool = False, async_finish: bool = False,
-                            return_recv_hook: bool = False, out: Optional[torch.Tensor] = None) -> \
+                            return_recv_hook: bool = False, out: Optional[torch.Tensor] = None,
+                            combine_wait_recv_cost_per_token_stats: Optional[torch.Tensor] = None) -> \
             Tuple[torch.Tensor, EventOverlap, Callable]:
         """
         A low-latency implementation for combining tokens (reduce **with weights**) with IBGDA.
@@ -612,13 +611,15 @@ class Buffer:
                 but **without actually receiving the data**. You must call the received hook to make sure the data's arrival.
                 If you do not set this flag, the kernel will ensure the data's arrival.
             out: the in-place output tensor, if set, the kernel will write the result to this tensor and return it directly.
+            combine_wait_recv_cost_per_token_stats: a average time spent waiting to receive each token tensor for statistics,
+                which should have shape `[num_ranks, num_ranks]` and be typed as `torch.int64`.
+                This is useful for detecting and pre-cisely localizing slow anomalies.
 
         Returns:
             combined_x: the reduced token tensor, with shape `[num_combined_tokens, hidden]` and type `torch.bfloat16`.
             event: the event after executing the kernel (valid only if `async_finish` is set).
             hook: the receiving hook function (valid only if `return_recv_hook` is set).
         """
-        combine_wait_recv_cost_per_token_stats = self.diagnose.get_stats_ll_stats_tensor()[1]
         src_info, layout_range, num_max_dispatch_tokens_per_rank, hidden, num_experts = handle
         combined_x, event, hook = self.runtime.low_latency_combine(x, topk_idx, topk_weights, src_info, layout_range,
                                                                    combine_wait_recv_cost_per_token_stats,
