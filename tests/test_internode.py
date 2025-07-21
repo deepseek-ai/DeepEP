@@ -11,9 +11,9 @@ from utils import init_dist, bench, calc_diff, create_grouped_scores, inplace_un
 import test_low_latency
 
 
-def test_main(num_sms: int, local_rank: int, num_local_ranks: int, num_ranks: int, num_nodes: int, rank: int, buffer: deep_ep.Buffer, group: dist.ProcessGroup):
+def test_main(num_tokens,num_sms: int, local_rank: int, num_local_ranks: int, num_ranks: int, num_nodes: int, rank: int, buffer: deep_ep.Buffer, group: dist.ProcessGroup):
     # Settings
-    num_tokens, hidden, num_topk_groups, num_topk, num_experts = 16, 128, min(num_nodes, 4), 8, (16 // num_ranks) * num_ranks
+    num_tokens, hidden, num_topk_groups, num_topk, num_experts = num_tokens, 128, min(num_nodes, 4), 8, (16 // num_ranks) * num_ranks
     assert num_experts % num_ranks == 0 and num_local_ranks == 8
     if local_rank == 0:
         print(f'[config] num_tokens={num_tokens}, hidden={hidden}, num_topk_groups={num_topk_groups}, num_topk={num_topk}', flush=True)
@@ -231,16 +231,16 @@ def test_loop(local_rank: int, num_local_ranks: int):
     if test_ll_compatibility:
         ll_num_tokens, ll_hidden, ll_num_experts, ll_num_topk = 16, 5120, 256, 9
 
-    num_sms = 20
+    num_sms = 16
     num_qps_per_rank = max(num_sms, ll_num_experts // num_ranks if test_ll_compatibility else 0)
 
     buffer = deep_ep.Buffer(group, int(1e9), int(1e9), low_latency_mode=test_ll_compatibility,
                             num_qps_per_rank=num_qps_per_rank)
     assert num_local_ranks == 8 and num_ranks > 8
     torch.manual_seed(rank)
-
+    num_tokens = 8  
     for i in (num_sms, ):
-        test_main(i, local_rank, num_local_ranks, num_ranks, num_nodes, rank, buffer, group)
+        test_main(num_tokens,i, local_rank, num_local_ranks, num_ranks, num_nodes, rank, buffer, group)
         if local_rank == 0:
             print('', flush=True)
 
