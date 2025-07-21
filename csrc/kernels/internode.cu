@@ -4,6 +4,8 @@
 #include "launch.cuh"
 #include "utils.cuh"
 #include "ibgda_device.cuh"
+#include <functional>
+#include <optional>
 
 namespace deep_ep {
 
@@ -1218,13 +1220,13 @@ void cached_notify(int hidden_int4, int num_scales, int num_topk_idx, int num_to
                   is_cached_dispatch, cpu_rdma_team);
 }
 
-template <int kNumRanks, bool kMaybeWithBias, typename dtype_t, int kMaxNumRanks, bool kUseTMA, int kNumStage = 1, int kNumTMALoadBytes = 0, typename GetAddrFn, typename ReceiveTWFn>
+template <int kNumRanks, bool kMaybeWithBias, typename dtype_t, int kMaxNumRanks, bool kUseTMA, int kNumStages, int kNumTMALoadBytes = 0, typename GetAddrFn, typename ReceiveTWFn>
 __device__ int combine_token(bool is_token_in_rank, int head_idx,
                              int lane_id, int hidden_int4, int num_topk,
                              int4* combined_row, float* combined_topk_weights,
                              const int4* bias_0_int4, const int4* bias_1_int4,
                              int num_max_recv_tokens, const GetAddrFn& get_addr_fn, const ReceiveTWFn& recv_tw_fn, 
-                             uint8_t* smem_ptr, uint32_t *tma_phase) {
+                             uint8_t* smem_ptr, uint32_t (&tma_phase)[kNumStages]) {
     constexpr auto kDtypePerInt4 = sizeof(int4) / sizeof(dtype_t);
 
     // Broadcast current heads
@@ -1237,10 +1239,11 @@ __device__ int combine_token(bool is_token_in_rank, int head_idx,
         topk_ranks[num_topk_ranks ++] = i;
     }
     EP_DEVICE_ASSERT(num_topk_ranks <= kMaxNumRanks);
-    EP_DEVICE_ASSERT(not (kUseTMA and kMaybeWithBias));
+    EP_STATIC_ASSERT(not (kUseTMA and kMaybeWithBias), "TMA cannot be used by receiver warps");
+    EP_STATIC_ASSERT(kNumStages == 2, "Only support 2 stages now");
 
     // Reduce data
-    if (kUseTMA) {
+    if constexpr (kUseTMA) {
         constexpr int kNumTMABufferBytesPerStage = kNumTMALoadBytes * (NUM_MAX_NVL_PEERS + 1) + 16;
         EP_DEVICE_ASSERT(hidden_int4 % 32 == 0);
 
@@ -1255,8 +1258,8 @@ __device__ int combine_token(bool is_token_in_rank, int head_idx,
         __syncwarp();
 
         for (int shifted = 0, iter = 0; shifted < hidden_int4; shifted += 32, iter += 1) {
-            const int stage_idx = iter % kNumStage;
-            const int next_stage_idx = (iter + 1) % kNumStage;
+            const int stage_idx = iter % kNumStages;
+            const int next_stage_idx = (iter + 1) % kNumStages;
 
             // Prefetch next stage 
             if (shifted + 32 < hidden_int4) {
@@ -1277,7 +1280,7 @@ __device__ int combine_token(bool is_token_in_rank, int head_idx,
                     values[k] += static_cast<float>(recv_value_dtypes[k]);
             }
 
-            tma_store_wait<1>();
+            tma_store_wait<kNumStages - 1>();
 
             auto out_dtypes = reinterpret_cast<dtype_t*>(tma_store_buffer(stage_idx) + lane_id);
             #pragma unroll
@@ -1667,12 +1670,12 @@ combine(int4* combined_x, float* combined_topk_weights,
                     auto get_addr_fn = [&](int src_nvl_rank, int slot_idx, int hidden_int4_idx) -> int4* { return reinterpret_cast<int4*>(nvl_channel_x.buffer(src_nvl_rank) + slot_idx * num_bytes_per_token) + hidden_int4_idx; };
                     auto recv_tw_fn = [&](int src_nvl_rank, int slot_idx, int topk_idx) -> float { return ld_nc_global(reinterpret_cast<float*>(nvl_channel_x.buffer(src_nvl_rank) + slot_idx * num_bytes_per_token + hidden_bytes + sizeof(SourceMeta)) + topk_idx); };
                     combine_token<NUM_MAX_NVL_PEERS, false, dtype_t, NUM_MAX_NVL_PEERS, true, kNumStages, kNumTMALoadBytes>(expected_head >= 0,
-                                                                                 expected_head, lane_id,
-                                                                                 hidden_int4, num_topk,
-                                                                                 static_cast<int4*>(shifted),
-                                                                                 reinterpret_cast<float*>(static_cast<int8_t*>(shifted) + hidden_bytes + sizeof(SourceMeta)),
-                                                                                 nullptr, nullptr, num_max_nvl_chunked_recv_tokens_per_rdma, get_addr_fn, recv_tw_fn,
-                                                                                 smem_ptr, tma_phase);
+                                                                                                                            expected_head, lane_id,
+                                                                                                                            hidden_int4, num_topk,
+                                                                                                                            static_cast<int4*>(shifted),
+                                                                                                                            reinterpret_cast<float*>(static_cast<int8_t*>(shifted) + hidden_bytes + sizeof(SourceMeta)),
+                                                                                                                            nullptr, nullptr, num_max_nvl_chunked_recv_tokens_per_rdma, get_addr_fn, recv_tw_fn,
+                                                                                                                            smem_ptr, tma_phase);
 
                     // Update head
                     if (lane_id < NUM_MAX_NVL_PEERS)
@@ -1746,15 +1749,16 @@ combine(int4* combined_x, float* combined_topk_weights,
                 // Combine current token
                 auto get_addr_fn = [&](int src_rdma_rank, int slot_idx, int hidden_int4_idx) -> int4* { return reinterpret_cast<int4*>(rdma_channel_data.recv_buffer(src_rdma_rank) + slot_idx * num_bytes_per_token) + hidden_int4_idx;};
                 auto recv_tw_fn = [&](int src_rdma_rank, int slot_idx, int topk_idx) -> float { return ld_nc_global(reinterpret_cast<const float*>(rdma_channel_data.recv_buffer(src_rdma_rank) + slot_idx * num_bytes_per_token + hidden_bytes + sizeof(SourceMeta)) + topk_idx);};
-                combine_token<kNumRDMARanks, true, dtype_t, kNumTopkRDMARanks, false>(expected_head >= 0,
-                                                                         expected_head, lane_id,
-                                                                         hidden_int4, num_topk,
-                                                                         combined_x + token_idx * hidden_int4,
-                                                                         combined_topk_weights + token_idx * num_topk,
-                                                                         bias_0 == nullptr ? nullptr : bias_0 + token_idx * hidden_int4,
-                                                                         bias_1 == nullptr ? nullptr : bias_1 + token_idx * hidden_int4,
-                                                                         num_max_rdma_chunked_recv_tokens, get_addr_fn, recv_tw_fn, 
-                                                                         nullptr, nullptr);
+                uint32_t dummy_tma_phases[2];
+                combine_token<kNumRDMARanks, true, dtype_t, kNumTopkRDMARanks, false, 2>(expected_head >= 0,
+                                                                                      expected_head, lane_id,
+                                                                                      hidden_int4, num_topk,
+                                                                                      combined_x + token_idx * hidden_int4,
+                                                                                      combined_topk_weights + token_idx * num_topk,
+                                                                                      bias_0 == nullptr ? nullptr : bias_0 + token_idx * hidden_int4,
+                                                                                      bias_1 == nullptr ? nullptr : bias_1 + token_idx * hidden_int4,
+                                                                                      num_max_rdma_chunked_recv_tokens, get_addr_fn, recv_tw_fn, 
+                                                                                      nullptr, dummy_tma_phases);
             }
 
             // Retired
