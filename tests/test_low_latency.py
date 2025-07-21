@@ -164,7 +164,7 @@ def test_loop(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
     test_main(num_tokens, hidden, num_experts, num_topk, rank, num_ranks, group, buffer,
               use_logfmt=args.use_logfmt, seed=1)
 
-    do_pressure_test = False
+    do_pressure_test = args.pressure_test
     for seed in range(int(1e9) if do_pressure_test else 0):
         if local_rank == 0:
             print(f'Testing with seed {seed} ...', flush=True)
@@ -198,6 +198,8 @@ if __name__ == '__main__':
                         help='Whether to disable NVLink for testing')
     parser.add_argument('--use-logfmt', action='store_true',
                         help='Whether to test LogFMT combine')
+    parser.add_argument("--pressure-test", action='store_true',
+                        help='Whether to do pressure test')
     args = parser.parse_args()
 
     num_processes = args.num_processes
