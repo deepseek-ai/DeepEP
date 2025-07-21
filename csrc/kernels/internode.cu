@@ -1,11 +1,12 @@
+#include <functional>
+#include <optional>
+
 #include "configs.cuh"
 #include "buffer.cuh"
 #include "exception.cuh"
 #include "launch.cuh"
 #include "utils.cuh"
 #include "ibgda_device.cuh"
-#include <functional>
-#include <optional>
 
 namespace deep_ep {
 
@@ -1270,7 +1271,6 @@ __device__ int combine_token(bool is_token_in_rank, int head_idx,
             }
 
             mbarrier_wait(tma_mbarrier(stage_idx), tma_phase[stage_idx]);
-
             float values[kDtypePerInt4] = {0};
             #pragma unroll
             for (int j = 0; j < num_topk_ranks; ++ j) {
@@ -1281,7 +1281,6 @@ __device__ int combine_token(bool is_token_in_rank, int head_idx,
             }
 
             tma_store_wait<kNumStages - 1>();
-
             auto out_dtypes = reinterpret_cast<dtype_t*>(tma_store_buffer(stage_idx) + lane_id);
             #pragma unroll
             for (int j = 0; j < kDtypePerInt4; ++ j)
@@ -1289,12 +1288,12 @@ __device__ int combine_token(bool is_token_in_rank, int head_idx,
             tma_store_fence();
             __syncwarp();
 
-            if (lane_id == 0) {
+            if (lane_id == 0)
                 tma_store_1d(tma_store_buffer(stage_idx), combined_row + shifted + lane_id, kNumTMALoadBytes);
-            }
             __syncwarp();
         }
 
+        // Flush all writes
         tma_store_wait();
     } else {
         #pragma unroll
@@ -1302,7 +1301,7 @@ __device__ int combine_token(bool is_token_in_rank, int head_idx,
             // Read bias
             // TODO: make it as a finer-grained template
             int4 bias_0_value_int4, bias_1_value_int4;
-            if (kMaybeWithBias) {
+            if constexpr (kMaybeWithBias) {
                 bias_0_value_int4 = bias_0_int4 != nullptr ? ld_nc_global(bias_0_int4 + i) : make_int4(0, 0, 0, 0);
                 bias_1_value_int4 = bias_1_int4 != nullptr ? ld_nc_global(bias_1_int4 + i) : make_int4(0, 0, 0, 0);
             }
@@ -1317,7 +1316,7 @@ __device__ int combine_token(bool is_token_in_rank, int head_idx,
             // Clean
             // Reduce bias
             float values[kDtypePerInt4] = {0};
-            if (kMaybeWithBias) {
+            if constexpr (kMaybeWithBias) {
                 auto bias_0_values = reinterpret_cast<const dtype_t*>(&bias_0_value_int4);
                 auto bias_1_values = reinterpret_cast<const dtype_t*>(&bias_1_value_int4);
                 #pragma unroll
