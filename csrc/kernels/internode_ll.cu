@@ -527,9 +527,6 @@ __forceinline__ __device__ bool logfmt_encode(uint32_t* uint32_buffer, uint32_t 
         }
     }
 
-    tma_store_fence();
-    __syncwarp();
-
     return enable_cast;
 }
 
@@ -703,10 +700,10 @@ combine(void* combined_x,
         EP_STATIC_ASSERT(kNumStages == 3 and kNumPrefetch == 1, "Invalid stages");
 
         auto smem_ptr = smem_buffer + warp_id * (kNumStages * (kNumTMABufferBytes + 16) + kNumMetaBytes);
-        uint32_t tma_phase[kNumStages] = {};
+        uint32_t tma_phase[kNumStages] = {0};
         auto tma_buffer   = PatternVisitor([=](const int& i) { return reinterpret_cast<int4*>(smem_ptr + i * (kNumTMABufferBytes + 16)); });
         auto tma_mbarrier = PatternVisitor([=](const int& i) { return reinterpret_cast<uint64_t*>(smem_ptr + i * (kNumTMABufferBytes + 16) + kNumTMABufferBytes); });
-        auto meta_buffer  = kUseLogFMT ? reinterpret_cast<uint32_t*>(smem_ptr + kNumStages * (kNumTMABufferBytes + 8)) : nullptr;
+        auto meta_buffer  = kUseLogFMT ? reinterpret_cast<uint32_t*>(smem_ptr + kNumStages * (kNumTMABufferBytes + 16)) : nullptr;
         EP_STATIC_ASSERT(kNumUnrolls * kNumStages <= 12, "TMA buffer size exceed limit");
 
         // Initialize m-barriers
@@ -769,6 +766,7 @@ combine(void* combined_x,
                     // Simulated cast
                     if constexpr (kUseLogFMT) {
                         bool enable_cast = logfmt_encode<kHidden, kNumUnrolls>(uint32_buffer, meta_buffer + i * kNumElemsPerInt4 / 128, lane_id);
+                        tma_store_fence();
                         int tma_bytes = 32 * kNumUnrolls * kNumElemsPerInt4 * (enable_cast ? 10 : 16) / 8;
                         // Store
                         if (elect_one_sync(lane_id))
@@ -842,8 +840,8 @@ combine(void* combined_x,
         // TMA 初始化，shared memory 重新分配
         constexpr int kNumDivisions = kHidden / 128;
         constexpr int kNumMetaBytes = kNumDivisions * sizeof(uint32_t);
-        constexpr int kNumBF16TMABytes = 32 * kNumUnrolls * kNumElemsPerInt4 * 16 / 8;
-        constexpr int kNumLogFmtTMABytes = kNumBF16TMABytes / 16 * 10;
+        constexpr int kNumBF16PerWarpBytes = 32 * kNumUnrolls * kNumElemsPerInt4 * 2;
+        constexpr int kNumLogFMTPerWarpBytes = kNumBF16PerWarpBytes / 16 * 10;
         const int num_work_warp = hidden_bf16_int4_pad / kNumUnrolls / 32;
         EP_DEVICE_ASSERT(num_work_warp + 1 <= num_threads / 32);
 
@@ -853,7 +851,7 @@ combine(void* combined_x,
         uint32_t tma_phase[kNumStages] = {0};
         auto full_barrier  = PatternVisitor([=](const int& k) { return reinterpret_cast<uint64_t*>(smem_buffer + k * kNumTMABufferBytes); });
         auto empty_barrier = PatternVisitor([=](const int& k) { return reinterpret_cast<uint64_t*>(smem_buffer + k * kNumTMABufferBytes + 16); });
-        auto tma_ld_buffer = PatternVisitor([=](const int& k) { return reinterpret_cast<uint32_t*>(smem_buffer + k * kNumTMABufferBytes + 32); });
+        auto tma_ld_buffer = PatternVisitor([=](const int& k) { return reinterpret_cast<uint8_t* >(smem_buffer + k * kNumTMABufferBytes + 32); });
         auto tma_st_buffer = PatternVisitor([=](const int& i) { return reinterpret_cast<uint32_t*>(smem_buffer + kNumStages * kNumTMABufferBytes + i * sizeof(int4) * kNumUnrolls); });
 
         // barrier 初始化
@@ -865,9 +863,12 @@ combine(void* combined_x,
 
         // shared memory 存 offset
         const auto smem_ptr = smem_buffer + kNumStages * kNumTMABufferBytes + kHidden * 2;
-        auto log_amax  = PatternVisitor([=](const int& k) { return reinterpret_cast<float*>(smem_ptr + k * 2); });
-        auto log_amin  = PatternVisitor([=](const int& k) { return reinterpret_cast<float*>(smem_ptr + kNumStages * 2 + k * 2); });
-        auto cast_info = PatternVisitor([=](const int& k) { return reinterpret_cast<int*>  (smem_ptr + kNumStages * 4 + k * 2); });
+        constexpr int kNumDivisionBytes = kNumDivisions * sizeof(uint32_t);
+        auto log_amax  = PatternVisitor([=](const int& k) { return reinterpret_cast<float*>(smem_ptr + k * kNumDivisionBytes); });
+        auto log_amin  = PatternVisitor([=](const int& k) { return reinterpret_cast<float*>(smem_ptr + kNumStages * kNumDivisionBytes + k * kNumDivisionBytes); });
+        auto cast_info = PatternVisitor([=](const int& k) { return reinterpret_cast<int*>  (smem_ptr + kNumStages * kNumDivisionBytes * 2 + k * kNumDivisionBytes); });
+
+        printf("###%d %d\n", blockIdx.x, threadIdx.x);
 
         // 未来优化：也分 4 个 warp group，每个包含 8 个 warp，最后 warp 间 reduce
         int stage = 0;
@@ -878,14 +879,14 @@ combine(void* combined_x,
                 for (int i = 0; i < num_topk; ++ i) {
                     int reg_topk_idx = static_cast<int>(__ldg(topk_idx + token_idx * num_topk + i));
                     if (reg_topk_idx >= 0) {
-                        auto buffer = reinterpret_cast<uint64_t*>(static_cast<uint8_t*>(rdma_recv_x) + (reg_topk_idx * num_max_dispatch_tokens_per_rank + token_idx) * num_bytes_per_slot);
+                        auto buffer = static_cast<uint8_t*>(rdma_recv_x) + (reg_topk_idx * num_max_dispatch_tokens_per_rank + token_idx) * num_bytes_per_slot;
+                        auto uint64_buffer = reinterpret_cast<uint64_t*>(buffer);
                         if (lane_id < kNumDivisions / 2) {
-                            logfmt_check_amaxmin<kHidden, kNumUnrolls>(buffer[lane_id], reinterpret_cast<float2*>(log_amax[stage]), reinterpret_cast<float2*>(log_amin[stage]), cast_info[stage], lane_id);
-                            if (lane_id < num_work_warp) {
-                                int cast_prefix_count = cast_info[stage][lane_id] >> 1;
-                                int tma_offset = kNumMetaBytes + kNumLogFmtTMABytes * cast_prefix_count + kNumBF16TMABytes * (lane_id - cast_prefix_count);
-                                int tma_bytes = cast_info[stage][lane_id] & 1 ? kNumLogFmtTMABytes : kNumBF16TMABytes;
-                                tma_load_1d(tma_ld_buffer[stage], buffer + tma_offset, full_barrier[stage], tma_bytes);
+                            logfmt_check_amaxmin<kHidden, kNumUnrolls>(uint64_buffer[lane_id], reinterpret_cast<float2*>(log_amax[stage]), reinterpret_cast<float2*>(log_amin[stage]), cast_info[stage], lane_id);
+                            if (lane_id == 0) {
+                                int cast_prefix_count = cast_info[stage][num_work_warp - 1] >> 1;
+                                int tma_bytes = cast_prefix_count * kNumLogFMTPerWarpBytes + (num_work_warp - cast_prefix_count) * kNumBF16PerWarpBytes;
+                                tma_load_1d(tma_ld_buffer[stage], buffer + kNumMetaBytes, full_barrier[stage], tma_bytes);
                                 mbarrier_arrive_and_expect_tx(full_barrier[stage], tma_bytes);
                             }
                         }
@@ -905,15 +906,17 @@ combine(void* combined_x,
                         // 调用 decode 并累加
                         int cast_prefix_count = cast_info[stage][warp_id] >> 1;
                         bool enable_cast = cast_info[stage][warp_id] & 1;
-                        int tma_offset = kNumMetaBytes + kNumLogFmtTMABytes * cast_prefix_count + kNumBF16TMABytes * (warp_id - cast_prefix_count);
+                        int tma_offset = kNumMetaBytes + kNumLogFMTPerWarpBytes * cast_prefix_count + kNumBF16PerWarpBytes * (warp_id - cast_prefix_count);
                         int inner_idx = lane_id * kNumUnrolls / 16;
                         int global_idx = warp_id * kNumUnrolls * 2 + inner_idx;
                         logfmt_decode_and_accumulate<kHidden, kNumUnrolls>(
-                            tma_ld_buffer[stage] + tma_offset + (enable_cast ? kNumLogFmtTMABytes : kNumBF16TMABytes) / 32 * lane_id, combined_values,
-                            log_amax[stage][global_idx], log_amin[stage][global_idx], enable_cast, lane_id, topk_weight
+                            reinterpret_cast<uint32_t*>(tma_ld_buffer[stage] + tma_offset + (enable_cast ? kNumLogFMTPerWarpBytes : kNumBF16PerWarpBytes) / 32 * lane_id),
+                            combined_values, log_amax[stage][global_idx], log_amin[stage][global_idx], enable_cast, lane_id, topk_weight
                         );
                         // empty mbarrier arrive
-                        mbarrier_arrive(empty_barrier[stage]);
+                        if (lane_id == 0)
+                            mbarrier_arrive(empty_barrier[stage]);
+                        __syncwarp();
                         stage = (stage + 1) % kNumStages;
                     }
                 }
@@ -926,10 +929,11 @@ combine(void* combined_x,
                 }
                 tma_store_fence();
                 if (elect_one_sync(lane_id))
-                    tma_store_1d(tma_st_buffer[warp_id], static_cast<int4*>(combined_x) + token_idx * hidden_bf16_int4 + warp_id * kNumUnrolls, kNumBF16TMABytes);
+                    tma_store_1d(tma_st_buffer[warp_id], static_cast<int4*>(combined_x) + token_idx * hidden_bf16_int4 + warp_id * kNumUnrolls, kNumBF16PerWarpBytes);
                 __syncwarp();
             }
         }
+
         tma_store_wait<0>();
     }
     else {
