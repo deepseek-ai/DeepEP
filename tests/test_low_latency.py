@@ -100,7 +100,7 @@ def test_main(num_tokens: int, hidden: int, num_experts: int, num_topk: int,
                             if do_check:
                                 diff = calc_diff(current_x * topk_weights.masked_fill(topk_idx == -1, 0).sum(dim=1).view(-1, 1), combined_x)
                                 assert torch.isnan(combined_x).sum().item() == 0
-                                assert diff < (7e-4 if dispatch_use_fp8 else 1e-5), f'Error: {diff=}, {zero_copy=}'
+                                assert diff < (7e-4 if dispatch_use_fp8 else 1e-5), f'Error: {diff=}, {dispatch_use_fp8=}, {zero_copy=}'
                                 hash_value ^= hash_tensor(combined_x)
 
     # noinspection PyShadowingNames

@@ -523,8 +523,8 @@ __forceinline__ __device__ void release_lock(int* mutex) {
 template <typename T> struct ReduceSum { __device__ T operator()(T a, T b) const { return a + b; } };
 template <typename T> struct ReduceMax { __device__ T operator()(T a, T b) const { return a > b ? a : b; } };
 template <typename T> struct ReduceMin { __device__ T operator()(T a, T b) const { return a < b ? a : b; } };
-template <typename T> struct ReduceAnd { __device__ T operator()(T a, T b) const { return a and b; } };
-template <typename T> struct ReduceOr  { __device__ T operator()(T a, T b) const { return a or  b; } };
+template <typename T> struct ReduceAnd { __device__ T operator()(T a, T b) const { return a & b; } };
+template <typename T> struct ReduceOr  { __device__ T operator()(T a, T b) const { return a | b; } };
 
 // Unified reduction function
 template <uint32_t kNumLanes, bool kIsOuter, typename T, typename Op>
@@ -532,19 +532,20 @@ __forceinline__ __device__ T warp_reduce(T value, Op op) {
     EP_STATIC_ASSERT(kNumLanes == 32 or kNumLanes == 16 or kNumLanes == 8 or
                      kNumLanes ==  4 or kNumLanes == 2  or kNumLanes == 1,
                      "Invalid number of lanes");
+    const uint32_t mask = __activemask();
     if constexpr (kIsOuter) {
-        if constexpr (kNumLanes <=  1) value = op(value, __shfl_xor_sync(0xffffffff, value,  1));
-        if constexpr (kNumLanes <=  2) value = op(value, __shfl_xor_sync(0xffffffff, value,  2));
-        if constexpr (kNumLanes <=  4) value = op(value, __shfl_xor_sync(0xffffffff, value,  4));
-        if constexpr (kNumLanes <=  8) value = op(value, __shfl_xor_sync(0xffffffff, value,  8));
-        if constexpr (kNumLanes <= 16) value = op(value, __shfl_xor_sync(0xffffffff, value, 16));
+        if constexpr (kNumLanes <=  1) value = op(value, __shfl_xor_sync(mask, value,  1));
+        if constexpr (kNumLanes <=  2) value = op(value, __shfl_xor_sync(mask, value,  2));
+        if constexpr (kNumLanes <=  4) value = op(value, __shfl_xor_sync(mask, value,  4));
+        if constexpr (kNumLanes <=  8) value = op(value, __shfl_xor_sync(mask, value,  8));
+        if constexpr (kNumLanes <= 16) value = op(value, __shfl_xor_sync(mask, value, 16));
     }
     else {
-        if constexpr (kNumLanes >= 32) value = op(value, __shfl_xor_sync(0xffffffff, value, 16));
-        if constexpr (kNumLanes >= 16) value = op(value, __shfl_xor_sync(0xffffffff, value,  8));
-        if constexpr (kNumLanes >=  8) value = op(value, __shfl_xor_sync(0xffffffff, value,  4));
-        if constexpr (kNumLanes >=  4) value = op(value, __shfl_xor_sync(0xffffffff, value,  2));
-        if constexpr (kNumLanes >=  2) value = op(value, __shfl_xor_sync(0xffffffff, value,  1));
+        if constexpr (kNumLanes >= 32) value = op(value, __shfl_xor_sync(mask, value, 16));
+        if constexpr (kNumLanes >= 16) value = op(value, __shfl_xor_sync(mask, value,  8));
+        if constexpr (kNumLanes >=  8) value = op(value, __shfl_xor_sync(mask, value,  4));
+        if constexpr (kNumLanes >=  4) value = op(value, __shfl_xor_sync(mask, value,  2));
+        if constexpr (kNumLanes >=  2) value = op(value, __shfl_xor_sync(mask, value,  1));
     }
 
     return value;

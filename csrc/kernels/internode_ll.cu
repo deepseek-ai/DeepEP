@@ -443,7 +443,7 @@ __forceinline__ __device__ void logfmt_simulated(uint32_t* uint32_buffer, const 
 }
 
 template <int kHidden, int kNumUnrolls>
-__forceinline__ __device__ bool logfmt_encode(uint32_t* uint32_buffer, uint32_t *shared_amaxmin, const int lane_id) {
+__forceinline__ __device__ bool logfmt_encode(uint32_t* uint32_buffer, uint32_t* uint32_st_buffer, uint32_t *shared_amaxmin, const int lane_id) {
     constexpr int kNumElemsPerInt4 = sizeof(int4) / sizeof(nv_bfloat16);
     constexpr float kLogThreshold = 0;
     constexpr float kMinClip = 32; // `== log_2(2 ^ (2 ^ 5))`
@@ -455,11 +455,12 @@ __forceinline__ __device__ bool logfmt_encode(uint32_t* uint32_buffer, uint32_t 
 
     // Local log amax
     float log_abs[kNumElemsPerInt4 * kNumUnrolls];
-    __nv_bfloat162 bf162_amax, bf162_amin;
+    __nv_bfloat162 bf162_amax = __nv_bfloat162(CUDART_ZERO_BF16, CUDART_ZERO_BF16);
+    __nv_bfloat162 bf162_amin = __nv_bfloat162(CUDART_INF_BF16, CUDART_INF_BF16);
     uint32_t local_op = 0;
     #pragma unroll
     for (int k = 0; k < kNumUnrolls * 4; ++ k) {
-        uint32_values[k] = uint32_buffer[k ^ (lane_id * kNumUnrolls / 8)];
+        uint32_values[k] = uint32_buffer[k];
         auto uint32_abs = uint32_values[k] & 0x7fff7fff;
         local_op |= ((uint32_values[k] >> 15) & 1) << (k * 2);
         local_op |= ((uint32_values[k] >> 31) & 1) << (k * 2 + 1);
@@ -495,7 +496,8 @@ __forceinline__ __device__ bool logfmt_encode(uint32_t* uint32_buffer, uint32_t 
         const auto fused_rounding = rounding - log_amin * step_inv;
 
         auto encode = [=](const float& log_abs) {
-            return __float2uint_rd(log_abs * step_inv + fused_rounding);
+            float tmp = log_abs == -INFINITY ? 0.0f : log_abs * step_inv + fused_rounding;
+            return __float2uint_rd(tmp);
         };
 
         EP_STATIC_ASSERT(kNumUnrolls == 2 or kNumUnrolls == 4, "kNumUnrolls == 2, 4 only");
@@ -507,8 +509,8 @@ __forceinline__ __device__ bool logfmt_encode(uint32_t* uint32_buffer, uint32_t 
             concat[5] = encode(log_abs[15]);
             #pragma unroll
             for (int k = 0; k < 5; ++ k)
-                uint32_buffer[k] = (concat[k] >> (k * 5)) | (concat[k + 1] << (27 - k * 5));
-            uint32_buffer[4] |= local_op << 16;
+                uint32_st_buffer[k] = (concat[k] >> (k * 5)) | (concat[k + 1] << (27 - k * 5));
+            uint32_st_buffer[4] |= local_op << 16;
         }
         else if constexpr (kNumUnrolls == 4) {
             uint32_t concat[11];
@@ -518,12 +520,12 @@ __forceinline__ __device__ bool logfmt_encode(uint32_t* uint32_buffer, uint32_t 
             concat[10] = encode(log_abs[30]) | (encode(log_abs[31]) << 9);
             #pragma unroll
             for (int k = 0; k < 5; ++ k)
-                uint32_buffer[k] = (concat[k] >> (k * 5)) | (concat[k + 1] << (27 - k * 5));
-            uint32_buffer[5] = (concat[5] >> 25) | (concat[6] << 2) | (concat[7] << 29);
+                uint32_st_buffer[k] = (concat[k] >> (k * 5)) | (concat[k + 1] << (27 - k * 5));
+            uint32_st_buffer[5] = (concat[5] >> 25) | (concat[6] << 2) | (concat[7] << 29);
             #pragma unroll
             for (int k = 6; k < 9; ++ k)
-                uint32_buffer[k] = (concat[k + 1] >> (k * 5 - 27)) | (concat[k + 2] << (54 - k * 5));
-            uint32_buffer[9] = local_op;
+                uint32_st_buffer[k] = (concat[k + 1] >> (k * 5 - 27)) | (concat[k + 2] << (54 - k * 5));
+            uint32_st_buffer[9] = local_op;
         }
     }
 
@@ -567,7 +569,7 @@ __forceinline__ __device__ void logfmt_decode_and_accumulate(uint32_t* uint32_bu
     if (enable_cast) {
         const auto step = (log_amax - log_amin) / static_cast<float>(kNumValues - 2);
         auto decode = [=](const uint32_t &encoded, const uint32_t &op) {
-            const auto decoded = exp2f_approx(((encoded & 0x1ff) - 1) * step + log_amin);
+            const auto decoded = !encoded ? 0.0f : exp2f_approx((encoded - 1) * step + log_amin);
             return op ? - decoded : decoded;
         };
 
@@ -583,11 +585,11 @@ __forceinline__ __device__ void logfmt_decode_and_accumulate(uint32_t* uint32_bu
             uint32_t local_op = uint32_buffer[4] >> 16;
             #pragma unroll
             for (int k = 0; k < 5; ++ k) {
-                accum[k * 3    ] += decode(concat[k]       & 0x1ff, local_op >> (k * 3    ) & 1) * weight;
-                accum[k * 3 + 1] += decode(concat[k] >> 9  & 0x1ff, local_op >> (k * 3 + 1) & 1) * weight;
-                accum[k * 3 + 2] += decode(concat[k] >> 18 & 0x1ff, local_op >> (k * 3 + 2) & 1) * weight;
+                accum[k * 3    ] += decode((concat[k]      ) & 0x1ff, (local_op >> (k * 3    )) & 1) * weight;
+                accum[k * 3 + 1] += decode((concat[k] >> 9 ) & 0x1ff, (local_op >> (k * 3 + 1)) & 1) * weight;
+                accum[k * 3 + 2] += decode((concat[k] >> 18) & 0x1ff, (local_op >> (k * 3 + 2)) & 1) * weight;
             }
-            accum[15] += decode(concat[5] & 0x1ff, local_op >> 15 & 1) * weight;
+            accum[15] += decode(concat[5] & 0x1ff, (local_op >> 15) & 1) * weight;
         }
         else if constexpr (kNumUnrolls == 4) {
             uint32_t concat[11];
@@ -604,12 +606,12 @@ __forceinline__ __device__ void logfmt_decode_and_accumulate(uint32_t* uint32_bu
             uint32_t local_op = uint32_buffer[9];
             #pragma unroll
             for (int k = 0; k < 10; ++ k) {
-                accum[k * 3    ] += decode(concat[k]       & 0x1ff, local_op >> (k * 3    ) & 1) * weight;
-                accum[k * 3 + 1] += decode(concat[k] >> 9  & 0x1ff, local_op >> (k * 3 + 1) & 1) * weight;
-                accum[k * 3 + 2] += decode(concat[k] >> 18 & 0x1ff, local_op >> (k * 3 + 2) & 1) * weight;
+                accum[k * 3    ] += decode((concat[k]      ) & 0x1ff, (local_op >> (k * 3    )) & 1) * weight;
+                accum[k * 3 + 1] += decode((concat[k] >> 9 ) & 0x1ff, (local_op >> (k * 3 + 1)) & 1) * weight;
+                accum[k * 3 + 2] += decode((concat[k] >> 18) & 0x1ff, (local_op >> (k * 3 + 2)) & 1) * weight;
             }
-            accum[30] += decode(concat[10]      & 0x1ff, local_op >> 30 & 1) * weight;
-            accum[31] += decode(concat[10] >> 9 & 0x1ff, local_op >> 31 & 1) * weight;
+            accum[30] += decode((concat[10]     ) & 0x1ff, (local_op >> 30) & 1) * weight;
+            accum[31] += decode((concat[10] >> 9) & 0x1ff, (local_op >> 31) & 1) * weight;
         }
     }
     else {
@@ -765,7 +767,8 @@ combine(void* combined_x,
 
                     // Simulated cast
                     if constexpr (kUseLogFMT) {
-                        bool enable_cast = logfmt_encode<kHidden, kNumUnrolls>(uint32_buffer, meta_buffer + i * kNumElemsPerInt4 / 128, lane_id);
+                        auto uint32_st_buffer = reinterpret_cast<uint32_t*>(tma_buffer[stage_idx]) + lane_id * kNumUnrolls * kNumElemsPerInt4 * 10 / 32;
+                        bool enable_cast = logfmt_encode<kHidden, kNumUnrolls>(uint32_buffer, uint32_st_buffer, meta_buffer + i * kNumElemsPerInt4 / 128, lane_id);
                         tma_store_fence();
                         int tma_bytes = 32 * kNumUnrolls * kNumElemsPerInt4 * (enable_cast ? 10 : 16) / 8;
                         // Store
@@ -795,7 +798,7 @@ combine(void* combined_x,
                 tma_store_wait();
                 __syncwarp();
             }
-            
+
             // Issue RDMA
             // NOTES: for zero-copy mode, we assume the data is already in the send buffer
             if (dst_p2p_ptr == 0)
@@ -848,11 +851,12 @@ combine(void* combined_x,
         // 控制 Stage 数量（需要比较大防止 warp 不均衡，取 4/8？），同时有 full barrier 和 empty barrier
         constexpr int kNumStages = 4;
         constexpr int kNumTMABufferBytes = 16 * 2 + kHidden * 2;
-        uint32_t tma_phase[kNumStages] = {0};
+        uint32_t tma_phase[kNumStages] = {0, 0, 0, 0};
+        uint32_t tma_empty_phase[kNumStages] = {1, 1, 1, 1};
         auto full_barrier  = PatternVisitor([=](const int& k) { return reinterpret_cast<uint64_t*>(smem_buffer + k * kNumTMABufferBytes); });
         auto empty_barrier = PatternVisitor([=](const int& k) { return reinterpret_cast<uint64_t*>(smem_buffer + k * kNumTMABufferBytes + 16); });
         auto tma_ld_buffer = PatternVisitor([=](const int& k) { return reinterpret_cast<uint8_t* >(smem_buffer + k * kNumTMABufferBytes + 32); });
-        auto tma_st_buffer = PatternVisitor([=](const int& i) { return reinterpret_cast<uint32_t*>(smem_buffer + kNumStages * kNumTMABufferBytes + i * sizeof(int4) * kNumUnrolls); });
+        auto tma_st_buffer = PatternVisitor([=](const int& i) { return reinterpret_cast<uint32_t*>(smem_buffer + kNumStages * kNumTMABufferBytes + i * kNumBF16PerWarpBytes); });
 
         // barrier 初始化
         #pragma unroll
@@ -868,8 +872,6 @@ combine(void* combined_x,
         auto log_amin  = PatternVisitor([=](const int& k) { return reinterpret_cast<float*>(smem_ptr + kNumStages * kNumDivisionBytes + k * kNumDivisionBytes); });
         auto cast_info = PatternVisitor([=](const int& k) { return reinterpret_cast<int*>  (smem_ptr + kNumStages * kNumDivisionBytes * 2 + k * kNumDivisionBytes); });
 
-        printf("###%d %d\n", blockIdx.x, threadIdx.x);
-
         // 未来优化：也分 4 个 warp group，每个包含 8 个 warp，最后 warp 间 reduce
         int stage = 0;
         for (int token_idx = sm_id; token_idx < num_combined_tokens; token_idx += num_sms) {
@@ -879,13 +881,14 @@ combine(void* combined_x,
                 for (int i = 0; i < num_topk; ++ i) {
                     int reg_topk_idx = static_cast<int>(__ldg(topk_idx + token_idx * num_topk + i));
                     if (reg_topk_idx >= 0) {
+                        mbarrier_wait(empty_barrier[stage], tma_empty_phase[stage]);
                         auto buffer = static_cast<uint8_t*>(rdma_recv_x) + (reg_topk_idx * num_max_dispatch_tokens_per_rank + token_idx) * num_bytes_per_slot;
                         auto uint64_buffer = reinterpret_cast<uint64_t*>(buffer);
                         if (lane_id < kNumDivisions / 2) {
                             logfmt_check_amaxmin<kHidden, kNumUnrolls>(uint64_buffer[lane_id], reinterpret_cast<float2*>(log_amax[stage]), reinterpret_cast<float2*>(log_amin[stage]), cast_info[stage], lane_id);
                             if (lane_id == 0) {
-                                int cast_prefix_count = cast_info[stage][num_work_warp - 1] >> 1;
-                                int tma_bytes = cast_prefix_count * kNumLogFMTPerWarpBytes + (num_work_warp - cast_prefix_count) * kNumBF16PerWarpBytes;
+                                int cast_count = (cast_info[stage][num_work_warp - 1] >> 1) + (cast_info[stage][num_work_warp - 1] & 1);
+                                int tma_bytes = cast_count * kNumLogFMTPerWarpBytes + (num_work_warp - cast_count) * kNumBF16PerWarpBytes;
                                 tma_load_1d(tma_ld_buffer[stage], buffer + kNumMetaBytes, full_barrier[stage], tma_bytes);
                                 mbarrier_arrive_and_expect_tx(full_barrier[stage], tma_bytes);
                             }
@@ -906,7 +909,7 @@ combine(void* combined_x,
                         // 调用 decode 并累加
                         int cast_prefix_count = cast_info[stage][warp_id] >> 1;
                         bool enable_cast = cast_info[stage][warp_id] & 1;
-                        int tma_offset = kNumMetaBytes + kNumLogFMTPerWarpBytes * cast_prefix_count + kNumBF16PerWarpBytes * (warp_id - cast_prefix_count);
+                        int tma_offset = kNumLogFMTPerWarpBytes * cast_prefix_count + kNumBF16PerWarpBytes * (warp_id - cast_prefix_count);
                         int inner_idx = lane_id * kNumUnrolls / 16;
                         int global_idx = warp_id * kNumUnrolls * 2 + inner_idx;
                         logfmt_decode_and_accumulate<kHidden, kNumUnrolls>(
@@ -925,11 +928,11 @@ combine(void* combined_x,
                 #pragma unroll
                 for (int k = 0; k < kNumUnrolls * 4; ++ k) {
                     auto combined_pack = __nv_bfloat162(combined_values[k * 2], combined_values[k * 2 + 1]);
-                    tma_st_buffer[warp_id][k] = *reinterpret_cast<uint32_t*>(&combined_pack);
+                    tma_st_buffer[warp_id][kNumUnrolls * 4 * lane_id + k] = *reinterpret_cast<uint32_t*>(&combined_pack);
                 }
                 tma_store_fence();
                 if (elect_one_sync(lane_id))
-                    tma_store_1d(tma_st_buffer[warp_id], static_cast<int4*>(combined_x) + token_idx * hidden_bf16_int4 + warp_id * kNumUnrolls, kNumBF16PerWarpBytes);
+                    tma_store_1d(tma_st_buffer[warp_id], static_cast<int4*>(combined_x) + token_idx * hidden_bf16_int4 + warp_id * kNumUnrolls * 32, kNumBF16PerWarpBytes);
                 __syncwarp();
             }
         }
