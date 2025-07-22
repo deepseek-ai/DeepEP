@@ -841,28 +841,28 @@ Buffer::internode_dispatch(const torch::Tensor& x, const std::optional<torch::Te
         num_recv_tokens_per_expert_list = std::vector<int>(moe_recv_expert_counter, moe_recv_expert_counter + num_local_experts);
     }
 
-    // auto rdma_channel_prefix_matrix_cpu = rdma_channel_prefix_matrix.cpu(); //num_rdma_ranks, num_channels
-    // auto recv_gbl_rank_prefix_sum_cpu = recv_gbl_rank_prefix_sum.cpu(); // num_ranks
-    // // print rdma_channel_prefix_matrix
-    // if (rank == 1 or rank == 15) {
-    //     printf("rank: %d, rdma_channel_prefix_matrix:\n", rank);
-    //     int32_t* data = rdma_channel_prefix_matrix_cpu.data_ptr<int32_t>();
-    //     for (int i = 0; i < num_rdma_ranks; ++i) {
-    //         printf("row %d: ", i);
-    //         for (int j = 0; j < num_channels; ++j) {
-    //             // 按行主序 row-major
-    //             printf("%d ", data[i * num_channels + j]);
-    //         }
-    //         printf("\n");
-    //     }
-    //     // print recv_gbl_rank_prefix_sum
-    //     printf("rank: %d, recv_gbl_rank_prefix_sum:\n", rank);
-    //     data = recv_gbl_rank_prefix_sum_cpu.data_ptr<int32_t>();
-    //     for (int i = 0; i < num_ranks; ++i) {
-    //         printf(" %d: %d\n", i, data[i]);
-    //     }
-    //     printf("rank: %d, num_recv_tokens: %d\n", rank, num_recv_tokens);
-    // }
+    auto rdma_channel_prefix_matrix_cpu = rdma_channel_prefix_matrix.cpu(); //num_rdma_ranks, num_channels
+    auto recv_gbl_rank_prefix_sum_cpu = recv_gbl_rank_prefix_sum.cpu(); // num_ranks
+    // print rdma_channel_prefix_matrix
+    if (rank == 1 or rank == 15) {
+        printf("rank: %d, rdma_channel_prefix_matrix:\n", rank);
+        int32_t* data = rdma_channel_prefix_matrix_cpu.data_ptr<int32_t>();
+        for (int i = 0; i < num_rdma_ranks; ++i) {
+            printf("row %d: ", i);
+            for (int j = 0; j < num_channels; ++j) {
+                // 按行主序 row-major
+                printf("%d ", data[i * num_channels + j]);
+            }
+            printf("\n");
+        }
+        // print recv_gbl_rank_prefix_sum
+        printf("rank: %d, recv_gbl_rank_prefix_sum:\n", rank);
+        data = recv_gbl_rank_prefix_sum_cpu.data_ptr<int32_t>();
+        for (int i = 0; i < num_ranks; ++i) {
+            printf(" %d: %d\n", i, data[i]);
+        }
+        printf("rank: %d, num_recv_tokens: %d\n", rank, num_recv_tokens);
+    }
 
     // Allocate new tensors
     auto recv_x = torch::empty({num_recv_tokens, hidden}, x.options());
@@ -896,7 +896,6 @@ Buffer::internode_dispatch(const torch::Tensor& x, const std::optional<torch::Te
                         torch::empty({num_recv_tokens, num_scales}, x_scales->options());
         recv_x_scales_ptr = static_cast<float*>(recv_x_scales->data_ptr());
     }
-
     // Launch data dispatch
     // NOTES: the buffer size checks are moved into the `.cu` file
     internode::dispatch(recv_x.data_ptr(), recv_x_scales_ptr, recv_topk_idx_ptr, recv_topk_weights_ptr,
@@ -914,6 +913,7 @@ Buffer::internode_dispatch(const torch::Tensor& x, const std::optional<torch::Te
                         buffer_ptrs_gpu, config.num_max_nvl_chunked_send_tokens, config.num_max_nvl_chunked_recv_tokens,
                         rank, num_ranks, cached_mode,
                         comm_stream, num_channels, low_latency_mode);
+    
 
     // Wait streams
     std::optional<EventHandle> event;
@@ -943,7 +943,7 @@ Buffer::internode_dispatch(const torch::Tensor& x, const std::optional<torch::Te
     // Switch back compute stream
     if (allocate_on_comm_stream)
         at::cuda::setCurrentCUDAStream(compute_stream);
-
+    
     // Return values
     return {recv_x, recv_x_scales, recv_topk_idx, recv_topk_weights, num_recv_tokens_per_expert_list,
             rdma_channel_prefix_matrix, gbl_channel_prefix_matrix,
@@ -1589,6 +1589,22 @@ Buffer::pcie_dispatch(const torch::Tensor& x, const std::optional<torch::Tensor>
         recv_x_scales_ptr = static_cast<float*>(recv_x_scales->data_ptr());
     }
 
+    //完整打印x的值,长度为hidden_int4*sizeof(int4)，先拉到cpu上再打印
+
+    // if(rank == 1 or rank == 9){
+    //     //完整打印x的值 长度为hidden_int4
+    //     printf("deepep_cpp before-----------before x rank: %d hidden_int4: %d, x: ", rank, hidden_int4);
+    //     auto x_cpu = x.cpu();   
+    //     uint8_t* x_cpu_ptr = reinterpret_cast<uint8_t*>(x_cpu.data_ptr());
+    //     for(int j = 0; j < hidden_int4 * sizeof(int4); j++){
+    //         printf("%d ", x_cpu_ptr[j]);
+    //     }
+    //     printf("\n");
+    //     printf("\n");
+    //     printf("\n");
+    //     printf("\n");
+        
+    // }
     // Launch Kernel
     auto topk_ranks_idx = torch::empty({num_recv_tokens, num_topk}, dtype(torch::kInt32).device(torch::kCUDA));
     internode::dispatch_pcie(
@@ -1602,18 +1618,19 @@ Buffer::pcie_dispatch(const torch::Tensor& x, const std::optional<torch::Tensor>
         rdma_buffer_ptr, config.num_max_rdma_chunked_send_tokens, config.num_max_rdma_chunked_recv_tokens,
         buffer_ptrs_gpu, rank, num_ranks, comm_stream, num_channels
     );
+
     // Stream Sync and Return
     std::optional<EventHandle> event;
     if (async) {
         event = EventHandle(comm_stream);
-        for (auto& t: {x, is_token_in_rank, rdma_channel_prefix_matrix, recv_gbl_rank_prefix_sum, recv_x}) {
+        for (auto& t: {x, is_token_in_rank, recv_x,rdma_channel_prefix_matrix, recv_gbl_rank_prefix_sum}) {
             t.record_stream(comm_stream);
             if (allocate_on_comm_stream)
                 t.record_stream(compute_stream);
         }
         for (auto& to: {x_scales, topk_idx, topk_weights,
-                        recv_x_scales,recv_topk_idx, recv_topk_weights,
                         num_tokens_per_rank, num_tokens_per_rdma_rank, num_tokens_per_expert,
+                        recv_topk_idx, recv_topk_weights, recv_x_scales,
                         recv_src_meta, recv_gbl_channel_prefix_matrix}) {
             to.has_value() ? to->record_stream(comm_stream) : void();
             if (allocate_on_comm_stream)
@@ -1625,7 +1642,21 @@ Buffer::pcie_dispatch(const torch::Tensor& x, const std::optional<torch::Tensor>
 
     if (allocate_on_comm_stream)
         at::cuda::setCurrentCUDAStream(compute_stream);
-
+    
+    // if(rank == 1 or rank == 9){
+    //     printf("\n");
+    //     printf("\n");
+    //     printf("\n");
+    //     printf("\n");
+    //     //完整打印x的值 长度为hidden_int4
+    //     printf("deepep_cpp after-----------after rank: %d hidden_int4: %d, recv_x: ", rank, hidden_int4);
+    //     auto recv_x_cpu = recv_x.cpu();   
+    //     uint8_t* recv_x_cpu_ptr = reinterpret_cast<uint8_t*>(recv_x_cpu.data_ptr());
+    //     for(int j = 0; j < hidden_int4 * sizeof(int4); ++j){
+    //         printf("%d ", recv_x_cpu_ptr[j]);
+    //     }
+    //     printf("\n");
+    // }
     return {recv_x, recv_x_scales, recv_topk_idx, recv_topk_weights, recv_src_meta,
             recv_gbl_channel_prefix_matrix, recv_gbl_rank_prefix_sum,
             num_recv_tokens_per_expert_list,

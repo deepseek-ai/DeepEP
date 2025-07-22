@@ -104,10 +104,10 @@ def test_main(num_tokens: int, num_sms: int, local_rank: int, num_local_ranks: i
             assert (check_x[check_start:check_end, :].int() - i).sum().item() == 0
             check_start = check_end
 
-
+    torch.set_printoptions(profile="full")
     for previous_mode in (False, True):
         for async_mode in (False, True):
-            for current_x in (x, x_pure_rand, x_e4m3):
+            for current_x in (x, x_e4m3, x_pure_rand):
                 for with_topk in (True, False):
                     if local_rank == 0:
                         print(f'[testing] Running with {"FP8" if isinstance(current_x, tuple) else "BF16"}, {"with" if with_topk else "without"} top-k (async={async_mode}, previous={previous_mode}) ...', flush=True, end='')
@@ -119,9 +119,8 @@ def test_main(num_tokens: int, num_sms: int, local_rank: int, num_local_ranks: i
                         dispatch_args.update({'previous_event': buffer.capture()})
                     recv_x, recv_topk_idx, recv_topk_weights, recv_num_tokens_per_expert_list, handle, event = buffer.dispatch(**dispatch_args)
                     event.current_stream_wait() if async_mode else ()
-                    recv_x = per_token_cast_back(*recv_x) if isinstance(recv_x, tuple) else recv_x
+                    # recv_x = per_token_cast_back(*recv_x) if isinstance(recv_x, tuple) else recv_x
                     if rank == 1 or rank == 9:
-                        torch.set_printoptions(profile="full")
                         print(f'rank: {rank}, recv_x: {recv_x}')
                     sys.exit()
                     # Checks
@@ -240,7 +239,7 @@ def test_loop(local_rank: int, num_local_ranks: int):
     if test_ll_compatibility:
         ll_num_tokens, ll_hidden, ll_num_experts, ll_num_topk = 16, 5120, 256, 9
 
-    num_sms = 2 
+    num_sms = 10 
     # 如果是ll模式，则num_qps_per_rank为num_experts // num_ranks，否则为sms/2=channel
     num_qps_per_rank = max(num_sms, ll_num_experts // num_ranks if test_ll_compatibility else 0)
 
@@ -249,8 +248,8 @@ def test_loop(local_rank: int, num_local_ranks: int):
     assert num_local_ranks == 8 and num_ranks > 8
     torch.manual_seed(rank)
     
-    num_tokens = 1  
-    for i in (num_sms, ):
+    num_tokens = 5  
+    for i in (num_sms, ): 
         test_main(num_tokens, i, local_rank, num_local_ranks, num_ranks, num_nodes, rank, buffer, group)
         if local_rank == 0:
             print('', flush=True)

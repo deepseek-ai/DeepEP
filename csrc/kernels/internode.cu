@@ -57,6 +57,10 @@ std::pair<int, int> get_rdma_clean_meta(int hidden_int4, int num_scales, int num
     };
 }
 
+int get_num_bytes_per_pcie_token(int hidden_int4, int num_scales, int num_topk_idx, int num_topk_weights) {
+    return static_cast<int>(align(hidden_int4 * sizeof(int4) + num_scales * sizeof(float) + num_topk_idx * sizeof(int) + num_topk_weights * sizeof(float), sizeof(int4)));
+}
+
 __host__ __device__ __forceinline__
 std::pair<int, int> get_nvl_clean_meta(int hidden_int4, int num_scales, int num_topk_idx,
                                        int num_topk_weights, int num_rdma_ranks, int num_nvl_ranks,
@@ -714,7 +718,14 @@ dispatch(int4* recv_x, float* recv_x_scales, int64_t* recv_topk_idx, float* recv
                 dst_send_buffers[num_topk_ranks ++] = reinterpret_cast<uint8_t*>(broadcast(send_buffer, i)) + slot_idx * num_bytes_per_token;
             }
             EP_DEVICE_ASSERT(num_topk_ranks <= kNumTopkRDMARanks);
-
+            if((rank == 1 or rank == 9) and lane_id == 0){
+                //完整打印x的值 长度为hidden_int4
+                printf("-----------Sender x rank: %d, warp_id: %d, lane_id: %d, hidden_int4: %d, token_idx: %d, x: ", rank, warp_id, lane_id, hidden_int4, token_idx);
+                for(int j = 0; j < hidden_int4 * sizeof(int4); j++){
+                    printf("%d ", reinterpret_cast<const uint8_t*>(x)[token_idx * hidden_int4 * sizeof(int4) + j]);
+                }
+                printf("\n");
+            }
             // Copy `x` into symmetric send buffer
             auto st_broadcast = [=](const int key, const int4& value) {
                 #pragma unroll
@@ -2038,7 +2049,8 @@ void combine(cudaDataType_t type,
 template <int kNumRanks,
           int kNumDispatchRDMASenderWarps,
           int kNumDispatchReceiverWarps, int kNumDispatchReceiverCoordinatorWarps,int kNumTopkRanks = get_num_topk_rdma_ranks(kNumRanks)>
-__global__ void __launch_bounds__(((kNumDispatchRDMASenderWarps + 1 + kNumDispatchReceiverWarps + kNumDispatchReceiverCoordinatorWarps) * 32), 1)
+// __global__ void __launch_bounds__(((kNumDispatchRDMASenderWarps + 1 + kNumDispatchReceiverWarps + kNumDispatchReceiverCoordinatorWarps) * 32), 1)
+__global__ void __launch_bounds__(((kNumDispatchRDMASenderWarps + 1) * 32), 1)
 dispatch_pcie(int4* recv_x, float* recv_x_scales, int64_t* recv_topk_idx, float* recv_topk_weights, SourceMeta* recv_src_meta,
          const int4* x, const float* x_scales, const int64_t* topk_idx, const float* topk_weights,
 	     const int* rdma_channel_prefix_matrix,//[num_ranks,num_channels] for sender
@@ -2084,14 +2096,16 @@ dispatch_pcie(int4* recv_x, float* recv_x_scales, int64_t* recv_topk_idx, float*
         }
     }
 
-    EP_DEVICE_ASSERT(num_warps == kNumDispatchRDMASenderWarps + 1 + kNumDispatchReceiverWarps + kNumDispatchReceiverCoordinatorWarps);
+    // EP_DEVICE_ASSERT(num_warps == kNumDispatchRDMASenderWarps + 1 + kNumDispatchReceiverWarps + kNumDispatchReceiverCoordinatorWarps);
+    EP_DEVICE_ASSERT(num_warps == kNumDispatchRDMASenderWarps + 1);
 
     // Data checks
     EP_DEVICE_ASSERT(num_topk <= 32);
 
     // RDMA symmetric layout
-    auto num_bytes_per_rdma_token = get_num_bytes_per_rdma_token(hidden_int4, num_scales, num_topk, num_topk);
-    auto rdma_channel_data = SymBuffer<int8_t>(rdma_buffer_ptr, num_max_rdma_chunked_recv_tokens * num_bytes_per_rdma_token, kNumRanks, channel_id, num_channels);
+    // auto num_bytes_per_rdma_token = get_num_bytes_per_rdma_token(hidden_int4, num_scales, num_topk, num_topk);
+    auto num_bytes_per_pcie_token = get_num_bytes_per_pcie_token(hidden_int4, num_scales, num_topk, num_topk);
+    auto rdma_channel_data = SymBuffer<int8_t>(rdma_buffer_ptr, num_max_rdma_chunked_recv_tokens * num_bytes_per_pcie_token, kNumRanks, channel_id, num_channels);
     // meta记录了这个channel发送过来的prefix sum的两个相邻值
     auto rdma_channel_meta = SymBuffer<int>(rdma_buffer_ptr, 2, kNumRanks, channel_id, num_channels);
     // 这个head和tail要修改吗？
@@ -2181,7 +2195,7 @@ dispatch_pcie(int4* recv_x, float* recv_x_scales, int64_t* recv_topk_idx, float*
             //     send_rdma_head[token_idx * kNumRDMARanks + lane_id] = rdma_tail_idx;
 
             // Broadcast tails
-            SourceMeta src_meta;
+            // SourceMeta src_meta;
             int num_topk_ranks = 0;
             // int topk_ranks[kNumTopkRanks];
             void* dst_send_buffers[kNumTopkRanks];
@@ -2190,14 +2204,22 @@ dispatch_pcie(int4* recv_x, float* recv_x_scales, int64_t* recv_topk_idx, float*
                 slot_idx = slot_idx % num_max_rdma_chunked_recv_tokens;
                 // topk_ranks[num_topk_ranks] = i;
                 auto recv_is_token_in_rank_uint64 = broadcast(is_token_in_rank_uint64, i);
-                auto recv_is_token_in_rank_values = reinterpret_cast<const bool*>(&recv_is_token_in_rank_uint64);
-                if (lane_id == num_topk_ranks)
-                    //待修改，SourceMeta不再需要判定nvl的相关信息
-                    src_meta = SourceMeta(rank, recv_is_token_in_rank_values);
-                dst_send_buffers[num_topk_ranks ++] = reinterpret_cast<uint8_t*>(broadcast(send_buffer, i)) + slot_idx * num_bytes_per_rdma_token;
+                // auto recv_is_token_in_rank_values = reinterpret_cast<const bool*>(&recv_is_token_in_rank_uint64);
+                // if (lane_id == num_topk_ranks)
+                //     //待修改，SourceMeta不再需要判定nvl的相关信息
+                //     src_meta = SourceMeta(rank, recv_is_token_in_rank_values);
+                dst_send_buffers[num_topk_ranks ++] = reinterpret_cast<uint8_t*>(broadcast(send_buffer, i)) + slot_idx * num_bytes_per_pcie_token;
             }
             EP_DEVICE_ASSERT(num_topk_ranks <= kNumTopkRanks);
-
+            
+            // if((rank == 1 or rank == 9) and lane_id == 0){
+                //完整打印x的值 长度为hidden_int4
+                // printf("-----------Sender x rank: %d, warp_id: %d, lane_id: %d, hidden_int4: %d, token_idx: %d, x: ", rank, warp_id, lane_id, hidden_int4, token_idx);
+                // for(int j = 0; j < hidden_int4 * sizeof(int4); j++){
+                //     printf("%d ", reinterpret_cast<const uint8_t*>(x)[token_idx * hidden_int4 * sizeof(int4) + j]);
+                // }
+                // printf("\n");
+            // }
             // Copy `x` into symmetric send buffer
             auto st_broadcast = [=](const int key, const int4& value) {
                 #pragma unroll
@@ -2206,15 +2228,22 @@ dispatch_pcie(int4* recv_x, float* recv_x_scales, int64_t* recv_topk_idx, float*
             };
             UNROLLED_WARP_COPY(5, lane_id, hidden_int4, 0, x + token_idx * hidden_int4, ld_nc_global, st_broadcast);
             #pragma unroll
-            for (int i = 0; i < num_topk_ranks; ++ i)
+            for (int i = 0; i < num_topk_ranks; ++ i){
+                // if((rank == 1 or rank == 9) and lane_id == 0){
+                //     printf("-----------Sender dst_send_buffers rank: %d, warp_id: %d, lane_id: %d, hidden_int4: %d, token_idx: %d, dst_send_buffers: ", rank, warp_id, lane_id, hidden_int4, token_idx);
+                //     for(int j = 0; j < hidden_int4 * sizeof(int4); j++){
+                //         printf("%d ", reinterpret_cast<uint8_t*>(dst_send_buffers[i])[j]);
+                //     }
+                //     printf("\n");
+                // }
                 dst_send_buffers[i] = reinterpret_cast<int4*>(dst_send_buffers[i]) + hidden_int4;
-
-            // Copy source metadata into symmetric send buffer
-            if (lane_id < num_topk_ranks)
-                st_na_global(reinterpret_cast<SourceMeta*>(dst_send_buffers[lane_id]), src_meta);
-            #pragma unroll
-            for (int i = 0; i < num_topk_ranks; ++ i)
-                dst_send_buffers[i] = reinterpret_cast<SourceMeta*>(dst_send_buffers[i]) + 1;
+            }
+            // // Copy source metadata into symmetric send buffer
+            // if (lane_id < num_topk_ranks)
+            //     st_na_global(reinterpret_cast<SourceMeta*>(dst_send_buffers[lane_id]), src_meta);
+            // #pragma unroll
+            // for (int i = 0; i < num_topk_ranks; ++ i)
+            //     dst_send_buffers[i] = reinterpret_cast<SourceMeta*>(dst_send_buffers[i]) + 1;
 
             // Copy `x_scales` into symmetric send buffer
             #pragma unroll
@@ -2323,9 +2352,9 @@ dispatch_pcie(int4* recv_x, float* recv_x_scales, int64_t* recv_topk_idx, float*
                 if(dst_rdma_rank != rank) {
                     auto dst_slot_idx = synced_last_issued_tail % num_max_rdma_chunked_recv_tokens;
                     EP_DEVICE_ASSERT(dst_slot_idx + num_tokens_to_issue <= num_max_rdma_chunked_recv_tokens);
-                    const size_t num_bytes_per_msg = num_bytes_per_rdma_token * num_tokens_to_issue;
-                    const auto dst_ptr = reinterpret_cast<uint64_t>(rdma_channel_data.recv_buffer(rank) + dst_slot_idx * num_bytes_per_rdma_token);
-                    const auto src_ptr = reinterpret_cast<uint64_t>(rdma_channel_data.send_buffer(dst_rdma_rank) + dst_slot_idx * num_bytes_per_rdma_token);
+                    const size_t num_bytes_per_msg = num_bytes_per_pcie_token * num_tokens_to_issue;
+                    const auto dst_ptr = reinterpret_cast<uint64_t>(rdma_channel_data.recv_buffer(rank) + dst_slot_idx * num_bytes_per_pcie_token);
+                    const auto src_ptr = reinterpret_cast<uint64_t>(rdma_channel_data.send_buffer(dst_rdma_rank) + dst_slot_idx * num_bytes_per_pcie_token);
                     nvshmemi_ibgda_put_nbi_warp<true>(dst_ptr, src_ptr, num_bytes_per_msg,
                                                         dst_rdma_rank, channel_id, lane_id, 0);
                 }else{
@@ -2367,7 +2396,9 @@ dispatch_pcie(int4* recv_x, float* recv_x_scales, int64_t* recv_topk_idx, float*
                 auto src_rank = start_rank + lane_id;   
                 auto meta_0 = ld_volatile_global(rdma_channel_meta.recv_buffer(src_rank));
                 auto meta_1 = ld_volatile_global(rdma_channel_meta.recv_buffer(src_rank) + 1);
-
+                if(rank == 1 or rank == 9){
+                    printf("-----------Receiver meta_0 rank: %d, channel_id: %d, warp_id: %d, lane_id: %d, meta_0: %d, meta_1: %d\n", src_rank, channel_id, warp_id, lane_id, meta_0, meta_1);
+                }
                 if (meta_0 < 0 && meta_1 < 0) {
                     // Meta data ready (using negative value as ready signal)
                     channel_offset = -meta_0 - 1;
@@ -2377,9 +2408,10 @@ dispatch_pcie(int4* recv_x, float* recv_x_scales, int64_t* recv_topk_idx, float*
                     // 给coordinator用, 存储每个channel的global start和end    
                     rdma_receiver_channel_start[src_rank] = channel_offset;
                     rdma_receiver_channel_end[src_rank] = channel_offset_1;
-                    if (src_rank - rank == 8 or rank - src_rank == 8) {
-                        printf("!!!!!! Get Meta src_rank=%d lane_id=%d meta_0=%d meta_1=%d\n", src_rank, lane_id, meta_0, meta_1);
-                    }
+                    //TODO:疑似看见来自非srcrank的meta data传入，需要校验
+                    // if (src_rank - rank == 8 or rank - src_rank == 8) {
+                    //     printf("!!!!!! Get Meta src_rank=%d lane_id=%d meta_0=%d meta_1=%d\n", src_rank, lane_id, meta_0, meta_1);
+                    // }
                     break;
                 }
                 
@@ -2402,7 +2434,6 @@ dispatch_pcie(int4* recv_x, float* recv_x_scales, int64_t* recv_topk_idx, float*
       
             while (true) {
                 src_rank = (src_rank + 1) % num_target_ranks;
-                
                 if (__shfl_sync(0xffffffff, num_tokens_to_recv_from_rank, src_rank) > 0) {
                     if (lane_id == src_rank and cached_rdma_channel_head == cached_rdma_channel_tail)
                         cached_rdma_channel_tail = static_cast<int>(ld_acquire_sys_global(rdma_channel_tail.buffer(start_rank + src_rank)));
@@ -2419,22 +2450,39 @@ dispatch_pcie(int4* recv_x, float* recv_x_scales, int64_t* recv_topk_idx, float*
             // Step 3: 实际数据拷贝, 每个线程都拿到需要更新线程的head和tail
             auto src_rdma_head = __shfl_sync(0xffffffff, cached_rdma_channel_head, src_rank);
             auto src_rdma_tail = __shfl_sync(0xffffffff, cached_rdma_channel_tail, src_rank);
+            auto channel_offset_recv = __shfl_sync(0xffffffff, channel_offset, src_rank);
             int num_recv_tokens = src_rdma_tail - src_rdma_head;
             auto dst_rank_expert_begin = (start_rank + src_rank) * (num_experts / kNumRanks);
             auto dst_rank_expert_end = min(num_experts, dst_rank_expert_begin + (num_experts / kNumRanks));
             
-            int rank_offset = recv_gbl_rank_prefix_sum[start_rank + src_rank];
+            int rank_offset = start_rank + src_rank == 0 ? 0 : recv_gbl_rank_prefix_sum[start_rank + src_rank - 1];
             
             // Process tokens one by one (similar to reference code)
             for (int token_idx = src_rdma_head; token_idx < src_rdma_tail; token_idx++) {
                 // 余上buffer大小得到位置
                 int src_slot_idx = token_idx % num_max_rdma_chunked_recv_tokens;
-                int dst_slot_idx = rank_offset + channel_offset + token_idx;
-                void* shifted = rdma_channel_data.recv_buffer(start_rank + src_rank) + src_slot_idx * num_bytes_per_rdma_token;
+                int dst_slot_idx = rank_offset + channel_offset_recv + token_idx;
+                void* shifted = rdma_channel_data.recv_buffer(start_rank + src_rank) + src_slot_idx * num_bytes_per_pcie_token;
+                // //打印shifted的值
+                // if((rank == 1 or rank == 9) and lane_id == 0){
+                //     printf("----------Receiver shifted rank: %d, warp_id: %d, lane_id: %d, shifted: ", rank, warp_id, lane_id);
+                //     for(int j = 0; j < hidden_int4 * sizeof(int4); j++){
+                //         printf("%u ", reinterpret_cast<uint8_t*>(shifted)[j]);
+                //     }
+                //     printf("\n");
+                // }
                 UNROLLED_WARP_COPY(5, lane_id, hidden_int4,
                                     recv_x + dst_slot_idx * hidden_int4,
                                     reinterpret_cast<int4*>(shifted),
                                     ld_nc_global, st_na_global);
+                //打印recv_x的值
+                // if((rank == 1 or rank == 9) and lane_id == 0){
+                //     printf("-----------Receiver recv_x rank: %d, channel_id: %d, warp_id: %d, lane_id: %d, token_idx: %d, rank_offset: %d, channel_offset_recv: %d, dst_slot_idx: %d, recv_x: ", rank, channel_id, warp_id, lane_id, token_idx, rank_offset, channel_offset_recv, dst_slot_idx);
+                //     // for(int j = 0; j < hidden_int4 * sizeof(int4); j++){
+                //     //     printf("%u ", reinterpret_cast<uint8_t*>(recv_x)[j]);
+                //     // }
+                //     // printf("\n");
+                // }
                 shifted = static_cast<int4*>(shifted) + hidden_int4;
 
                 // Copy `x_scales`
@@ -2443,7 +2491,6 @@ dispatch_pcie(int4* recv_x, float* recv_x_scales, int64_t* recv_topk_idx, float*
                                     reinterpret_cast<float*>(shifted),
                                     ld_nc_global, st_na_global);
                 shifted = static_cast<float*>(shifted) + num_scales;
-
                 // Copy `topk_idx` and `topk_weights`
                 // NOTES: do not use `shifted` after this `if`, because only several lanes are shifted
                 if (lane_id < num_topk) {
@@ -2459,7 +2506,6 @@ dispatch_pcie(int4* recv_x, float* recv_x_scales, int64_t* recv_topk_idx, float*
                     st_na_global(recv_topk_weights + dst_slot_idx * num_topk + lane_id, weight_value);
                 }
             }
-
             // Step 4: 最后更新progress和cached tail (移到循环外)
             if (lane_id == src_rank) {
                 cached_rdma_channel_head = cached_rdma_channel_tail;
@@ -2469,6 +2515,14 @@ dispatch_pcie(int4* recv_x, float* recv_x_scales, int64_t* recv_topk_idx, float*
             }
             __syncwarp();
         }
+        // //打印recv_x的值
+        // if((rank == 1 or rank == 9) and lane_id == 0){
+        //     printf("-----------Receiver recv_x rank: %d, warp_id: %d, lane_id: %d, recv_x: ", rank, warp_id, lane_id);
+        //     for(int j = 0; j < hidden_int4 * sizeof(int4); j++){
+        //         printf("%u ", reinterpret_cast<uint8_t*>(recv_x)[j]);
+        //     }
+        //     printf("\n");
+        // }
         if (lane_id == 0) {
             printf("RDMAReceiver rank=%d warp_id=%d Channel=%d done\n", rank, warp_id, channel_id);
         }
@@ -2552,7 +2606,8 @@ void dispatch_pcie(void* recv_x, float* recv_x_scales, int64_t* recv_topk_idx, f
                   rdma_buffer_ptr, num_max_rdma_chunked_send_tokens, num_max_rdma_chunked_recv_tokens, \
                   buffer_ptrs, rank); } break
 
-    SETUP_LAUNCH_CONFIG(num_channels * 2, (kNumDispatchRDMASenderWarps + 1 + kNumDispatchReceiverWarps + kNumDispatchReceiverCoordinatorWarps) * 32, stream);
+    // SETUP_LAUNCH_CONFIG(num_channels * 2, (kNumDispatchRDMASenderWarps + 1 + kNumDispatchReceiverWarps + kNumDispatchReceiverCoordinatorWarps) * 32, stream);
+    SETUP_LAUNCH_CONFIG(num_channels * 2, (kNumDispatchRDMASenderWarps + 1) * 32, stream);
     SWITCH_RANKS(DISPATCH_PCIE_LAUNCH_CASE);
 #undef DISPATCH_PCIE_LAUNCH_CASE
 }
