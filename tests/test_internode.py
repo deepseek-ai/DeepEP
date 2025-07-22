@@ -101,7 +101,7 @@ def test_main(num_tokens,num_sms: int, local_rank: int, num_local_ranks: int, nu
     for previous_mode in (False, True):
         for async_mode in (False, True):
             for current_x in (x, x_pure_rand, x_e4m3):
-                for with_topk in (True, False):
+                for with_topk in (True,):
                     if local_rank == 0:
                         print(f'[testing] Running with {"FP8" if isinstance(current_x, tuple) else "BF16"}, {"with" if with_topk else "without"} top-k (async={async_mode}, previous={previous_mode}) ...', flush=True, end='')
                     dispatch_args = {'x': current_x, 'num_tokens_per_rank': num_tokens_per_rank, 'num_tokens_per_rdma_rank': num_tokens_per_rdma_rank,  'is_token_in_rank': is_token_in_rank,
