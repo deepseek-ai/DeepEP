@@ -718,14 +718,6 @@ dispatch(int4* recv_x, float* recv_x_scales, int64_t* recv_topk_idx, float* recv
                 dst_send_buffers[num_topk_ranks ++] = reinterpret_cast<uint8_t*>(broadcast(send_buffer, i)) + slot_idx * num_bytes_per_token;
             }
             EP_DEVICE_ASSERT(num_topk_ranks <= kNumTopkRDMARanks);
-            if((rank == 1 or rank == 9) and lane_id == 0){
-                //完整打印x的值 长度为hidden_int4
-                printf("-----------Sender x rank: %d, warp_id: %d, lane_id: %d, hidden_int4: %d, token_idx: %d, x: ", rank, warp_id, lane_id, hidden_int4, token_idx);
-                for(int j = 0; j < hidden_int4 * sizeof(int4); j++){
-                    printf("%d ", reinterpret_cast<const uint8_t*>(x)[token_idx * hidden_int4 * sizeof(int4) + j]);
-                }
-                printf("\n");
-            }
             // Copy `x` into symmetric send buffer
             auto st_broadcast = [=](const int key, const int4& value) {
                 #pragma unroll
