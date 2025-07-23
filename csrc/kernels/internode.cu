@@ -367,7 +367,7 @@ notify_dispatch_pcie(const int* num_tokens_per_rank, int* moe_recv_counter_mappe
     auto num_threads = static_cast<int>(blockDim.x), num_warps = num_threads / 32;
 
     auto rdma_rank = rank / NUM_MAX_NVL_PEERS, nvl_rank = rank % NUM_MAX_NVL_PEERS;
-    auto num_rdma_experts = num_experts / kNumRDMARanks, num_pe_experts = num_rdma_experts / NUM_MAX_NVL_PEERS;
+    auto num_rdma_experts = num_experts / kNumRDMARanks, num_local_experts = num_rdma_experts / NUM_MAX_NVL_PEERS;
 
     if (sm_id == 0) {
         // Communication with others
@@ -380,8 +380,7 @@ notify_dispatch_pcie(const int* num_tokens_per_rank, int* moe_recv_counter_mappe
 
         // Send numbers of tokens per rank/expert to RDMA ranks
         auto rdma_buffer_ptr_int = static_cast<int*>(rdma_buffer_ptr);
-        // TODO use AsymBuffer to save memory
-        auto rdma_recv_num_tokens_mixed = SymBuffer<int>(rdma_buffer_ptr, NUM_MAX_NVL_PEERS + num_rdma_experts + 1, kNumRDMARanks);
+        auto rdma_recv_num_tokens_mixed = Buffer<int>(rdma_buffer_ptr, num_ranks + num_experts);
         auto rdma_recv_num_tokens_per_rank_and_expert = Buffer<int>(rdma_buffer_ptr, num_ranks + num_experts);
 
         // Clean up for later data dispatch
@@ -393,43 +392,45 @@ notify_dispatch_pcie(const int* num_tokens_per_rank, int* moe_recv_counter_mappe
 
         // Copy to send buffer
         #pragma unroll
-        for (int i = thread_id; i < num_ranks; i += num_threads)
-            rdma_recv_num_tokens_mixed.send_buffer(i / NUM_MAX_NVL_PEERS)[i * (NUM_MAX_NVL_PEERS + num_pe_experts)] = num_tokens_per_rank[i];
-        #pragma unroll
-        for (int i = thread_id; i < num_experts; i += num_threads)
-            rdma_recv_num_tokens_mixed.send_buffer(i / num_rdma_experts)[i * (NUM_MAX_NVL_PEERS + num_pe_experts) + i % num_pe_experts] = num_tokens_per_expert[i];
-        __syncthreads();
-
-
-        #pragma unroll
-        for (int i = 0; i < num_ranks; ++ i) {
-            if (warp_id == 0) {
-                nvshmemi_ibgda_put_nbi_warp<true>(reinterpret_cast<uint64_t>(&rdma_recv_num_tokens_per_rank_and_expert[rank * (NUM_MAX_NVL_PEERS + num_pe_experts)]),
-                                                  reinterpret_cast<uint64_t>(&rdma_recv_num_tokens_mixed.send_buffer(i / NUM_MAX_NVL_PEERS)[(i % NUM_MAX_NVL_PEERS) * (NUM_MAX_NVL_PEERS + num_pe_experts)]), 
-                                                  (NUM_MAX_NVL_PEERS + num_pe_experts) * sizeof(int), i, 0, lane_id, 0);
+        //TODO: use multi-thread
+        if (thread_id == 0) {
+            for (int i = 0; i < num_ranks; ++i) {
+                rdma_recv_num_tokens_mixed[i * (1 + num_local_experts)] = num_tokens_per_rank[i];
+                for (int j = 0; j < num_local_experts; j++)
+                    rdma_recv_num_tokens_mixed[i * (1 + num_local_experts) + 1 + j] = num_tokens_per_expert[i * num_local_experts + j];
             }
         }
         __syncthreads();
-        if (thread_id < kNumRDMARanks and thread_id != rdma_rank)
-            nvshmemi_ibgda_quiet(translate_dst_rdma_rank<kLowLatencyMode>(thread_id, nvl_rank), 0);
+        //TODO: use multi-thread && use ibgda
+        if (thread_id == 0) {
+            for (int i = 0; i < num_ranks; ++i)
+            nvshmem_int_put_nbi( &rdma_recv_num_tokens_per_rank_and_expert[rank * (1 + num_local_experts)],
+                                &rdma_recv_num_tokens_mixed[i * (1 + num_local_experts)],
+                                1 + num_local_experts, i);
+         }
+        __syncthreads();
+
+        if (thread_id < (kNumRDMARanks * 8) and thread_id != rank)
+            nvshmem_quiet();
+        __syncthreads();
 
         // Reduce the number of tokens per rank/expert
-        EP_DEVICE_ASSERT(num_pe_experts <= num_threads);
+        EP_DEVICE_ASSERT(num_local_experts <= num_threads);
         if (thread_id == 0) {
             int sum = 0;
             #pragma unroll
             for (int i = 0; i < num_ranks; ++ i) {
-                sum += rdma_recv_num_tokens_per_rank_and_expert[i];
+                sum += rdma_recv_num_tokens_per_rank_and_expert[i* (1 + num_local_experts)];
                 recv_gbl_rank_prefix_sum[i] = sum;
             }
             while (ld_volatile_global(moe_recv_counter_mapped) != -1);
             *moe_recv_counter_mapped = sum;
         }
-        if (thread_id < num_pe_experts) {
+        if (thread_id < num_local_experts) {
             int sum = 0;
             #pragma unroll
-            for (int i = 0; i < NUM_MAX_NVL_PEERS; ++ i)
-                sum += rdma_recv_num_tokens_per_rank_and_expert[i + num_pe_experts * rank];
+            for (int i = 0; i < num_ranks; ++ i)
+                sum += rdma_recv_num_tokens_per_rank_and_expert[i*(1 + num_local_experts) + thread_id];
             sum = (sum + expert_alignment - 1) / expert_alignment * expert_alignment;
             while (ld_volatile_global(moe_recv_expert_counter_mapped + thread_id) != -1);
             moe_recv_expert_counter_mapped[thread_id] = sum;
