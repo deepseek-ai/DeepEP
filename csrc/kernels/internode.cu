@@ -418,6 +418,11 @@ notify_dispatch_pcie(const int* num_tokens_per_rank, int* moe_recv_counter_mappe
         if (thread_id < num_ranks and thread_id != rank)
             nvshmemi_ibgda_quiet(thread_id, 0);
         __syncthreads();
+        
+        if (thread_id == 0) {
+            nvshmem_sync_all();
+        }
+        __syncthreads();
 
         // Reduce the number of tokens per rank/expert
         EP_DEVICE_ASSERT(num_local_experts <= num_threads);
