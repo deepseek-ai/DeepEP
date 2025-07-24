@@ -363,8 +363,8 @@ notify_dispatch_pcie(const int* num_tokens_per_rank, int* moe_recv_counter_mappe
                 const int* num_tokens_per_expert, int* moe_recv_expert_counter_mapped, int num_experts,
                 const bool* is_token_in_rank, int num_tokens, int num_channels, int expert_alignment,
                 const int rdma_clean_offset, const int rdma_num_int_clean,
-                int* gbl_channel_prefix_matrix, int* recv_gbl_rank_prefix_sum,
-                void* rdma_buffer_ptr, int** barrier_signal_ptrs, int rank) {
+                int* rdma_channel_prefix_matrix, int* recv_rdma_rank_prefix_sum,
+                void* rdma_buffer_ptr, int rank) {
     auto sm_id = static_cast<int>(blockIdx.x);
     auto thread_id = static_cast<int>(threadIdx.x), warp_id = thread_id / 32, lane_id = get_lane_id();
     auto num_threads = static_cast<int>(blockDim.x), num_warps = num_threads / 32;
@@ -426,7 +426,7 @@ notify_dispatch_pcie(const int* num_tokens_per_rank, int* moe_recv_counter_mappe
             #pragma unroll
             for (int i = 0; i < num_ranks; ++ i) {
                 sum += rdma_recv_num_tokens_mixed.recv_buffer(i)[0];
-                recv_gbl_rank_prefix_sum[i] = sum;
+                recv_rdma_rank_prefix_sum[i] = sum;
             }
             while (ld_volatile_global(moe_recv_counter_mapped) != -1);
             *moe_recv_counter_mapped = sum;
@@ -473,7 +473,7 @@ notify_dispatch_pcie(const int* num_tokens_per_rank, int* moe_recv_counter_mappe
             if (lane_id == 0) {
                 #pragma unroll
                 for (int i = 0; i < NUM_MAX_NVL_PEERS; ++ i)
-                    gbl_channel_prefix_matrix[(dst_node_rank * NUM_MAX_NVL_PEERS + i) * num_channels + channel_id] = per_node_rank_count[i];
+                    rdma_channel_prefix_matrix[(dst_node_rank * NUM_MAX_NVL_PEERS + i) * num_channels + channel_id] = per_node_rank_count[i];
             }
         }
         // Calculate prefix sum
@@ -481,7 +481,7 @@ notify_dispatch_pcie(const int* num_tokens_per_rank, int* moe_recv_counter_mappe
 
         EP_STATIC_ASSERT(NUM_MAX_NVL_PEERS <= 32, "Invalid number of NVL peers");
         if (thread_id < NUM_MAX_NVL_PEERS) {
-            auto prefix_row = gbl_channel_prefix_matrix + (dst_node_rank * NUM_MAX_NVL_PEERS + thread_id) * num_channels;
+            auto prefix_row = rdma_channel_prefix_matrix + (dst_node_rank * NUM_MAX_NVL_PEERS + thread_id) * num_channels;
             #pragma unroll
             for (int i = 1; i < num_channels; ++ i)
                 prefix_row[i] += prefix_row[i - 1];
@@ -493,9 +493,8 @@ void notify_dispatch_pcie(const int* num_tokens_per_rank, int* moe_recv_counter_
                      const int* num_tokens_per_expert, int* moe_recv_expert_counter_mapped, int num_experts,
                      const bool* is_token_in_rank, int num_tokens, int num_channels,
                      int hidden_int4, int num_scales, int num_topk, int expert_alignment,
-                     int* gbl_channel_prefix_matrix, int* recv_gbl_rank_prefix_sum,
-                     void* rdma_buffer_ptr, int num_max_rdma_chunked_recv_tokens,
-                     int** barrier_signal_ptrs, int rank,
+                     int* rdma_channel_prefix_matrix, int* recv_rdma_rank_prefix_sum,
+                     void* rdma_buffer_ptr, int num_max_rdma_chunked_recv_tokens,int rank,
                      cudaStream_t stream, int64_t num_rdma_bytes,
                      bool low_latency_mode) {
 #define NOTIFY_DISPATCH_PCIE_LAUNCH_CASE(num_ranks) { \
@@ -506,9 +505,8 @@ void notify_dispatch_pcie(const int* num_tokens_per_rank, int* moe_recv_counter_
                   num_tokens_per_expert, moe_recv_expert_counter_mapped, num_experts, \
                   is_token_in_rank, num_tokens, num_channels, expert_alignment, \
                   pcie_clean_meta.first, pcie_clean_meta.second, \
-                  gbl_channel_prefix_matrix, recv_gbl_rank_prefix_sum, \
-                  rdma_buffer_ptr, \
-                  barrier_signal_ptrs, rank); } break
+                  rdma_channel_prefix_matrix, recv_rdma_rank_prefix_sum, \
+                  rdma_buffer_ptr, rank); } break
 
     constexpr int kNumThreads = 512;
     const auto num_nodes = num_ranks / NUM_MAX_NVL_PEERS;
@@ -2041,13 +2039,12 @@ void combine(cudaDataType_t type,
 template <int kNumRanks,
           int kNumDispatchRDMASenderWarps,
           int kNumDispatchReceiverWarps, int kNumDispatchReceiverCoordinatorWarps,int kNumTopkRanks = get_num_topk_rdma_ranks(kNumRanks)>
-// __global__ void __launch_bounds__(((kNumDispatchRDMASenderWarps + 1 + kNumDispatchReceiverWarps + kNumDispatchReceiverCoordinatorWarps) * 32), 1)
 __global__ void __launch_bounds__(((kNumDispatchRDMASenderWarps + 1) * 32), 1)
 dispatch_pcie(int4* recv_x, float* recv_x_scales, int64_t* recv_topk_idx, float* recv_topk_weights, SourceMeta* recv_src_meta,
          const int4* x, const float* x_scales, const int64_t* topk_idx, const float* topk_weights,
 	     const int* rdma_channel_prefix_matrix,//[num_ranks,num_channels] for sender
-         const int* recv_gbl_rank_prefix_sum, // notify dispatch传入的，逻辑上[num_ranks]
-         int* recv_gbl_channel_prefix_matrix, // 在函数中构造的，给combine用的, 逻辑上[num_ranks, num_channels]
+         const int* recv_rdma_rank_prefix_sum, // notify dispatch传入的，逻辑上[num_ranks]
+         int* recv_rdma_channel_prefix_matrix, // 在函数中构造的，给combine用的, 逻辑上[num_ranks, num_channels]
          int num_tokens, int hidden_int4, int num_scales, int num_topk, int num_experts,int num_local_experts,
          int scale_token_stride, int scale_hidden_stride,
 	     void* rdma_buffer_ptr, int num_max_rdma_chunked_send_tokens, int num_max_rdma_chunked_recv_tokens,
@@ -2087,8 +2084,6 @@ dispatch_pcie(int4* recv_x, float* recv_x_scales, int64_t* recv_topk_idx, float*
             warp_role = WarpRole::kNone;
         }
     }
-
-    // EP_DEVICE_ASSERT(num_warps == kNumDispatchRDMASenderWarps + 1 + kNumDispatchReceiverWarps + kNumDispatchReceiverCoordinatorWarps);
     EP_DEVICE_ASSERT(num_warps == kNumDispatchRDMASenderWarps + 1);
 
     // Data checks
@@ -2187,18 +2182,17 @@ dispatch_pcie(int4* recv_x, float* recv_x_scales, int64_t* recv_topk_idx, float*
             //     send_rdma_head[token_idx * kNumRDMARanks + lane_id] = rdma_tail_idx;
 
             // Broadcast tails
+
             // SourceMeta src_meta;
             int num_topk_ranks = 0;
-            // int topk_ranks[kNumTopkRanks];
             void* dst_send_buffers[kNumTopkRanks];
             #pragma unroll
             for (int i = 0, slot_idx; i < kNumRanks; ++ i) if ((slot_idx = __shfl_sync(0xffffffff, rdma_tail_idx, i)) >= 0) {
                 slot_idx = slot_idx % num_max_rdma_chunked_recv_tokens;
-                // topk_ranks[num_topk_ranks] = i;
                 auto recv_is_token_in_rank_uint64 = broadcast(is_token_in_rank_uint64, i);
                 // auto recv_is_token_in_rank_values = reinterpret_cast<const bool*>(&recv_is_token_in_rank_uint64);
                 // if (lane_id == num_topk_ranks)
-                //     //待修改，SourceMeta不再需要判定nvl的相关信息
+                //     //TODO，SourceMeta不再需要判定nvl的相关信息
                 //     src_meta = SourceMeta(rank, recv_is_token_in_rank_values);
                 dst_send_buffers[num_topk_ranks ++] = reinterpret_cast<uint8_t*>(broadcast(send_buffer, i)) + slot_idx * num_bytes_per_pcie_token;
             }
@@ -2373,7 +2367,7 @@ dispatch_pcie(int4* recv_x, float* recv_x_scales, int64_t* recv_topk_idx, float*
                     channel_offset = -meta_0 - 1;
                     int channel_offset_1 = -meta_1 - 1;
                     num_tokens_to_recv_from_rank = channel_offset_1 - channel_offset;
-                    recv_gbl_channel_prefix_matrix[src_rank * num_channels + channel_id] = channel_offset_1 + recv_gbl_rank_prefix_sum[src_rank];
+                    recv_rdma_channel_prefix_matrix[src_rank * num_channels + channel_id] = channel_offset_1 + recv_rdma_rank_prefix_sum[src_rank];
                     // 给coordinator用, 存储每个channel的global start和end    
                     rdma_receiver_channel_start[src_rank] = channel_offset;
                     rdma_receiver_channel_end[src_rank] = channel_offset_1;
@@ -2421,7 +2415,7 @@ dispatch_pcie(int4* recv_x, float* recv_x_scales, int64_t* recv_topk_idx, float*
             auto dst_rank_expert_begin = (start_rank + src_rank) * (num_experts / kNumRanks);
             auto dst_rank_expert_end = min(num_experts, dst_rank_expert_begin + (num_experts / kNumRanks));
             
-            int rank_offset = start_rank + src_rank == 0 ? 0 : recv_gbl_rank_prefix_sum[start_rank + src_rank - 1];
+            int rank_offset = start_rank + src_rank == 0 ? 0 : recv_rdma_rank_prefix_sum[start_rank + src_rank - 1];
             
             // Process tokens one by one (similar to reference code)
             for (int token_idx = src_rdma_head; token_idx < src_rdma_tail; token_idx++) {
@@ -2515,8 +2509,8 @@ dispatch_pcie(int4* recv_x, float* recv_x_scales, int64_t* recv_topk_idx, float*
 void dispatch_pcie(void* recv_x, float* recv_x_scales, int64_t* recv_topk_idx, float* recv_topk_weights, void* recv_src_meta,
                    const void* x, const float* x_scales, const int64_t* topk_idx, const float* topk_weights,
                    const int* rdma_channel_prefix_matrix,
-                   const int* recv_gbl_rank_prefix_sum,
-                   int* recv_gbl_channel_prefix_matrix,    // 新增参数
+                   const int* recv_rdma_rank_prefix_sum,
+                   int* recv_rdma_channel_prefix_matrix,    // 新增参数
                    int num_tokens, int hidden_int4, int num_scales, int num_topk, int num_experts,int num_local_experts,
                    int scale_token_stride, int scale_hidden_stride,
                    void* rdma_buffer_ptr, int num_max_rdma_chunked_send_tokens, int num_max_rdma_chunked_recv_tokens,
@@ -2532,13 +2526,12 @@ void dispatch_pcie(void* recv_x, float* recv_x_scales, int64_t* recv_topk_idx, f
                   reinterpret_cast<int4*>(recv_x), recv_x_scales, recv_topk_idx, recv_topk_weights, reinterpret_cast<internode::SourceMeta*>(recv_src_meta), \
                   reinterpret_cast<const int4*>(x), x_scales, topk_idx, topk_weights, \
                   rdma_channel_prefix_matrix, \
-                  recv_gbl_rank_prefix_sum, recv_gbl_channel_prefix_matrix, \
+                  recv_rdma_rank_prefix_sum, recv_rdma_channel_prefix_matrix, \
                   num_tokens, hidden_int4, num_scales, num_topk, num_experts,num_local_experts, \
                   scale_token_stride, scale_hidden_stride, \
                   rdma_buffer_ptr, num_max_rdma_chunked_send_tokens, num_max_rdma_chunked_recv_tokens, \
                   buffer_ptrs, rank); } break
 
-    // SETUP_LAUNCH_CONFIG(num_channels * 2, (kNumDispatchRDMASenderWarps + 1 + kNumDispatchReceiverWarps + kNumDispatchReceiverCoordinatorWarps) * 32, stream);
     SETUP_LAUNCH_CONFIG(num_channels * 2, (kNumDispatchRDMASenderWarps + 1) * 32, stream);
     SWITCH_RANKS(DISPATCH_PCIE_LAUNCH_CASE);
 #undef DISPATCH_PCIE_LAUNCH_CASE

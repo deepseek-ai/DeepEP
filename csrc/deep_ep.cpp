@@ -1344,7 +1344,7 @@ std::tuple<torch::Tensor, std::optional<torch::Tensor>, std::optional<torch::Ten
 std::optional<torch::Tensor>, std::optional<torch::Tensor>, std::optional<torch::Tensor>, torch::Tensor, std::vector<int>, std::optional<EventHandle>>
 Buffer::pcie_dispatch(const torch::Tensor& x, const std::optional<torch::Tensor>& x_scales,
                       const std::optional<torch::Tensor>& topk_idx, const std::optional<torch::Tensor>& topk_weights,
-                      const std::optional<torch::Tensor>& num_tokens_per_rank, const std::optional<torch::Tensor>& num_tokens_per_rdma_rank,
+                      const std::optional<torch::Tensor>& num_tokens_per_rank,
                       const torch::Tensor& is_token_in_rank, const std::optional<torch::Tensor>& num_tokens_per_expert,
                       int expert_alignment,const Config& config, std::optional<EventHandle>& previous_event, bool async, bool allocate_on_comm_stream) {
 #ifndef DISABLE_NVSHMEM
@@ -1355,18 +1355,14 @@ Buffer::pcie_dispatch(const torch::Tensor& x, const std::optional<torch::Tensor>
 
     // --------Check only for NOT CACHED mode----------
     EP_HOST_ASSERT(num_tokens_per_rank.has_value());
-    EP_HOST_ASSERT(num_tokens_per_rdma_rank.has_value());
     //// Type Check
     EP_HOST_ASSERT(num_tokens_per_expert.has_value());
     EP_HOST_ASSERT(num_tokens_per_rank->scalar_type() == torch::kInt32);
-    EP_HOST_ASSERT(num_tokens_per_rdma_rank->scalar_type() == torch::kInt32);
     EP_HOST_ASSERT(num_tokens_per_expert->scalar_type() == torch::kInt32);
     ////Shape and contiguous checks
     EP_HOST_ASSERT(num_tokens_per_rank->dim() == 1 and num_tokens_per_rank->is_contiguous());
-    EP_HOST_ASSERT(num_tokens_per_rdma_rank->dim() == 1 and num_tokens_per_rdma_rank->is_contiguous());
     EP_HOST_ASSERT(num_tokens_per_expert->dim() == 1 and num_tokens_per_expert->is_contiguous());
     EP_HOST_ASSERT(num_tokens_per_rank->size(0) == num_ranks);
-    EP_HOST_ASSERT(num_tokens_per_rdma_rank->size(0) == num_rdma_ranks);
     EP_HOST_ASSERT(num_tokens_per_expert->size(0) % num_ranks == 0);
     EP_HOST_ASSERT(num_tokens_per_expert->size(0) / num_ranks <= NUM_MAX_LOCAL_EXPERTS);
     // --------Check only for NOT CACHED mode----------
@@ -1428,20 +1424,11 @@ Buffer::pcie_dispatch(const torch::Tensor& x, const std::optional<torch::Tensor>
     // Allocate tensors for notify step
     // Create handles (only return for non-cached mode)
     int num_recv_tokens = -1, num_rdma_recv_tokens = -1;
-    auto rdma_channel_prefix_matrix = torch::Tensor();
+    auto gbl_channel_prefix_matrix = torch::Tensor();
     auto recv_gbl_rank_prefix_sum = torch::Tensor();
     std::vector<int> num_recv_tokens_per_expert_list;
 
-    // TODO: delete below 2 tensors
-    auto recv_rdma_rank_prefix_sum = torch::Tensor();
-    auto gbl_channel_prefix_matrix = torch::Tensor();
-
-
-
     // Barrier or send sizes
-    // TODO: use new notify_dispatch   
-    rdma_channel_prefix_matrix = torch::empty({num_ranks, num_channels}, dtype(torch::kInt32).device(torch::kCUDA));
-    recv_rdma_rank_prefix_sum = torch::empty({num_rdma_ranks}, dtype(torch::kInt32).device(torch::kCUDA));
     gbl_channel_prefix_matrix = torch::empty({num_ranks, num_channels}, dtype(torch::kInt32).device(torch::kCUDA));
     recv_gbl_rank_prefix_sum = torch::empty({num_ranks}, dtype(torch::kInt32).device(torch::kCUDA));
 
@@ -1456,8 +1443,7 @@ Buffer::pcie_dispatch(const torch::Tensor& x, const std::optional<torch::Tensor>
                                 is_token_in_rank.data_ptr<bool>(), num_tokens, num_channels,
                                 hidden_int4, num_scales, num_topk, expert_alignment,
                                 gbl_channel_prefix_matrix.data_ptr<int>(), recv_gbl_rank_prefix_sum.data_ptr<int>(),
-                                rdma_buffer_ptr, config.num_max_rdma_chunked_recv_tokens,
-                                barrier_signal_ptrs_gpu, rank, comm_stream,
+                                rdma_buffer_ptr, config.num_max_rdma_chunked_recv_tokens,rank, comm_stream,
                                 config.get_pcie_buffer_size_hint(hidden_int4 * sizeof(int4), num_ranks), false);
     //Synchronize total received tokens and tokens per expert
     auto start_time = std::chrono::high_resolution_clock::now();

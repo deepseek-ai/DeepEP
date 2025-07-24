@@ -358,7 +358,7 @@ class Buffer:
         # pcie
         if self.pcie_mode:
             assert num_worst_tokens == 0, 'Internode dispatch does not support `num_worst_tokens > 0`'
-            return self.pcie_dispatch(x, handle, num_tokens_per_rank, num_tokens_per_rdma_rank, is_token_in_rank, num_tokens_per_expert,
+            return self.pcie_dispatch(x, handle, num_tokens_per_rank, is_token_in_rank, num_tokens_per_expert,
                                      topk_idx, topk_weights, expert_alignment, config, previous_event, async_finish, allocate_on_comm_stream)
 
         # Internode
@@ -439,7 +439,7 @@ class Buffer:
     # noinspection PyTypeChecker
     def pcie_dispatch(self, x: Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]],
                            handle: Optional[Tuple] = None,
-                           num_tokens_per_rank: Optional[torch.Tensor] = None, num_tokens_per_rdma_rank: Optional[torch.Tensor] = None,
+                           num_tokens_per_rank: Optional[torch.Tensor] = None, 
                            is_token_in_rank: Optional[torch.Tensor] = None, num_tokens_per_expert: Optional[torch.Tensor] = None,
                            topk_idx: Optional[torch.Tensor] = None, topk_weights: Optional[torch.Tensor] = None, expert_alignment: int = 1,
                            config: Optional[Config] = None,
@@ -463,7 +463,7 @@ class Buffer:
             recv_gbl_channel_prefix_matrix, recv_gbl_rank_prefix_sum, \
             num_recv_tokens_per_expert_list, event = self.runtime.pcie_dispatch(
             x, x_scales, topk_idx, topk_weights,
-            num_tokens_per_rank, num_tokens_per_rdma_rank, is_token_in_rank, num_tokens_per_expert,
+            num_tokens_per_rank, is_token_in_rank, num_tokens_per_expert,
             expert_alignment, config, getattr(previous_event, 'event', None), async_finish, allocate_on_comm_stream)
         handle = (recv_src_meta, recv_gbl_channel_prefix_matrix, recv_gbl_rank_prefix_sum)
         return (recv_x, recv_x_scales) if x_scales is not None else recv_x, recv_topk_idx, recv_topk_weights, num_recv_tokens_per_expert_list, handle, EventOverlap(event)
