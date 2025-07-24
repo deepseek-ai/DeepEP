@@ -1474,17 +1474,14 @@ Buffer::pcie_dispatch(const torch::Tensor& x, const std::optional<torch::Tensor>
     for (int i = 0; i < num_local_experts; ++ i)
         moe_recv_expert_counter[i] = -1;
     internode::notify_dispatch_pcie(num_tokens_per_rank->data_ptr<int>(), moe_recv_counter_mapped, num_ranks,
-                                num_tokens_per_rdma_rank->data_ptr<int>(), moe_recv_rdma_counter_mapped,
-                                num_tokens_per_expert->data_ptr<int>(), moe_recv_expert_counter_mapped, num_experts,
+                                num_tokens_per_expert->data_ptr<int>(), 
+                                moe_recv_expert_counter_mapped, num_experts,
                                 is_token_in_rank.data_ptr<bool>(), num_tokens, num_channels,
                                 hidden_int4, num_scales, num_topk, expert_alignment,
-                                rdma_channel_prefix_matrix.data_ptr<int>(), recv_rdma_rank_prefix_sum.data_ptr<int>(),
                                 gbl_channel_prefix_matrix.data_ptr<int>(), recv_gbl_rank_prefix_sum.data_ptr<int>(),
                                 rdma_buffer_ptr, config.num_max_rdma_chunked_recv_tokens,
-                                buffer_ptrs_gpu, config.num_max_nvl_chunked_recv_tokens,
                                 barrier_signal_ptrs_gpu, rank, comm_stream,
-                                config.get_pcie_buffer_size_hint(hidden_int4 * sizeof(int4), num_ranks),
-                                num_nvl_bytes, false);
+                                config.get_pcie_buffer_size_hint(hidden_int4 * sizeof(int4), num_ranks), false);
     //Synchronize total received tokens and tokens per expert
     auto start_time = std::chrono::high_resolution_clock::now();
     while (true) {
