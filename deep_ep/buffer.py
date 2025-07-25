@@ -528,7 +528,9 @@ class Buffer:
                              num_max_dispatch_tokens_per_rank: int, num_experts: int,
                              cumulative_local_expert_recv_stats: Optional[torch.Tensor] = None,
                              dispatch_wait_recv_cost_stats: Optional[torch.Tensor] = None,
+                             x_sf_scale: Optional[torch.Tensor] = None,
                              use_fp8: bool = True, round_scale: bool = False, use_ue8m0: bool = False,
+                             use_nvfp4: bool = False, use_ue8m0_for_nvfp4_sf: bool = False,
                              async_finish: bool = False, return_recv_hook: bool = False) -> \
             Tuple[Tuple[torch.Tensor, torch.Tensor], torch.Tensor, Tuple, EventOverlap, Callable]:
         """
@@ -551,9 +553,12 @@ class Buffer:
             dispatch_wait_recv_cost_stats: a cumulative time spent waiting to receive each token tensor for statistics,
                 which should have shape `[num_ranks, num_ranks]` and be typed as `torch.int64`.
                 This is useful for detecting and pre-cisely localizing slow anomalies.
+            x_sf_scale: a tensor with `torch.float32`, shaped as `[num_tokens]`, the scaling factors for each token.
             use_fp8: whether to enable FP8 casting, with this, the received data will be a tuple of FP8 tensor and scaling factors.
             round_scale: whether round the scaling factors into power of 2.
             use_ue8m0: whether use UE8M0 as scaling factor format (available only with `round_scale=True`).
+            use_nvfp4: whether to enable NVFP4 casting, with this, the received data will be a tuple of NVFP4 tensor and scaling factors.
+            use_ue8m0_for_nvfp4_sf: whether use UE8M0 as NVFP4 scaling factor format (available only with `use_nvfp4=True`).
             async_finish: the current stream will not wait for the communication kernels to be finished if set.
             return_recv_hook: return a receiving hook if set. If set, the kernel will just do the RDMA request issues,
                 but **without actually receiving the data**. You must call the received hook to make sure the data's arrival.
@@ -578,19 +583,27 @@ class Buffer:
             event: the event after executing the kernel (valid only if `async_finish` is set).
             hook: the receiving hook function (valid only if `return_recv_hook` is set).
         """
-        packed_recv_x, packed_recv_x_scales, packed_recv_count, packed_recv_src_info, packed_recv_layout_range, event, hook = \
+        packed_recv_x, packed_recv_x_scales, packed_recv_x_sf_scale, packed_recv_count, packed_recv_src_info, packed_recv_layout_range, event, hook = \
             self.runtime.low_latency_dispatch(x, topk_idx,
                                               cumulative_local_expert_recv_stats,
                                               dispatch_wait_recv_cost_stats,
+                                              x_sf_scale,
                                               num_max_dispatch_tokens_per_rank, num_experts,
                                               use_fp8, round_scale, use_ue8m0,
+                                              use_nvfp4, use_ue8m0_for_nvfp4_sf,
                                               async_finish, return_recv_hook)
         handle = (packed_recv_src_info, packed_recv_layout_range, num_max_dispatch_tokens_per_rank, x.size(1), num_experts)
         tensors_to_record = (x, topk_idx,
                              packed_recv_x, packed_recv_x_scales, packed_recv_count,
                              packed_recv_src_info, packed_recv_layout_range,
-                             cumulative_local_expert_recv_stats)
-        return (packed_recv_x, packed_recv_x_scales) if use_fp8 else packed_recv_x, packed_recv_count, handle, \
+                             cumulative_local_expert_recv_stats,
+                             x_sf_scale)
+        if use_fp8:
+            packed_recv_x = (packed_recv_x, packed_recv_x_scales)
+        elif use_nvfp4:
+            packed_recv_x = (packed_recv_x, packed_recv_x_scales, packed_recv_x_sf_scale)
+        
+        return packed_recv_x, packed_recv_count, handle, \
             EventOverlap(event, tensors_to_record if async_finish else None), hook
 
     # noinspection PyTypeChecker

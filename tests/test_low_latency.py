@@ -11,6 +11,9 @@ from typing import Optional
 import deep_ep
 from utils import init_dist, bench, bench_kineto, calc_diff, hash_tensor, per_token_cast_back
 
+MAX_E4M3 = 448
+MAX_NVFP4 = 6.0
+
 
 def test_main(num_tokens: int, hidden: int, num_experts: int, num_topk: int,
               rank: int, num_ranks: int, group: dist.ProcessGroup, buffer: deep_ep.Buffer,
@@ -48,26 +51,48 @@ def test_main(num_tokens: int, hidden: int, num_experts: int, num_topk: int,
     hash_value, num_times = 0, 0
     for current_x in x_list:
         for return_recv_hook in (False, True):
-            for dispatch_use_fp8 in (False, True):
+            for dispatch_data_type in ('bf16', 'fp8', 'nvfp4'):
+                dispatch_use_fp8 = dispatch_data_type == 'fp8'
+                dispatch_use_nvfp4 = dispatch_data_type == 'nvfp4'
+                use_ue8m0_for_nvfp4_sf = False
                 for round_scale in (False, True) if dispatch_use_fp8 else (False, ):
                     for use_ue8m0 in (False, True) if round_scale else (False, ):
                         num_times += 1
                         for i in range((num_times % 2) + 1):
                             cumulative_local_expert_recv_stats = torch.zeros((num_local_experts, ), dtype=torch.int, device='cuda')
+                            max_val = torch.max(torch.abs(current_x), dim=1).values
+                            x_sf_scale = (MAX_E4M3 * MAX_NVFP4) / max_val.to(torch.float32)
                             packed_recv_x, packed_recv_count, handle, event, hook = \
                                 buffer.low_latency_dispatch(current_x, topk_idx, num_tokens, num_experts,
                                                             use_fp8=dispatch_use_fp8, round_scale=round_scale, use_ue8m0=use_ue8m0,
+                                                            use_nvfp4=dispatch_use_nvfp4, use_ue8m0_for_nvfp4_sf=use_ue8m0_for_nvfp4_sf,
                                                             cumulative_local_expert_recv_stats=cumulative_local_expert_recv_stats,
+                                                            x_sf_scale=x_sf_scale,
                                                             async_finish=not return_recv_hook, return_recv_hook=return_recv_hook)
                             hook() if return_recv_hook else event.current_stream_wait()
-                        packed_recv_x = (packed_recv_x[0], packed_recv_x[1].contiguous()) if dispatch_use_fp8 else packed_recv_x
-                        simulated_gemm_x = per_token_cast_back(packed_recv_x[0].view(-1, hidden), packed_recv_x[1].view(-1, hidden // 128)).view(packed_recv_x[0].shape) \
-                            if dispatch_use_fp8 else packed_recv_x.clone()
+                        if dispatch_use_fp8:
+                            packed_recv_x = (packed_recv_x[0], packed_recv_x[1].contiguous())
+                        elif dispatch_use_nvfp4:
+                            packed_recv_x = (packed_recv_x[0], packed_recv_x[1].contiguous(), packed_recv_x[2].contiguous())
+                        else:
+                            packed_recv_x = packed_recv_x
+
+                        if dispatch_use_fp8:
+                            simulated_gemm_x = per_token_cast_back(packed_recv_x[0].view(-1, hidden), packed_recv_x[1].view(-1, hidden // 128)).view(packed_recv_x[0].shape)
+                        elif dispatch_use_nvfp4:
+                            simulated_gemm_x = per_token_cast_back(packed_recv_x[0], packed_recv_x[1], packed_recv_x[2], src_data_format='nvfp4', use_ue8m0_for_nvfp4_sf=use_ue8m0_for_nvfp4_sf)
+                        else:
+                            simulated_gemm_x = packed_recv_x.clone()
                         all_topk_idx = torch.empty((num_ranks, num_tokens, num_topk), dtype=topk_idx.dtype, device='cuda')
                         dist.all_gather_into_tensor(all_topk_idx, topk_idx, group=group)
                         for i in range(num_local_experts if do_check else 0):
                             expert_id = rank * num_local_experts + i
-                            recv_x = per_token_cast_back(packed_recv_x[0][i], packed_recv_x[1][i]) if dispatch_use_fp8 else packed_recv_x[i]
+                            if dispatch_use_fp8:
+                                recv_x = per_token_cast_back(packed_recv_x[0][i], packed_recv_x[1][i])
+                            elif dispatch_use_nvfp4:
+                                recv_x = per_token_cast_back(packed_recv_x[0][i], packed_recv_x[1][i], packed_recv_x[2][i], src_data_format='nvfp4', use_ue8m0_for_nvfp4_sf=use_ue8m0_for_nvfp4_sf)
+                            else:
+                                recv_x = packed_recv_x[i]
                             recv_count, recv_src_info, recv_layout_range = packed_recv_count[i], handle[0][i], handle[1][i]
 
                             # Check expert indices
@@ -83,18 +108,22 @@ def test_main(num_tokens: int, hidden: int, num_experts: int, num_topk: int,
                             if current_x is x:
                                 recv_x = recv_x[:num_valid_tokens]
                                 recv_x_amin = recv_x[:, :-128].amin(dim=-1)
+                                recv_x_amax = recv_x[:, :-128].amax(dim=-1)
                                 recv_src_info = recv_src_info[:num_valid_tokens]
-                                assert torch.equal(recv_x_amin, recv_x[:, :-128].amax(dim=-1))
-                                if round_scale:
-                                    assert calc_diff(recv_x[:, -1], recv_src_info.view(-1)) < 0.007
+                                assert torch.equal(recv_x_amin, recv_x_amax), f'recv_x_amin: {recv_x_amin}, recv_x_amax: {recv_x_amax}'
+                                diff = calc_diff(recv_x[:, -1], recv_src_info.view(-1))
+                                if dispatch_use_nvfp4:
+                                    assert diff < 3, f"rank {rank}, num_times {num_times}, expert_id: {expert_id}, diff: {diff}"
+                                elif round_scale:
+                                    assert diff < 3, f"rank {rank}, num_times {num_times}, expert_id: {expert_id}, diff: {diff}"
                                 else:
                                     assert (recv_x[:, -128:] - recv_src_info.view(-1, 1) % num_tokens).sum().item() == 0
                                 for j in range(num_ranks):
                                     begin_idx, count = (recv_layout_range[j] >> 32).item(), (recv_layout_range[j] & int_mask).item()
-                                    if not round_scale:
+                                    if not round_scale and not dispatch_use_nvfp4:
                                         assert (recv_x_amin == j - rank_offset).sum().item() == (all_topk_idx[j] == expert_id).sum().item()
                                         assert (recv_x[begin_idx:begin_idx + count, :-128] - j + rank_offset).sum().item() == 0
-                            if dispatch_use_fp8:
+                            if dispatch_use_fp8 or dispatch_use_nvfp4:
                                 hash_value ^= hash_tensor(packed_recv_x[0][i, :num_valid_tokens])
                                 hash_value ^= hash_tensor(packed_recv_x[1][i, :num_valid_tokens])
                             else:
@@ -113,7 +142,7 @@ def test_main(num_tokens: int, hidden: int, num_experts: int, num_topk: int,
                             if do_check:
                                 diff = calc_diff(current_x * topk_weights.masked_fill(topk_idx == -1, 0).sum(dim=1).view(-1, 1), combined_x)
                                 assert torch.isnan(combined_x).sum().item() == 0
-                                assert diff < (9e-4 if dispatch_use_fp8 else 1e-5), f'Error: {diff=}, {dispatch_use_fp8=}, {zero_copy=}'
+                                assert diff < (9e-4 if (dispatch_use_fp8 or dispatch_use_nvfp4) else 1e-5), f'Error: {diff=}, {dispatch_use_fp8=}, {dispatch_use_nvfp4=}, {zero_copy=}'
                                 hash_value ^= hash_tensor(combined_x)
 
     # noinspection PyShadowingNames
@@ -217,6 +246,7 @@ if __name__ == '__main__':
                         help='Whether to test LogFMT combine')
     parser.add_argument("--pressure-test", action='store_true',
                         help='Whether to do pressure test')
+
     args = parser.parse_args()
 
     num_processes = args.num_processes
