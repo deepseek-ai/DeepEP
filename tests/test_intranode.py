@@ -241,7 +241,7 @@ def test_loop(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
                             num_qps_per_rank=(ll_num_experts // num_ranks if test_ll_compatibility else 1), explicitly_destroy=True)
     torch.manual_seed(rank)
 
-    for i in (24, ):
+    for i in (128, ):
         test_main(args, i, local_rank, num_ranks, rank, buffer, group)
         if local_rank == 0:
             print('', flush=True)
