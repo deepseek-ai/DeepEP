@@ -163,6 +163,16 @@ void dispatch_pcie(void* recv_x, float* recv_x_scales, int64_t* recv_topk_idx, f
                    void** buffer_ptrs, int rank, int num_ranks,
                    cudaStream_t stream, int num_channels);
 
+void combine_pcie(cudaDataType_t type,
+                  void* combined_x, float* combined_topk_weights,
+                  const void* recv_x, const float* recv_topk_weights,
+                  const void* bias_0, const void* bias_1,
+                  const int* combined_rdma_head,
+                  const int* recv_gbl_channel_prefix_matrix, const int* recv_rank_prefix_sum,
+                  int num_recv_tokens, int num_combined_tokens, int hidden, int num_topk,
+                  void* rdma_buffer_ptr, int num_max_rdma_chunked_send_tokens, int num_max_rdma_chunked_recv_tokens,
+                  int rank, int num_ranks, cudaStream_t stream, int num_channels, bool low_latency_mode);
+
 } // namespace internode
 
 // Internode low-latency kernels
