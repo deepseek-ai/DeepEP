@@ -2354,6 +2354,9 @@ dispatch_pcie(int4* recv_x, float* recv_x_scales, int64_t* recv_topk_idx, float*
         const int num_target_ranks= end_rank - start_rank;
         EP_DEVICE_ASSERT(num_target_ranks <= 32);
 
+        auto dst_rank_expert_begin = rank * (num_experts / kNumRanks);
+        auto dst_rank_expert_end = min(num_experts, dst_rank_expert_begin + (num_experts / kNumRanks));
+
         int cached_rdma_channel_head = 0;
         int cached_rdma_channel_tail = 0;
         
@@ -2417,8 +2420,7 @@ dispatch_pcie(int4* recv_x, float* recv_x_scales, int64_t* recv_topk_idx, float*
             auto src_rdma_tail = __shfl_sync(0xffffffff, cached_rdma_channel_tail, src_rank);
             auto channel_offset_recv = __shfl_sync(0xffffffff, channel_offset, src_rank);
             int num_recv_tokens = src_rdma_tail - src_rdma_head;
-            auto dst_rank_expert_begin = (start_rank + src_rank) * (num_experts / kNumRanks);
-            auto dst_rank_expert_end = min(num_experts, dst_rank_expert_begin + (num_experts / kNumRanks));
+            
             
             int rank_offset = start_rank + src_rank == 0 ? 0 : recv_rdma_rank_prefix_sum[start_rank + src_rank - 1];
             
@@ -2521,8 +2523,8 @@ void dispatch_pcie(void* recv_x, float* recv_x_scales, int64_t* recv_topk_idx, f
                    void* rdma_buffer_ptr, int num_max_rdma_chunked_send_tokens, int num_max_rdma_chunked_recv_tokens,
                    void** buffer_ptrs, int rank, int num_ranks,
                    cudaStream_t stream, int num_channels) {
-    constexpr int kNumDispatchRDMASenderWarps = 4;
-    constexpr int kNumDispatchReceiverWarps = 4;
+    constexpr int kNumDispatchRDMASenderWarps = 8;
+    constexpr int kNumDispatchReceiverWarps = 8;
     constexpr int kNumDispatchReceiverCoordinatorWarps = 1;
 
 #define DISPATCH_PCIE_LAUNCH_CASE(num_ranks) { \
