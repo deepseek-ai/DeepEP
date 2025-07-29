@@ -1341,7 +1341,7 @@ bool is_sm90_compiled() {
 
 
 std::tuple<torch::Tensor, std::optional<torch::Tensor>, std::optional<torch::Tensor>, 
-std::optional<torch::Tensor>, std::optional<torch::Tensor>, std::optional<torch::Tensor>, torch::Tensor, std::vector<int>, std::optional<EventHandle>>
+std::optional<torch::Tensor>, std::optional<torch::Tensor>, std::optional<torch::Tensor>, torch::Tensor, torch::Tensor, std::vector<int>, std::optional<EventHandle>>
 Buffer::pcie_dispatch(const torch::Tensor& x, const std::optional<torch::Tensor>& x_scales,
                       const std::optional<torch::Tensor>& topk_idx, const std::optional<torch::Tensor>& topk_weights,
                       const std::optional<torch::Tensor>& num_tokens_per_rank,
@@ -1474,6 +1474,7 @@ Buffer::pcie_dispatch(const torch::Tensor& x, const std::optional<torch::Tensor>
     auto recv_src_meta = std::optional<torch::Tensor>();
     // 需要dispatch函数填的
     auto recv_rdma_channel_prefix_matrix = std::optional<torch::Tensor>();
+    auto send_rdma_head = torch::empty({num_tokens, num_ranks}, dtype(torch::kInt32).device(torch::kCUDA));
     // not cache mode
     // TODO: check recv_src_meta usage
     recv_src_meta = torch::empty({num_recv_tokens, internode::get_source_meta_bytes()}, dtype(torch::kByte).device(torch::kCUDA));
@@ -1503,7 +1504,7 @@ Buffer::pcie_dispatch(const torch::Tensor& x, const std::optional<torch::Tensor>
         x.data_ptr(), x_scales_ptr, topk_idx_ptr, topk_weights_ptr,
         rdma_channel_prefix_matrix.data_ptr<int>(),
         recv_rdma_rank_prefix_sum.data_ptr<int>(),
-        recv_rdma_channel_prefix_matrix->data_ptr<int>(),
+        recv_rdma_channel_prefix_matrix->data_ptr<int>(), send_rdma_head.data_ptr<int>(),
         num_tokens, hidden_int4, num_scales, num_topk, num_experts,num_local_experts,
         scale_token_stride, scale_hidden_stride,
         rdma_buffer_ptr, config.num_max_rdma_chunked_send_tokens, config.num_max_rdma_chunked_recv_tokens,
@@ -1514,7 +1515,7 @@ Buffer::pcie_dispatch(const torch::Tensor& x, const std::optional<torch::Tensor>
     std::optional<EventHandle> event;
     if (async) {
         event = EventHandle(comm_stream);
-        for (auto& t: {x, is_token_in_rank, recv_x,rdma_channel_prefix_matrix, recv_rdma_rank_prefix_sum}) {
+        for (auto& t: {x, is_token_in_rank, recv_x,rdma_channel_prefix_matrix, recv_rdma_rank_prefix_sum, send_rdma_head}) {
             t.record_stream(comm_stream);
             if (allocate_on_comm_stream)
                 t.record_stream(compute_stream);
@@ -1536,7 +1537,7 @@ Buffer::pcie_dispatch(const torch::Tensor& x, const std::optional<torch::Tensor>
 
     return {recv_x, recv_x_scales, recv_topk_idx, recv_topk_weights, recv_src_meta,
             recv_rdma_channel_prefix_matrix, recv_rdma_rank_prefix_sum,
-            num_recv_tokens_per_expert_list,
+            send_rdma_head, num_recv_tokens_per_expert_list,
             event};
 #else
     EP_HOST_ASSERT(false and "NVSHMEM is disabled during compilation");

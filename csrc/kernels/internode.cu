@@ -2064,6 +2064,7 @@ dispatch_pcie(int4* recv_x, float* recv_x_scales, int64_t* recv_topk_idx, float*
 	     const int* rdma_channel_prefix_matrix,//[num_ranks,num_channels] for sender
          const int* recv_rdma_rank_prefix_sum, // notify dispatch传入的，逻辑上[num_ranks]
          int* recv_rdma_channel_prefix_matrix, // 在函数中构造的，给combine用的, 逻辑上[num_ranks, num_channels]
+         int* send_rdma_head, // [num_tokens, num_ranks]
          int num_tokens, int hidden_int4, int num_scales, int num_topk, int num_experts,int num_local_experts,
          int scale_token_stride, int scale_hidden_stride,
 	     void* rdma_buffer_ptr, int num_max_rdma_chunked_send_tokens, int num_max_rdma_chunked_recv_tokens,
@@ -2196,9 +2197,8 @@ dispatch_pcie(int4* recv_x, float* recv_x_scales, int64_t* recv_topk_idx, float*
             __syncwarp();
 
             // Store RDMA head for combine
-            // TODO：kCachedMode是什么场景？？ 接口参数添加send_rdma_head
-            // if (lane_id < kNumRDMARanks and not kCachedMode)
-            //     send_rdma_head[token_idx * kNumRDMARanks + lane_id] = rdma_tail_idx;
+            if (lane_id < kNumRanks)
+                send_rdma_head[token_idx * kNumRanks + lane_id] = rdma_tail_idx;
 
             // Broadcast tails
 
@@ -2531,7 +2531,7 @@ void dispatch_pcie(void* recv_x, float* recv_x_scales, int64_t* recv_topk_idx, f
                    const void* x, const float* x_scales, const int64_t* topk_idx, const float* topk_weights,
                    const int* rdma_channel_prefix_matrix,
                    const int* recv_rdma_rank_prefix_sum,
-                   int* recv_rdma_channel_prefix_matrix,    // 新增参数
+                   int* recv_rdma_channel_prefix_matrix, int* send_rdma_head,
                    int num_tokens, int hidden_int4, int num_scales, int num_topk, int num_experts,int num_local_experts,
                    int scale_token_stride, int scale_hidden_stride,
                    void* rdma_buffer_ptr, int num_max_rdma_chunked_send_tokens, int num_max_rdma_chunked_recv_tokens,
@@ -2547,7 +2547,7 @@ void dispatch_pcie(void* recv_x, float* recv_x_scales, int64_t* recv_topk_idx, f
                   reinterpret_cast<int4*>(recv_x), recv_x_scales, recv_topk_idx, recv_topk_weights, reinterpret_cast<internode::SourceMeta*>(recv_src_meta), \
                   reinterpret_cast<const int4*>(x), x_scales, topk_idx, topk_weights, \
                   rdma_channel_prefix_matrix, \
-                  recv_rdma_rank_prefix_sum, recv_rdma_channel_prefix_matrix, \
+                  recv_rdma_rank_prefix_sum, recv_rdma_channel_prefix_matrix, send_rdma_head, \
                   num_tokens, hidden_int4, num_scales, num_topk, num_experts,num_local_experts, \
                   scale_token_stride, scale_hidden_stride, \
                   rdma_buffer_ptr, num_max_rdma_chunked_send_tokens, num_max_rdma_chunked_recv_tokens, \
