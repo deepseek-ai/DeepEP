@@ -171,7 +171,7 @@ void combine_pcie(cudaDataType_t type,
                   const int* recv_gbl_channel_prefix_matrix, const int* recv_rank_prefix_sum,
                   int num_recv_tokens, int num_combined_tokens, int hidden, int num_topk,
                   void* rdma_buffer_ptr, int num_max_rdma_chunked_send_tokens, int num_max_rdma_chunked_recv_tokens,
-                  int rank, int num_ranks, cudaStream_t stream, int num_channels, bool low_latency_mode);
+                  int rank, int num_ranks, cudaStream_t stream, int num_channels);
 
 } // namespace internode
 
