@@ -459,13 +459,15 @@ class Buffer:
         #     NotImplementedError('PCIE dispatch with handle is not implemented')
         # else:
         assert num_tokens_per_rank is not None and is_token_in_rank is not None and num_tokens_per_expert is not None
-        recv_x, recv_x_scales, recv_topk_idx, recv_topk_weights, recv_src_meta, \
-            recv_gbl_channel_prefix_matrix, recv_gbl_rank_prefix_sum, \
-            num_recv_tokens_per_expert_list, event = self.runtime.pcie_dispatch(
+        recv_x, recv_x_scales, recv_topk_idx, recv_topk_weights, num_recv_tokens_per_expert_list, \
+            rdma_channel_prefix_matrix, recv_rdma_channel_prefix_matrix, recv_rdma_rank_prefix_sum, \
+            recv_src_meta, send_rdma_head, event = self.runtime.pcie_dispatch(
             x, x_scales, topk_idx, topk_weights,
             num_tokens_per_rank, is_token_in_rank, num_tokens_per_expert,
             expert_alignment, config, getattr(previous_event, 'event', None), async_finish, allocate_on_comm_stream)
-        handle = (recv_src_meta, recv_gbl_channel_prefix_matrix, recv_gbl_rank_prefix_sum)
+        handle = (is_token_in_rank, 
+                rdma_channel_prefix_matrix, recv_rdma_channel_prefix_matrix, recv_rdma_rank_prefix_sum, 
+                recv_src_meta, send_rdma_head)
         return (recv_x, recv_x_scales) if x_scales is not None else recv_x, recv_topk_idx, recv_topk_weights, num_recv_tokens_per_expert_list, handle, EventOverlap(event)
 
 

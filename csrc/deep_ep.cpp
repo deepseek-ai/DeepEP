@@ -1339,9 +1339,8 @@ bool is_sm90_compiled() {
 #endif
 }
 
-
 std::tuple<torch::Tensor, std::optional<torch::Tensor>, std::optional<torch::Tensor>, 
-std::optional<torch::Tensor>, std::optional<torch::Tensor>, std::optional<torch::Tensor>, torch::Tensor, torch::Tensor, std::vector<int>, std::optional<EventHandle>>
+std::optional<torch::Tensor>,std::vector<int>, torch::Tensor, std::optional<torch::Tensor>, torch::Tensor, std::optional<torch::Tensor>, torch::Tensor, std::optional<EventHandle>>
 Buffer::pcie_dispatch(const torch::Tensor& x, const std::optional<torch::Tensor>& x_scales,
                       const std::optional<torch::Tensor>& topk_idx, const std::optional<torch::Tensor>& topk_weights,
                       const std::optional<torch::Tensor>& num_tokens_per_rank,
@@ -1352,6 +1351,8 @@ Buffer::pcie_dispatch(const torch::Tensor& x, const std::optional<torch::Tensor>
 
     const int num_channels = config.num_sms / 2;
     EP_HOST_ASSERT(config.num_sms % 2 == 0);
+    // For now, we only support 1-32 ranks
+    EP_HOST_ASSERT(0 < num_ranks and num_ranks <= 32);
 
     // --------Check only for NOT CACHED mode----------
     EP_HOST_ASSERT(num_tokens_per_rank.has_value());
@@ -1535,10 +1536,10 @@ Buffer::pcie_dispatch(const torch::Tensor& x, const std::optional<torch::Tensor>
     if (allocate_on_comm_stream)
         at::cuda::setCurrentCUDAStream(compute_stream);
 
-    return {recv_x, recv_x_scales, recv_topk_idx, recv_topk_weights, recv_src_meta,
+    return {recv_x, recv_x_scales, recv_topk_idx, recv_topk_weights, num_recv_tokens_per_expert_list,
+            rdma_channel_prefix_matrix, 
             recv_rdma_channel_prefix_matrix, recv_rdma_rank_prefix_sum,
-            send_rdma_head, num_recv_tokens_per_expert_list,
-            event};
+            recv_src_meta, send_rdma_head, event};
 #else
     EP_HOST_ASSERT(false and "NVSHMEM is disabled during compilation");
     return {};
