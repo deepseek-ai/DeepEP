@@ -2436,7 +2436,7 @@ dispatch_pcie(int4* recv_x, float* recv_x_scales, int64_t* recv_topk_idx, float*
             int num_recv_tokens = src_rdma_tail - src_rdma_head;
             
             
-            int rank_offset = start_rank + src_rank == 0 ? 0 : recv_rank_prefix_sum[start_rank + src_rank - 1];
+            int rank_offset = start_rank + src_rank == 0 ? 0 : recv_rdma_rank_prefix_sum[start_rank + src_rank - 1];
             
             // Process tokens one by one (similar to reference code)
             for (int token_idx = src_rdma_head; token_idx < src_rdma_tail; token_idx++) {
@@ -2559,9 +2559,9 @@ void dispatch_pcie(void* recv_x, float* recv_x_scales, int64_t* recv_topk_idx, f
 }
 
 template<bool kLowLatencyMode, int kNumRanks, typename dtype_t, 
-         int kNumCombinePCIESenderWarps, int kNumCombinePCIEReceiverWarps, int kNumCombinePCIEReceiverCoordinatorWarps,
+         int kNumCombineSenderWarps, int kNumCombineReceiverWarps, int kNumCombineCoordinatorWarps,
          int kNumTopkRanks = get_num_topk_rdma_ranks(kNumRanks)>
-__global__ void __launch_bounds__(((kNumCombinePCIESenderWarps + 1) * 32), 1)
+__global__ void __launch_bounds__(((kNumCombineSenderWarps + kNumCombineCoordinatorWarps) * 32), 1)
 combine_pcie(int4* combined_x, float* combined_topk_weights,
              const int4* recv_x, const float* recv_topk_weights,
              const int4* bias_0, const int4* bias_1,
@@ -2591,17 +2591,17 @@ combine_pcie(int4* combined_x, float* combined_topk_weights,
     // Role assignment (similar to dispatch_pcie)
     WarpRole warp_role;
     if (not is_receiver_sm) {
-        if (warp_id < kNumCombinePCIESenderWarps) {
+        if (warp_id < kNumCombineSenderWarps) {
             warp_role = WarpRole::kRDMASender;
-        } else if (warp_id == kNumCombinePCIESenderWarps) {
+        } else if (warp_id == kNumCombineSenderWarps) {
             warp_role = WarpRole::kRDMASenderCoordinator;
         } else {
             warp_role = WarpRole::kNone;
         }
     } else {
-        if (warp_id < kNumCombinePCIEReceiverWarps) {
+        if (warp_id < kNumCombineReceiverWarps) {
             warp_role = WarpRole::kRDMAReceiver;
-        } else if (warp_id < kNumCombinePCIEReceiverWarps + kNumCombinePCIEReceiverCoordinatorWarps) {
+        } else if (warp_id < kNumCombineReceiverWarps + kNumCombineCoordinatorWarps) {
             warp_role = WarpRole::kRDMAReceiverCoordinator;
         } else {
             warp_role = WarpRole::kNone;
@@ -2617,14 +2617,14 @@ combine_pcie(int4* combined_x, float* combined_topk_weights,
 
     // Shared memory for synchronization
     __shared__ int sender_channel_tail[kNumRanks];
-    __shared__ int receiver_rdma_head[kNumCombinePCIEReceiverWarps][kNumRanks];
-    __shared__ bool receiver_retired[kNumCombinePCIEReceiverWarps];
-    auto sync_sender_smem = [=]() { asm volatile("bar.sync 0, %0;" :: "r"((kNumCombinePCIESenderWarps + 1) * 32)); };
-    auto sync_receiver_smem = [=]() { asm volatile("bar.sync 1, %0;" :: "r"((kNumCombinePCIEReceiverWarps + kNumCombinePCIEReceiverCoordinatorWarps) * 32)); };
+    __shared__ int receiver_channel_head[kNumCombineReceiverWarps][kNumRanks];
+    __shared__ bool receiver_retired[kNumCombineReceiverWarps];
+    auto sync_sender_smem = [=]() { asm volatile("bar.sync 0, %0;" :: "r"((kNumCombineSenderWarps + 1) * 32)); };
+    auto sync_receiver_smem = [=]() { asm volatile("bar.sync 1, %0;" :: "r"((kNumCombineReceiverWarps + kNumCombineCoordinatorWarps) * 32)); };
 
     if (warp_role == WarpRole::kRDMASender) {
         // Move data from recv_x to RDMA send buffer (following dispatch_pcie sender pattern)
-        constexpr int ranks_per_warp = (kNumRanks + kNumCombinePCIESenderWarps - 1) / kNumCombinePCIESenderWarps;
+        constexpr int ranks_per_warp = (kNumRanks + kNumCombineSenderWarps - 1) / kNumCombineSenderWarps;
         const int start_rank = warp_id * ranks_per_warp;
         const int end_rank = min(start_rank + ranks_per_warp, kNumRanks);
         const int num_target_ranks = end_rank - start_rank;
@@ -2650,11 +2650,13 @@ combine_pcie(int4* combined_x, float* combined_topk_weights,
                 // TODO: 是否需要加上rank shuffle?
                 src_rank = (src_rank + 1 + channel_id + rank) % num_target_ranks;
                 if (__shfl_sync(0xffffffff, num_tokens_to_send_to_rank, src_rank) > 0) {
-                    if (lane_id == src_rank and cached_rdma_channel_head == cached_rdma_channel_tail)
-                        cached_rdma_channel_head = static_cast<int>(ld_acquire_sys_global(rdma_channel_head.buffer(start_rank + src_rank)));
-                        int num_tokens_processed = cached_rdma_channel_tail - cached_rdma_channel_head;
-                        if (__shfl_sync(0xffffffff, num_tokens_processed + num_max_rdma_chunked_send_tokens <= num_max_rdma_chunked_recv_tokens, src_rank))
+                    if (lane_id == src_rank) {
+                        int num_tokens_to_issue = min(num_tokens_to_send_to_rank, num_max_rdma_chunked_send_tokens);
+                        if (src_rank == lane_id && num_tokens_to_issue + cached_rdma_channel_tail - cached_rdma_channel_head > num_max_rdma_chunked_recv_tokens)
+                            cached_rdma_channel_head = static_cast<int>(ld_acquire_sys_global(rdma_channel_head.buffer(start_rank + src_rank)));
+                        if (__shfl_sync(0xffffffff, cached_rdma_channel_tail - cached_rdma_channel_head + num_tokens_to_issue <= num_max_rdma_chunked_recv_tokens, src_rank))
                             break;
+                    }
                 }
                 
                 // Timeout check
@@ -2667,11 +2669,8 @@ combine_pcie(int4* combined_x, float* combined_topk_weights,
 
             // Process a token for this destination rank
             auto src_rdma_tail = __shfl_sync(0xffffffff, cached_rdma_channel_tail, src_rank);
-            auto num_tokens_to_send = __shfl_sync(0xffffffff, num_tokens_to_send_to_rank, src_rank);
-            num_tokens_to_send = min(num_tokens_to_send, num_max_rdma_chunked_send_tokens);
+            auto num_tokens_to_send = min(__shfl_sync(0xffffffff, num_tokens_to_send_to_rank, src_rank), num_max_rdma_chunked_send_tokens);
             auto channel_offset_send = __shfl_sync(0xffffffff, channel_offset, src_rank);
-            auto dst_rank_expert_begin = (start_rank + src_rank) * (num_experts / kNumRanks);
-            auto dst_rank_expert_end = min(num_experts, dst_rank_expert_begin + (num_experts / kNumRanks));
             auto rank_offset = start_rank + src_rank == 0 ? 0 : recv_rank_prefix_sum[start_rank + src_rank - 1];
             auto token_idx = src_rdma_tail;
             // Process tokens one by one (similar to reference code)
@@ -2679,10 +2678,10 @@ combine_pcie(int4* combined_x, float* combined_topk_weights,
                 // 余上buffer大小得到位置
                 int dst_slot_idx = token_idx % num_max_rdma_chunked_recv_tokens;        
                 int src_slot_idx = rank_offset + channel_offset_send + token_idx;
-                void* shifted = rdma_channel_data.send_buffer(start_rank + src_rank) + src_slot_idx * num_bytes_per_pcie_token;
+                void* shifted = rdma_channel_data.send_buffer(start_rank + src_rank) + dst_slot_idx * num_bytes_per_pcie_token;
                 UNROLLED_WARP_COPY(5, lane_id, hidden_int4,
-                                    recv_x + dst_slot_idx * hidden_int4,
                                     reinterpret_cast<int4*>(shifted),
+                                    recv_x + src_slot_idx * hidden_int4,
                                     ld_nc_global, st_na_global);
                 shifted = static_cast<int4*>(shifted) + hidden_int4;
 
@@ -2707,162 +2706,142 @@ combine_pcie(int4* combined_x, float* combined_topk_weights,
 
         const int warp_id = threadIdx.x / 32;
         const int lane_id = threadIdx.x % 32;
-        const int sub_warp_id = warp_id - kNumDispatchReceiverWarps;
+        const int sub_warp_id = warp_id - kNumCombineSenderWarps;
 
-        constexpr int ranks_per_warp = (kNumRanks + kNumDispatchReceiverCoordinatorWarps - 1) / kNumDispatchReceiverCoordinatorWarps;
+        constexpr int ranks_per_warp = (kNumRanks + kNumCombineCoordinatorWarps - 1) / kNumCombineCoordinatorWarps;
         const int start_rank = sub_warp_id * ranks_per_warp;
         const int end_rank = min(start_rank + ranks_per_warp, kNumRanks);
         const int num_target_ranks = end_rank - start_rank;
         EP_DEVICE_ASSERT(num_target_ranks <= 32);
 
-        int last_tail = 0, src_rank = lane_id < num_target_ranks ? lane_id + start_rank : -1;
+        int last_issued_tail = 0, target_rank = lane_id < num_target_ranks ? lane_id + start_rank : -1;
         sync_sender_smem();
-        
-        while (true) {
-            // Check if all sender warps are retired, to fix
-            if (__all_sync(0xffffffff, lane_id >= kNumCombinePCIESenderWarps or sender_channel_tail[lane_id] == 0))
-                break;
 
-            // Process each destination rank
-            for (int dst_rank = 0; dst_rank < kNumRanks; dst_rank++) {
-                if (dst_rank == rank) continue; // Skip self
-                
-                // Find minimum head across all sender warps for this dst_rank
-                int min_head = std::numeric_limits<int>::max();
-                #pragma unroll
-                for (int i = 0; i < kNumCombinePCIESenderWarps; ++ i) {
-                    if (sender_channel_tail[i] != 0)
-                        min_head = min(min_head, sender_channel_tail[i]);
-                }
-                
-                // Send if we have enough tokens
-                int num_tokens_to_send = min_head - last_tail;
-                if (min_head != std::numeric_limits<int>::max() and 
-                    num_tokens_to_send >= num_max_rdma_chunked_send_tokens and 
-                    lane_id == 0) {
-                    
-                    // Issue RDMA put
-                    auto src_slot_idx = last_tail[dst_rank] % num_max_rdma_chunked_recv_tokens;
-                    const size_t num_bytes_per_msg = num_tokens_to_send * num_bytes_per_pcie_token;
-                    const auto dst_ptr = reinterpret_cast<uint64_t>(rdma_channel_data.recv_buffer(rank) + src_slot_idx * num_bytes_per_pcie_token);
-                    const auto src_ptr = reinterpret_cast<uint64_t>(rdma_channel_data.send_buffer(dst_rank) + src_slot_idx * num_bytes_per_pcie_token);
-                    
+        int channel_offset = target_rank >= 0 ? (channel_id == 0? 0: recv_gbl_channel_prefix_matrix[target_rank * num_channels + channel_id - 1]) : -1;
+        int num_tokens_to_send_to_rank = target_rank >= 0 ? recv_gbl_channel_prefix_matrix[target_rank * num_channels + channel_id] -  channel_offset: 0;
+        auto start_time = clock64();
+         while (__any_sync(0xffffffff, num_tokens_to_send_to_rank > 0)) {
+           // Timeout check
+            if (clock64() - start_time > NUM_TIMEOUT_CYCLES and target_rank < kNumRanks) {
+                printf("DeepEP RDMA sender coordinator timeout, channel: %d, IB: %d, dst IB: %d, tail: %d, remaining: %d\n",
+                        channel_id, rank, target_rank, last_issued_tail, num_tokens_to_send_to_rank);
+                trap();
+            }
+            // Process each source rank
+            for (int i = 0, synced_num_tokens_to_send; i < num_target_ranks; i++) {
+                int src_rank = (i + channel_id + rank) % num_target_ranks;
+                synced_num_tokens_to_send = __shfl_sync(0xffffffff, num_tokens_to_send_to_rank, src_rank);
+                if (synced_num_tokens_to_send <= 0) continue;
+                auto synced_last_issued_tail = __shfl_sync(0xffffffff, last_issued_tail, src_rank);
+                auto processed_tail = __shfl_sync(0xffffffff, ld_acquire_cta(const_cast<const int*>(sender_channel_tail + start_rank + src_rank)), 0);
+                auto num_tokens_processed = processed_tail - synced_last_issued_tail;
+                if(num_tokens_processed < num_max_rdma_chunked_send_tokens and num_tokens_processed != synced_num_tokens_to_send)
+                    continue;
+                auto num_tokens_to_issue = min(num_tokens_processed, num_max_rdma_chunked_send_tokens);
+                if (src_rank + start_rank != target_rank) {
+                    auto dst_slot_idx = synced_last_issued_tail % num_max_rdma_chunked_recv_tokens;
+                    // TODO: 这里是为了什么？？
+                    EP_DEVICE_ASSERT(dst_slot_idx + num_tokens_to_issue <= num_max_rdma_chunked_recv_tokens);
+                    const size_t num_bytes_per_msg = num_bytes_per_pcie_token * num_tokens_to_issue;
+                    const auto dst_ptr = reinterpret_cast<uint64_t>(rdma_channel_data.recv_buffer(rank) + dst_slot_idx * num_bytes_per_pcie_token);
+                    const auto src_ptr = reinterpret_cast<uint64_t>(rdma_channel_data.send_buffer(src_rank + start_rank) + dst_slot_idx * num_bytes_per_pcie_token);
                     nvshmemi_ibgda_put_nbi_warp<true>(dst_ptr, src_ptr, num_bytes_per_msg,
-                                                      dst_rank, channel_id, lane_id, 0);
-
-                    // Update remote tail
-                    nvshmemi_ibgda_amo_nonfetch_add(rdma_channel_tail.buffer(rank), num_tokens_to_send,
-                                                    dst_rank, channel_id, false);
-                    
-                    last_tail[dst_rank] += num_tokens_to_send;
+                                                        src_rank + start_rank, channel_id, lane_id, 0);    
+                } else {
+                    memory_fence();
                 }
                 __syncwarp();
+
+                if (src_rank + start_rank == target_rank) {
+                    last_issued_tail += num_tokens_to_issue;
+                    num_tokens_to_send_to_rank -= num_tokens_to_issue;
+                    nvshmemi_ibgda_amo_nonfetch_add(rdma_channel_tail.buffer(rank), num_tokens_to_issue,
+                        src_rank + start_rank, channel_id, src_rank + start_rank == target_rank);
+                }
             }
 
             // Nanosleep and let other warps work
             __nanosleep(NUM_WAIT_NANOSECONDS);
         }
 
-    } else if (warp_role == WarpRole::kRDMAReceiver) {
+    }  else if (warp_role == WarpRole::kRDMAReceiver) {
         // Receive from RDMA buffer and write to combined_x with reduction
-        constexpr int ranks_per_warp = (kNumRanks + kNumCombinePCIEReceiverWarps - 1) / kNumCombinePCIEReceiverWarps;
-        const int start_rank = warp_id * ranks_per_warp;
-        const int end_rank = min(start_rank + ranks_per_warp, kNumRanks);
-        const int num_target_ranks = end_rank - start_rank;
-        EP_DEVICE_ASSERT(num_target_ranks <= 32);
-
-                 // Clean shared memory and sync
-         for (int i = lane_id; i < kNumRanks; i += 32) {
-             receiver_rdma_head[warp_id][i] = 0;
-         }
-         if (lane_id == 0) receiver_retired[warp_id] = false;
-         sync_receiver_smem();
+        // Clean shared memory and sync
+        EP_DEVICE_ASSERT(kNumRanks <= 32);
+        for (int i = lane_id; i < kNumRanks; i += 32) {
+            receiver_channel_head[warp_id][i] = 0;
+        }
+        if (lane_id == 0) receiver_retired[warp_id] = false;
+        sync_receiver_smem();
 
         // Get task range for combined tokens
         int token_start_idx, token_end_idx;
         get_channel_task_range(num_combined_tokens, num_channels, channel_id, token_start_idx, token_end_idx);
 
-        // Process tokens and combine
-        for (int64_t token_idx = token_start_idx + warp_id; token_idx < token_end_idx; token_idx += kNumCombinePCIEReceiverWarps) {
+        // Iterate over tokens and combine
+        int cached_channel_tail_idx = 0;
+        for (int64_t token_idx = token_start_idx + warp_id; token_idx < token_end_idx; token_idx += kNumCombineSenderWarps) {
             int expected_head = -1;
             if (lane_id < kNumRanks) {
                 expected_head = ld_nc_global(combined_rdma_head + token_idx * kNumRanks + lane_id);
-                (expected_head < 0) ? (receiver_rdma_head[warp_id][lane_id] = -expected_head - 1) : (receiver_rdma_head[warp_id][lane_id] = expected_head);
+                (expected_head < 0) ? (receiver_channel_head[warp_id][lane_id] = -expected_head - 1) : (receiver_channel_head[warp_id][lane_id] = expected_head);
             }
 
-            // Wait for data to be ready
+            // Wait lanes to be ready
             auto start_time = clock64();
-            while (expected_head >= 0) {
-                int cached_tail = static_cast<int>(ld_acquire_sys_global(rdma_channel_tail.buffer(lane_id)));
-                if (cached_tail > expected_head) break;
+            while (cached_channel_tail_idx <= expected_head) {
+                cached_channel_tail_idx = static_cast<int>(ld_acquire_sys_global(rdma_channel_tail.buffer(lane_id)));
 
                 // Timeout check
                 if (clock64() - start_time > NUM_TIMEOUT_CYCLES) {
-                    printf("DeepEP combine_pcie receiver timeout, channel: %d, rank: %d, src: %d, tail: %d, expect: %d\n",
-                           channel_id, rank, lane_id, cached_tail, expected_head);
+                    printf("DeepEP combine RDMA receiver timeout, channel: %d, RDMA: %d, nvl: %d, src RDMA: %d, tail: %d, waiting: %ld, expect: %d\n",
+                            channel_id, rank, lane_id, cached_channel_tail_idx, token_idx, expected_head);
                     trap();
                 }
             }
             __syncwarp();
 
-            // Combine current token using combine_token function
-            auto recv_fn = [&](int src_rank, int slot_idx, int hidden_int4_idx) -> int4 { 
-                return ld_nc_global(reinterpret_cast<const int4*>(rdma_channel_data.recv_buffer(src_rank) + slot_idx * num_bytes_per_pcie_token) + hidden_int4_idx);
-            };
-            auto recv_tw_fn = [&](int src_rank, int slot_idx, int topk_idx) -> float { 
-                return ld_nc_global(reinterpret_cast<const float*>(rdma_channel_data.recv_buffer(src_rank) + slot_idx * num_bytes_per_pcie_token + hidden_bytes) + topk_idx);
-            };
-            
+            // Combine current token
+            auto recv_fn = [&](int src_rank, int slot_idx, int hidden_int4_idx) -> int4 { return ld_nc_global(reinterpret_cast<const int4*>(rdma_channel_data.recv_buffer(src_rank) + slot_idx * num_bytes_per_pcie_token) + hidden_int4_idx);};
+            auto recv_tw_fn = [&](int src_rank, int slot_idx, int topk_idx) -> float { return ld_nc_global(reinterpret_cast<const float*>(rdma_channel_data.recv_buffer(src_rank) + slot_idx * num_bytes_per_pcie_token + hidden_bytes) + topk_idx);};
             combine_token<kNumRanks, true, dtype_t, kNumTopkRanks>(expected_head >= 0,
-                                                                   expected_head, lane_id,
-                                                                   hidden_int4, num_topk,
-                                                                   combined_x + token_idx * hidden_int4,
-                                                                   combined_topk_weights + token_idx * num_topk,
-                                                                   bias_0 == nullptr ? nullptr : bias_0 + token_idx * hidden_int4,
-                                                                   bias_1 == nullptr ? nullptr : bias_1 + token_idx * hidden_int4,
-                                                                   num_max_rdma_chunked_recv_tokens, recv_fn, recv_tw_fn);
+                                                                        expected_head, lane_id,
+                                                                        hidden_int4, num_topk,
+                                                                        combined_x + token_idx * hidden_int4,
+                                                                        combined_topk_weights + token_idx * num_topk,
+                                                                        bias_0 == nullptr ? nullptr : bias_0 + token_idx * hidden_int4,
+                                                                        bias_1 == nullptr ? nullptr : bias_1 + token_idx * hidden_int4,
+                                                                        num_max_rdma_chunked_recv_tokens, recv_fn, recv_tw_fn);
         }
 
-    } else if (warp_role == WarpRole::kRDMAReceiverCoordinator) {
-        // Update remote heads (following dispatch_pcie receiver coordinator pattern)
-        const int sub_warp_id = warp_id - kNumCombinePCIEReceiverWarps;
-        constexpr int ranks_per_warp = (kNumRanks + kNumCombinePCIEReceiverCoordinatorWarps - 1) / kNumCombinePCIEReceiverCoordinatorWarps;
-        const int start_rank = sub_warp_id * ranks_per_warp;
-        const int end_rank = min(start_rank + ranks_per_warp, kNumRanks);
-        const int num_target_ranks = end_rank - start_rank;
-        EP_DEVICE_ASSERT(num_target_ranks <= 32);
+        // Mark as retired
+        __syncwarp();
+        if (lane_id == 0)
+            receiver_retired[warp_id] = true;
 
+    } else {
+        // kRDMAReceiverCoordinator - update remote heads
         sync_receiver_smem();
         
-        int last_head[kNumRanks] = {0};
-        
-                 while (true) {
-             // Check if all receiver warps are retired
-             if (__all_sync(0xffffffff, lane_id >= kNumCombinePCIEReceiverWarps or receiver_retired[lane_id]))
-                 break;
+        int last_head = 0;
+        int dst_rank = lane_id < kNumRanks ? lane_id : 0;
+        EP_STATIC_ASSERT(kNumCombineSenderWarps <= 32, "Invalid number of PCIe sender warps");
+        while (true) {
+            // Retired
+            if (__all_sync(0xffffffff, lane_id >= kNumCombineSenderWarps or receiver_retired[lane_id]))
+                break;
 
-            // Process each source rank
-            for (int src_rank_idx = 0; src_rank_idx < num_target_ranks; src_rank_idx++) {
-                int src_rank = start_rank + src_rank_idx;
-                
-                // Find minimum head for this source rank
-                int min_head = std::numeric_limits<int>::max();
-                #pragma unroll
-                for (int i = 0; i < kNumCombinePCIEReceiverWarps; ++ i) {
-                    min_head = min(min_head, receiver_rdma_head[i][src_rank]);
-                }
-                
-                // Update remote head if we have progress
-                if (min_head != std::numeric_limits<int>::max() and 
-                    min_head >= last_head[src_rank] + num_max_rdma_chunked_send_tokens and 
-                    lane_id == 0) {
-                    
-                    nvshmemi_ibgda_amo_nonfetch_add(rdma_channel_head.buffer(rank), min_head - last_head[src_rank],
-                                                    src_rank, channel_id + num_channels, src_rank == rank);
-                    last_head[src_rank] = min_head;
-                }
-                __syncwarp();
-            }
+            // Find minimum head for RDMA ranks
+            int min_head = std::numeric_limits<int>::max();
+            #pragma unroll
+            for (int i = 0; i < kNumCombineSenderWarps; ++ i) if (not receiver_retired[i])
+                min_head = min(min_head, receiver_channel_head[i][dst_rank]);
+                    if (min_head != std::numeric_limits<int>::max() and min_head >= last_head + num_max_rdma_chunked_send_tokens and lane_id < kNumRanks) {
+            nvshmemi_ibgda_amo_nonfetch_add(rdma_channel_head.buffer(rank), min_head - last_head,
+                                            translate_dst_rdma_rank<kLowLatencyMode>(dst_rank, 0), 
+                                            channel_id + num_channels, dst_rank == rank);
+            last_head = min_head;
+        }
 
             // Nanosleep and let other warps work
             __nanosleep(NUM_WAIT_NANOSECONDS);
@@ -2879,14 +2858,14 @@ void combine_pcie(cudaDataType_t type,
                   int num_recv_tokens, int num_combined_tokens, int hidden, int num_topk,
                   void* rdma_buffer_ptr, int num_max_rdma_chunked_send_tokens, int num_max_rdma_chunked_recv_tokens,
                   int rank, int num_ranks, cudaStream_t stream, int num_channels, bool low_latency_mode) {
-    constexpr int kNumCombinePCIESenderWarps = 4;
-    constexpr int kNumCombinePCIEReceiverWarps = 4;
-    constexpr int kNumCombinePCIEReceiverCoordinatorWarps = 1;
+    constexpr int kNumCombineSenderWarps = 4;
+    constexpr int kNumCombineReceiverWarps = 4;
+    constexpr int kNumCombineCoordinatorWarps = 1;
 
 #define COMBINE_PCIE_LAUNCH_CASE(num_ranks_val) { \
     auto combine_pcie_func = low_latency_mode ? \
-        combine_pcie<true, num_ranks_val, nv_bfloat16, kNumCombinePCIESenderWarps, kNumCombinePCIEReceiverWarps, kNumCombinePCIEReceiverCoordinatorWarps> : \
-        combine_pcie<false, num_ranks_val, nv_bfloat16, kNumCombinePCIESenderWarps, kNumCombinePCIEReceiverWarps, kNumCombinePCIEReceiverCoordinatorWarps>; \
+        combine_pcie<true, num_ranks_val, nv_bfloat16, kNumCombineSenderWarps, kNumCombineReceiverWarps, kNumCombineCoordinatorWarps> : \
+        combine_pcie<false, num_ranks_val, nv_bfloat16, kNumCombineSenderWarps, kNumCombineReceiverWarps, kNumCombineCoordinatorWarps>; \
     LAUNCH_KERNEL(&cfg, combine_pcie_func, \
                   reinterpret_cast<int4*>(combined_x), combined_topk_weights, \
                   reinterpret_cast<const int4*>(recv_x), recv_topk_weights, \
@@ -2900,7 +2879,7 @@ void combine_pcie(cudaDataType_t type,
     EP_HOST_ASSERT(type == CUDA_R_16BF);
     EP_HOST_ASSERT(hidden % (sizeof(int4) / sizeof(nv_bfloat16)) == 0);
 
-    SETUP_LAUNCH_CONFIG(num_channels * 2, (kNumCombinePCIESenderWarps + 1) * 32, stream);
+    SETUP_LAUNCH_CONFIG(num_channels * 2, (kNumCombineSenderWarps + 1) * 32, stream);
     SWITCH_RANKS(COMBINE_PCIE_LAUNCH_CASE);
 #undef COMBINE_PCIE_LAUNCH_CASE
 }
