@@ -2558,8 +2558,10 @@ void dispatch_pcie(void* recv_x, float* recv_x_scales, int64_t* recv_topk_idx, f
 #undef DISPATCH_PCIE_LAUNCH_CASE
 }
 
-template<bool kLowLatencyMode, int kNumRanks, typename dtype_t, 
-         int kNumCombineSenderWarps, int kNumCombineReceiverWarps, int kNumCombineCoordinatorWarps,
+template<int kNumRanks, typename dtype_t,
+         int kNumCombineSenderWarps,
+         int kNumCombineReceiverWarps,
+         int kNumCombineCoordinatorWarps,
          int kNumTopkRanks = get_num_topk_rdma_ranks(kNumRanks)>
 __global__ void __launch_bounds__(((kNumCombineSenderWarps + kNumCombineCoordinatorWarps) * 32), 1)
 combine_pcie(int4* combined_x, float* combined_topk_weights,
@@ -2586,7 +2588,6 @@ combine_pcie(int4* combined_x, float* combined_topk_weights,
     const bool is_receiver_sm = sm_id % 2 == 1;
 
     EP_DEVICE_ASSERT(num_topk <= 32);
-    EP_DEVICE_ASSERT(hidden_int4 * (sizeof(int4) / sizeof(dtype_t)) % (sizeof(int4) / sizeof(dtype_t)) == 0);
 
     // Role assignment (similar to dispatch_pcie)
     WarpRole warp_role;
@@ -2838,7 +2839,7 @@ combine_pcie(int4* combined_x, float* combined_topk_weights,
                 min_head = min(min_head, receiver_channel_head[i][dst_rank]);
                     if (min_head != std::numeric_limits<int>::max() and min_head >= last_head + num_max_rdma_chunked_send_tokens and lane_id < kNumRanks) {
             nvshmemi_ibgda_amo_nonfetch_add(rdma_channel_head.buffer(rank), min_head - last_head,
-                                            translate_dst_rdma_rank<kLowLatencyMode>(dst_rank, 0), 
+                                            dst_rank, 
                                             channel_id + num_channels, dst_rank == rank);
             last_head = min_head;
         }
@@ -2857,15 +2858,16 @@ void combine_pcie(cudaDataType_t type,
                   const int* recv_gbl_channel_prefix_matrix, const int* recv_rank_prefix_sum,
                   int num_recv_tokens, int num_combined_tokens, int hidden, int num_topk,
                   void* rdma_buffer_ptr, int num_max_rdma_chunked_send_tokens, int num_max_rdma_chunked_recv_tokens,
-                  int rank, int num_ranks, cudaStream_t stream, int num_channels, bool low_latency_mode) {
+                  int rank, int num_ranks, cudaStream_t stream, int num_channels) {
     constexpr int kNumCombineSenderWarps = 4;
     constexpr int kNumCombineReceiverWarps = 4;
     constexpr int kNumCombineCoordinatorWarps = 1;
 
-#define COMBINE_PCIE_LAUNCH_CASE(num_ranks_val) { \
-    auto combine_pcie_func = low_latency_mode ? \
-        combine_pcie<true, num_ranks_val, nv_bfloat16, kNumCombineSenderWarps, kNumCombineReceiverWarps, kNumCombineCoordinatorWarps> : \
-        combine_pcie<false, num_ranks_val, nv_bfloat16, kNumCombineSenderWarps, kNumCombineReceiverWarps, kNumCombineCoordinatorWarps>; \
+    EP_HOST_ASSERT(type == CUDA_R_16BF);
+    EP_HOST_ASSERT(hidden % (sizeof(int4) / sizeof(nv_bfloat16)) == 0);
+   
+#define COMBINE_PCIE_LAUNCH_CASE(num_ranks) { \
+    auto combine_pcie_func = combine_pcie<num_ranks, nv_bfloat16, kNumCombineSenderWarps, kNumCombineReceiverWarps, kNumCombineCoordinatorWarps>; \
     LAUNCH_KERNEL(&cfg, combine_pcie_func, \
                   reinterpret_cast<int4*>(combined_x), combined_topk_weights, \
                   reinterpret_cast<const int4*>(recv_x), recv_topk_weights, \
@@ -2876,10 +2878,7 @@ void combine_pcie(cudaDataType_t type,
                   rdma_buffer_ptr, num_max_rdma_chunked_send_tokens, num_max_rdma_chunked_recv_tokens, \
                   rank, num_ranks); } break
 
-    EP_HOST_ASSERT(type == CUDA_R_16BF);
-    EP_HOST_ASSERT(hidden % (sizeof(int4) / sizeof(nv_bfloat16)) == 0);
-
-    SETUP_LAUNCH_CONFIG(num_channels * 2, (kNumCombineSenderWarps + 1) * 32, stream);
+    SETUP_LAUNCH_CONFIG(num_channels * 2, (kNumCombineSenderWarps + kNumCombineCoordinatorWarps) * 32, stream);
     SWITCH_RANKS(COMBINE_PCIE_LAUNCH_CASE);
 #undef COMBINE_PCIE_LAUNCH_CASE
 }

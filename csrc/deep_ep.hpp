@@ -144,6 +144,13 @@ public:
                   int expert_alignment,const Config& config, std::optional<EventHandle>& previous_event, bool async, bool allocate_on_comm_stream);
 
     std::tuple<torch::Tensor, std::optional<torch::Tensor>, std::optional<EventHandle>>
+    pcie_combine(const torch::Tensor& recv_x, const std::optional<torch::Tensor>& recv_topk_weights,
+                 const std::optional<torch::Tensor>& bias_0, const std::optional<torch::Tensor>& bias_1,
+                 const torch::Tensor& combined_rdma_head,
+                 const torch::Tensor& recv_gbl_channel_prefix_matrix, const torch::Tensor& recv_rank_prefix_sum,
+                 int num_combined_tokens, const Config& config, std::optional<EventHandle>& previous_event, bool async, bool allocate_on_comm_stream);
+
+    std::tuple<torch::Tensor, std::optional<torch::Tensor>, std::optional<EventHandle>>
     internode_combine(const torch::Tensor& x, const std::optional<torch::Tensor>& topk_weights,
                       const std::optional<torch::Tensor>& bias_0, const std::optional<torch::Tensor>& bias_1,
                       const torch::Tensor& src_meta, const torch::Tensor& is_combined_token_in_rank,

@@ -1544,6 +1544,120 @@ Buffer::pcie_dispatch(const torch::Tensor& x, const std::optional<torch::Tensor>
 #endif
 }
 
+std::tuple<torch::Tensor, std::optional<torch::Tensor>, std::optional<EventHandle>>
+Buffer::pcie_combine(const torch::Tensor& recv_x, const std::optional<torch::Tensor>& recv_topk_weights,
+                     const std::optional<torch::Tensor>& bias_0, const std::optional<torch::Tensor>& bias_1,
+                     const torch::Tensor& combined_rdma_head,
+                     const torch::Tensor& recv_gbl_channel_prefix_matrix, const torch::Tensor& recv_rank_prefix_sum,
+                     int num_combined_tokens, const Config& config, std::optional<EventHandle>& previous_event, bool async, bool allocate_on_comm_stream) {
+#ifndef DISABLE_NVSHMEM
+    pybind11::gil_scoped_release release;
+
+    const int num_channels = config.num_sms / 2;
+    EP_HOST_ASSERT(config.num_sms % 2 == 0);
+
+    // Input tensor checks
+    EP_HOST_ASSERT(recv_x.dim() == 2 && recv_x.is_contiguous());
+    EP_HOST_ASSERT((recv_x.size(1) * recv_x.element_size()) % sizeof(int4) == 0);
+    EP_HOST_ASSERT(combined_rdma_head.dim() == 1 && combined_rdma_head.is_contiguous());
+    EP_HOST_ASSERT(recv_gbl_channel_prefix_matrix.dim() == 2 && recv_gbl_channel_prefix_matrix.is_contiguous());
+    EP_HOST_ASSERT(recv_rank_prefix_sum.dim() == 1 && recv_rank_prefix_sum.is_contiguous());
+    EP_HOST_ASSERT(recv_gbl_channel_prefix_matrix.size(0) == num_ranks);
+    EP_HOST_ASSERT(recv_gbl_channel_prefix_matrix.size(1) == num_channels);
+    EP_HOST_ASSERT(recv_rank_prefix_sum.size(0) == num_ranks);
+
+    auto num_recv_tokens = static_cast<int>(recv_x.size(0));
+    auto hidden = static_cast<int>(recv_x.size(1));
+    auto hidden_int4 = static_cast<int>(recv_x.size(1) * recv_x.element_size() / sizeof(int4));
+
+    // Top-k checks
+    int num_topk = 0;
+    float* recv_topk_weights_ptr = nullptr;
+    if (recv_topk_weights.has_value()) {
+        EP_HOST_ASSERT(recv_topk_weights->dim() == 2 && recv_topk_weights->is_contiguous());
+        EP_HOST_ASSERT(recv_topk_weights->size(0) == num_recv_tokens);
+        EP_HOST_ASSERT(recv_topk_weights->scalar_type() == torch::kFloat32);
+        num_topk = static_cast<int>(recv_topk_weights->size(1));
+        recv_topk_weights_ptr = recv_topk_weights->data_ptr<float>();
+    }
+
+    // Bias checks
+    const void* bias_0_ptr = nullptr;
+    const void* bias_1_ptr = nullptr;
+    if (bias_0.has_value()) {
+        EP_HOST_ASSERT(bias_0->dim() == 1 && bias_0->is_contiguous());
+        EP_HOST_ASSERT(bias_0->size(0) == hidden);
+        bias_0_ptr = bias_0->data_ptr();
+    }
+    if (bias_1.has_value()) {
+        EP_HOST_ASSERT(bias_1->dim() == 1 && bias_1->is_contiguous());
+        EP_HOST_ASSERT(bias_1->size(0) == hidden);
+        bias_1_ptr = bias_1->data_ptr();
+    }
+
+    // Stream Management
+    auto compute_stream = at::cuda::getCurrentCUDAStream();
+    if (allocate_on_comm_stream) {
+        EP_HOST_ASSERT(previous_event.has_value() && async);
+        at::cuda::setCurrentCUDAStream(comm_stream);
+    }
+
+    if (previous_event.has_value()) {
+        stream_wait(comm_stream, previous_event.value());
+    } else {
+        stream_wait(comm_stream, compute_stream);
+    }
+
+    // Allocate output tensors
+    auto combined_x = torch::empty({num_combined_tokens, hidden}, recv_x.options());
+    auto combined_topk_weights = std::optional<torch::Tensor>();
+    float* combined_topk_weights_ptr = nullptr;
+    if (recv_topk_weights.has_value()) {
+        combined_topk_weights = torch::empty({num_combined_tokens, num_topk}, recv_topk_weights->options());
+        combined_topk_weights_ptr = combined_topk_weights->data_ptr<float>();
+    }
+
+    // Launch kernel
+    internode::combine_pcie(
+        recv_x.scalar_type() == torch::kBFloat16 ? CUDA_R_16BF : CUDA_R_16F,
+        combined_x.data_ptr(), combined_topk_weights_ptr,
+        recv_x.data_ptr(), recv_topk_weights_ptr,
+        bias_0_ptr, bias_1_ptr,
+        combined_rdma_head.data_ptr<int>(),
+        recv_gbl_channel_prefix_matrix.data_ptr<int>(), recv_rank_prefix_sum.data_ptr<int>(),
+        num_recv_tokens, num_combined_tokens, hidden, num_topk,
+        rdma_buffer_ptr, config.num_max_rdma_chunked_send_tokens, config.num_max_rdma_chunked_recv_tokens,
+        rank, num_ranks, comm_stream, num_channels
+    );
+
+    // Stream Sync and Return
+    std::optional<EventHandle> event;
+    if (async) {
+        event = EventHandle(comm_stream);
+        for (auto& t: {recv_x, combined_rdma_head, recv_gbl_channel_prefix_matrix, recv_rank_prefix_sum, combined_x}) {
+            t.record_stream(comm_stream);
+            if (allocate_on_comm_stream)
+                t.record_stream(compute_stream);
+        }
+        for (auto& to: {recv_topk_weights, bias_0, bias_1, combined_topk_weights}) {
+            to.has_value() ? to->record_stream(comm_stream) : void();
+            if (allocate_on_comm_stream)
+                to.has_value() ? to->record_stream(compute_stream) : void();
+        }
+    } else {
+        stream_wait(compute_stream, comm_stream);
+    }
+
+    if (allocate_on_comm_stream)
+        at::cuda::setCurrentCUDAStream(compute_stream);
+
+    return {combined_x, combined_topk_weights, event};
+#else
+    EP_HOST_ASSERT(false and "NVSHMEM is disabled during compilation");
+    return {};
+#endif
+}
+
 } // namespace deep_ep
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
@@ -1581,6 +1695,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         .def("internode_dispatch", &deep_ep::Buffer::internode_dispatch)
         .def("internode_combine", &deep_ep::Buffer::internode_combine)
         .def("pcie_dispatch", &deep_ep::Buffer::pcie_dispatch)
+        .def("pcie_combine", &deep_ep::Buffer::pcie_combine)
         .def("clean_low_latency_buffer", &deep_ep::Buffer::clean_low_latency_buffer)
         .def("low_latency_dispatch", &deep_ep::Buffer::low_latency_dispatch)
         .def("low_latency_combine", &deep_ep::Buffer::low_latency_combine)
