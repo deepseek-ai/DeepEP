@@ -285,8 +285,6 @@ dispatch(void* packed_recv_x, void* packed_recv_x_scales,
                 atomicAdd(cumulative_local_expert_recv_stats + local_expert_idx, num_recv_tokens);
 
             if (dispatch_wait_recv_cost_stats != nullptr)
-                // Since the number of tokens transmitted at one time in LL mode is not large,
-                // 'wait_recv_cost' is used to represent the waiting time for receiving each token
                 atomicAdd(reinterpret_cast<unsigned long long*>(dispatch_wait_recv_cost_stats + src_rank),
                                                                 wait_recv_cost);
         }
