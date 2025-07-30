@@ -135,7 +135,7 @@ def test_main(args: argparse.Namespace,
                         dispatch_args.update({'topk_idx': topk_idx, 'topk_weights': topk_weights_pure_rand if is_rand else topk_weights})
                     if previous_mode:
                         dispatch_args.update({'previous_event': buffer.capture()})
-                    recv_x, recv_topk_idx, recv_topk_weights, recv_num_tokens_per_expert_list, handle, event = buffer.dispatch(
+                    recv_x, recv_topk_idx, recv_topk_weights, recv_num_tokens_per_expert_list, handle, event, _ = buffer.dispatch(
                         **dispatch_args)
                     event.current_stream_wait() if async_mode else ()
 
@@ -148,7 +148,7 @@ def test_main(args: argparse.Namespace,
                     recv_x = per_token_cast_back(*recv_x) if isinstance(recv_x, tuple) else recv_x
 
                     # Checks
-                    recv_gbl_rank_prefix_sum = handle[-4]
+                    recv_gbl_rank_prefix_sum = handle[-5]
                     assert gbl_num_tokens_per_rank[rank].item() == recv_x.size(0), \
                         f'{gbl_num_tokens_per_rank[rank].item()} != {recv_x.size(0)}'
                     assert gbl_num_tokens_per_expert.view(num_ranks, -1)[rank].tolist() == recv_num_tokens_per_expert_list
@@ -191,7 +191,7 @@ def test_main(args: argparse.Namespace,
                         dispatch_args = {'x': current_x, 'handle': handle, 'config': config, 'async_finish': async_mode}
                         if previous_mode:
                             dispatch_args.update({'previous_event': buffer.capture()})
-                        recv_x, _, _, _, _, event = buffer.dispatch(**dispatch_args)
+                        recv_x, _, _, _, _, event, _ = buffer.dispatch(**dispatch_args)
                         event.current_stream_wait() if async_mode else ()
                         recv_x = per_token_cast_back(*recv_x) if isinstance(recv_x, tuple) else recv_x
                         if not is_rand:
@@ -205,7 +205,7 @@ def test_main(args: argparse.Namespace,
                         combine_args.update({'topk_weights': recv_topk_weights})
                     if previous_mode:
                         combine_args.update({'previous_event': buffer.capture()})
-                    combined_x, combined_topk_weights, event = buffer.combine(**combine_args)
+                    combined_x, combined_topk_weights, event, _ = buffer.combine(**combine_args)
                     event.current_stream_wait() if async_mode else ()
                     check_x = (combined_x.float() - bias_0.float() - bias_1.float()) / is_token_in_rank.sum(dim=1).unsqueeze(1)
                     ref_x = x_pure_rand if is_rand else x
@@ -280,7 +280,7 @@ def test_main(args: argparse.Namespace,
         'num_tokens_per_expert': num_tokens_per_expert,
         'config': dispatch_config if dispatch_config is not None else config
     }
-    recv_x, _, _, _, handle, _ = buffer.dispatch(**dispatch_args)
+    recv_x, _, _, _, handle, _, _ = buffer.dispatch(**dispatch_args)
 
     # Tune combine performance
     best_time, best_results = 1e10, None

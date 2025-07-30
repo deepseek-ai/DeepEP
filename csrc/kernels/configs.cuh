@@ -19,6 +19,8 @@
 
 #define LOW_LATENCY_SEND_PHASE 1
 #define LOW_LATENCY_RECV_PHASE 2
+#define NORMAL_DECOUPLED_SEND_PHASE 1
+#define NORMAL_DECOUPLED_RECV_PHASE 2
 
 // Make CLion CUDA indexing work
 #ifdef __CLION_IDE__
