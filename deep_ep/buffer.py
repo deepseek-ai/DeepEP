@@ -34,7 +34,8 @@ class Buffer:
                  low_latency_mode: bool = False, num_qps_per_rank: int = 24,
                  allow_nvlink_for_low_latency_mode: bool = True,
                  allow_mnnvl: bool = False,
-                 explicitly_destroy: bool = False) -> None:
+                 explicitly_destroy: bool = False,
+                 dynamic_buffer_resize: bool = False) -> None:
         """
         Initialize the communication buffer.
 
@@ -53,6 +54,9 @@ class Buffer:
             explicitly_destroy: If this flag is set to True, you need to explicitly call `destroy()` to release resources;
                 otherwise, the resources will be released by the destructor.
                 Note: Releasing resources in the destructor may cause Python's exception handling process to hang.
+            dynamic_buffer_resize: Enable dynamic buffer resizing based on actual usage. This simplifies 
+                the design by allocating buffers based on maximum possible tokens rather than using queues.
+                Refer to https://github.com/deepseek-ai/DeepEP/issues/39 for more details.
         """
         check_nvlink_connections(group)
 
@@ -64,6 +68,7 @@ class Buffer:
         self.num_rdma_bytes = num_rdma_bytes
         self.low_latency_mode = low_latency_mode
         self.explicitly_destroy = explicitly_destroy
+        self.dynamic_buffer_resize = dynamic_buffer_resize
         self.runtime = deep_ep_cpp.Buffer(self.rank, self.group_size, num_nvl_bytes, num_rdma_bytes, low_latency_mode, explicitly_destroy)
 
         # Synchronize device IDs

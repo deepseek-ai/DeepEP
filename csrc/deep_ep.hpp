@@ -75,6 +75,15 @@ private:
     // Host-side RDMA-level MoE info
     volatile int* moe_recv_rdma_counter = nullptr;
     int* moe_recv_rdma_counter_mapped = nullptr;
+    
+    // Dynamic buffer resizing support
+    // This implements the "Easier Potential Overall Design" from issue #39
+    // Instead of using queues for memory efficiency, we allocate buffers based on maximum token counts
+    // This simplifies the design and eliminates potential deadlocks from queue-based communication
+    bool dynamic_buffer_resize = false;
+    int max_tokens_observed = 0;
+    int buffer_expansion_count = 0;
+    int buffer_contraction_count = 0;
 
 public:
     Buffer(int rank, int num_ranks, int64_t num_nvl_bytes, int64_t num_rdma_bytes, bool low_latency_mode, bool explicitly_destroy);
@@ -105,6 +114,13 @@ public:
 
     void destroy();
 
+    // Functions for dynamic buffer resizing
+    // Implements the approach suggested in issue #39 for simpler design
+    void enable_dynamic_buffer_resize(bool enable);
+    bool is_dynamic_buffer_resize_enabled() const;
+    int get_max_tokens_observed() const;
+    void reset_max_tokens_observed();
+    
     std::tuple<torch::Tensor, std::optional<torch::Tensor>, torch::Tensor, torch::Tensor, std::optional<EventHandle>>
     get_dispatch_layout(const torch::Tensor& topk_idx, int num_experts, std::optional<EventHandle>& previous_event,
                         bool async, bool allocate_on_comm_stream);
