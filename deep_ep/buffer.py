@@ -421,6 +421,10 @@ class Buffer:
         # Default config
         config = self.get_combine_config(self.group_size) if config is None else config
 
+        # PCIe
+        if self.pcie_mode:
+            return self.pcie_combine(x, handle, topk_weights, bias, config, previous_event, async_finish, allocate_on_comm_stream)
+
         # Internode
         if self.runtime.get_num_rdma_ranks() > 1:
             return self.internode_combine(x, handle, topk_weights, bias, config, previous_event, async_finish, allocate_on_comm_stream)
@@ -482,6 +486,36 @@ class Buffer:
                     recv_src_meta, send_rdma_head)
             return (recv_x, recv_x_scales) if x_scales is not None else recv_x, recv_topk_idx, recv_topk_weights, num_recv_tokens_per_expert_list, handle, EventOverlap(event)
 
+    # noinspection PyTypeChecker
+    def pcie_combine(self, x: torch.Tensor, handle: Union[tuple, list],
+                          topk_weights: Optional[torch.Tensor] = None,
+                          bias: Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]] = None,
+                          config: Optional[Config] = None,
+                          previous_event: Optional[EventOverlap] = None, async_finish: bool = False,
+                          allocate_on_comm_stream: bool = False) -> \
+            Tuple[torch.Tensor, Optional[torch.Tensor], EventOverlap]:
+        """
+        Internode combine implementation, for more details, please refer to the `combine` docs.
+        Normally, you should not directly call this function.
+        """
+        assert config is not None
+
+        # Unpack handle and bias
+        is_combined_token_in_rank, \
+            _, \
+            recv_gbl_channel_prefix_matrix, recv_rank_prefix_sum, \
+            src_meta, send_rdma_head = handle
+        bias_0, bias_1 = Buffer._unpack_bias(bias)
+
+        num_combined_tokens = is_combined_token_in_rank.shape[0]
+        # Launch the kernel
+        combined_x, combined_topk_weights, event = self.runtime.pcie_combine(
+            x, topk_weights, bias_0, bias_1,
+            send_rdma_head,
+            recv_gbl_channel_prefix_matrix, recv_rank_prefix_sum,
+            num_combined_tokens, config, getattr(previous_event, 'event', None),
+            async_finish, allocate_on_comm_stream)
+        return combined_x, combined_topk_weights, EventOverlap(event)
 
     # noinspection PyTypeChecker
     def internode_dispatch(self, x: Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]],
