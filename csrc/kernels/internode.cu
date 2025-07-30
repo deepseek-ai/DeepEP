@@ -1399,6 +1399,84 @@ void cached_notify(int hidden_int4, int num_scales, int num_topk_idx, int num_to
                   buffer_ptrs, barrier_signal_ptrs, rank, num_ranks,
                   is_cached_dispatch, cpu_rdma_team);
 }
+template <bool kCachedMode>
+__global__ void cached_notify_pcie(const int rdma_clean_offset, const int rdma_num_int_clean,
+                              int* combined_rdma_head, int num_combined_tokens, int num_channels,
+                              void* rdma_buffer_ptr,
+                              int rank, int num_ranks) {
+    auto sm_id = static_cast<int>(blockIdx.x);
+    auto thread_id = static_cast<int>(threadIdx.x);
+    auto num_threads = static_cast<int>(blockDim.x);
+    auto num_warps = num_threads / 32;
+    auto warp_id = thread_id / 32;
+    auto lane_id = get_lane_id();
+
+    if (sm_id == 0) {
+        // Barrier for RDMA
+        if (thread_id == 0)
+            nvshmem_sync_all();
+        __syncthreads();
+
+        // Clean
+        auto rdma_buffer_ptr_int = static_cast<int*>(rdma_buffer_ptr);
+        #pragma unroll
+        for (int i = thread_id; i < rdma_num_int_clean; i += num_threads)
+            rdma_buffer_ptr_int[rdma_clean_offset + i] = 0;
+        __syncthreads();
+
+        // Barrier again
+        if (thread_id == 0)
+            nvshmem_sync_all();
+    } else if (sm_id == 1) {
+        if (kCachedMode)
+            return;
+
+        // TODO: for now, we only support 32 ranks, and only use lane_id to iterate ranks
+        EP_DEVICE_ASSERT(num_warps >= num_channels);
+        EP_DEVICE_ASSERT(num_ranks <= 32);
+
+        // Iterate in reverse order
+        if (lane_id < num_ranks and warp_id < num_channels) {
+            int token_start_idx, token_end_idx;
+            get_channel_task_range(num_combined_tokens, num_channels, warp_id, token_start_idx, token_end_idx);
+
+            // NOTES: `1 << 25` is a heuristic large number
+            int last_head = 1 << 25;
+            for (int token_idx = token_end_idx - 1; token_idx >= token_start_idx; -- token_idx) {
+                auto current_head = __ldg(combined_rdma_head + token_idx * num_ranks + lane_id);
+                if (current_head < 0) {
+                    combined_rdma_head[token_idx * num_ranks + lane_id] = -last_head - 1;
+                } else {
+                    last_head = current_head;
+                }
+            }
+        }
+    }
+}
+
+void cached_notify_pcie(int hidden_int4, int num_scales, int num_topk_idx, int num_topk_weights,
+                   int num_ranks, int num_channels, int num_combined_tokens, int* combined_rdma_head,
+                   void* rdma_buffer_ptr, int num_max_rdma_chunked_recv_tokens,
+                   int rank, cudaStream_t stream,
+                   int64_t num_rdma_bytes,
+                   bool is_cached_dispatch) {
+    const int num_threads = std::max(128, 32 * num_channels);
+
+    // Get clean meta
+    auto pcie_clean_meta = get_pcie_clean_meta(hidden_int4, num_scales, num_topk_idx, num_topk_weights, num_ranks, num_max_rdma_chunked_recv_tokens, num_channels);
+    EP_HOST_ASSERT((pcie_clean_meta.first + pcie_clean_meta.second) * sizeof(int) <= num_rdma_bytes);
+    EP_HOST_ASSERT(num_rdma_bytes < std::numeric_limits<int>::max());
+    EP_HOST_ASSERT(num_channels * 2 > 3);
+
+    // Launch kernel
+    auto cached_notify_pcie_func = is_cached_dispatch ? cached_notify_pcie<true> : cached_notify_pcie<false>;
+    SETUP_LAUNCH_CONFIG(2, num_threads, stream);
+    LAUNCH_KERNEL(&cfg, cached_notify_pcie_func,
+                  pcie_clean_meta.first, pcie_clean_meta.second,
+                  combined_rdma_head, num_combined_tokens, num_channels,
+                  rdma_buffer_ptr,
+                  rank, num_ranks);
+}
 
 template <int kNumRanks, bool kMaybeWithBias, typename dtype_t, int kMaxNumRanks, bool kUseTMA, int kNumStages, int kNumTMALoadBytes = 0, typename GetAddrFn, typename ReceiveTWFn>
 __device__ int combine_token(bool is_token_in_rank, int head_idx,
@@ -2055,7 +2133,7 @@ void combine(cudaDataType_t type,
 #undef COMBINE_LAUNCH_CASE
 }
 
-template <int kNumRanks,
+template <int kNumRanks,bool kCachedMode,
           int kNumDispatchRDMASenderWarps,
           int kNumDispatchReceiverWarps, int kNumDispatchReceiverCoordinatorWarps,int kNumTopkRanks = get_num_topk_rdma_ranks(kNumRanks)>
 __global__ void __launch_bounds__(((kNumDispatchRDMASenderWarps + 1) * 32), 1)
@@ -2065,6 +2143,7 @@ dispatch_pcie(int4* recv_x, float* recv_x_scales, int64_t* recv_topk_idx, float*
          const int* recv_rdma_rank_prefix_sum, // notify dispatch传入的，逻辑上[num_ranks]
          int* recv_rdma_channel_prefix_matrix, // 在函数中构造的，给combine用的, 逻辑上[num_ranks, num_channels]
          int* send_rdma_head, // [num_tokens, num_ranks]
+         const bool* is_token_in_rank,
          int num_tokens, int hidden_int4, int num_scales, int num_topk, int num_experts,int num_local_experts,
          int scale_token_stride, int scale_hidden_stride,
 	     void* rdma_buffer_ptr, int num_max_rdma_chunked_send_tokens, int num_max_rdma_chunked_recv_tokens,
@@ -2163,25 +2242,33 @@ dispatch_pcie(int4* recv_x, float* recv_x_scales, int64_t* recv_topk_idx, float*
         int64_t token_idx;
         int cached_rdma_channel_head = 0, global_rdma_tail_idx = 0;
         auto send_buffer = lane_id == rank ? rdma_channel_data.recv_buffer(lane_id) : rdma_channel_data.send_buffer(lane_id);
-
         for (token_idx = token_start_idx; token_idx < token_end_idx; ++ token_idx) {
             // Read RDMA rank existence
             uint64_t is_token_in_rank_uint64 = 0;
-            for(int i = 0; i < num_topk; ++i) {
-                //TODO: 暂时用topk计算，后续根据性能考虑是否在get dispatch layout中实现topk_ranks_idx替换减少计算
-                int target_expert = __ldg(reinterpret_cast<const int*>(topk_idx + token_idx * num_topk + i));
-                int target_rank = target_expert / num_local_experts;
-                if(lane_id == target_rank) {
-                    is_token_in_rank_uint64 = 1;
-                    global_rdma_tail_idx++;
-                    break;
-                }
-            }  
+            if (lane_id < kNumRanks) {
+                // 方法1: 直接读取bool值（最安全）
+                bool is_token_in_rank_value = is_token_in_rank[token_idx * kNumRanks + lane_id];
+                global_rdma_tail_idx += is_token_in_rank_value ? 1 : 0;    
+                // 为了保持后续代码兼容，将bool转换为uint64_t
+                is_token_in_rank_uint64 = is_token_in_rank_value ? 1 : 0;
+            }            
+            //TODO: 用topk计算，适合rank 拓展，但不适合cachemode
+            // for(int i = 0; i < num_topk; ++i) {
+            //     int target_expert = __ldg(reinterpret_cast<const int*>(topk_idx + token_idx * num_topk + i));
+            //     int target_rank = target_expert / num_local_experts;
+            //     if(lane_id == target_rank) {
+            //         is_token_in_rank_uint64 = 1;
+            //         global_rdma_tail_idx++;
+            //         break;
+            //     }
+            // }  
             __syncwarp();
+
             // Skip the token which does not belong to this warp
             if ((token_idx - token_start_idx) % kNumDispatchRDMASenderWarps != warp_id)
                 continue;
             auto rdma_tail_idx = is_token_in_rank_uint64 == 0 ? -1 : global_rdma_tail_idx - 1;
+
             // Wait the remote buffer to be released
             auto start_time = clock64();
             while (is_token_in_rank_uint64 != 0 and rdma_tail_idx - cached_rdma_channel_head >= num_max_rdma_chunked_recv_tokens) {
@@ -2197,7 +2284,7 @@ dispatch_pcie(int4* recv_x, float* recv_x_scales, int64_t* recv_topk_idx, float*
             __syncwarp();
 
             // Store RDMA head for combine
-            if (lane_id < kNumRanks)
+            if (lane_id < kNumRanks and not kCachedMode)
                 send_rdma_head[token_idx * kNumRanks + lane_id] = rdma_tail_idx;
 
             // Broadcast tails
@@ -2389,7 +2476,8 @@ dispatch_pcie(int4* recv_x, float* recv_x_scales, int64_t* recv_topk_idx, float*
                     channel_offset = -meta_0 - 1;
                     int channel_offset_1 = -meta_1 - 1;
                     num_tokens_to_recv_from_rank = channel_offset_1 - channel_offset;
-                    recv_rdma_channel_prefix_matrix[src_rank * num_channels + channel_id] = channel_offset_1 + recv_rdma_rank_prefix_sum[src_rank];
+                    if (not kCachedMode)
+                        recv_rdma_channel_prefix_matrix[src_rank * num_channels + channel_id] = channel_offset_1 + recv_rdma_rank_prefix_sum[src_rank];
                     // 给coordinator用, 存储每个channel的global start和end    
                     rdma_receiver_channel_start[src_rank] = channel_offset;
                     rdma_receiver_channel_end[src_rank] = channel_offset_1;
@@ -2527,27 +2615,32 @@ dispatch_pcie(int4* recv_x, float* recv_x_scales, int64_t* recv_topk_idx, float*
     }
 }
 
+// TODO: remove this recv_src_meta
 void dispatch_pcie(void* recv_x, float* recv_x_scales, int64_t* recv_topk_idx, float* recv_topk_weights, void* recv_src_meta,
                    const void* x, const float* x_scales, const int64_t* topk_idx, const float* topk_weights,
                    const int* rdma_channel_prefix_matrix,
                    const int* recv_rdma_rank_prefix_sum,
                    int* recv_rdma_channel_prefix_matrix, int* send_rdma_head,
+                   const bool* is_token_in_rank,
                    int num_tokens, int hidden_int4, int num_scales, int num_topk, int num_experts,int num_local_experts,
                    int scale_token_stride, int scale_hidden_stride,
                    void* rdma_buffer_ptr, int num_max_rdma_chunked_send_tokens, int num_max_rdma_chunked_recv_tokens,
-                   void** buffer_ptrs, int rank, int num_ranks,
+                   void** buffer_ptrs, int rank, int num_ranks,bool is_cached_dispatch,
                    cudaStream_t stream, int num_channels) {
     constexpr int kNumDispatchRDMASenderWarps = 8;
     constexpr int kNumDispatchReceiverWarps = 8;
     constexpr int kNumDispatchReceiverCoordinatorWarps = 1;
 
 #define DISPATCH_PCIE_LAUNCH_CASE(num_ranks) { \
-    auto dispatch_func = internode::dispatch_pcie<num_ranks, kNumDispatchRDMASenderWarps, kNumDispatchReceiverWarps, kNumDispatchReceiverCoordinatorWarps>; \
+    auto dispatch_func = is_cached_dispatch ? \
+        internode::dispatch_pcie<num_ranks, true, kNumDispatchRDMASenderWarps, kNumDispatchReceiverWarps, kNumDispatchReceiverCoordinatorWarps> : \
+        internode::dispatch_pcie<num_ranks, false, kNumDispatchRDMASenderWarps, kNumDispatchReceiverWarps, kNumDispatchReceiverCoordinatorWarps>; \
     LAUNCH_KERNEL(&cfg, dispatch_func, \
                   reinterpret_cast<int4*>(recv_x), recv_x_scales, recv_topk_idx, recv_topk_weights, reinterpret_cast<internode::SourceMeta*>(recv_src_meta), \
                   reinterpret_cast<const int4*>(x), x_scales, topk_idx, topk_weights, \
                   rdma_channel_prefix_matrix, \
                   recv_rdma_rank_prefix_sum, recv_rdma_channel_prefix_matrix, send_rdma_head, \
+                  is_token_in_rank, \
                   num_tokens, hidden_int4, num_scales, num_topk, num_experts,num_local_experts, \
                   scale_token_stride, scale_hidden_stride, \
                   rdma_buffer_ptr, num_max_rdma_chunked_send_tokens, num_max_rdma_chunked_recv_tokens, \
