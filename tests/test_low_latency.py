@@ -127,21 +127,21 @@ def test_main(num_tokens: int, hidden: int, num_experts: int, num_topk: int,
 
     # noinspection PyShadowingNames
     def test_diagnose(test_dispatch_slow: bool, slow_rank: int,
-                      dispatch_wait_recv_cost_per_token_stats: Optional[torch.Tensor] = None,
-                      combine_wait_recv_cost_per_token_stats: Optional[torch.Tensor] = None):
+                      dispatch_wait_recv_cost_stats: Optional[torch.Tensor] = None,
+                      combine_wait_recv_cost_stats: Optional[torch.Tensor] = None):
         if test_dispatch_slow:
             if rank == slow_rank:
                 time.sleep(0.001)
             buffer.low_latency_dispatch(x_pure_rand, topk_idx, num_tokens, num_experts,
                                         cumulative_local_expert_recv_stats=cumulative_local_expert_recv_stats,
-                                        dispatch_wait_recv_cost_per_token_stats=dispatch_wait_recv_cost_per_token_stats,
+                                        dispatch_wait_recv_cost_stats=dispatch_wait_recv_cost_stats,
                                         use_fp8=True, async_finish=False)
         else:
             if rank == slow_rank:
                 time.sleep(0.001)
             buffer.low_latency_combine(simulated_gemm_x, topk_idx, topk_weights, handle,
                                        use_logfmt=use_logfmt, return_recv_hook=False,
-                                       combine_wait_recv_cost_per_token_stats=combine_wait_recv_cost_per_token_stats)
+                                       combine_wait_recv_cost_stats=combine_wait_recv_cost_stats)
     # Calculate bandwidth
     num_fp8_bytes, num_bf16_bytes = (hidden + hidden / 128 * 4 + 16), hidden * 2
     num_dispatch_comm_bytes, num_combine_comm_bytes = 0, 0
@@ -215,8 +215,8 @@ def test_main(num_tokens: int, hidden: int, num_experts: int, num_topk: int,
                 'abnormal_points': abnormal_points
             }
 
-        dispatch_wait_recv_cost_per_token_stats = torch.zeros((num_ranks, ), dtype=torch.int64, device='cuda')
-        combine_wait_recv_cost_per_token_stats = torch.zeros((num_ranks, ), dtype=torch.int64, device='cuda')
+        dispatch_wait_recv_cost_stats = torch.zeros((num_ranks, ), dtype=torch.int64, device='cuda')
+        combine_wait_recv_cost_stats = torch.zeros((num_ranks, ), dtype=torch.int64, device='cuda')
         slow_rank = [0, 1]
         for i, test_dispatch_slow in enumerate([True, False]):
             bench(
@@ -224,9 +224,9 @@ def test_main(num_tokens: int, hidden: int, num_experts: int, num_topk: int,
                     test_diagnose,
                     test_dispatch_slow=test_dispatch_slow,
                     slow_rank=slow_rank[i],
-                    dispatch_wait_recv_cost_per_token_stats=dispatch_wait_recv_cost_per_token_stats,
-                    combine_wait_recv_cost_per_token_stats=combine_wait_recv_cost_per_token_stats))
-        stats_list = [dispatch_wait_recv_cost_per_token_stats, combine_wait_recv_cost_per_token_stats]
+                    dispatch_wait_recv_cost_stats=dispatch_wait_recv_cost_stats,
+                    combine_wait_recv_cost_stats=combine_wait_recv_cost_stats))
+        stats_list = [dispatch_wait_recv_cost_stats, combine_wait_recv_cost_stats]
         stats_tensor = torch.stack(stats_list, dim=0)   # (N, num_ranks)
         # gather all ranks dispatch and combine diagnose stats to rank 0
         gather_tensor = [

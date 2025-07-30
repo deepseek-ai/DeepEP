@@ -42,7 +42,7 @@ dispatch(void* packed_recv_x, void* packed_recv_x_scales,
          int* packed_recv_src_info, int64_t* packed_recv_layout_range,
          int* packed_recv_count,
          int* cumulative_local_expert_recv_stats,
-         int64_t* dispatch_wait_recv_cost_per_token_stats,
+         int64_t* dispatch_wait_recv_cost_stats,
          void* rdma_recv_x, int* rdma_recv_count, void* rdma_x,
          const void* x, const int64_t* topk_idx,
          int* atomic_counter_per_expert, int* atomic_finish_counter_per_expert,
@@ -284,11 +284,11 @@ dispatch(void* packed_recv_x, void* packed_recv_x_scales,
             if (cumulative_local_expert_recv_stats != nullptr)
                 atomicAdd(cumulative_local_expert_recv_stats + local_expert_idx, num_recv_tokens);
 
-            if (dispatch_wait_recv_cost_per_token_stats != nullptr)
+            if (dispatch_wait_recv_cost_stats != nullptr)
                 // Since the number of tokens transmitted at one time in LL mode is not large,
                 // 'wait_recv_cost' is used to represent the waiting time for receiving each token
-                atomicAverage(reinterpret_cast<unsigned long long*>(dispatch_wait_recv_cost_per_token_stats + src_rank),
-                                                                    wait_recv_cost);
+                atomicAdd(reinterpret_cast<unsigned long long*>(dispatch_wait_recv_cost_stats + src_rank),
+                                                                wait_recv_cost);
         }
         asm volatile("bar.sync %0, %1;" :: "r"(warp_group_id + 2), "r"(num_warps_per_group * 32));
         num_recv_tokens = shared_num_recv_tokens[warp_group_id];
@@ -339,7 +339,7 @@ void dispatch(void* packed_recv_x, void* packed_recv_x_scales,
               int* packed_recv_src_info, int64_t* packed_recv_layout_range,
               int* packed_recv_count,
               int* cumulative_local_expert_recv_stats,
-              int64_t* dispatch_wait_recv_cost_per_token_stats,
+              int64_t* dispatch_wait_recv_cost_stats,
               void* rdma_recv_x, int* rdma_recv_count, void* rdma_x,
               const void* x, const int64_t* topk_idx,
               int* next_clean, int num_next_clean_int,
@@ -378,7 +378,7 @@ LAUNCH_KERNEL(&cfg, dispatch_func, \
               packed_recv_src_info, packed_recv_layout_range, \
               packed_recv_count, \
               cumulative_local_expert_recv_stats, \
-              dispatch_wait_recv_cost_per_token_stats, \
+              dispatch_wait_recv_cost_stats, \
               rdma_recv_x, rdma_recv_count, rdma_x, \
               x, topk_idx, \
               atomic_counter_per_expert, atomic_finish_counter_per_expert, \
@@ -399,7 +399,7 @@ combine(void* combined_x,
         void* rdma_recv_x, int* rdma_recv_flag, void* rdma_send_x,
         const void* x, const int64_t* topk_idx, const float* topk_weights,
         const int* src_info, const int64_t* layout_range,
-        int64_t* combine_wait_recv_cost_per_token_stats,
+        int64_t* combine_wait_recv_cost_stats,
         int* next_clean, int num_next_clean_int,
         int* atomic_clean_flag,
         int num_combined_tokens, int hidden, int num_topk,
@@ -633,9 +633,9 @@ combine(void* combined_x,
             auto start_time = clock64();
             while (ld_acquire_sys_global(rdma_recv_flag + responsible_expert_idx) == 0);
             auto wait_recv_cost = clock64() - start_time;
-            if (combine_wait_recv_cost_per_token_stats != nullptr)
-                atomicAverage(reinterpret_cast<unsigned long long*>(combine_wait_recv_cost_per_token_stats
-                              + responsible_expert_idx / num_local_experts), wait_recv_cost);
+            if (combine_wait_recv_cost_stats != nullptr)
+                atomicAdd(reinterpret_cast<unsigned long long*>(combine_wait_recv_cost_stats
+                          + responsible_expert_idx / num_local_experts), wait_recv_cost);
         }
     }
     cg::this_grid().sync();
@@ -684,7 +684,7 @@ void combine(void* combined_x,
              void* rdma_recv_x, int* rdma_recv_flag, void* rdma_send_x,
              const void* x, const int64_t* topk_idx, const float* topk_weights,
              const int* src_info, const int64_t* layout_range,
-             int64_t* combine_wait_recv_cost_per_token_stats,
+             int64_t* combine_wait_recv_cost_stats,
              int* next_clean, int num_next_clean_int,
              int num_combined_tokens, int hidden, int num_max_dispatch_tokens_per_rank,
              int num_topk, int num_experts, int rank, int num_ranks,
@@ -719,7 +719,7 @@ LAUNCH_KERNEL(&cfg, combine_func, \
               combined_x, \
               rdma_recv_x, rdma_recv_flag, rdma_send_x, \
               x, topk_idx, topk_weights, src_info, layout_range, \
-              combine_wait_recv_cost_per_token_stats, \
+              combine_wait_recv_cost_stats, \
               next_clean, num_next_clean_int, \
               atomic_clean_flag, \
               num_combined_tokens, hidden, num_topk, \
