@@ -2,7 +2,7 @@ import os
 import time
 import torch
 import torch.distributed as dist
-import sys
+
 # noinspection PyUnresolvedReferences
 import deep_ep
 from utils import init_dist, bench, calc_diff, create_grouped_scores, inplace_unique, per_token_cast_to_fp8, per_token_cast_back
@@ -11,9 +11,9 @@ from utils import init_dist, bench, calc_diff, create_grouped_scores, inplace_un
 import test_low_latency
 
 
-def test_main(num_tokens,num_sms: int, local_rank: int, num_local_ranks: int, num_ranks: int, num_nodes: int, rank: int, buffer: deep_ep.Buffer, group: dist.ProcessGroup):
+def test_main(num_sms: int, local_rank: int, num_local_ranks: int, num_ranks: int, num_nodes: int, rank: int, buffer: deep_ep.Buffer, group: dist.ProcessGroup):
     # Settings
-    num_tokens, hidden, num_topk_groups, num_topk, num_experts = num_tokens, 128, min(num_nodes, 4), 8, (16 // num_ranks) * num_ranks
+    num_tokens, hidden, num_topk_groups, num_topk, num_experts = 4096, 7168, min(num_nodes, 4), 8, (256 // num_ranks) * num_ranks
     assert num_experts % num_ranks == 0 and num_local_ranks == 8
     if local_rank == 0:
         print(f'[config] num_tokens={num_tokens}, hidden={hidden}, num_topk_groups={num_topk_groups}, num_topk={num_topk}', flush=True)
@@ -28,8 +28,6 @@ def test_main(num_tokens,num_sms: int, local_rank: int, num_local_ranks: int, nu
     group_idx = torch.topk(group_scores, k=num_topk_groups, dim=-1, sorted=False).indices
     masked_scores = create_grouped_scores(scores, group_idx, num_nodes)
     topk_idx = torch.topk(masked_scores, num_topk, dim=-1, largest=True, sorted=False)[1]
-    # FOR TEST bi:0——8 1——9 2——10 3——11 4——12 5——13 6——14 7——15
-    topk_idx = torch.ones((num_tokens, num_topk), dtype=torch.int64, device='cuda') * ((num_experts // num_ranks)  * ((8 + rank) % num_ranks))
     topk_weights = torch.ones((num_tokens, num_topk), dtype=torch.float32, device='cuda') * rank
     topk_weights_pure_rand = torch.randn((num_tokens, num_topk), dtype=torch.float32, device='cuda')
     rank_idx = topk_idx // (num_experts // num_ranks)
@@ -97,11 +95,10 @@ def test_main(num_tokens,num_sms: int, local_rank: int, num_local_ranks: int, nu
             assert (check_x[check_start:check_end, :].int() - i).sum().item() == 0
             check_start = check_end
 
-    torch.set_printoptions(profile="full")
     for previous_mode in (False, True):
         for async_mode in (False, True):
-            for current_x in (x, x_pure_rand, x_e4m3):
-                for with_topk in (True,):
+            for current_x in (x_pure_rand, x, x_e4m3):
+                for with_topk in (False, True):
                     if local_rank == 0:
                         print(f'[testing] Running with {"FP8" if isinstance(current_x, tuple) else "BF16"}, {"with" if with_topk else "without"} top-k (async={async_mode}, previous={previous_mode}) ...', flush=True, end='')
                     dispatch_args = {'x': current_x, 'num_tokens_per_rank': num_tokens_per_rank, 'num_tokens_per_rdma_rank': num_tokens_per_rdma_rank,  'is_token_in_rank': is_token_in_rank,
@@ -112,10 +109,8 @@ def test_main(num_tokens,num_sms: int, local_rank: int, num_local_ranks: int, nu
                         dispatch_args.update({'previous_event': buffer.capture()})
                     recv_x, recv_topk_idx, recv_topk_weights, recv_num_tokens_per_expert_list, handle, event = buffer.dispatch(**dispatch_args)
                     event.current_stream_wait() if async_mode else ()
-                    # recv_x = per_token_cast_back(*recv_x) if isinstance(recv_x, tuple) else recv_x
-                    if rank == 1 or rank == 9:
-                        print(f'rank: {rank}, recv_x: {recv_x}') 
-                    sys.exit()       
+                    recv_x = per_token_cast_back(*recv_x) if isinstance(recv_x, tuple) else recv_x
+
                     # Checks
                     recv_gbl_rank_prefix_sum = handle[-4]
                     assert gbl_num_tokens_per_rank[rank].item() == recv_x.size(0), f'{gbl_num_tokens_per_rank[rank].item()} != {recv_x.size(0)}'
@@ -143,7 +138,7 @@ def test_main(num_tokens,num_sms: int, local_rank: int, num_local_ranks: int, nu
                         recv_x = per_token_cast_back(*recv_x) if isinstance(recv_x, tuple) else recv_x
                         if current_x is not x_pure_rand:
                             check_data(recv_x, recv_gbl_rank_prefix_sum)
-                    sys.exit()
+
                     # Test combine
                     bias_0 = torch.ones((num_tokens, hidden), dtype=torch.bfloat16, device='cuda')
                     bias_1 = torch.randn((num_tokens, hidden), dtype=torch.bfloat16, device='cuda')
@@ -231,16 +226,16 @@ def test_loop(local_rank: int, num_local_ranks: int):
     if test_ll_compatibility:
         ll_num_tokens, ll_hidden, ll_num_experts, ll_num_topk = 16, 5120, 256, 9
 
-    num_sms = 36
+    num_sms = 24
     num_qps_per_rank = max(num_sms, ll_num_experts // num_ranks if test_ll_compatibility else 0)
 
     buffer = deep_ep.Buffer(group, int(1e9), int(1e9), low_latency_mode=test_ll_compatibility,
                             num_qps_per_rank=num_qps_per_rank)
     assert num_local_ranks == 8 and num_ranks > 8
     torch.manual_seed(rank)
-    num_tokens = 18  
+
     for i in (num_sms, ):
-        test_main(num_tokens,i, local_rank, num_local_ranks, num_ranks, num_nodes, rank, buffer, group)
+        test_main(i, local_rank, num_local_ranks, num_ranks, num_nodes, rank, buffer, group)
         if local_rank == 0:
             print('', flush=True)
 
