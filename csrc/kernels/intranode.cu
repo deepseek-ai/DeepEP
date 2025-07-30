@@ -163,11 +163,11 @@ void cached_notify_dispatch(const int* rank_prefix_matrix, int num_memset_int,
 
 template <int kNumRanks, int kNumThreads, int kNumTMABytesPerWarp>
 __global__ void __launch_bounds__(kNumThreads, 1)
-dispatch(int4* recv_x, float* recv_x_scales, int* recv_src_idx, int64_t* recv_topk_idx, float* recv_topk_weights, int* recv_channel_offset,
-         int* send_head, const int4* x, const float* x_scales, const int64_t* topk_idx, const float* topk_weights,
+dispatch(int4* recv_x, float* recv_x_scales, float* recv_x_sf_scale_for_nvfp4, int* recv_src_idx, int64_t* recv_topk_idx, float* recv_topk_weights, int* recv_channel_offset,
+         int* send_head, const int4* x, const float* x_scales, const float* sf_scale_for_nvfp4, const int64_t* topk_idx, const float* topk_weights,
          const bool* is_token_in_rank, const int* channel_prefix_matrix,
-         int num_tokens, int num_worst_tokens, int hidden_int4, int num_topk, int num_experts, int num_scales,
-         int scale_token_stride, int scale_hidden_stride,
+         int num_tokens, int num_worst_tokens, int hidden_int4, int num_topk, int num_experts, int num_scales, int num_sf_scales_for_nvfp4,
+         int scale_token_stride, int scale_hidden_stride, int sf_scale_for_nvfp4_token_stride, int sf_scale_for_nvfp4_hidden_stride,
          void** buffer_ptrs, int rank,
          int num_max_send_tokens, int num_recv_buffer_tokens) {
     const auto num_sms = static_cast<int>(gridDim.x), sm_id = static_cast<int>(blockIdx.x);
@@ -214,11 +214,13 @@ dispatch(int4* recv_x, float* recv_x_scales, int* recv_src_idx, int64_t* recv_to
     // `topk_idx_buffers`: kNumChannels * kNumRanks * num_recv_buffer_tokens * num_topk * sizeof(int64_t)
     // `topk_weights_buffers`: kNumChannels * kNumRanks * num_recv_buffer_tokens * num_topk * sizeof(float)
     // `x_scales_buffers`: kNumChannels * kNumRanks * num_recv_buffer_tokens * num_scales * sizeof(float)
+    // `x_sf_scale_for_nvfp4_buffers`: kNumChannels * kNumRanks * num_recv_buffer_tokens * num_sf_scales_for_nvfp4 * sizeof(float)
     auto channel_x_buffers = Buffer<int4>(ptr, num_channels_total * num_recv_buffer_tokens * hidden_int4, channel_rank_offset * num_recv_buffer_tokens * hidden_int4);
     auto channel_src_idx_buffers = Buffer<int>(ptr, num_channels_total * num_recv_buffer_tokens, channel_rank_offset * num_recv_buffer_tokens);
     auto channel_topk_idx_buffers = Buffer<int64_t>(ptr, num_channels_total * num_recv_buffer_tokens * num_topk, channel_rank_offset * num_recv_buffer_tokens * num_topk);
     auto channel_topk_weights_buffers = Buffer<float>(ptr, num_channels_total * num_recv_buffer_tokens * num_topk, channel_rank_offset * num_recv_buffer_tokens * num_topk);
     auto channel_x_scales_buffers = Buffer<float>(ptr, num_channels_total * num_recv_buffer_tokens * num_scales, channel_rank_offset * num_recv_buffer_tokens * num_scales);
+    auto channel_x_sf_scale_for_nvfp4_buffers = Buffer<float>(ptr, num_channels_total * num_recv_buffer_tokens * num_sf_scales_for_nvfp4, channel_rank_offset * num_recv_buffer_tokens * num_sf_scales_for_nvfp4);
 
     // TMA stuffs
 #ifndef DISABLE_SM90_FEATURES
@@ -325,6 +327,14 @@ dispatch(int4* recv_x, float* recv_x_scales, int* recv_src_idx, int64_t* recv_to
                         auto offset = token_idx * scale_token_stride + i * scale_hidden_stride;
                         channel_x_scales_buffers[dst_slot_idx * num_scales + i] = __ldg(x_scales + offset);
                     }
+
+                    // Copy `sf_scale_for_nvfp4`
+                    #pragma unroll
+                    for (int i = lane_id; i < num_sf_scales_for_nvfp4; i += 32) {
+                        auto offset = token_idx * sf_scale_for_nvfp4_token_stride + i * sf_scale_for_nvfp4_hidden_stride;
+                        channel_x_sf_scale_for_nvfp4_buffers[dst_slot_idx * num_sf_scales_for_nvfp4 + i] = __ldg(sf_scale_for_nvfp4 + offset);
+                    }
+
                 }
 
                 // Move token index
@@ -441,6 +451,15 @@ dispatch(int4* recv_x, float* recv_x_scales, int* recv_src_idx, int64_t* recv_to
                     ld_nc_global(channel_x_scales_buffers.buffer() + token_idx_in_buffer * num_scales + scales_idx);
             }
 
+            // Copy `sf_scale_for_nvfp4`
+            #pragma unroll 4
+            for (int i = recv_thread_id_in_rank; i < num_recv_tokens * num_sf_scales_for_nvfp4; i += 32 * num_recv_warps_per_rank) {
+                int chunk_idx = i / num_sf_scales_for_nvfp4, sf_scales_idx = i % num_sf_scales_for_nvfp4;
+                int token_idx_in_buffer = (cached_channel_head_idx + chunk_idx) % num_recv_buffer_tokens;
+                recv_x_sf_scale_for_nvfp4[static_cast<int64_t>(total_offset + chunk_idx) * num_sf_scales_for_nvfp4 + sf_scales_idx] =
+                    ld_nc_global(channel_x_sf_scale_for_nvfp4_buffers.buffer() + token_idx_in_buffer * num_sf_scales_for_nvfp4 + sf_scales_idx);
+            }
+
             // Move queue
             cached_channel_head_idx += num_recv_tokens;
             total_offset += num_recv_tokens;
@@ -466,11 +485,11 @@ dispatch(int4* recv_x, float* recv_x_scales, int* recv_src_idx, int64_t* recv_to
     }
 }
 
-void dispatch(void* recv_x, float* recv_x_scales, int* recv_src_idx, int64_t* recv_topk_idx, float* recv_topk_weights, int* recv_channel_offset,
-              int* send_head, const void* x, const float* x_scales, const int64_t* topk_idx, const float* topk_weights,
+void dispatch(void* recv_x, float* recv_x_scales, float* recv_x_sf_scale_for_nvfp4, int* recv_src_idx, int64_t* recv_topk_idx, float* recv_topk_weights, int* recv_channel_offset,
+              int* send_head, const void* x, const float* x_scales, const float* sf_scale_for_nvfp4, const int64_t* topk_idx, const float* topk_weights,
               const bool* is_token_in_rank, const int* channel_prefix_matrix,
-              int num_tokens, int num_worst_tokens, int hidden_int4, int num_topk, int num_experts, int num_scales,
-              int scale_token_stride, int scale_hidden_stride,
+              int num_tokens, int num_worst_tokens, int hidden_int4, int num_topk, int num_experts, int num_scales, int num_sf_scales_for_nvfp4,
+              int scale_token_stride, int scale_hidden_stride, int sf_scale_for_nvfp4_token_stride, int sf_scale_for_nvfp4_hidden_stride,
               void** buffer_ptrs, int rank, int num_ranks,
               cudaStream_t stream, int num_sms, int num_max_send_tokens, int num_recv_buffer_tokens) {
     constexpr int kNumThreads = 768;
@@ -481,16 +500,17 @@ void dispatch(void* recv_x, float* recv_x_scales, int* recv_src_idx, int64_t* re
 
     // Make sure never OOB
     EP_HOST_ASSERT(static_cast<int64_t>(num_scales) * scale_hidden_stride < std::numeric_limits<int>::max());
+    EP_HOST_ASSERT(static_cast<int64_t>(num_sf_scales_for_nvfp4) * sf_scale_for_nvfp4_hidden_stride < std::numeric_limits<int>::max());
 
 #define DISPATCH_LAUNCH_CASE(ranks) { \
     auto kernel = dispatch<ranks, kNumThreads, kNumTMABytesPerWarp>; \
     SET_SHARED_MEMORY_FOR_TMA(kernel); \
     LAUNCH_KERNEL(&cfg, kernel, \
-        reinterpret_cast<int4*>(recv_x), recv_x_scales, recv_src_idx, recv_topk_idx, recv_topk_weights, recv_channel_offset, \
-        send_head, reinterpret_cast<const int4*>(x), x_scales, topk_idx, topk_weights, \
+        reinterpret_cast<int4*>(recv_x), recv_x_scales, recv_x_sf_scale_for_nvfp4, recv_src_idx, recv_topk_idx, recv_topk_weights, recv_channel_offset, \
+        send_head, reinterpret_cast<const int4*>(x), x_scales, sf_scale_for_nvfp4, topk_idx, topk_weights, \
         is_token_in_rank, channel_prefix_matrix, \
-        num_tokens, num_worst_tokens, hidden_int4, num_topk, num_experts, num_scales, \
-        scale_token_stride, scale_hidden_stride, \
+        num_tokens, num_worst_tokens, hidden_int4, num_topk, num_experts, num_scales, num_sf_scales_for_nvfp4, \
+        scale_token_stride, scale_hidden_stride, sf_scale_for_nvfp4_token_stride, sf_scale_for_nvfp4_hidden_stride, \
         buffer_ptrs, rank, \
         num_max_send_tokens, num_recv_buffer_tokens); \
     } break

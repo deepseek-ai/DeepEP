@@ -54,11 +54,11 @@ void cached_notify_dispatch(const int* rank_prefix_matrix, int num_memset_int,
                             void** buffer_ptrs, int** barrier_signal_ptrs, int rank, int num_ranks,
                             cudaStream_t stream);
 
-void dispatch(void* recv_x, float* recv_x_scales, int* recv_src_idx, int64_t* recv_topk_idx, float* recv_topk_weights, int* recv_channel_offset,
-              int* send_head, const void* x, const float* x_scales, const int64_t* topk_idx, const float* topk_weights,
+void dispatch(void* recv_x, float* recv_x_scales, float* recv_x_sf_scale_for_nvfp4, int* recv_src_idx, int64_t* recv_topk_idx, float* recv_topk_weights, int* recv_channel_offset,
+              int* send_head, const void* x, const float* x_scales, const float* sf_scale_for_nvfp4, const int64_t* topk_idx, const float* topk_weights,
               const bool* is_token_in_rank, const int* channel_prefix_matrix,
-              int num_tokens, int num_worst_tokens, int hidden_int4, int num_topk, int num_experts, int num_scales,
-              int scale_token_stride, int scale_hidden_stride,
+              int num_tokens, int num_worst_tokens, int hidden_int4, int num_topk, int num_experts, int num_scales, int num_sf_scales_for_nvfp4,
+              int scale_token_stride, int scale_hidden_stride, int sf_scale_for_nvfp4_token_stride, int sf_scale_for_nvfp4_hidden_stride,
               void** buffer_ptrs, int rank, int num_ranks,
               cudaStream_t stream, int num_sms,
               int num_max_send_tokens, int num_recv_buffer_tokens);

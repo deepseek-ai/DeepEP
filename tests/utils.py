@@ -9,7 +9,7 @@ import os
 import sys
 import torch
 import torch.distributed as dist
-from typing import Optional, Union
+from typing import Optional, Tuple, Union
 
 
 def init_dist(local_rank: int, num_local_ranks: int):
@@ -73,6 +73,80 @@ def per_token_cast_back(x_fp8: torch.Tensor, x_scales: torch.Tensor):
     x_scales = x_scales.view(x_fp8.size(0), -1, 1)
     return (x_fp32_padded * x_scales).view(x_fp8_padded.shape).to(torch.bfloat16)[:,:n].contiguous()
 
+def quantize_bfloat16_to_nvfp4(x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    assert x.dim() == 2 and x.size(1) % 16 == 0
+    m, n = x.shape
+    x_global_amax = x.abs().float().amax(dim=1).view(m, -1).clamp(1e-4)
+    sf_scales = (6.0 * 448.0) / x_global_amax
+    x_global_quantized = (x * sf_scales).view(m, n)
+    x_view = x_global_quantized.view(m, -1, 16)
+    x_amax = x_view.abs().float().amax(dim=2).view(m, -1).clamp(1e-4)
+    x_quantized = (x_view * (6.0 / x_amax.unsqueeze(2))).view(m, n)
+    x_nvfp4_packed = pack_8xnvfp4_to_int32(x_quantized)
+    x_scales = (x_amax / 6.0).view(m, -1)
+    return x_nvfp4_packed, x_scales.to(torch.float8_e4m3fn).view(dtype=torch.int32), sf_scales
+
+def pack_8xnvfp4_to_int32(x: torch.Tensor) -> torch.Tensor:
+    num_tokens, hidden = x.shape
+    NVFP4_TABLE = torch.tensor([0, 0.5, 1, 1.5, 2, 3, 4, 6], dtype=torch.float32, device=x.device)
+    NVFP4_INTREPL = torch.tensor([0, 1, 2, 3, 4, 5, 6, 7], dtype=torch.int32, device=x.device)
+    sign = (x < 0).to(torch.int32)
+    diff = (x.abs().unsqueeze(-1) - NVFP4_TABLE.view(1, 1, 8)).abs()
+    idx = diff.argmin(dim=-1)
+    repl = NVFP4_INTREPL[idx]
+    int32_elm = ((sign << 3) + repl)
+    int32_elm = int32_elm.reshape(num_tokens, hidden // 8, 8)
+    shift = int32_elm << torch.tensor([28, 24, 20, 16, 12, 8, 4, 0], dtype=torch.int32, device=x.device)
+    uint32_shift = shift.view(dtype=torch.uint32)
+    final = uint32_shift.sum(dim=-1).to(dtype=torch.uint32).view(dtype=torch.int32)
+    return final
+
+def int32_to_8floats_lookup(tensor: torch.Tensor, table: torch.Tensor) -> torch.Tensor:
+    """
+    Decomposes each int32 in the input tensor into 8 4-bit values,
+    and converts them into float values using a lookup table.
+
+    Args:
+        tensor: (int32 Tensor) Tensor of any shape, e.g., [B, N]
+        table: (float Tensor) A 1D lookup table of length 16 that maps all 4-bit values to floats
+
+    Returns:
+        float32 Tensor: Merges the last two dimensions, so shape is [..., n*M], where n is the number of int32 and 8 per int32.
+    """
+    assert tensor.dtype == torch.int32, "Input must be of int32 type"
+    assert table.numel() == 16 and table.ndim == 1, "Lookup table must be 1D with length 16"
+
+    result = []
+    for i in range(8):
+        shift = (7 - i) * 4
+        idx = ((tensor >> shift) & 0xF).long()  # Extract 4-bit index [0, 15]
+        val = table[idx].unsqueeze(-1)  # Lookup and preserve dimensions
+        result.append(val)
+
+    out = torch.cat(result, dim=-1)  # Output shape: [..., 8]
+    # Merge the last two dimensions if shape is [..., M, 8]
+    out = out.reshape(*out.shape[:-2], -1) if out.ndim > 2 else out
+    return out
+
+
+def dequantize_nvfp4_back_to_bfloat16(x_nvfp4: torch.Tensor, x_scales: torch.Tensor, x_sf_scale: torch.Tensor, use_ue8m0_for_nvfp4_sf: bool = False):
+    NVFP4_TABLE = torch.tensor([0, 0.5, 1, 1.5, 2, 3, 4, 6, 0, -0.5, -1.0, -1.5, -2, -3, -4, -6], dtype=torch.float32, device=x_nvfp4.device)   
+    if use_ue8m0_for_nvfp4_sf:
+        x_scales = x_scales.view(dtype=torch.int8).to(torch.int) << 23
+        x_scales = x_scales.view(dtype=torch.float)
+    else:
+        x_scales = x_scales.view(dtype=torch.float8_e4m3fn).to(torch.float32)
+    x_sf_scale = 1 / x_sf_scale
+    x_scales = x_scales * x_sf_scale
+    
+    x_fp32 = int32_to_8floats_lookup(x_nvfp4, NVFP4_TABLE)
+    
+    x_fp32 = x_fp32.view(*x_fp32.shape[:-1], -1, 16)
+    x_scales = x_scales.view(*x_scales.shape[:-1], -1, 1)
+    x_fp32 = x_fp32 * x_scales
+    x_fp32 = x_fp32.view(*x_nvfp4.shape[:-1], -1).to(torch.bfloat16)
+
+    return x_fp32
 
 def inplace_unique(x: torch.Tensor, num_slots: int):
     assert x.dim() == 2

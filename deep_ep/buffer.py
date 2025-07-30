@@ -307,7 +307,7 @@ class Buffer:
         return num_tokens_per_rank, num_tokens_per_rdma_rank, num_tokens_per_expert, is_token_in_rank, EventOverlap(event)
 
     # noinspection PyTypeChecker
-    def dispatch(self, x: Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]],
+    def dispatch(self, x: Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor], Tuple[torch.Tensor, torch.Tensor, torch.Tensor]],
                  handle: Optional[Tuple] = None,
                  num_tokens_per_rank: Optional[torch.Tensor] = None, num_tokens_per_rdma_rank: Optional[torch.Tensor] = None,
                  is_token_in_rank: Optional[torch.Tensor] = None, num_tokens_per_expert: Optional[torch.Tensor] = None,
@@ -316,8 +316,8 @@ class Buffer:
                  config: Optional[Config] = None,
                  previous_event: Optional[EventOverlap] = None, async_finish: bool = False,
                  allocate_on_comm_stream: bool = False) -> \
-            Tuple[Union[Tuple[torch.Tensor, torch.Tensor], torch.Tensor], Optional[torch.Tensor],
-                  Optional[torch.Tensor], List[int], Tuple, EventOverlap]:
+            Tuple[Union[Tuple[torch.Tensor, torch.Tensor], torch.Tensor, Tuple[torch.Tensor, torch.Tensor, torch.Tensor]],
+                  Optional[torch.Tensor], Optional[torch.Tensor], List[int], Tuple, EventOverlap]:
         """
         Dispatch tokens to different ranks, both intranode and internode settings are supported.
         Intranode kernels require all the ranks should be visible via NVLink.
@@ -325,10 +325,14 @@ class Buffer:
             index should be visible via RDMA.
 
         Arguments:
-            x: `torch.Tensor` or tuple of `torch.Tensor`, for the first type, the shape must be `[num_tokens, hidden]`,
-                and type must be `torch.bfloat16`; for the second type, the first element of the tuple must be shaped as
-                `[num_tokens, hidden]` with type `torch.float8_e4m3fn`, the second must be `[num_tokens, hidden // 128]`
-                 (requiring divisible) with type `torch.float`.
+            x: `torch.Tensor` or tuple of two `torch.Tensor` or tuple of three `torch.Tensor`.
+                for the first type, the shape must be `[num_tokens, hidden]`, and type must be `torch.bfloat16`;
+                for the second type, the first element of the tuple must be shaped as `[num_tokens, hidden]`
+                with type `torch.float8_e4m3fn`, the second must be `[num_tokens, hidden // 128]` (requiring divisible)
+                with type `torch.float`.
+                for the thrid type, the first element of the tuple must be shaped as `[num_tokens, hidden // 8]` (requiring divisible)
+                with type `torch.int`, the second must be `[num_tokens, hidden // 64]` with type `torch.int`,
+                the third can be `[num_tokens, *]` with type `torch.float`.
             handle: an optional communication handle, if set, the CPU will reuse the layout information to save some time.
             num_tokens_per_rank: `[num_ranks]` with `torch.int`, the number of tokens to be sent to each rank.
             num_tokens_per_rdma_rank: `[num_rdma_ranks]` with `torch.int`, the number of tokens to be sent to each RDMA
@@ -373,26 +377,38 @@ class Buffer:
                                            topk_idx, topk_weights, expert_alignment, config, previous_event, async_finish, allocate_on_comm_stream)
 
         # Launch the kernel with cached or non-cached mode
-        x, x_scales = x if isinstance(x, tuple) else (x, None)
+        use_nvfp4 = False
+        sf_scale_for_nvfp4 = None
+        if isinstance(x, tuple) and len(x) == 3:
+            use_nvfp4 = True
+            x, x_scales, sf_scale_for_nvfp4 = x
+        elif isinstance(x, tuple) and len(x) == 2:
+            x, x_scales = x
+        else:
+            x, x_scales = x, None
         if handle is not None:
             assert topk_idx is None and topk_weights is None
             rank_prefix_matrix, channel_prefix_matrix, recv_channel_prefix_matrix, recv_src_idx, is_token_in_rank, send_head = handle
             num_recv_tokens = recv_src_idx.size(0)
-            recv_x, recv_x_scales, _, _, _, _, _, _, _, _, event = self.runtime.intranode_dispatch(
+            recv_x, recv_x_scales, recv_x_sf_scale_for_nvfp4, _, _, _, _, _, _, _, _, event = self.runtime.intranode_dispatch(
                 x, x_scales, None, None,
                 None, is_token_in_rank, None, num_recv_tokens, rank_prefix_matrix, channel_prefix_matrix,
-                expert_alignment, num_worst_tokens, config,
+                expert_alignment, num_worst_tokens, config, use_nvfp4, sf_scale_for_nvfp4,
                 getattr(previous_event, 'event', None), async_finish, allocate_on_comm_stream)
-            return (recv_x, recv_x_scales) if x_scales is not None else recv_x, None, None, None, None, EventOverlap(event)
+            if x_scales is not None:
+                recv_x = (recv_x, recv_x_scales, recv_x_sf_scale_for_nvfp4) if use_nvfp4 else (recv_x, recv_x_scales)
+            return recv_x, None, None, None, None, EventOverlap(event)
         else:
             assert num_tokens_per_rank is not None and is_token_in_rank is not None and num_tokens_per_expert is not None
-            recv_x, recv_x_scales, recv_topk_idx, recv_topk_weights, num_recv_tokens_per_expert_list, rank_prefix_matrix, channel_prefix_matrix, recv_channel_prefix_matrix, recv_src_idx, send_head, event = \
+            recv_x, recv_x_scales, recv_x_sf_scale_for_nvfp4, recv_topk_idx, recv_topk_weights, num_recv_tokens_per_expert_list, rank_prefix_matrix, channel_prefix_matrix, recv_channel_prefix_matrix, recv_src_idx, send_head, event = \
                 self.runtime.intranode_dispatch(x, x_scales, topk_idx, topk_weights,
                                                 num_tokens_per_rank, is_token_in_rank, num_tokens_per_expert, 0, None, None,
-                                                expert_alignment, num_worst_tokens, config,
+                                                expert_alignment, num_worst_tokens, config, use_nvfp4, sf_scale_for_nvfp4,
                                                 getattr(previous_event, 'event', None), async_finish, allocate_on_comm_stream)
             handle = (rank_prefix_matrix, channel_prefix_matrix, recv_channel_prefix_matrix, recv_src_idx, is_token_in_rank, send_head)
-            return (recv_x, recv_x_scales) if x_scales is not None else recv_x, recv_topk_idx, recv_topk_weights, num_recv_tokens_per_expert_list, handle, EventOverlap(event)
+            if x_scales is not None:
+                recv_x = (recv_x, recv_x_scales, recv_x_sf_scale_for_nvfp4) if use_nvfp4 else (recv_x, recv_x_scales)
+            return recv_x, recv_topk_idx, recv_topk_weights, num_recv_tokens_per_expert_list, handle, EventOverlap(event)
 
     # noinspection PyTypeChecker
     def combine(self, x: torch.Tensor, handle: Tuple,
@@ -532,7 +548,7 @@ class Buffer:
                            previous_event: Optional[EventOverlap] = None, async_finish: bool = False,
                            allocate_on_comm_stream: bool = False) -> \
             Tuple[Union[Tuple[torch.Tensor, torch.Tensor], torch.Tensor], Optional[torch.Tensor],
-            Optional[torch.Tensor], List[int], Tuple, EventOverlap]:
+                Optional[torch.Tensor], List[int], Tuple, EventOverlap]:
         """
         Internode dispatch implementation, for more details, please refer to the `dispatch` docs.
         Normally, you should not directly call this function.
