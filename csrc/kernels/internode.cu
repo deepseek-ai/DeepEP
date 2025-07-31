@@ -1715,23 +1715,7 @@ __device__ int combine_token(bool is_token_in_rank,
             for (int j = 0; j < num_topk_ranks; ++j)
                 recv_value_int4[j] = ld_nc_global(get_addr_fn(topk_ranks[j], slot_indices[j], i));
 
-            // Clean
-            // Reduce bias
-            float values[kDtypePerInt4] = {0};
-            if constexpr (kMaybeWithBias) {
-                auto bias_0_values = reinterpret_cast<const dtype_t*>(&bias_0_value_int4);
-                auto bias_1_values = reinterpret_cast<const dtype_t*>(&bias_1_value_int4);
-                #pragma unroll
-                for (int j = 0; j < kDtypePerInt4; ++j)
-                    values[j] = static_cast<float>(bias_0_values[j]) + static_cast<float>(bias_1_values[j]);
-            }
-            // Read buffers
-            // TODO: maybe too many registers here
-            int4 recv_value_int4[kMaxNumRanks];
-            #pragma unroll
-            for (int j = 0; j < num_topk_ranks; ++j)
-                recv_value_int4[j] = ld_nc_global(get_addr_fn(topk_ranks[j], slot_indices[j], i));
-            
+
             // Clean
             // Reduce bias
             float values[kDtypePerInt4] = {0};
@@ -2028,7 +2012,7 @@ combine(int4* combined_x, float* combined_topk_weights,
                 return reinterpret_cast<uint64_t*>(smem_ptr + i * kNumTMABufferBytesPerStage + kNumTMALoadBytes * (NUM_MAX_NVL_PEERS + 1));
             };
             uint32_t tma_phase[kNumStages] = {0};
-            if (lane_id < kNumStages) {
+            if (not kDecoupledMode and lane_id < kNumStages) {
                 mbarrier_init(tma_mbarrier(lane_id), 32);
                 fence_barrier_init();
             }
