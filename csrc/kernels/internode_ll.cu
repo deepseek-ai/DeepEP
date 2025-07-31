@@ -659,7 +659,7 @@ combine(void* combined_x,
 
     // Message package
     constexpr int kNumDivisions = kHidden / 128;
-    constexpr int kNumMetaBytes = kUseLogFMT ? kNumDivisions * sizeof(uint32_t) : 0;
+    constexpr int kNumMetaBytes = kNumDivisions * sizeof(uint32_t);
     constexpr size_t num_bytes_per_slot = kHidden * sizeof(nv_bfloat16) + kNumMetaBytes;
     EP_STATIC_ASSERT(num_bytes_per_slot % sizeof(int4) == 0, "Invalid vectorization");
 
