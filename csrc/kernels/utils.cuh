@@ -647,7 +647,7 @@ enum class WarpRole_Dispatch {
 };
 
 template <bool kDecoupledMode>
-__forceinline__ __device__ std::pair<WarpRole_Dispatch, int> get_warp_role(bool is_forwarder, int warp_id, int channel_id, int kNumDispatchRDMASenderWarps, bool return_recv_hook, int phases) {
+__forceinline__ __device__ std::pair<WarpRole_Dispatch, int> get_warp_role_dispatch(bool is_forwarder, int warp_id, int channel_id, int kNumDispatchRDMASenderWarps, bool return_recv_hook, int phases) {
     if (not kDecoupledMode) {  // native mode
         if (is_forwarder) {
             if (warp_id < NUM_MAX_NVL_PEERS) {
@@ -743,7 +743,7 @@ __forceinline__ __device__ std::pair<WarpRole_Combine, int> get_warp_role_combin
                 auto shuffled_warp_id = warp_id;
                 shuffled_warp_id = (shuffled_warp_id + channel_id) % NUM_MAX_NVL_PEERS;
                 return {WarpRole_Combine::kNVLSender, shuffled_warp_id};
-            } else if (warp_id < NUM_MAX_NVL_PEERS + kNumForwarders) {
+            } else if (warp_id < kNumForwarders + NUM_MAX_NVL_PEERS) {
                 auto shuffled_warp_id = warp_id - NUM_MAX_NVL_PEERS;
                 shuffled_warp_id = (shuffled_warp_id + channel_id) % kNumForwarders;
                 return {WarpRole_Combine::kNVLAndRDMAForwarder, shuffled_warp_id};
