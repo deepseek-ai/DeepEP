@@ -655,7 +655,7 @@ combine(void* combined_x,
     constexpr int kNumUnrolls = 4;
     constexpr int hidden_bf16_int4_pad = align(static_cast<int>(hidden_bf16_int4), 32 * kNumUnrolls);
     EP_STATIC_ASSERT(hidden_bf16_int4 % kNumUnrolls == 0, "Invalid hidden");
-    EP_STATIC_ASSERT(kNumUnrolls == 1 or kNumUnrolls == 2 or kNumUnrolls == 4, "Invalid unrolling factors");
+    EP_STATIC_ASSERT(kNumUnrolls == 2 or kNumUnrolls == 4, "Invalid unrolling factors");
 
     // Message package
     constexpr int kNumDivisions = kHidden / 128;
@@ -834,21 +834,27 @@ combine(void* combined_x,
     EP_DEVICE_ASSERT(num_topk <= 32);
     EP_STATIC_ASSERT(kHidden % (32 * kNumElemsPerInt4) == 0, "Invalid vectorization");
     if constexpr (kUseLogFMT) {
-        // Reallocate shared memory
-        constexpr int kNumBF16PerWarpBytes = 32 * kNumUnrolls * kNumElemsPerInt4 * 2;
-        constexpr int kNumLogFMTPerWarpBytes = kNumBF16PerWarpBytes / 16 * 10;
-        const int num_work_warp = hidden_bf16_int4_pad / kNumUnrolls / 32;
-        EP_DEVICE_ASSERT(num_work_warp + 1 <= num_threads / 32);
+        // Reassign warp groups
+        // TODO: use more warps
+        constexpr int kMaxNumGroups = 1;
+        const int num_decode_warps = hidden_bf16_int4_pad / (kNumUnrolls * 32);
+        const int num_groups = min(kMaxNumGroups, (num_threads / 32) / (num_decode_warps + 1));
+        const int sub_warp_id = warp_id % (num_decode_warps + 1);
+        const int group_id = warp_id / (num_decode_warps + 1);
+        EP_DEVICE_ASSERT(num_groups > 0);
+        if (group_id >= num_groups) return;
 
+        // Reallocate shared memory
         constexpr int kNumStages = 3;
         constexpr int kNumTMABufferBytes = 16 * 2 + kHidden * 2;
-        uint32_t tma_full_phase[kNumStages];
-        uint32_t tma_empty_phase[kNumStages];
+        constexpr int kNumBF16PerWarpBytes = 32 * kNumUnrolls * kNumElemsPerInt4 * 2;
+        constexpr int kNumLogFMTPerWarpBytes = kNumBF16PerWarpBytes / 16 * 10;
+
+        uint32_t tma_phase[kNumStages];
         #pragma unroll
-        for (int i = 0; i < kNumStages; ++ i) {
-            tma_full_phase[i] = 0;
-            tma_empty_phase[i] = 1;
-        }
+        for (int i = 0; i < kNumStages; ++ i)
+            tma_phase[i] = (sub_warp_id == num_decode_warps ? 1 : 0);
+
         auto full_barrier  = PatternVisitor([=](const int& k) { return reinterpret_cast<uint64_t*>(smem_buffer + k * kNumTMABufferBytes); });
         auto empty_barrier = PatternVisitor([=](const int& k) { return reinterpret_cast<uint64_t*>(smem_buffer + k * kNumTMABufferBytes + 16); });
         auto tma_ld_buffer = PatternVisitor([=](const int& k) { return reinterpret_cast<uint8_t* >(smem_buffer + k * kNumTMABufferBytes + 32); });
@@ -863,27 +869,26 @@ combine(void* combined_x,
         #pragma unroll
         for (int k = 0; k < kNumStages; ++ k) {
             mbarrier_init(full_barrier[k], 1);
-            mbarrier_init(empty_barrier[k], num_work_warp);
+            mbarrier_init(empty_barrier[k], num_decode_warps);
         }
 
-        // TODO: use more warps
         int stage_idx = 0;
         for (int token_idx = sm_id; token_idx < num_combined_tokens; token_idx += num_sms) {
-            if (warp_id == num_work_warp) {
+            if (sub_warp_id == num_decode_warps) {
                 #pragma unroll
                 for (int i = 0; i < num_topk; ++ i) {
                     int reg_topk_idx = static_cast<int>(__ldg(topk_idx + token_idx * num_topk + i));
                     if (reg_topk_idx < 0) continue;
 
-                    mbarrier_wait(empty_barrier[stage_idx], tma_empty_phase[stage_idx]);
+                    mbarrier_wait(empty_barrier[stage_idx], tma_phase[stage_idx]);
                     auto buffer = static_cast<uint8_t*>(rdma_recv_x) + (reg_topk_idx * num_max_dispatch_tokens_per_rank + token_idx) * num_bytes_per_slot;
                     auto uint64_buffer = reinterpret_cast<uint64_t*>(buffer);
                     if (lane_id < kNumDivisions / 2) {
                         logfmt_check_amaxmin<kHidden, kNumUnrolls>(uint64_buffer[lane_id], reinterpret_cast<float2*>(log_amax[stage_idx]),
                                                                     reinterpret_cast<float2*>(log_amin[stage_idx]), cast_info[stage_idx], lane_id);
                         if (lane_id == 0) {
-                            int cast_count = (cast_info[stage_idx][num_work_warp - 1] >> 1) + (cast_info[stage_idx][num_work_warp - 1] & 1);
-                            int tma_bytes = cast_count * kNumLogFMTPerWarpBytes + (num_work_warp - cast_count) * kNumBF16PerWarpBytes;
+                            int cast_count = (cast_info[stage_idx][num_decode_warps - 1] >> 1) + (cast_info[stage_idx][num_decode_warps - 1] & 1);
+                            int tma_bytes = cast_count * kNumLogFMTPerWarpBytes + (num_decode_warps - cast_count) * kNumBF16PerWarpBytes;
                             tma_load_1d(tma_ld_buffer[stage_idx], buffer + kNumMetaBytes, full_barrier[stage_idx], tma_bytes);
                             mbarrier_arrive_and_expect_tx(full_barrier[stage_idx], tma_bytes);
                         }
@@ -892,7 +897,7 @@ combine(void* combined_x,
                     stage_idx = (stage_idx + 1) % kNumStages;
                 }
             }
-            else if (warp_id < num_work_warp) {
+            else if (sub_warp_id < num_decode_warps) {
                 float combined_values[kNumElemsPerInt4 * kNumUnrolls] = {0.0f};
                 #pragma unroll
                 for (int i = 0; i < num_topk; ++ i) {
@@ -900,7 +905,7 @@ combine(void* combined_x,
                     if (reg_topk_idx < 0) continue;
 
                     float topk_weight = __ldg(topk_weights + token_idx * num_topk + i);
-                    mbarrier_wait(full_barrier[stage_idx], tma_full_phase[stage_idx]);
+                    mbarrier_wait(full_barrier[stage_idx], tma_phase[stage_idx]);
 
                     int cast_prefix_count = cast_info[stage_idx][warp_id] >> 1;
                     bool enable_cast = cast_info[stage_idx][warp_id] & 1;
@@ -995,8 +1000,10 @@ void combine(void* combined_x,
     // Online cast cannot use zero-copy
     EP_HOST_ASSERT(not (zero_copy and use_logfmt));
 
-    constexpr int kNumTMABytesPerWarp = 12 * (512 + 16) + 256;
-    const int smem_size = kNumTMABytesPerWarp * num_warps;
+    // TODO: correct shared memory size
+    const int smem_size = 190 * 1024;
+    // constexpr int kNumTMABytesPerWarp = 12 * (512 + 16) + 256;
+    // const int smem_size = kNumTMABytesPerWarp * num_warps;
 
 #define COMBINE_LAUNCH_CASE(hidden) { \
 auto combine_func = use_logfmt ? \
