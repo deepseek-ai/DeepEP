@@ -1,9 +1,6 @@
 #include <functional>
 #include <optional>
 
-#include <functional>
-#include <optional>
-
 #include "configs.cuh"
 #include "buffer.cuh"
 #include "exception.cuh"
@@ -1277,14 +1274,11 @@ void cached_notify(int hidden_int4, int num_scales, int num_topk_idx, int num_to
 }
 
 template <int kNumRanks, bool kMaybeWithBias, typename dtype_t, int kMaxNumRanks, bool kUseTMA, int kNumStages, int kNumTMALoadBytes = 0, typename GetAddrFn, typename ReceiveTWFn>
-template <int kNumRanks, bool kMaybeWithBias, typename dtype_t, int kMaxNumRanks, bool kUseTMA, int kNumStages, int kNumTMALoadBytes = 0, typename GetAddrFn, typename ReceiveTWFn>
 __device__ int combine_token(bool is_token_in_rank, int head_idx,
                              int lane_id, int hidden_int4, int num_topk,
                              int4* combined_row, float* combined_topk_weights,
                              const int4* bias_0_int4, const int4* bias_1_int4,
                              int num_max_recv_tokens, const GetAddrFn& get_addr_fn, const ReceiveTWFn& recv_tw_fn,
-                             uint8_t* smem_ptr, uint32_t (&tma_phase)[kNumStages]) {
-                             int num_max_recv_tokens, const GetAddrFn& get_addr_fn, const ReceiveTWFn& recv_tw_fn, 
                              uint8_t* smem_ptr, uint32_t (&tma_phase)[kNumStages]) {
     constexpr auto kDtypePerInt4 = sizeof(int4) / sizeof(dtype_t);
 
@@ -1371,23 +1365,6 @@ __device__ int combine_token(bool is_token_in_rank, int head_idx,
             for (int j = 0; j < num_topk_ranks; ++ j)
                 recv_value_int4[j] = ld_nc_global(get_addr_fn(topk_ranks[j], slot_indices[j], i));
 
-            // Clean
-            // Reduce bias
-            float values[kDtypePerInt4] = {0};
-            if constexpr (kMaybeWithBias) {
-                auto bias_0_values = reinterpret_cast<const dtype_t*>(&bias_0_value_int4);
-                auto bias_1_values = reinterpret_cast<const dtype_t*>(&bias_1_value_int4);
-                #pragma unroll
-                for (int j = 0; j < kDtypePerInt4; ++ j)
-                    values[j] = static_cast<float>(bias_0_values[j]) + static_cast<float>(bias_1_values[j]);
-            }
-            // Read buffers
-            // TODO: maybe too many registers here
-            int4 recv_value_int4[kMaxNumRanks];
-            #pragma unroll
-            for (int j = 0; j < num_topk_ranks; ++ j)
-                recv_value_int4[j] = ld_nc_global(get_addr_fn(topk_ranks[j], slot_indices[j], i));
-            
             // Clean
             // Reduce bias
             float values[kDtypePerInt4] = {0};
@@ -1653,7 +1630,7 @@ combine(int4* combined_x, float* combined_topk_weights,
             auto smem_ptr = smem_buffer + warp_id * kNumStages * kNumTMABufferBytesPerStage;
             auto tma_mbarrier = [=](const int& i) { return reinterpret_cast<uint64_t*>(smem_ptr + i * kNumTMABufferBytesPerStage + kNumTMALoadBytes * (NUM_MAX_NVL_PEERS + 1)); };
             uint32_t tma_phase[kNumStages] = {0};
-            if (lane_id < kNumStages) {
+            if (not kDecoupledMode and lane_id < kNumStages) {
                 mbarrier_init(tma_mbarrier(lane_id), 32);
                 fence_view_async_shared();
                 fence_barrier_init();
@@ -1729,7 +1706,6 @@ combine(int4* combined_x, float* combined_topk_weights,
                     // Combine current token
                     auto rdma_slot_idx = token_idx % num_max_rdma_chunked_recv_tokens;
                     void* shifted = send_buffer + rdma_slot_idx * num_bytes_per_token;
-                    auto get_addr_fn = [&](int src_nvl_rank, int slot_idx, int hidden_int4_idx) -> int4* { return reinterpret_cast<int4*>(nvl_channel_x.buffer(src_nvl_rank) + slot_idx * num_bytes_per_token) + hidden_int4_idx; };
                     auto get_addr_fn = [&](int src_nvl_rank, int slot_idx, int hidden_int4_idx) -> int4* { return reinterpret_cast<int4*>(nvl_channel_x.buffer(src_nvl_rank) + slot_idx * num_bytes_per_token) + hidden_int4_idx; };
                     auto recv_tw_fn = [&](int src_nvl_rank, int slot_idx, int topk_idx) -> float { return ld_nc_global(reinterpret_cast<float*>(nvl_channel_x.buffer(src_nvl_rank) + slot_idx * num_bytes_per_token + hidden_bytes + sizeof(SourceMeta)) + topk_idx); };
                     if(not kDecoupledMode) {
