@@ -1002,10 +1002,15 @@ void combine(void* combined_x,
     // Online cast cannot use zero-copy
     EP_HOST_ASSERT(not (zero_copy and use_logfmt));
 
-    // TODO: correct shared memory size
-    const int smem_size = 190 * 1024;
-    // constexpr int kNumTMABytesPerWarp = 12 * (512 + 16) + 256;
-    // const int smem_size = kNumTMABytesPerWarp * num_warps;
+    constexpr int kNumStages = 3;
+    constexpr int kNumUnrolls = 4;
+    constexpr int kMaxNumGroups = 2;
+    const int num_meta_bytes = hidden / 128 * 4;
+    const int num_send_tma_bytes = 32 * sizeof(int4) * kNumUnrolls + 16;
+    const int smem_send_size = num_warps * (kNumStages * num_send_tma_bytes + num_meta_bytes);
+    const int num_recv_tma_bytes = 16 * 2 + hidden * 2;
+    const int smem_recv_size = kMaxNumGroups * (kNumStages * num_recv_tma_bytes + hidden * 2 + kNumStages * num_meta_bytes * 3);
+    const int smem_size = max(smem_send_size, smem_recv_size);
 
 #define COMBINE_LAUNCH_CASE(hidden) { \
 auto combine_func = use_logfmt ? \
