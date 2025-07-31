@@ -2477,7 +2477,7 @@ dispatch_pcie(int4* recv_x, float* recv_x_scales, int64_t* recv_topk_idx, float*
                     int channel_offset_1 = -meta_1 - 1;
                     num_tokens_to_recv_from_rank = channel_offset_1 - channel_offset;
                     if (not kCachedMode)
-                        recv_rdma_channel_prefix_matrix[src_rank * num_channels + channel_id] = channel_offset_1 + recv_rdma_rank_prefix_sum[src_rank];
+                        recv_rdma_channel_prefix_matrix[src_rank * num_channels + channel_id] = channel_offset_1 + (src_rank == 0 ? 0 : recv_rdma_rank_prefix_sum[src_rank - 1]);
                     // 给coordinator用, 存储每个channel的global start和end    
                     rdma_receiver_channel_start[src_rank] = channel_offset;
                     rdma_receiver_channel_end[src_rank] = channel_offset_1;
@@ -2732,8 +2732,8 @@ combine_pcie(int4* combined_x, float* combined_topk_weights,
         // Get task range for this channel
         int cached_rdma_channel_head = 0;
         int cached_rdma_channel_tail = 0;
-        int channel_offset = target_rank >= 0 ? (channel_id == 0? 0: recv_gbl_channel_prefix_matrix[target_rank * num_channels + channel_id - 1]) : 0;
-        int num_tokens_to_send_to_rank = target_rank >= 0 ? recv_gbl_channel_prefix_matrix[target_rank * num_channels + channel_id] -  channel_offset: 0;
+        int total_offset = target_rank == 0 && channel_id == 0 ? 0 : recv_gbl_channel_prefix_matrix[target_rank * num_channels + channel_id - 1];
+        int num_tokens_to_send_to_rank = target_rank >= 0 ? recv_gbl_channel_prefix_matrix[target_rank * num_channels + channel_id] -  total_offset: 0;
         
         // Process tokens using round-robin destination selection
         int src_rank = -1;
@@ -2764,14 +2764,14 @@ combine_pcie(int4* combined_x, float* combined_topk_weights,
             // Process a token for this destination rank
             auto src_rdma_tail = __shfl_sync(0xffffffff, cached_rdma_channel_tail, src_rank);
             auto num_tokens_to_send = min(__shfl_sync(0xffffffff, num_tokens_to_send_to_rank, src_rank), num_max_rdma_chunked_send_tokens);
-            auto channel_offset_send = __shfl_sync(0xffffffff, channel_offset, src_rank);
+            auto total_offset_send = __shfl_sync(0xffffffff, total_offset, src_rank);
             auto rank_offset = start_rank + src_rank == 0 ? 0 : recv_rank_prefix_sum[start_rank + src_rank - 1];
             auto token_idx = src_rdma_tail;
             // Process tokens one by one (similar to reference code)
             for (; token_idx < src_rdma_tail + num_tokens_to_send; token_idx++) {
                 // 余上buffer大小得到位置
                 int dst_slot_idx = token_idx % num_max_rdma_chunked_recv_tokens;        
-                int src_slot_idx = rank_offset + channel_offset_send + token_idx;
+                int src_slot_idx = total_offset_send + token_idx;
                 void* shifted = rdma_channel_data.send_buffer(start_rank + src_rank) + dst_slot_idx * num_bytes_per_pcie_token;
                 UNROLLED_WARP_COPY(5, lane_id, hidden_int4,
                                     reinterpret_cast<int4*>(shifted),
