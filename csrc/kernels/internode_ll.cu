@@ -746,7 +746,6 @@ combine(void* combined_x,
                 // Prefetch
                 if (elect_one_sync(lane_id))
                     tma_load_and_arrive(0, cpy_src_int4_ptr, get_num_tma_bytes(0));
-                __syncwarp();
 
                 int tma_offset_bytes = kNumMetaBytes;
                 #pragma unroll
@@ -759,7 +758,6 @@ combine(void* combined_x,
                         const auto& offset_int4 = i + 32 * kNumUnrolls;
                         tma_load_and_arrive(next_stage_idx, cpy_src_int4_ptr + offset_int4, get_num_tma_bytes(offset_int4));
                     }
-                    __syncwarp();
 
                     // Wait the current TMA arrival
                     mbarrier_wait(tma_mbarrier[stage_idx], tma_phase[stage_idx]);
@@ -773,7 +771,6 @@ combine(void* combined_x,
                         // Store
                         if (elect_one_sync(lane_id))
                             tma_store_1d(tma_buffer[stage_idx], reinterpret_cast<uint8_t*>(cpy_dst_int4_ptr) + tma_offset_bytes, tma_bytes);
-                        __syncwarp();
                         tma_offset_bytes += tma_bytes;
                     }
                     else {
@@ -782,7 +779,6 @@ combine(void* combined_x,
                         // Store
                         if (elect_one_sync(lane_id))
                             tma_store_1d(tma_buffer[stage_idx], cpy_dst_int4_ptr + i, get_num_tma_bytes(i));
-                        __syncwarp();
                     }
                 }
 
@@ -790,7 +786,6 @@ combine(void* combined_x,
                     send_bytes = tma_offset_bytes;
                     if (elect_one_sync(lane_id))
                         tma_store_1d(meta_buffer, cpy_dst_int4_ptr, kNumMetaBytes);
-                    __syncwarp();
                 }
 
                 // Flush all stores
@@ -847,11 +842,11 @@ combine(void* combined_x,
 
         constexpr int kNumStages = 3;
         constexpr int kNumTMABufferBytes = 16 * 2 + kHidden * 2;
-        uint32_t tma_phase[kNumStages];
+        uint32_t tma_full_phase[kNumStages];
         uint32_t tma_empty_phase[kNumStages];
         #pragma unroll
         for (int i = 0; i < kNumStages; ++ i) {
-            tma_phase[i] = 0;
+            tma_full_phase[i] = 0;
             tma_empty_phase[i] = 1;
         }
         auto full_barrier  = PatternVisitor([=](const int& k) { return reinterpret_cast<uint64_t*>(smem_buffer + k * kNumTMABufferBytes); });
@@ -859,25 +854,22 @@ combine(void* combined_x,
         auto tma_ld_buffer = PatternVisitor([=](const int& k) { return reinterpret_cast<uint8_t* >(smem_buffer + k * kNumTMABufferBytes + 32); });
         auto tma_st_buffer = PatternVisitor([=](const int& i) { return reinterpret_cast<uint32_t*>(smem_buffer + kNumStages * kNumTMABufferBytes + i * kNumBF16PerWarpBytes); });
 
-        // barrier 初始化
-        #pragma unroll
-        for (int k = 0; k < kNumStages; ++ k) {
-            mbarrier_init(full_barrier[k], 1);
-            mbarrier_init(empty_barrier[k], num_work_warp);
-        }
-
-        // shared memory 存 offset
         const auto smem_ptr = smem_buffer + kNumStages * kNumTMABufferBytes + kHidden * 2;
         constexpr int kNumDivisionBytes = kNumDivisions * sizeof(uint32_t);
         auto log_amax  = PatternVisitor([=](const int& k) { return reinterpret_cast<float*>(smem_ptr + k * kNumDivisionBytes); });
         auto log_amin  = PatternVisitor([=](const int& k) { return reinterpret_cast<float*>(smem_ptr + kNumStages * kNumDivisionBytes + k * kNumDivisionBytes); });
         auto cast_info = PatternVisitor([=](const int& k) { return reinterpret_cast<int*>  (smem_ptr + kNumStages * kNumDivisionBytes * 2 + k * kNumDivisionBytes); });
 
-        // 未来优化：也分 4 个 warp group，每个包含 8 个 warp，最后 warp 间 reduce
+        #pragma unroll
+        for (int k = 0; k < kNumStages; ++ k) {
+            mbarrier_init(full_barrier[k], 1);
+            mbarrier_init(empty_barrier[k], num_work_warp);
+        }
+
+        // TODO: use more warps
         int stage_idx = 0;
         for (int token_idx = sm_id; token_idx < num_combined_tokens; token_idx += num_sms) {
             if (warp_id == num_work_warp) {
-                // 加载 amaxmin，处理存储 log_amaxmin, offset, cast 到 shared memory，发起 TMA
                 #pragma unroll
                 for (int i = 0; i < num_topk; ++ i) {
                     int reg_topk_idx = static_cast<int>(__ldg(topk_idx + token_idx * num_topk + i));
@@ -908,7 +900,7 @@ combine(void* combined_x,
                     if (reg_topk_idx < 0) continue;
 
                     float topk_weight = __ldg(topk_weights + token_idx * num_topk + i);
-                    mbarrier_wait(full_barrier[stage_idx], tma_phase[stage_idx]);
+                    mbarrier_wait(full_barrier[stage_idx], tma_full_phase[stage_idx]);
 
                     int cast_prefix_count = cast_info[stage_idx][warp_id] >> 1;
                     bool enable_cast = cast_info[stage_idx][warp_id] & 1;
@@ -920,9 +912,8 @@ combine(void* combined_x,
                         combined_values, log_amax[stage_idx][global_idx], log_amin[stage_idx][global_idx], enable_cast, lane_id, topk_weight
                     );
 
-                    if (lane_id == 0)
+                    if (elect_one_sync(lane_id))
                         mbarrier_arrive(empty_barrier[stage_idx]);
-                    __syncwarp();
                     stage_idx = (stage_idx + 1) % kNumStages;
                 }
                 tma_store_wait<0>();
@@ -935,10 +926,8 @@ combine(void* combined_x,
                 tma_store_fence();
                 if (elect_one_sync(lane_id))
                     tma_store_1d(tma_st_buffer[warp_id], static_cast<int4*>(combined_x) + token_idx * hidden_bf16_int4 + warp_id * kNumUnrolls * 32, kNumBF16PerWarpBytes);
-                __syncwarp();
             }
         }
-
         tma_store_wait<0>();
     }
     else {
