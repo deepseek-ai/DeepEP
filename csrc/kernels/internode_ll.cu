@@ -658,7 +658,9 @@ combine(void* combined_x,
     EP_STATIC_ASSERT(kNumUnrolls == 1 or kNumUnrolls == 2 or kNumUnrolls == 4, "Invalid unrolling factors");
 
     // Message package
-    constexpr size_t num_bytes_per_slot = kHidden * sizeof(nv_bfloat16);
+    constexpr int kNumDivisions = kHidden / 128;
+    constexpr int kNumMetaBytes = kUseLogFMT ? kNumDivisions * sizeof(uint32_t) : 0;
+    constexpr size_t num_bytes_per_slot = kHidden * sizeof(nv_bfloat16) + kNumMetaBytes;
     EP_STATIC_ASSERT(num_bytes_per_slot % sizeof(int4) == 0, "Invalid vectorization");
 
     // Sending phase
@@ -694,8 +696,6 @@ combine(void* combined_x,
         unpack2(layout, num_tokens_to_send, offset);
 
         // TMA stuffs
-        constexpr int kNumDivisions = kHidden / 128;
-        constexpr int kNumMetaBytes = kUseLogFMT ? kNumDivisions * sizeof(uint32_t) : 0;
         constexpr int kNumTMABufferBytes = sizeof(int4) * 32 * kNumUnrolls;
         constexpr int kNumStages = 3;
         constexpr int kNumPrefetch = 1;
@@ -841,8 +841,6 @@ combine(void* combined_x,
     EP_STATIC_ASSERT(kHidden % (32 * kNumElemsPerInt4) == 0, "Invalid vectorization");
     if constexpr (kUseLogFMT) {
         // TMA 初始化，shared memory 重新分配
-        constexpr int kNumDivisions = kHidden / 128;
-        constexpr int kNumMetaBytes = kNumDivisions * sizeof(uint32_t);
         constexpr int kNumBF16PerWarpBytes = 32 * kNumUnrolls * kNumElemsPerInt4 * 2;
         constexpr int kNumLogFMTPerWarpBytes = kNumBF16PerWarpBytes / 16 * 10;
         const int num_work_warp = hidden_bf16_int4_pad / kNumUnrolls / 32;
