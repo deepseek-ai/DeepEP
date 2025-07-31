@@ -123,11 +123,12 @@ def test_main(num_tokens: int, hidden: int, num_experts: int, num_topk: int,
 
     # Calculate bandwidth
     num_fp8_bytes, num_bf16_bytes = (hidden + hidden / 128 * 4 + 16), hidden * 2
+    num_logfmt10_bytes = hidden * 10 / 8 + hidden / 128 * 4
     num_dispatch_comm_bytes, num_combine_comm_bytes = 0, 0
     for i in range(num_tokens):
         num_selections = (topk_idx[i] != -1).sum().item()
         num_dispatch_comm_bytes += num_fp8_bytes * num_selections
-        num_combine_comm_bytes += num_bf16_bytes * num_selections
+        num_combine_comm_bytes += (num_logfmt10_bytes if use_logfmt else num_bf16_bytes) * num_selections
 
     # Dispatch + combine testing
     avg_t, min_t, max_t = bench(partial(test_func, return_recv_hook=False))
