@@ -1,6 +1,9 @@
 #include <functional>
 #include <optional>
 
+#include <functional>
+#include <optional>
+
 #include "configs.cuh"
 #include "buffer.cuh"
 #include "exception.cuh"
@@ -388,7 +391,7 @@ dispatch(int4* recv_x, float* recv_x_scales, int64_t* recv_topk_idx, float* recv
     EP_DEVICE_ASSERT((not return_recv_hook) or ((phases & NORMAL_DECOUPLED_SEND_PHASE) == 0) or ((phases & NORMAL_DECOUPLED_RECV_PHASE) == 0));
     EP_DEVICE_ASSERT(ibgda_get_state()->num_rc_per_pe == num_channels or ibgda_get_state()->num_rc_per_pe >= num_sms);
 
-    auto role_meta = get_warp_role<kDecoupledMode>(is_forwarder, warp_id, channel_id, kNumDispatchRDMASenderWarps, return_recv_hook, phases);
+    auto role_meta = get_warp_role_dispatch<kDecoupledMode>(is_forwarder, warp_id, channel_id, kNumDispatchRDMASenderWarps, return_recv_hook, phases);
     auto warp_role = role_meta.first;
     auto target_rank = role_meta.second; // Not applicable for RDMA senders
     EP_DEVICE_ASSERT(num_warps == kNumDispatchRDMASenderWarps + 1 + NUM_MAX_NVL_PEERS);
@@ -1274,11 +1277,14 @@ void cached_notify(int hidden_int4, int num_scales, int num_topk_idx, int num_to
 }
 
 template <int kNumRanks, bool kMaybeWithBias, typename dtype_t, int kMaxNumRanks, bool kUseTMA, int kNumStages, int kNumTMALoadBytes = 0, typename GetAddrFn, typename ReceiveTWFn>
+template <int kNumRanks, bool kMaybeWithBias, typename dtype_t, int kMaxNumRanks, bool kUseTMA, int kNumStages, int kNumTMALoadBytes = 0, typename GetAddrFn, typename ReceiveTWFn>
 __device__ int combine_token(bool is_token_in_rank, int head_idx,
                              int lane_id, int hidden_int4, int num_topk,
                              int4* combined_row, float* combined_topk_weights,
                              const int4* bias_0_int4, const int4* bias_1_int4,
                              int num_max_recv_tokens, const GetAddrFn& get_addr_fn, const ReceiveTWFn& recv_tw_fn,
+                             uint8_t* smem_ptr, uint32_t (&tma_phase)[kNumStages]) {
+                             int num_max_recv_tokens, const GetAddrFn& get_addr_fn, const ReceiveTWFn& recv_tw_fn, 
                              uint8_t* smem_ptr, uint32_t (&tma_phase)[kNumStages]) {
     constexpr auto kDtypePerInt4 = sizeof(int4) / sizeof(dtype_t);
 
@@ -1375,6 +1381,23 @@ __device__ int combine_token(bool is_token_in_rank, int head_idx,
                 for (int j = 0; j < kDtypePerInt4; ++ j)
                     values[j] = static_cast<float>(bias_0_values[j]) + static_cast<float>(bias_1_values[j]);
             }
+            // Read buffers
+            // TODO: maybe too many registers here
+            int4 recv_value_int4[kMaxNumRanks];
+            #pragma unroll
+            for (int j = 0; j < num_topk_ranks; ++ j)
+                recv_value_int4[j] = ld_nc_global(get_addr_fn(topk_ranks[j], slot_indices[j], i));
+            
+            // Clean
+            // Reduce bias
+            float values[kDtypePerInt4] = {0};
+            if constexpr (kMaybeWithBias) {
+                auto bias_0_values = reinterpret_cast<const dtype_t*>(&bias_0_value_int4);
+                auto bias_1_values = reinterpret_cast<const dtype_t*>(&bias_1_value_int4);
+                #pragma unroll
+                for (int j = 0; j < kDtypePerInt4; ++ j)
+                    values[j] = static_cast<float>(bias_0_values[j]) + static_cast<float>(bias_1_values[j]);
+            }
 
             // Reduce all-to-all results
             #pragma unroll
@@ -1410,9 +1433,9 @@ __device__ int combine_token(bool is_token_in_rank, int head_idx,
 
 template<bool kLowLatencyMode, bool kDecoupledMode,
          int kNumRDMARanks, typename dtype_t,
-         int kNumCombineForwarderWarps,
          int kNumTMABytesPerSenderWarp,
          int kNumTMABytesPerForwarderWarp,
+         int kNumCombineForwarderWarps = kDecoupledMode ? 16 : 24,
          int kNumTopkRDMARanks = get_num_topk_rdma_ranks(kNumRDMARanks),
          int kNumWarpsPerForwarder = (kNumCombineForwarderWarps / kNumRDMARanks > 0) ? kNumCombineForwarderWarps / kNumRDMARanks : 1,
          int kNumForwarders = kNumRDMARanks * kNumWarpsPerForwarder,
@@ -1448,11 +1471,10 @@ combine(int4* combined_x, float* combined_topk_weights,
     warp_id = role_meta.second;
 
     if (kDecoupledMode) {
-        EP_DEVICE_ASSERT(num_warps == NUM_MAX_NVL_PEERS + kNumForwarders + 1);
+        EP_DEVICE_ASSERT(num_warps == kNumForwarders + NUM_MAX_NVL_PEERS + 1);
     } else {
         EP_DEVICE_ASSERT(num_warps == kNumForwarders + 1);
     }
-
     auto num_max_nvl_chunked_recv_tokens_per_rdma = num_max_nvl_chunked_recv_tokens / kNumRDMARanks;
 
     if (warp_role == WarpRole_Combine::kNVLSender) {
@@ -1708,14 +1730,26 @@ combine(int4* combined_x, float* combined_topk_weights,
                     auto rdma_slot_idx = token_idx % num_max_rdma_chunked_recv_tokens;
                     void* shifted = send_buffer + rdma_slot_idx * num_bytes_per_token;
                     auto get_addr_fn = [&](int src_nvl_rank, int slot_idx, int hidden_int4_idx) -> int4* { return reinterpret_cast<int4*>(nvl_channel_x.buffer(src_nvl_rank) + slot_idx * num_bytes_per_token) + hidden_int4_idx; };
+                    auto get_addr_fn = [&](int src_nvl_rank, int slot_idx, int hidden_int4_idx) -> int4* { return reinterpret_cast<int4*>(nvl_channel_x.buffer(src_nvl_rank) + slot_idx * num_bytes_per_token) + hidden_int4_idx; };
                     auto recv_tw_fn = [&](int src_nvl_rank, int slot_idx, int topk_idx) -> float { return ld_nc_global(reinterpret_cast<float*>(nvl_channel_x.buffer(src_nvl_rank) + slot_idx * num_bytes_per_token + hidden_bytes + sizeof(SourceMeta)) + topk_idx); };
-                    combine_token<NUM_MAX_NVL_PEERS, false, dtype_t, NUM_MAX_NVL_PEERS, true, kNumStages, kNumTMALoadBytes>(expected_head >= 0,
-                                                                                                                            expected_head, lane_id,
-                                                                                                                            hidden_int4, num_topk,
-                                                                                                                            static_cast<int4*>(shifted),
-                                                                                                                            reinterpret_cast<float*>(static_cast<int8_t*>(shifted) + hidden_bytes + sizeof(SourceMeta)),
-                                                                                                                            nullptr, nullptr, num_max_nvl_chunked_recv_tokens_per_rdma, get_addr_fn, recv_tw_fn,
-                                                                                                                            smem_ptr, tma_phase);
+                    if(not kDecoupledMode) {
+                        combine_token<NUM_MAX_NVL_PEERS, false, dtype_t, NUM_MAX_NVL_PEERS, true, kNumStages, kNumTMALoadBytes>(expected_head >= 0,
+                                                                                                                                expected_head, lane_id,
+                                                                                                                                hidden_int4, num_topk,
+                                                                                                                                static_cast<int4*>(shifted),
+                                                                                                                                reinterpret_cast<float*>(static_cast<int8_t*>(shifted) + hidden_bytes + sizeof(SourceMeta)),
+                                                                                                                                nullptr, nullptr, num_max_nvl_chunked_recv_tokens_per_rdma, get_addr_fn, recv_tw_fn,
+                                                                                                                                smem_ptr, tma_phase);
+                    }
+                    else {
+                        combine_token<NUM_MAX_NVL_PEERS, false, dtype_t, NUM_MAX_NVL_PEERS, false, kNumStages>(expected_head >= 0,
+                                                                                                                expected_head, lane_id,
+                                                                                                                hidden_int4, num_topk,
+                                                                                                                static_cast<int4*>(shifted),
+                                                                                                                reinterpret_cast<float*>(static_cast<int8_t*>(shifted) + hidden_bytes + sizeof(SourceMeta)),
+                                                                                                                nullptr, nullptr, num_max_nvl_chunked_recv_tokens_per_rdma, get_addr_fn, recv_tw_fn,
+                                                                                                                nullptr, tma_phase);
+                    }
 
                     // Update head
                     if (lane_id < NUM_MAX_NVL_PEERS)
@@ -1869,9 +1903,10 @@ void combine(cudaDataType_t type,
              void* rdma_buffer_ptr, int num_max_rdma_chunked_send_tokens, int num_max_rdma_chunked_recv_tokens,
              void** buffer_ptrs, int num_max_nvl_chunked_send_tokens, int num_max_nvl_chunked_recv_tokens,
              int rank, int num_ranks, cudaStream_t stream, int num_channels, bool low_latency_mode, bool decoupled_mode, bool return_recv_hook, int phases, int num_max_dispatch_tokens_per_rank) {
-    constexpr int kNumCombineForwarderWarps = 16;
-    constexpr int kNumTMABytesPerWarp = 16384;
-    constexpr int smem_size = kNumTMABytesPerWarp * NUM_MAX_NVL_PEERS;
+    const int kNumCombineForwarderWarps = decoupled_mode ? 16 : 24;
+    constexpr int kNumTMABytesPerSenderWarp = 16384;
+    constexpr int kNumTMABytesPerForwarderWarp = 9248;
+    const int smem_size = std::max(kNumTMABytesPerSenderWarp * NUM_MAX_NVL_PEERS, kNumTMABytesPerForwarderWarp * kNumCombineForwarderWarps);
 
     auto num_sms = return_recv_hook ? num_channels : num_channels * 2;  // one SM per channel for hook mode
 
@@ -1879,10 +1914,10 @@ void combine(cudaDataType_t type,
 
 #define COMBINE_LAUNCH_CASE(num_rdma_ranks) { \
     auto combine_func = low_latency_mode ? \
-                            (decoupled_mode ? combine<true, true, num_rdma_ranks, nv_bfloat16, kNumCombineForwarderWarps, kNumTMABytesPerWarp> : \
-                                              combine<true, false, num_rdma_ranks, nv_bfloat16, kNumCombineForwarderWarps, kNumTMABytesPerWarp> ) : \
-                            (decoupled_mode ? combine<false, true, num_rdma_ranks, nv_bfloat16, kNumCombineForwarderWarps, kNumTMABytesPerWarp> : \
-                                              combine<false, false, num_rdma_ranks, nv_bfloat16, kNumCombineForwarderWarps, kNumTMABytesPerWarp> ); \
+                            (decoupled_mode ? combine<true, true, num_rdma_ranks, nv_bfloat16, kNumTMABytesPerSenderWarp, kNumTMABytesPerForwarderWarp> : \
+                                              combine<true, false, num_rdma_ranks, nv_bfloat16, kNumTMABytesPerSenderWarp, kNumTMABytesPerForwarderWarp> ) : \
+                            (decoupled_mode ? combine<false, true, num_rdma_ranks, nv_bfloat16, kNumTMABytesPerSenderWarp, kNumTMABytesPerForwarderWarp> : \
+                                              combine<false, false, num_rdma_ranks, nv_bfloat16, kNumTMABytesPerSenderWarp, kNumTMABytesPerForwarderWarp> ); \
     SET_SHARED_MEMORY_FOR_TMA(combine_func); \
     LAUNCH_KERNEL(&cfg, combine_func, \
                   reinterpret_cast<int4*>(combined_x), combined_topk_weights, is_combined_token_in_rank, \
@@ -1898,7 +1933,8 @@ void combine(cudaDataType_t type,
     int num_rdma_ranks = num_ranks / NUM_MAX_NVL_PEERS;
     auto num_warps_per_forwarder = std::max(kNumCombineForwarderWarps / num_rdma_ranks, 1);
     int num_forwarder_warps = num_rdma_ranks * num_warps_per_forwarder;
-    auto num_warps_per_block = decoupled_mode ? num_forwarder_warps + NUM_MAX_NVL_PEERS + 1 : num_forwarder_warps + 1;
+    auto num_warps_per_block = decoupled_mode ? num_forwarder_warps + NUM_MAX_NVL_PEERS + 1 : num_forwarder_warps + 1;  // 25 warps per block for both cases
+    EP_HOST_ASSERT(num_rdma_ranks <= kNumCombineForwarderWarps);
     EP_HOST_ASSERT(num_forwarder_warps > NUM_MAX_NVL_PEERS and num_forwarder_warps % num_rdma_ranks == 0);
     EP_HOST_ASSERT(num_max_nvl_chunked_recv_tokens % num_rdma_ranks == 0);
     EP_HOST_ASSERT(num_max_nvl_chunked_recv_tokens / num_rdma_ranks > std::max(num_max_rdma_chunked_send_tokens, num_max_nvl_chunked_send_tokens));
