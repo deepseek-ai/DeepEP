@@ -497,7 +497,7 @@ __forceinline__ __device__ bool logfmt_encode(uint32_t* ld_buffer, uint32_t* st_
         const auto fused_rounding = rounding - log_amin * step_inv;
 
         auto encode = [=](const float& log_abs) {
-            float tmp = log_abs == -INFINITY ? .0f : log_abs * step_inv + fused_rounding;
+            float tmp = log_abs == -INFINITY ? 0.0f : log_abs * step_inv + fused_rounding;
             return __float2uint_rd(tmp);
         };
 
