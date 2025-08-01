@@ -991,10 +991,11 @@ void combine(void* combined_x,
     constexpr int kNumMaxTopk = 9;
     const int num_warp_groups = ceil_div(num_experts, num_device_sms);
     const int num_warps_per_group = 32 / num_warp_groups;
-    EP_HOST_ASSERT(num_warp_groups > 0 and num_warps_per_group > 0);
+    const int num_recv_per_sm = ceil_div(num_combined_tokens, num_device_sms);
+    EP_HOST_ASSERT(num_warp_groups > 0 and num_warps_per_group > 0 and num_recv_per_sm > 0);
 
     const auto num_warps = num_warp_groups * num_warps_per_group;
-    const auto num_sms = ceil_div(num_experts, num_warp_groups);
+    const auto num_sms = max(ceil_div(num_experts, num_warp_groups), ceil_div(num_combined_tokens, num_recv_per_sm));
 
     // Check workspace
     auto atomic_clean_flag = static_cast<int*>(workspace);
