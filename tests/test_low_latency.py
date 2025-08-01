@@ -23,7 +23,12 @@ def test_main(num_tokens: int, hidden: int, num_experts: int, num_topk: int,
 
     x = torch.ones((num_tokens, hidden), dtype=torch.bfloat16, device='cuda') * (rank - rank_offset)
     x[:, -128:] = torch.arange(num_tokens, device='cuda').to(torch.bfloat16).view(-1, 1)
-    x_pure_rand = torch.randn((num_tokens, hidden), dtype=torch.bfloat16, device='cuda') * 0.1
+    x_list = [x]
+    for i in range(4 if use_logfmt else 0):
+        x_list.append(torch.randn((num_tokens, hidden), dtype=torch.bfloat16, device='cuda') * 0.5 * random.random())
+    x_test = torch.randn((num_tokens, hidden), dtype=torch.bfloat16, device='cuda') * 0.1
+    x_list.append(x_test)
+
     scores = torch.randn((num_tokens, num_experts), dtype=torch.float32, device='cuda').abs() + 1
     topk_idx = torch.topk(scores, num_topk, dim=-1, largest=True, sorted=True)[1]
     topk_weights = torch.randn((num_tokens, num_topk), dtype=torch.float32, device='cuda').abs()
@@ -35,7 +40,7 @@ def test_main(num_tokens: int, hidden: int, num_experts: int, num_topk: int,
     # Check dispatch correctness
     do_check = True
     hash_value, num_times = 0, 0
-    for current_x in (x, x_pure_rand):
+    for current_x in x_list:
         for return_recv_hook in (False, True):
             for dispatch_use_fp8 in (False, True):
                 for round_scale in (False, True) if dispatch_use_fp8 else (False, ):
@@ -67,7 +72,7 @@ def test_main(num_tokens: int, hidden: int, num_experts: int, num_topk: int,
                             assert num_valid_tokens == (all_topk_idx == expert_id).sum().item(), f'{num_valid_tokens} != {(all_topk_idx == expert_id).sum().item()}'
 
                             # Check received data
-                            if current_x is not x_pure_rand:
+                            if current_x is x:
                                 recv_x = recv_x[:num_valid_tokens]
                                 recv_x_amin = recv_x[:, :-128].amin(dim=-1)
                                 recv_src_info = recv_src_info[:num_valid_tokens]
@@ -113,7 +118,7 @@ def test_main(num_tokens: int, hidden: int, num_experts: int, num_topk: int,
     # noinspection PyShadowingNames
     def test_func(return_recv_hook: bool):
         recv_x, recv_count, handle, event, hook = \
-            buffer.low_latency_dispatch(x_pure_rand, topk_idx, num_tokens, num_experts,
+            buffer.low_latency_dispatch(x_test, topk_idx, num_tokens, num_experts,
                                         cumulative_local_expert_recv_stats=cumulative_local_expert_recv_stats,
                                         use_fp8=True, async_finish=False, return_recv_hook=return_recv_hook)
         large_gemm_with_hook(hook) if return_recv_hook else None
