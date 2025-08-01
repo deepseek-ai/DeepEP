@@ -868,11 +868,11 @@ combine(void* combined_x,
         auto log_amin  = PatternVisitor([=](const int& k) { return reinterpret_cast<float*>(smem_group_ptr + kNumStages * kNumDivisionBytes + k * kNumDivisionBytes); });
         auto cast_info = PatternVisitor([=](const int& k) { return reinterpret_cast<int*>  (smem_group_ptr + kNumStages * kNumDivisionBytes * 2 + k * kNumDivisionBytes); });
 
-        #pragma unroll
-        for (int k = 0; k < kNumStages; ++ k) {
-            mbarrier_init(full_barrier[k], 1);
-            mbarrier_init(empty_barrier[k], num_decode_warps);
+        if (sub_warp_id == num_decode_warps and lane_id < kNumStages) {
+            mbarrier_init(full_barrier[lane_id], 1);
+            mbarrier_init(empty_barrier[lane_id], num_decode_warps);
         }
+        asm volatile("bar.sync %0, %1;" :: "r"(group_id + 1), "r"((num_decode_warps + 1) * 32));
 
         int stage_idx = 0;
         for (int token_idx = sm_id + num_sms * group_id; token_idx < num_combined_tokens; token_idx += num_sms * num_groups) {
