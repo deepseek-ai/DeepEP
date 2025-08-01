@@ -118,13 +118,6 @@ void cached_notify(int hidden_int4, int num_scales, int num_topk_idx, int num_to
                    int64_t num_rdma_bytes, int64_t num_nvl_bytes,
                    bool is_cached_dispatch, bool low_latency_mode);
 
-void cached_notify_pcie(int hidden_int4, int num_scales, int num_topk_idx, int num_topk_weights,
-                   int num_ranks, int num_channels, int num_combined_tokens, int* combined_rdma_head,
-                   void* rdma_buffer_ptr, int num_max_rdma_chunked_recv_tokens,
-                   int rank, cudaStream_t stream,
-                   int64_t num_rdma_bytes,
-                   bool is_cached_dispatch);
-
 void combine(cudaDataType_t type,
              void* combined_x, float* combined_topk_weights,
              const bool* is_combined_token_in_rank,
@@ -136,50 +129,6 @@ void combine(cudaDataType_t type,
              void* rdma_buffer_ptr, int num_max_rdma_chunked_send_tokens, int num_max_rdma_chunked_recv_tokens,
              void** buffer_ptrs, int num_max_nvl_chunked_send_tokens, int num_max_nvl_chunked_recv_tokens,
              int rank, int num_ranks, cudaStream_t stream, int num_channels, bool low_latency_mode);
-
-void notify_dispatch_pcie(const int* num_tokens_per_rank, int* moe_recv_counter_mapped, int num_ranks,
-                     const int* num_tokens_per_expert, int* moe_recv_expert_counter_mapped, int num_experts,
-                     const bool* is_token_in_rank, int num_tokens, int num_channels,
-                     int hidden_int4, int num_scales, int num_topk, int expert_alignment,
-                     int* rdma_channel_prefix_matrix, int* recv_rdma_rank_prefix_sum,
-                     void* rdma_buffer_ptr, int num_max_rdma_chunked_recv_tokens,int rank,
-                     cudaStream_t stream, int64_t num_rdma_bytes,
-                     bool low_latency_mode);
-
-void notify_dispatch(const int* num_tokens_per_rank, int* moe_recv_counter_mapped, int num_ranks,
-                     const int* num_tokens_per_rdma_rank, int* moe_recv_rdma_counter_mapped,
-                     const int* num_tokens_per_expert, int* moe_recv_expert_counter_mapped, int num_experts,
-                     const bool* is_token_in_rank, int num_tokens, int num_channels,
-                     int hidden_int4, int num_scales, int num_topk, int expert_alignment,
-                     int* rdma_channel_prefix_matrix, int* recv_rdma_rank_prefix_sum,
-                     int* gbl_channel_prefix_matrix, int* recv_gbl_rank_prefix_sum,
-                     void* rdma_buffer_ptr, int num_max_rdma_chunked_recv_tokens,
-                     void** buffer_ptrs, int num_max_nvl_chunked_recv_tokens,
-                     int** barrier_signal_ptrs, int rank,
-                     cudaStream_t stream, int64_t num_rdma_bytes, int64_t num_nvl_bytes,
-                     bool low_latency_mode);
-
-void dispatch_pcie(void* recv_x, float* recv_x_scales, int64_t* recv_topk_idx, float* recv_topk_weights, void* recv_src_meta,
-                   const void* x, const float* x_scales, const int64_t* topk_idx, const float* topk_weights,
-                   const int* rdma_channel_prefix_matrix,
-                   const int* recv_rdma_rank_prefix_sum,
-                   int* recv_rdma_channel_prefix_matrix, int* send_rdma_head,
-                   const bool* is_token_in_rank,
-                   int num_tokens, int hidden_int4, int num_scales, int num_topk, int num_experts,int num_local_experts,
-                   int scale_token_stride, int scale_hidden_stride,
-		           void* rdma_buffer_ptr, int num_max_rdma_chunked_send_tokens, int num_max_rdma_chunked_recv_tokens,
-                   void** buffer_ptrs, int rank, int num_ranks,bool is_cached_dispatch,
-                   cudaStream_t stream, int num_channels);
-
-void combine_pcie(cudaDataType_t type,
-                  void* combined_x, float* combined_topk_weights,
-                  const void* recv_x, const float* recv_topk_weights,
-                  const void* bias_0, const void* bias_1,
-                  const int* combined_rdma_head,
-                  const int* recv_gbl_channel_prefix_matrix, const int* recv_rank_prefix_sum,
-                  int num_recv_tokens, int num_combined_tokens, int hidden, int num_topk,
-                  void* rdma_buffer_ptr, int num_max_rdma_chunked_send_tokens, int num_max_rdma_chunked_recv_tokens,
-                  int rank, int num_ranks, cudaStream_t stream, int num_channels);
 
 } // namespace internode
 
@@ -217,5 +166,52 @@ void combine(void* combined_x,
              cudaStream_t stream, int phases, bool zero_copy);
 
 } // namespace internode_ll
+
+
+// Internode kernels
+namespace pcie {
+
+int get_source_meta_bytes();
+
+void cached_notify_pcie(int hidden_int4, int num_scales, int num_topk_idx, int num_topk_weights,
+                   int num_ranks, int num_channels, int num_combined_tokens, int* combined_rdma_head,
+                   void* rdma_buffer_ptr, int num_max_rdma_chunked_recv_tokens,
+                   int rank, cudaStream_t stream,
+                   int64_t num_rdma_bytes,
+                   bool is_cached_dispatch);
+
+void notify_dispatch_pcie(const int* num_tokens_per_rank, int* moe_recv_counter_mapped, int num_ranks,
+                     const int* num_tokens_per_expert, int* moe_recv_expert_counter_mapped, int num_experts,
+                     const bool* is_token_in_rank, int num_tokens, int num_channels,
+                     int hidden_int4, int num_scales, int num_topk, int expert_alignment,
+                     int* rdma_channel_prefix_matrix, int* recv_rdma_rank_prefix_sum,
+                     void* rdma_buffer_ptr, int num_max_rdma_chunked_recv_tokens,int rank,
+                     cudaStream_t stream, int64_t num_rdma_bytes,
+                     bool low_latency_mode);
+
+void dispatch_pcie(void* recv_x, float* recv_x_scales, int64_t* recv_topk_idx, float* recv_topk_weights, void* recv_src_meta,
+                   const void* x, const float* x_scales, const int64_t* topk_idx, const float* topk_weights,
+                   const int* rdma_channel_prefix_matrix,
+                   const int* recv_rdma_rank_prefix_sum,
+                   int* recv_rdma_channel_prefix_matrix, int* send_rdma_head,
+                   const bool* is_token_in_rank,
+                   int num_tokens, int hidden_int4, int num_scales, int num_topk, int num_experts,int num_local_experts,
+                   int scale_token_stride, int scale_hidden_stride,
+		           void* rdma_buffer_ptr, int num_max_rdma_chunked_send_tokens, int num_max_rdma_chunked_recv_tokens,
+                   void** buffer_ptrs, int rank, int num_ranks,bool is_cached_dispatch,
+                   cudaStream_t stream, int num_channels);
+
+void combine_pcie(cudaDataType_t type,
+                  void* combined_x, float* combined_topk_weights,
+                  const void* recv_x, const float* recv_topk_weights,
+                  const void* bias_0, const void* bias_1,
+                  const int* combined_rdma_head,
+                  const int* recv_gbl_channel_prefix_matrix, const int* recv_rank_prefix_sum,
+                  int num_recv_tokens, int num_combined_tokens, int hidden, int num_topk,
+                  void* rdma_buffer_ptr, int num_max_rdma_chunked_send_tokens, int num_max_rdma_chunked_recv_tokens,
+                  int rank, int num_ranks, cudaStream_t stream, int num_channels);
+
+} // namespace pcie
+
 
 } // namespace deep_ep

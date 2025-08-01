@@ -1454,7 +1454,7 @@ Buffer::pcie_dispatch(const torch::Tensor& x, const std::optional<torch::Tensor>
         recv_rdma_rank_prefix_sum = cached_recv_rdma_rank_prefix_sum.value();
 
         // Just a barrier and clean flags
-        internode::cached_notify_pcie(hidden_int4, num_scales, num_topk, num_topk,
+        pcie::cached_notify_pcie(hidden_int4, num_scales, num_topk, num_topk,
                                  num_ranks, num_channels, 0, nullptr,
                                  rdma_buffer_ptr, config.num_max_rdma_chunked_recv_tokens,
                                  rank, comm_stream,
@@ -1469,7 +1469,8 @@ Buffer::pcie_dispatch(const torch::Tensor& x, const std::optional<torch::Tensor>
         *moe_recv_counter = -1, *moe_recv_rdma_counter = -1;
         for (int i = 0; i < num_local_experts; ++ i)
             moe_recv_expert_counter[i] = -1;
-        internode::notify_dispatch_pcie(num_tokens_per_rank->data_ptr<int>(), moe_recv_counter_mapped, num_ranks,
+        
+        pcie::notify_dispatch_pcie(num_tokens_per_rank->data_ptr<int>(), moe_recv_counter_mapped, num_ranks,
                                     num_tokens_per_expert->data_ptr<int>(), 
                                     moe_recv_expert_counter_mapped, num_experts,
                                     is_token_in_rank.data_ptr<bool>(), num_tokens, num_channels,
@@ -1511,7 +1512,7 @@ Buffer::pcie_dispatch(const torch::Tensor& x, const std::optional<torch::Tensor>
     // not cache mode
     if (not cached_mode) {
         // TODO: check recv_src_meta usage
-        recv_src_meta = torch::empty({num_recv_tokens, internode::get_source_meta_bytes()}, dtype(torch::kByte).device(torch::kCUDA));
+        recv_src_meta = torch::empty({num_recv_tokens, pcie::get_source_meta_bytes()}, dtype(torch::kByte).device(torch::kCUDA));
         recv_rdma_channel_prefix_matrix = torch::empty({num_ranks, num_channels}, dtype(torch::kInt32).device(torch::kCUDA));
         send_rdma_head = torch::empty({num_tokens, num_ranks}, dtype(torch::kInt32).device(torch::kCUDA));
     }
@@ -1535,7 +1536,7 @@ Buffer::pcie_dispatch(const torch::Tensor& x, const std::optional<torch::Tensor>
     }
     
     // Launch Kernel
-    internode::dispatch_pcie(
+    pcie::dispatch_pcie(
         recv_x.data_ptr(), recv_x_scales_ptr, recv_topk_idx_ptr, recv_topk_weights_ptr, 
         cached_mode ? nullptr : recv_src_meta->data_ptr(),
         x.data_ptr(), x_scales_ptr, topk_idx_ptr, topk_weights_ptr,
@@ -1658,7 +1659,7 @@ Buffer::pcie_combine(const torch::Tensor& recv_x, const std::optional<torch::Ten
     }
 
     // Launch kernel
-    internode::combine_pcie(
+    pcie::combine_pcie(
         recv_x.scalar_type() == torch::kBFloat16 ? CUDA_R_16BF : CUDA_R_16F,
         combined_x.data_ptr(), combined_topk_weights_ptr,
         recv_x.data_ptr(), recv_topk_weights_ptr,
@@ -1709,7 +1710,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
              py::arg("num_max_nvl_chunked_send_tokens") = 6, py::arg("num_max_nvl_chunked_recv_tokens") = 256,
              py::arg("num_max_rdma_chunked_send_tokens") = 6, py::arg("num_max_rdma_chunked_recv_tokens") = 256)
         .def("get_nvl_buffer_size_hint", &deep_ep::Config::get_nvl_buffer_size_hint)
-        .def("get_rdma_buffer_size_hint", &deep_ep::Config::get_rdma_buffer_size_hint);
+        .def("get_rdma_buffer_size_hint", &deep_ep::Config::get_rdma_buffer_size_hint)
+        .def("get_pcie_buffer_size_hint", &deep_ep::Config::get_pcie_buffer_size_hint);
     m.def("get_low_latency_rdma_size_hint", &deep_ep::get_low_latency_rdma_size_hint);
 
     pybind11::class_<deep_ep::EventHandle>(m, "EventHandle")
