@@ -2013,7 +2013,7 @@ combine(int4* combined_x, float* combined_topk_weights,
             };
             uint32_t tma_phase[kNumStages] = {0};
             if (not kDecoupledMode and lane_id < kNumStages) {
-                mbarrier_init(tma_mbarrier(lane_id), 32);
+                mbarrier_init(tma_mbarrier(lane_id), 32);  // in hook mode, 'kNVLAndRDMAForwarder' and 'kNVLSender' warps are on the same SM, in case the init here makes the data dirty
                 fence_barrier_init();
             }
             __syncwarp();
