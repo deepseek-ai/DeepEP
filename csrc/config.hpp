@@ -108,7 +108,7 @@ struct Config {
         size_t num_bytes = 0;
         num_bytes += num_channels * num_ranks * 2 * 2 * sizeof(int);//used for rdma_channel_meta
         num_bytes += num_channels * num_ranks * num_max_rdma_chunked_recv_tokens * hidden_bytes * 2;
-        num_bytes += num_channels * num_ranks * num_max_rdma_chunked_recv_tokens * internode::get_source_meta_bytes() * 2;
+        // num_bytes += num_channels * num_ranks * num_max_rdma_chunked_recv_tokens * pcie::get_source_meta_bytes() * 2;
         num_bytes += num_channels * num_ranks * num_max_rdma_chunked_recv_tokens * kNumMaxTopK * sizeof(int64_t) * 2;
         num_bytes += num_channels * num_ranks * num_max_rdma_chunked_recv_tokens * kNumMaxTopK * sizeof(float) * 2;
         num_bytes += num_channels * num_ranks * num_max_rdma_chunked_recv_tokens * kNumMaxScales * sizeof(float) * 2;
