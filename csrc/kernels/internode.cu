@@ -1631,7 +1631,7 @@ combine(int4* combined_x, float* combined_topk_weights,
             auto tma_mbarrier = [=](const int& i) { return reinterpret_cast<uint64_t*>(smem_ptr + i * kNumTMABufferBytesPerStage + kNumTMALoadBytes * (NUM_MAX_NVL_PEERS + 1)); };
             uint32_t tma_phase[kNumStages] = {0};
             if (not kDecoupledMode and lane_id < kNumStages) {
-                mbarrier_init(tma_mbarrier(lane_id), 32);
+                mbarrier_init(tma_mbarrier(lane_id), 32);  // in hook mode, 'kNVLAndRDMAForwarder' and 'kNVLSender' warps are on the same SM, in case the init here makes the data dirty
                 fence_view_async_shared();
                 fence_barrier_init();
             }
@@ -1708,24 +1708,13 @@ combine(int4* combined_x, float* combined_topk_weights,
                     void* shifted = send_buffer + rdma_slot_idx * num_bytes_per_token;
                     auto get_addr_fn = [&](int src_nvl_rank, int slot_idx, int hidden_int4_idx) -> int4* { return reinterpret_cast<int4*>(nvl_channel_x.buffer(src_nvl_rank) + slot_idx * num_bytes_per_token) + hidden_int4_idx; };
                     auto recv_tw_fn = [&](int src_nvl_rank, int slot_idx, int topk_idx) -> float { return ld_nc_global(reinterpret_cast<float*>(nvl_channel_x.buffer(src_nvl_rank) + slot_idx * num_bytes_per_token + hidden_bytes + sizeof(SourceMeta)) + topk_idx); };
-                    if(not kDecoupledMode) {
-                        combine_token<NUM_MAX_NVL_PEERS, false, dtype_t, NUM_MAX_NVL_PEERS, true, kNumStages, kNumTMALoadBytes>(expected_head >= 0,
-                                                                                                                                expected_head, lane_id,
-                                                                                                                                hidden_int4, num_topk,
-                                                                                                                                static_cast<int4*>(shifted),
-                                                                                                                                reinterpret_cast<float*>(static_cast<int8_t*>(shifted) + hidden_bytes + sizeof(SourceMeta)),
-                                                                                                                                nullptr, nullptr, num_max_nvl_chunked_recv_tokens_per_rdma, get_addr_fn, recv_tw_fn,
-                                                                                                                                smem_ptr, tma_phase);
-                    }
-                    else {
-                        combine_token<NUM_MAX_NVL_PEERS, false, dtype_t, NUM_MAX_NVL_PEERS, false, kNumStages>(expected_head >= 0,
-                                                                                                                expected_head, lane_id,
-                                                                                                                hidden_int4, num_topk,
-                                                                                                                static_cast<int4*>(shifted),
-                                                                                                                reinterpret_cast<float*>(static_cast<int8_t*>(shifted) + hidden_bytes + sizeof(SourceMeta)),
-                                                                                                                nullptr, nullptr, num_max_nvl_chunked_recv_tokens_per_rdma, get_addr_fn, recv_tw_fn,
-                                                                                                                nullptr, tma_phase);
-                    }
+                    combine_token<NUM_MAX_NVL_PEERS, false, dtype_t, NUM_MAX_NVL_PEERS, not kDecoupledMode, kNumStages, kNumTMALoadBytes>(expected_head >= 0,
+                                                                                                                            expected_head, lane_id,
+                                                                                                                            hidden_int4, num_topk,
+                                                                                                                            static_cast<int4*>(shifted),
+                                                                                                                            reinterpret_cast<float*>(static_cast<int8_t*>(shifted) + hidden_bytes + sizeof(SourceMeta)),
+                                                                                                                            nullptr, nullptr, num_max_nvl_chunked_recv_tokens_per_rdma, get_addr_fn, recv_tw_fn,
+                                                                                                                            smem_ptr, tma_phase);
 
                     // Update head
                     if (lane_id < NUM_MAX_NVL_PEERS)
