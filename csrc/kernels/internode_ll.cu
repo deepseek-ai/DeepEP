@@ -487,7 +487,7 @@ __forceinline__ __device__ bool logfmt_encode(uint32_t* ld_buffer, uint32_t* st_
     float amin = static_cast<float>(bf16_amin);
     float log_amax = log2f_approx(amax);
     float log_amin = amin == 0 ? log_amax - kMinClip : fmaxf(log2f_approx(amin), log_amax - kMinClip);
-    bool enable_cast = warp_reduce_and<(16 / kNumUnrolls), true>(log_amax <= kLogThreshold and log_amin < log_amax);
+    bool enable_cast = warp_reduce_and<(16 / kNumUnrolls), true>(log_amax < kLogThreshold and log_amin < log_amax);
 
     if (enable_cast) {
         const auto step = (log_amax - log_amin) / static_cast<float>(kNumValues - 2);
