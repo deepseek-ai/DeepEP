@@ -555,7 +555,7 @@ __forceinline__ __device__ void logfmt_decode_and_accumulate(uint32_t* ld_buffer
         const auto step = (log_amax - log_amin) / static_cast<float>(kNumValues - 2);
         auto decode = [=](const uint32_t &encoded, const uint32_t &op) {
             const auto decoded = !encoded ? .0f : exp2f_approx((encoded - 1) * step + log_amin);
-            return op ? - decoded : decoded;
+            return op ? -decoded : decoded;
         };
 
         EP_STATIC_ASSERT(kNumRecvUnrolls == 2 or kNumRecvUnrolls == 4, "kNumRecvUnrolls == 2 or 4 only");
