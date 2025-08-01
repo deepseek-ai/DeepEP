@@ -2,15 +2,16 @@ import os
 import subprocess
 import setuptools
 import importlib
-import importlib.resources
+
+from pathlib import Path
 from torch.utils.cpp_extension import BuildExtension, CUDAExtension
 
 
 # Wheel specific: the wheels only include the soname of the host library `libnvshmem_host.so.X`
-def get_nvshmem_host_lib_name():
-    for path in importlib.resources.files('nvidia.nvshmem').iterdir():
-        for file in path.rglob('libnvshmem_host.so.*'):
-            return file.name
+def get_nvshmem_host_lib_name(base_dir):
+    path = Path(base_dir).joinpath('lib')
+    for file in path.rglob('libnvshmem_host.so.*'):
+        return file.name
     raise ModuleNotFoundError('libnvshmem_host.so not found')
 
 
@@ -21,7 +22,7 @@ if __name__ == '__main__':
     if nvshmem_dir is None:
         try:
             nvshmem_dir = importlib.util.find_spec("nvidia.nvshmem").submodule_search_locations[0]
-            nvshmem_host_lib = get_nvshmem_host_lib_name()
+            nvshmem_host_lib = get_nvshmem_host_lib_name(nvshmem_dir)
             import nvidia.nvshmem as nvshmem
         except (ModuleNotFoundError, AttributeError, IndexError):
             print('Warning: `NVSHMEM_DIR` is not specified, and the NVSHMEM module is not installed. All internode and low-latency features are disabled\n')
