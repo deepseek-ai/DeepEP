@@ -340,6 +340,11 @@ __device__ __forceinline__ void mbarrier_arrive_and_expect_tx(uint64_t* mbar_ptr
     asm volatile("mbarrier.arrive.expect_tx.shared::cta.b64 _, [%1], %0; \n\t" :: "r"(num_bytes), "r"(mbar_int_ptr));
 }
 
+__device__ __forceinline__ void mbarrier_arrive(uint64_t* mbar_ptr) {
+    auto mbar_int_ptr = static_cast<uint32_t>(__cvta_generic_to_shared(mbar_ptr));
+    asm volatile("mbarrier.arrive.shared::cta.b64 _, [%0]; \n\t" :: "r"(mbar_int_ptr));
+}
+
 __device__ __forceinline__ void tma_store_fence() {
     asm volatile ("fence.proxy.async.shared::cta;");
 }
@@ -518,36 +523,58 @@ __forceinline__ __device__ void release_lock(int* mutex) {
 template <typename T> struct ReduceSum { __device__ T operator()(T a, T b) const { return a + b; } };
 template <typename T> struct ReduceMax { __device__ T operator()(T a, T b) const { return a > b ? a : b; } };
 template <typename T> struct ReduceMin { __device__ T operator()(T a, T b) const { return a < b ? a : b; } };
+template <typename T> struct ReduceAnd { __device__ T operator()(T a, T b) const { return a & b; } };
+template <typename T> struct ReduceOr  { __device__ T operator()(T a, T b) const { return a | b; } };
 
 // Unified reduction function
-template <uint32_t kNumLanes, typename T, typename Op>
+template <uint32_t kNumLanes, bool kIsOuter, typename T, typename Op>
 __forceinline__ __device__ T warp_reduce(T value, Op op) {
     EP_STATIC_ASSERT(kNumLanes == 32 or kNumLanes == 16 or kNumLanes == 8 or
                      kNumLanes ==  4 or kNumLanes == 2  or kNumLanes == 1,
                      "Invalid number of lanes");
+    const uint32_t mask = __activemask();
+    if constexpr (kIsOuter) {
+        if constexpr (kNumLanes <=  1) value = op(value, __shfl_xor_sync(mask, value,  1));
+        if constexpr (kNumLanes <=  2) value = op(value, __shfl_xor_sync(mask, value,  2));
+        if constexpr (kNumLanes <=  4) value = op(value, __shfl_xor_sync(mask, value,  4));
+        if constexpr (kNumLanes <=  8) value = op(value, __shfl_xor_sync(mask, value,  8));
+        if constexpr (kNumLanes <= 16) value = op(value, __shfl_xor_sync(mask, value, 16));
+    }
+    else {
+        if constexpr (kNumLanes >= 32) value = op(value, __shfl_xor_sync(mask, value, 16));
+        if constexpr (kNumLanes >= 16) value = op(value, __shfl_xor_sync(mask, value,  8));
+        if constexpr (kNumLanes >=  8) value = op(value, __shfl_xor_sync(mask, value,  4));
+        if constexpr (kNumLanes >=  4) value = op(value, __shfl_xor_sync(mask, value,  2));
+        if constexpr (kNumLanes >=  2) value = op(value, __shfl_xor_sync(mask, value,  1));
+    }
 
-    if constexpr (kNumLanes >= 32) value = op(value, __shfl_xor_sync(0xffffffff, value, 16));
-    if constexpr (kNumLanes >= 16) value = op(value, __shfl_xor_sync(0xffffffff, value,  8));
-    if constexpr (kNumLanes >=  8) value = op(value, __shfl_xor_sync(0xffffffff, value,  4));
-    if constexpr (kNumLanes >=  4) value = op(value, __shfl_xor_sync(0xffffffff, value,  2));
-    if constexpr (kNumLanes >=  2) value = op(value, __shfl_xor_sync(0xffffffff, value,  1));
     return value;
 }
 
 // Convenience aliases
-template < uint32_t kNumLanes = 32, typename T>
+template <uint32_t kNumLanes = 32, bool kIsOuter = false, typename T>
 __forceinline__ __device__ T warp_reduce_sum(T value) {
-    return warp_reduce<kNumLanes, T>(value, ReduceSum<T>{});
+    return warp_reduce<kNumLanes, kIsOuter, T>(value, ReduceSum<T>{});
 }
 
-template <uint32_t kNumLanes = 32, typename T>
+template <uint32_t kNumLanes = 32, bool kIsOuter = false, typename T>
 __forceinline__ __device__ T warp_reduce_max(T value) {
-    return warp_reduce<kNumLanes, T>(value, ReduceMax<T>{});
+    return warp_reduce<kNumLanes, kIsOuter, T>(value, ReduceMax<T>{});
 }
 
-template <uint32_t kNumLanes = 32, typename T>
+template <uint32_t kNumLanes = 32, bool kIsOuter = false, typename T>
 __forceinline__ __device__ T warp_reduce_min(T value) {
-    return warp_reduce<kNumLanes, T>(value, ReduceMin<T>{});
+    return warp_reduce<kNumLanes, kIsOuter, T>(value, ReduceMin<T>{});
+}
+
+template <uint32_t kNumLanes = 32, bool kIsOuter = false, typename T>
+__forceinline__ __device__ T warp_reduce_and(T value) {
+    return warp_reduce<kNumLanes, kIsOuter, T>(value, ReduceAnd<T>{});
+}
+
+template <uint32_t kNumLanes = 32, bool kIsOuter = false, typename T>
+__forceinline__ __device__ T warp_reduce_or(T value) {
+    return warp_reduce<kNumLanes, kIsOuter, T>(value, ReduceOr<T>{});
 }
 
 } // namespace deep_ep
