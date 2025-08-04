@@ -1622,7 +1622,16 @@ Buffer::pcie_combine(const torch::Tensor& recv_x, const std::optional<torch::Ten
         recv_topk_weights_ptr = recv_topk_weights->data_ptr<float>();
     }
 
-    // Bias checks
+    // Launch barrier and reset queue head and tail
+    pcie::cached_notify_pcie(hidden_int4, 0, 0, num_topk,
+                             num_ranks, num_channels,
+                             num_combined_tokens, combined_rdma_head.data_ptr<int>(),
+                             rdma_buffer_ptr, config.num_max_rdma_chunked_recv_tokens,
+                             rank, comm_stream,
+                             config.get_pcie_buffer_size_hint(hidden_int4 * sizeof(int4), num_ranks),
+                             false);
+
+    // Assign bias pointers
     const void* bias_0_ptr = nullptr;
     const void* bias_1_ptr = nullptr;
     if (bias_0.has_value()) {
