@@ -388,7 +388,7 @@ class Buffer:
             handle: the returned communication handle.
             event: the event after executing the kernel (valid only if `async_finish` is set).
         """
-        decoupled_mode = return_recv_hook
+        decoupled_mode = return_recv_hook  # This mode (decoupled_mode=True, return_recv_hook=False) is implemented to support large buffers without hooks, but offers no practical performance benefit and is not exposed to user for use.
         # Default config
         config = self.get_dispatch_config(self.group_size) if config is None else config
 
@@ -453,7 +453,7 @@ class Buffer:
             recv_topk_weights: the reduced top-k weights from its dispatch ranks.
             event: the event after executing the kernel (valid only if `async_finish` is set).
         """
-        decoupled_mode = return_recv_hook
+        decoupled_mode = return_recv_hook  # This mode (decoupled_mode=True, return_recv_hook=False) is implemented to support large buffers without hooks, but offers no practical performance benefit and is not exposed to user for use.
 
         # Default config
         config = self.get_combine_config(self.group_size) if config is None else config

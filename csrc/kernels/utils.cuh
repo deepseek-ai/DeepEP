@@ -664,7 +664,7 @@ __forceinline__ __device__ std::pair<WarpRole_Dispatch, int> get_warp_role_dispa
         }
     }
 
-    else if (return_recv_hook) {  // hook mode
+    if (return_recv_hook) {  // hook mode
         EP_DEVICE_ASSERT(phases != 0);
         if ((phases & NORMAL_DECOUPLED_RECV_PHASE) == 0) {  // send phase
             if (warp_id < kNumDispatchRDMASenderWarps + NUM_MAX_NVL_PEERS) {
@@ -686,22 +686,20 @@ __forceinline__ __device__ std::pair<WarpRole_Dispatch, int> get_warp_role_dispa
         }
     }
         
-    else {  // decoupled mode, but no hook
-        if (not is_forwarder) {  // send warps
-            if (warp_id < kNumDispatchRDMASenderWarps + NUM_MAX_NVL_PEERS) {
-                return {WarpRole_Dispatch::kRDMASender, -1};
-            } else {
-                return {WarpRole_Dispatch::kRDMASenderCoordinator, -1};
-            }
+    // decoupled mode, but no hook
+    if (not is_forwarder) {  // send warps
+        if (warp_id < kNumDispatchRDMASenderWarps + NUM_MAX_NVL_PEERS) {
+            return {WarpRole_Dispatch::kRDMASender, -1};
+        } else {
+            return {WarpRole_Dispatch::kRDMASenderCoordinator, -1};
         }
-
-        else {  // recv warps
-            if (warp_id < NUM_MAX_NVL_PEERS) {
-                return {WarpRole_Dispatch::kRDMAAndNVLForwarder, (warp_id + channel_id) % NUM_MAX_NVL_PEERS};
-            } 
-            else {
-                return {WarpRole_Dispatch::kNVLReceivers, (warp_id + channel_id - kNumDispatchRDMASenderWarps) % NUM_MAX_NVL_PEERS};
-            }
+    }
+    else {  // recv warps
+        if (warp_id < NUM_MAX_NVL_PEERS) {
+            return {WarpRole_Dispatch::kRDMAAndNVLForwarder, (warp_id + channel_id) % NUM_MAX_NVL_PEERS};
+        } 
+        else {
+            return {WarpRole_Dispatch::kNVLReceivers, (warp_id + channel_id - kNumDispatchRDMASenderWarps) % NUM_MAX_NVL_PEERS};
         }
     }
 }
@@ -736,7 +734,8 @@ __forceinline__ __device__ std::pair<WarpRole_Combine, int> get_warp_role_combin
             }
         }
     }
-    else if (return_recv_hook) {  // hook mode
+
+    if (return_recv_hook) {  // hook mode
         EP_DEVICE_ASSERT(phases != 0);
         if ((phases & NORMAL_DECOUPLED_RECV_PHASE) == 0) {  // send phase
             if (warp_id < NUM_MAX_NVL_PEERS) {
@@ -758,22 +757,22 @@ __forceinline__ __device__ std::pair<WarpRole_Combine, int> get_warp_role_combin
             return {WarpRole_Combine::kInvalidWarpRole, -1};
         }
     }
-    else {  // decoupled mode, but no hook
-        if (is_forwarder_sm) {  // send warps
-            if (warp_id < NUM_MAX_NVL_PEERS) {
-                auto shuffled_warp_id = warp_id;
-                shuffled_warp_id = (shuffled_warp_id + channel_id) % NUM_MAX_NVL_PEERS;
-                return {WarpRole_Combine::kNVLSender, shuffled_warp_id};
-            } else if (warp_id < NUM_MAX_NVL_PEERS + kNumForwarders) {
-                auto shuffled_warp_id = warp_id - NUM_MAX_NVL_PEERS;
-                shuffled_warp_id = (shuffled_warp_id + channel_id) % kNumForwarders;
-                return {WarpRole_Combine::kNVLAndRDMAForwarder, shuffled_warp_id};
-            } else {
-                return {WarpRole_Combine::kCoordinator, 0};
-            }
-        } else {  // recv warps
-            return {WarpRole_Combine::kRDMAReceiver, warp_id};
+
+    // decoupled mode, but no hook
+    if (is_forwarder_sm) {  // send warps
+        if (warp_id < NUM_MAX_NVL_PEERS) {
+            auto shuffled_warp_id = warp_id;
+            shuffled_warp_id = (shuffled_warp_id + channel_id) % NUM_MAX_NVL_PEERS;
+            return {WarpRole_Combine::kNVLSender, shuffled_warp_id};
+        } else if (warp_id < NUM_MAX_NVL_PEERS + kNumForwarders) {
+            auto shuffled_warp_id = warp_id - NUM_MAX_NVL_PEERS;
+            shuffled_warp_id = (shuffled_warp_id + channel_id) % kNumForwarders;
+            return {WarpRole_Combine::kNVLAndRDMAForwarder, shuffled_warp_id};
+        } else {
+            return {WarpRole_Combine::kCoordinator, 0};
         }
+    } else {  // recv warps
+        return {WarpRole_Combine::kRDMAReceiver, warp_id};
     }
 }
 
