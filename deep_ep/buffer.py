@@ -79,7 +79,6 @@ class Buffer:
             raise ValueError("Either 'group' or 'comm' must be provided.")
         self.num_nvl_bytes = num_nvl_bytes
         self.num_rdma_bytes = num_rdma_bytes
-        low_latency_mode = True
         self.low_latency_mode = low_latency_mode
         self.explicitly_destroy = explicitly_destroy
         self.runtime = deep_ep_cpp.Buffer(self.rank, self.group_size, num_nvl_bytes, num_rdma_bytes, low_latency_mode, explicitly_destroy)
