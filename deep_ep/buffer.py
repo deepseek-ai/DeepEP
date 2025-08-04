@@ -86,7 +86,7 @@ class Buffer:
             raise ValueError("Either 'group' or 'comm' must be provided.")
         self.num_nvl_bytes = num_nvl_bytes
         self.num_rdma_bytes = num_rdma_bytes
-        low_latency_mode = True # TODO avoid issue https://github.com/deepseek-ai/DeepEP/issues/137#issuecomment-2834431502
+        low_latency_mode = True
         self.low_latency_mode = low_latency_mode
         self.explicitly_destroy = explicitly_destroy
         self.enable_shrink = enable_shrink
