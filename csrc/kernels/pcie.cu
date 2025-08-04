@@ -901,7 +901,7 @@ combine_pcie(int4* combined_x, float* combined_topk_weights,
         EP_DEVICE_ASSERT(num_target_ranks <= 32);
 
         // Clean shared memory and sync
-        (lane_id < kNumRanks) ? (sender_channel_tail[lane_id] = 0) : 0;
+        (target_rank >= 0) ? (sender_channel_tail[target_rank] = 0) : 0;
         sync_sender_smem();
 
         // Get task range for this channel
@@ -973,15 +973,15 @@ combine_pcie(int4* combined_x, float* combined_topk_weights,
                     st_na_global(static_cast<float*>(shifted) + lane_id, weight_value);
                 }
             }
+            __syncwarp();
             // Step 4: 最后更新progress和cached tail (移到循环外)
             if (lane_id == src_rank) {
                 cached_rdma_channel_tail = token_idx;
                 num_tokens_to_send_to_rank -= num_tokens_to_send;
                 // Update progress, 给coordinator看的
-                st_release_cta(sender_channel_tail + start_rank + src_rank, cached_rdma_channel_tail);
+                st_release_cta(sender_channel_tail + target_rank, cached_rdma_channel_tail);
                 printf("After copy: rank: %d, src_rank: %d, cached_rdma_channel_tail: %d, num_tokens_to_send_to_rank: %d, total_offset: %d\n", rank, src_rank + start_rank, cached_rdma_channel_tail, num_tokens_to_send_to_rank, total_offset);
             }
-            __syncwarp();
         }
         if (lane_id == 0) {
             printf("RDMA sender exited!! rank: %d, warp_id: %d, cached_rdma_channel_tail: %d num_tokens_to_send_to_rank: %d  \n", rank, warp_id, cached_rdma_channel_tail, num_tokens_to_send_to_rank);
@@ -1002,67 +1002,65 @@ combine_pcie(int4* combined_x, float* combined_topk_weights,
         int last_issued_tail = 0, target_rank = lane_id < num_target_ranks ? lane_id + start_rank : -1;
         sync_sender_smem();
 
-        // int total_offset = 0;
-        // if (target_rank > 0 || (target_rank == 0 && channel_id > 0)) {
-        //     total_offset = recv_gbl_channel_prefix_matrix[target_rank * num_channels + channel_id - 1];
-        // }
-        // int num_tokens_to_send_to_rank = target_rank >= 0 ? (recv_gbl_channel_prefix_matrix[target_rank * num_channels + channel_id] -  total_offset) : 0;
-        // auto start_time = clock64();
-        // if (rank == 0 && target_rank == 8) {
-        //     printf("Coordinator: rank: %d, lane_id: %d, num_tokens_to_send_to_rank: %d, total_offset: %d\n", rank, lane_id, num_tokens_to_send_to_rank, total_offset);
-        // }
-        // while (__any_sync(0xffffffff, num_tokens_to_send_to_rank > 0)) {
-        //    // Timeout check
-        //     if (clock64() - start_time > NUM_TIMEOUT_CYCLES and target_rank < kNumRanks) {
-        //         printf("DeepEP RDMA sender coordinator timeout, channel: %d, IB: %d, dst IB: %d, tail: %d, remaining: %d\n",
-        //                 channel_id, rank, target_rank, last_issued_tail, num_tokens_to_send_to_rank);
-        //         trap();
-        //     }
-        //     // Process each source rank
-        //     for (int i = 0, synced_num_tokens_to_send; i < num_target_ranks; i++) {
-        //         int src_rank = (i + channel_id + rank) % num_target_ranks;
-        //         synced_num_tokens_to_send = __shfl_sync(0xffffffff, num_tokens_to_send_to_rank, src_rank);
-        //         if (synced_num_tokens_to_send <= 0) continue;
-        //         auto synced_last_issued_tail = __shfl_sync(0xffffffff, last_issued_tail, src_rank);
-        //         auto processed_tail = __shfl_sync(0xffffffff, ld_acquire_cta(const_cast<const int*>(sender_channel_tail + start_rank + src_rank)), 0);
-        //         auto num_tokens_processed = processed_tail - synced_last_issued_tail;
-        //         if(num_tokens_processed < num_max_rdma_chunked_send_tokens and num_tokens_processed != synced_num_tokens_to_send)
-        //             continue;
-        //         auto num_tokens_to_issue = min(num_tokens_processed, num_max_rdma_chunked_send_tokens);
-        //         if (lane_id == 0) {
-        //             printf("rank: %d, src_rank: %d, num_tokens_to_issue: %d, num_tokens_processed: %d\n", rank, src_rank + start_rank, num_tokens_to_issue, num_tokens_processed);
-        //         }
-        //         if (src_rank + start_rank != target_rank) {
-        //             auto dst_slot_idx = synced_last_issued_tail % num_max_rdma_chunked_recv_tokens;
-        //             // TODO: 这里是为了什么？？
-        //             EP_DEVICE_ASSERT(dst_slot_idx + num_tokens_to_issue <= num_max_rdma_chunked_recv_tokens);
-        //             const size_t num_bytes_per_msg = num_bytes_per_pcie_token * num_tokens_to_issue;
-        //             const auto dst_ptr = reinterpret_cast<uint64_t>(rdma_channel_data.recv_buffer(rank) + dst_slot_idx * num_bytes_per_pcie_token);
-        //             const auto src_ptr = reinterpret_cast<uint64_t>(rdma_channel_data.send_buffer(src_rank + start_rank) + dst_slot_idx * num_bytes_per_pcie_token);
-        //             nvshmemi_ibgda_put_nbi_warp<true>(dst_ptr, src_ptr, num_bytes_per_msg,
-        //                                                 src_rank + start_rank, channel_id, lane_id, 0);    
-        //             if (lane_id == 0) {
-        //                 printf("rank: %d, src_rank: %d, dst_slot_idx: %d, num_tokens_to_issue: %d, num_tokens_processed: %d\n", rank, src_rank + start_rank, dst_slot_idx, num_tokens_to_issue, num_tokens_processed);
-        //             }
-        //         } else {
-        //             memory_fence();
-        //         }
-        //         __syncwarp();
+        int total_offset = 0;
+        if (target_rank > 0 || (target_rank == 0 && channel_id > 0)) {
+            total_offset = recv_gbl_channel_prefix_matrix[target_rank * num_channels + channel_id - 1];
+        }
+        int num_tokens_to_send_to_rank = target_rank >= 0 ? (recv_gbl_channel_prefix_matrix[target_rank * num_channels + channel_id] -  total_offset) : 0;
+        if (lane_id == 0) {
+            printf("Coordinator: rank: %d, lane_id: %d, num_tokens_to_send_to_rank: %d, total_offset: %d\n", rank, lane_id, num_tokens_to_send_to_rank, total_offset);
+        }
+        auto start_time = clock64();
+        while (__any_sync(0xffffffff, num_tokens_to_send_to_rank > 0)) {
+           // Timeout check
+            if (clock64() - start_time > NUM_TIMEOUT_CYCLES and target_rank < kNumRanks) {
+                printf("DeepEP RDMA sender coordinator timeout, channel: %d, IB: %d, dst IB: %d, tail: %d, remaining: %d\n",
+                        channel_id, rank, target_rank, last_issued_tail, num_tokens_to_send_to_rank);
+                trap();
+            }
+            // Process each source rank
+            for (int i = 0, synced_num_tokens_to_send; i < num_target_ranks; i++) {
+                int src_rank_idx = (i + channel_id + rank) % num_target_ranks;
+                synced_num_tokens_to_send = __shfl_sync(0xffffffff, num_tokens_to_send_to_rank, src_rank_idx);
+                if (synced_num_tokens_to_send <= 0) continue;
+                auto synced_last_issued_tail = __shfl_sync(0xffffffff, last_issued_tail, src_rank_idx);
+                auto processed_tail = __shfl_sync(0xffffffff, ld_acquire_cta(const_cast<const int*>(sender_channel_tail + start_rank + src_rank_idx)), 0);
+                auto num_tokens_processed = processed_tail - synced_last_issued_tail;
+                if(num_tokens_processed < num_max_rdma_chunked_send_tokens and num_tokens_processed != synced_num_tokens_to_send)
+                    continue;
+                auto num_tokens_to_issue = min(num_tokens_processed, num_max_rdma_chunked_send_tokens);
+                if (lane_id == 0) {
+                    printf("Coordinator: rank: %d, src_rank: %d, num_tokens_to_issue: %d, num_tokens_processed: %d\n", rank, src_rank_idx + start_rank, num_tokens_to_issue, num_tokens_processed);
+                }
+                if (src_rank_idx + start_rank != rank) {
+                    auto dst_slot_idx = synced_last_issued_tail % num_max_rdma_chunked_recv_tokens;
+                    // TODO: 这里是为了什么？？
+                    EP_DEVICE_ASSERT(dst_slot_idx + num_tokens_to_issue <= num_max_rdma_chunked_recv_tokens);
+                    const size_t num_bytes_per_msg = num_bytes_per_pcie_token * num_tokens_to_issue;
+                    const auto dst_ptr = reinterpret_cast<uint64_t>(rdma_channel_data.recv_buffer(rank) + dst_slot_idx * num_bytes_per_pcie_token);
+                    const auto src_ptr = reinterpret_cast<uint64_t>(rdma_channel_data.send_buffer(src_rank_idx + start_rank) + dst_slot_idx * num_bytes_per_pcie_token);
+                    nvshmemi_ibgda_put_nbi_warp<true>(dst_ptr, src_ptr, num_bytes_per_msg,
+                                                        src_rank_idx + start_rank, channel_id, lane_id, 0);    
+                    if (lane_id == 0) {
+                        printf("rank: %d, src_rank: %d, dst_slot_idx: %d, num_tokens_to_issue: %d, num_tokens_processed: %d\n", rank, src_rank_idx + start_rank, dst_slot_idx, num_tokens_to_issue, num_tokens_processed);
+                    }
+                } else {
+                    memory_fence();
+                }
+                __syncwarp();
 
-        //         if (src_rank + start_rank == target_rank) {
-        //             last_issued_tail += num_tokens_to_issue;
-        //             num_tokens_to_send_to_rank -= num_tokens_to_issue;
-        //             nvshmemi_ibgda_amo_nonfetch_add(rdma_channel_tail.buffer(rank), num_tokens_to_issue,
-        //                 target_rank, channel_id, target_rank == rank);
-        //             if (rank == 0 || rank == 8) {
-        //                 printf("After One issue : rank: %d, target_rank: %d, num_tokens_to_issue: %d, num_tokens_to_send_to_rank: %d\n", rank, target_rank, num_tokens_to_issue, num_tokens_to_send_to_rank);
-        //             }
-        //         }
-        //     }
+                if (src_rank_idx + start_rank == target_rank) {
+                    last_issued_tail += num_tokens_to_issue;
+                    num_tokens_to_send_to_rank -= num_tokens_to_issue;
+                    nvshmemi_ibgda_amo_nonfetch_add(rdma_channel_tail.buffer(rank), num_tokens_to_issue,
+                        target_rank, channel_id, target_rank == rank);
+                    printf("After One issue : rank: %d, target_rank: %d, num_tokens_to_issue: %d, num_tokens_to_send_to_rank: %d\n", rank, target_rank, num_tokens_to_issue, num_tokens_to_send_to_rank);
+                }
+            }
 
-        //     // Nanosleep and let other warps work
-        //     __nanosleep(NUM_WAIT_NANOSECONDS);
-        // }
+            // Nanosleep and let other warps work
+            __nanosleep(NUM_WAIT_NANOSECONDS);
+        }
         if (lane_id == 0) {
              printf("Coordinator exited!! rank: %d, warp_id: %d\n", rank, warp_id);
         }
