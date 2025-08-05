@@ -14,7 +14,7 @@ import test_low_latency
 
 def test_main(num_tokens: int, num_sms: int, local_rank: int, num_local_ranks: int, num_ranks: int, num_nodes: int, rank: int, buffer: deep_ep.Buffer, group: dist.ProcessGroup):
     # Settings
-    num_tokens, hidden, num_topk_groups, num_topk, num_experts = num_tokens, 7168, min(num_nodes, 1), 8, (256 // num_ranks) * num_ranks
+    num_tokens, hidden, num_topk_groups, num_topk, num_experts = num_tokens, 7168, min(num_nodes, 8), 8, (256 // num_ranks) * num_ranks
     assert num_experts % num_ranks == 0 and num_local_ranks == 8
     if local_rank == 0:
         print(f'[config] num_tokens={num_tokens}, hidden={hidden}, num_topk_groups={num_topk_groups}, num_topk={num_topk}', flush=True)
@@ -34,7 +34,7 @@ def test_main(num_tokens: int, num_sms: int, local_rank: int, num_local_ranks: i
     topk_idx = torch.topk(scores, num_topk, dim=-1, largest=True, sorted=True)[1]
     # FOR TEST bi:0——8 1——9 2——10 3——11 4——12 5——13 6——14 7——15
     # topk_idx = torch.ones((num_tokens, num_topk), dtype=torch.int64, device='cuda') * ((num_experts // num_ranks)  * ((8 + rank) % num_ranks))
-    
+    print(f'rank: {rank}, topk_idx: {topk_idx}')
     #实现一段代码使node0的topk_idx为8-15，node1的topk_idx为0-7,重复num_tokens次
     # if rank <8:
     #     topk_idx = torch.arange(8, 16, dtype=torch.int64, device='cuda').repeat(num_tokens, 1)
@@ -167,7 +167,7 @@ def test_main(num_tokens: int, num_sms: int, local_rank: int, num_local_ranks: i
     
     if local_rank == 0:
         print("pass")
-    # sys.exit()
+    sys.exit()
     # For later tuning
     
     dispatch_bf16_rdma_send_bytes = num_rdma_token_sent * hidden * 2

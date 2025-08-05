@@ -897,6 +897,7 @@ __device__ int combine_token(bool is_token_in_rank, int head_idx,
         for (int i = 0; i < num_topk_ranks; ++ i)
             value += recv_tw_fn(topk_ranks[i], slot_indices[i], lane_id);
         st_na_global(combined_topk_weights + lane_id, value);
+        
     }
 
     // Return the minimum top-k rank
@@ -1022,10 +1023,12 @@ combine_pcie(int4* combined_x, float* combined_topk_weights,
             num_tokens_to_send = min(num_tokens_to_send, num_max_rdma_chunked_send_tokens);
             auto total_offset_send = __shfl_sync(0xffffffff, total_offset, src_rank);
             auto token_idx = src_rdma_tail;
+            auto send_buffer = (start_rank + src_rank) == rank ? rdma_channel_data.recv_buffer(rank) : rdma_channel_data.send_buffer(start_rank + src_rank);
             for (; token_idx < src_rdma_tail + num_tokens_to_send; token_idx++) {
                 int dst_slot_idx = token_idx % num_max_rdma_chunked_recv_tokens;        
                 int src_slot_idx = total_offset_send + token_idx;
-                void* shifted = rdma_channel_data.send_buffer(start_rank + src_rank) + dst_slot_idx * num_bytes_per_pcie_token;
+                
+                void* shifted = send_buffer + dst_slot_idx * num_bytes_per_pcie_token;
                 UNROLLED_WARP_COPY(5, lane_id, hidden_int4,
                                     reinterpret_cast<int4*>(shifted),
                                     recv_x + src_slot_idx * hidden_int4,
@@ -1162,7 +1165,7 @@ combine_pcie(int4* combined_x, float* combined_topk_weights,
                                                                         bias_0 == nullptr ? nullptr : bias_0 + token_idx * hidden_int4,
                                                                         bias_1 == nullptr ? nullptr : bias_1 + token_idx * hidden_int4,
                                                                         num_max_rdma_chunked_recv_tokens, recv_fn, recv_tw_fn);
-        }
+       }
 
         // Mark as retired
         __syncwarp();
