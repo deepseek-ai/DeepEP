@@ -487,7 +487,7 @@ class Buffer:
             return (recv_x, recv_x_scales) if x_scales is not None else recv_x, recv_topk_idx, recv_topk_weights, num_recv_tokens_per_expert_list, handle, EventOverlap(event)
 
     # noinspection PyTypeChecker
-    def pcie_combine(self, x: torch.Tensor, handle: Union[tuple, list],
+    def pcie_combine(self, recv_x: torch.Tensor, handle: Union[tuple, list],
                           topk_weights: Optional[torch.Tensor] = None,
                           bias: Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]] = None,
                           config: Optional[Config] = None,
@@ -510,7 +510,7 @@ class Buffer:
         num_combined_tokens = is_combined_token_in_rank.shape[0]
         # Launch the kernel
         combined_x, combined_topk_weights, event = self.runtime.pcie_combine(
-            x, topk_weights, bias_0, bias_1,
+            recv_x, topk_weights, bias_0, bias_1,
             send_rdma_head,
             recv_gbl_channel_prefix_matrix, recv_rank_prefix_sum,
             num_combined_tokens, config, getattr(previous_event, 'event', None),
