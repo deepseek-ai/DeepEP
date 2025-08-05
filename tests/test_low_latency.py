@@ -26,9 +26,10 @@ def test_main(num_tokens: int, hidden: int, num_experts: int, num_topk: int,
     x_list = [x]
     for i in range(4 if use_logfmt else 0):
         # NOTES: make more LogFMT casts and also with some BF16
-        x_list.append(torch.randn((num_tokens, hidden), dtype=torch.bfloat16, device='cuda') * (random.random() * 0.5))
-    # Most of the values in `x_perf` is lower than the threshold, casting most channels
-    x_perf = torch.randn((num_tokens, hidden), dtype=torch.bfloat16, device='cuda') * 0.1
+        x_list.append(torch.randn((num_tokens, hidden), dtype=torch.bfloat16, device='cuda') * 0.5 * random.random())
+    # NOTES: the last one is for performance testing
+    # Most of the values in the perf case is lower than the threshold, casting most channels
+    x_list.append(torch.randn((num_tokens, hidden), dtype=torch.bfloat16, device='cuda') * 0.1)
 
     scores = torch.randn((num_tokens, num_experts), dtype=torch.float32, device='cuda').abs() + 1
     topk_idx = torch.topk(scores, num_topk, dim=-1, largest=True, sorted=True)[1]
@@ -119,7 +120,7 @@ def test_main(num_tokens: int, hidden: int, num_experts: int, num_topk: int,
     # noinspection PyShadowingNames
     def test_func(return_recv_hook: bool):
         recv_x, recv_count, handle, event, hook = \
-            buffer.low_latency_dispatch(x_perf, topk_idx, num_tokens, num_experts,
+            buffer.low_latency_dispatch(current_x, topk_idx, num_tokens, num_experts,
                                         cumulative_local_expert_recv_stats=cumulative_local_expert_recv_stats,
                                         use_fp8=True, async_finish=False, return_recv_hook=return_recv_hook)
         large_gemm_with_hook(hook) if return_recv_hook else None
