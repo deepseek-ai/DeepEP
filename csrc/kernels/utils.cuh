@@ -322,6 +322,11 @@ __device__ __forceinline__ void mbarrier_init(uint64_t* mbar_ptr, uint32_t arriv
     asm volatile("mbarrier.init.shared::cta.b64 [%1], %0;" :: "r"(arrive_count), "r"(mbar_int_ptr));
 }
 
+__device__ __forceinline__ void mbarrier_inval(uint64_t* mbar_ptr) {
+    auto mbar_int_ptr = static_cast<uint32_t>(__cvta_generic_to_shared(mbar_ptr));
+    asm volatile("mbarrier.inval.shared::cta.b64 [%0];" :: "r"(mbar_int_ptr));
+}
+
 __device__ __forceinline__ void mbarrier_wait(uint64_t* mbar_ptr, uint32_t& phase) {
     auto mbar_int_ptr = static_cast<uint32_t>(__cvta_generic_to_shared(mbar_ptr));
     asm volatile("{\n\t"
