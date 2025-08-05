@@ -383,7 +383,7 @@ LAUNCH_KERNEL(&cfg, dispatch_func, \
 }
 
 template <int kNumSendUnrolls>
-__forceinline__ __device__ bool logfmt_encode(uint32_t* ld_buffer, uint32_t* st_buffer, uint32_t *shared_amaxmin) {
+__forceinline__ __device__ int logfmt_encode(uint32_t* ld_buffer, uint32_t* st_buffer, uint32_t *shared_amaxmin) {
     constexpr int kNumElemsPerInt4 = sizeof(int4) / sizeof(nv_bfloat16);
     constexpr float kLogThreshold = 0;
     constexpr float kMinClip = 32; // `== log_2(2 ^ (2 ^ 5))`
@@ -461,7 +461,10 @@ __forceinline__ __device__ bool logfmt_encode(uint32_t* ld_buffer, uint32_t* st_
             st_buffer[i * 5 + 4] |= (local_signs >> 16 * i) << 16;
         }
     }
-    return enable_cast;
+    tma_store_fence();
+    __syncwarp();
+    // TODO: make `enable_cast` as a template?
+    return 32 * (kNumSendUnrolls * sizeof(int4) * 8 * (enable_cast ? 10 : 16) / 16 / 8);
 }
 
 template <int kNumSendUnrolls, int kNumRecvUnrolls>
@@ -572,6 +575,7 @@ combine(void* combined_x,
     EP_STATIC_ASSERT(kNumSendUnrolls >= kNumRecvUnrolls, "Invalid unroll factors");
 
     // Message package
+    EP_STATIC_ASSERT(kHidden % 128 == 0, "Invalid hidden");
     constexpr int kNumDivisions = kHidden / 128;
     constexpr int kNumMetaBytes = kNumDivisions * sizeof(uint32_t);
     constexpr size_t num_bytes_per_slot = kHidden * sizeof(nv_bfloat16) + kNumMetaBytes;
@@ -660,6 +664,7 @@ combine(void* combined_x,
                 // Prefetch
                 if (elect_one_sync(lane_id))
                     tma_load_and_arrive(0, cpy_src_int4_ptr, get_num_tma_bytes(0));
+                __syncwarp();
 
                 int tma_offset_bytes = kNumMetaBytes;
                 #pragma unroll
@@ -667,32 +672,32 @@ combine(void* combined_x,
                     // Load the next iteration
                     const int& stage_idx = iter_idx % kNumStages;
                     const int& next_stage_idx = (iter_idx + 1) % kNumStages;
-                    tma_store_wait<kNumStages - kNumPrefetch - 1>();
                     if (iter_idx + 1 < kNumIters and elect_one_sync(lane_id)) {
+                        tma_store_wait<kNumStages - kNumPrefetch - 1>();
                         const auto& offset_int4 = i + 32 * kNumSendUnrolls;
                         tma_load_and_arrive(next_stage_idx, cpy_src_int4_ptr + offset_int4, get_num_tma_bytes(offset_int4));
                     }
+                    __syncwarp();
 
                     // Wait the current TMA arrival
                     mbarrier_wait(tma_mbarrier[stage_idx], tma_phase[stage_idx]);
                     const auto& ld_buffer = reinterpret_cast<uint32_t*>(tma_buffer[stage_idx] + lane_id * kNumSendUnrolls);
 
                     if constexpr (kUseLogFMT) {
+                        // Cast if possible
                         auto st_buffer = reinterpret_cast<uint32_t*>(tma_buffer[stage_idx]) + lane_id * kNumSendUnrolls * kNumElemsPerInt4 * 10 / 32;
-                        bool enable_cast = logfmt_encode<kNumSendUnrolls>(ld_buffer, st_buffer, meta_buffer + i * kNumElemsPerInt4 / 128);
-                        tma_store_fence();
-                        int tma_bytes = 32 * kNumSendUnrolls * kNumElemsPerInt4 * (enable_cast ? 10 : 16) / 8;
-                        // Store
+                        int num_tma_bytes = logfmt_encode<kNumSendUnrolls>(ld_buffer, st_buffer, meta_buffer + i * kNumElemsPerInt4 / 128);
                         if (elect_one_sync(lane_id))
-                            tma_store_1d(tma_buffer[stage_idx], reinterpret_cast<uint8_t*>(cpy_dst_int4_ptr) + tma_offset_bytes, tma_bytes);
-                        tma_offset_bytes += tma_bytes;
+                            tma_store_1d(tma_buffer[stage_idx], reinterpret_cast<uint8_t*>(cpy_dst_int4_ptr) + tma_offset_bytes, num_tma_bytes);
+                        tma_offset_bytes += num_tma_bytes;
                     } else {
-                        // Store
+                        // BF16 original values
                         if (elect_one_sync(lane_id))
                             tma_store_1d(tma_buffer[stage_idx], cpy_dst_int4_ptr + i, get_num_tma_bytes(i));
                     }
                 }
 
+                // Store metadata (min/max values) for LogFMT
                 if constexpr (kUseLogFMT) {
                     send_bytes = tma_offset_bytes;
                     if (elect_one_sync(lane_id))
