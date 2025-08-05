@@ -527,54 +527,53 @@ template <typename T> struct ReduceAnd { __device__ T operator()(T a, T b) const
 template <typename T> struct ReduceOr  { __device__ T operator()(T a, T b) const { return a | b; } };
 
 // Unified reduction function
-template <uint32_t kNumLanes, bool kIsOuter, typename T, typename Op>
+template <int kNumLanesPerGroup, bool kIntergroupReduce, typename T, typename Op>
 __forceinline__ __device__ T warp_reduce(T value, Op op) {
-    EP_STATIC_ASSERT(kNumLanes == 32 or kNumLanes == 16 or kNumLanes == 8 or
-                     kNumLanes ==  4 or kNumLanes == 2  or kNumLanes == 1,
+    EP_STATIC_ASSERT(kNumLanesPerGroup == 32 or kNumLanesPerGroup == 16 or kNumLanesPerGroup == 8 or
+                     kNumLanesPerGroup ==  4 or kNumLanesPerGroup == 2  or kNumLanesPerGroup == 1,
                      "Invalid number of lanes");
+    // TODO: always use mask `0xffffffff`
     const uint32_t mask = __activemask();
-    if constexpr (kIsOuter) {
-        if constexpr (kNumLanes <=  1) value = op(value, __shfl_xor_sync(mask, value,  1));
-        if constexpr (kNumLanes <=  2) value = op(value, __shfl_xor_sync(mask, value,  2));
-        if constexpr (kNumLanes <=  4) value = op(value, __shfl_xor_sync(mask, value,  4));
-        if constexpr (kNumLanes <=  8) value = op(value, __shfl_xor_sync(mask, value,  8));
-        if constexpr (kNumLanes <= 16) value = op(value, __shfl_xor_sync(mask, value, 16));
+    if constexpr (kIntergroupReduce) {
+        if constexpr (kNumLanesPerGroup <=  1) value = op(value, __shfl_xor_sync(mask, value,  1));
+        if constexpr (kNumLanesPerGroup <=  2) value = op(value, __shfl_xor_sync(mask, value,  2));
+        if constexpr (kNumLanesPerGroup <=  4) value = op(value, __shfl_xor_sync(mask, value,  4));
+        if constexpr (kNumLanesPerGroup <=  8) value = op(value, __shfl_xor_sync(mask, value,  8));
+        if constexpr (kNumLanesPerGroup <= 16) value = op(value, __shfl_xor_sync(mask, value, 16));
+    } else {
+        if constexpr (kNumLanesPerGroup >= 32) value = op(value, __shfl_xor_sync(mask, value, 16));
+        if constexpr (kNumLanesPerGroup >= 16) value = op(value, __shfl_xor_sync(mask, value,  8));
+        if constexpr (kNumLanesPerGroup >=  8) value = op(value, __shfl_xor_sync(mask, value,  4));
+        if constexpr (kNumLanesPerGroup >=  4) value = op(value, __shfl_xor_sync(mask, value,  2));
+        if constexpr (kNumLanesPerGroup >=  2) value = op(value, __shfl_xor_sync(mask, value,  1));
     }
-    else {
-        if constexpr (kNumLanes >= 32) value = op(value, __shfl_xor_sync(mask, value, 16));
-        if constexpr (kNumLanes >= 16) value = op(value, __shfl_xor_sync(mask, value,  8));
-        if constexpr (kNumLanes >=  8) value = op(value, __shfl_xor_sync(mask, value,  4));
-        if constexpr (kNumLanes >=  4) value = op(value, __shfl_xor_sync(mask, value,  2));
-        if constexpr (kNumLanes >=  2) value = op(value, __shfl_xor_sync(mask, value,  1));
-    }
-
     return value;
 }
 
 // Convenience aliases
-template <uint32_t kNumLanes = 32, bool kIsOuter = false, typename T>
+template <int kNumLanesPerGroup = 32, bool kIntergroupReduce = false, typename T>
 __forceinline__ __device__ T warp_reduce_sum(T value) {
-    return warp_reduce<kNumLanes, kIsOuter, T>(value, ReduceSum<T>{});
+    return warp_reduce<kNumLanesPerGroup, kIntergroupReduce, T>(value, ReduceSum<T>{});
 }
 
-template <uint32_t kNumLanes = 32, bool kIsOuter = false, typename T>
+template <int kNumLanesPerGroup = 32, bool kIntergroupReduce = false, typename T>
 __forceinline__ __device__ T warp_reduce_max(T value) {
-    return warp_reduce<kNumLanes, kIsOuter, T>(value, ReduceMax<T>{});
+    return warp_reduce<kNumLanesPerGroup, kIntergroupReduce, T>(value, ReduceMax<T>{});
 }
 
-template <uint32_t kNumLanes = 32, bool kIsOuter = false, typename T>
+template <int kNumLanesPerGroup = 32, bool kIntergroupReduce = false, typename T>
 __forceinline__ __device__ T warp_reduce_min(T value) {
-    return warp_reduce<kNumLanes, kIsOuter, T>(value, ReduceMin<T>{});
+    return warp_reduce<kNumLanesPerGroup, kIntergroupReduce, T>(value, ReduceMin<T>{});
 }
 
-template <uint32_t kNumLanes = 32, bool kIsOuter = false, typename T>
+template <int kNumLanesPerGroup = 32, bool kIntergroupReduce = false, typename T>
 __forceinline__ __device__ T warp_reduce_and(T value) {
-    return warp_reduce<kNumLanes, kIsOuter, T>(value, ReduceAnd<T>{});
+    return warp_reduce<kNumLanesPerGroup, kIntergroupReduce, T>(value, ReduceAnd<T>{});
 }
 
-template <uint32_t kNumLanes = 32, bool kIsOuter = false, typename T>
+template <int kNumLanesPerGroup = 32, bool kIntergroupReduce = false, typename T>
 __forceinline__ __device__ T warp_reduce_or(T value) {
-    return warp_reduce<kNumLanes, kIsOuter, T>(value, ReduceOr<T>{});
+    return warp_reduce<kNumLanesPerGroup, kIntergroupReduce, T>(value, ReduceOr<T>{});
 }
 
 } // namespace deep_ep
