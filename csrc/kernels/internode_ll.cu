@@ -654,7 +654,7 @@ combine(void* combined_x,
             const auto buf_ptr = reinterpret_cast<int64_t>(rdma_send_x_vec_row);
             const auto dst_ptr = reinterpret_cast<uint64_t>(rdma_recv_x) + (global_expert_idx * num_max_dispatch_tokens_per_rank + src_idx) * num_bytes_per_slot;
             const auto dst_p2p_ptr = nvshmemi_get_p2p_ptr(dst_ptr, rank, dst_rank);
-            int send_bytes = hidden * sizeof(nv_bfloat16);
+            int num_send_bytes = hidden * sizeof(nv_bfloat16);
 
             if (not zero_copy or dst_p2p_ptr != 0) {
                 // Read from `cpy_src_int4_ptr` and copy into `cpy_dst_int4_ptr`
@@ -699,7 +699,7 @@ combine(void* combined_x,
 
                 // Store metadata (min/max values) for LogFMT
                 if constexpr (kUseLogFMT) {
-                    send_bytes = tma_offset_bytes;
+                    num_send_bytes = tma_offset_bytes;
                     if (elect_one_sync(lane_id))
                         tma_store_1d(meta_buffer, cpy_dst_int4_ptr, kNumMetaBytes);
                 }
@@ -712,7 +712,7 @@ combine(void* combined_x,
             // Issue RDMA
             // NOTES: for zero-copy mode, we assume the data is already in the send buffer
             if (dst_p2p_ptr == 0)
-                nvshmemi_ibgda_put_nbi_warp(dst_ptr, buf_ptr, send_bytes, dst_rank, local_expert_idx, lane_id, token_idx - offset);
+                nvshmemi_ibgda_put_nbi_warp(dst_ptr, buf_ptr, num_send_bytes, dst_rank, local_expert_idx, lane_id, token_idx - offset);
         }
 
         // Put the finishing flag
