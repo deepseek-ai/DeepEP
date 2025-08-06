@@ -499,7 +499,7 @@ __forceinline__ __device__ void logfmt_check_amaxmin(uint8_t* meta_buffer, float
         shared_cast_info[lane_id / kNumRecvUnrolls] = (cast_prefix_count << 1) | (cast_bit ? 1u : 0u);
 }
 
-template <int kHidden, int kNumRecvUnrolls>
+template <int kNumRecvUnrolls>
 __forceinline__ __device__ void logfmt_decode_and_accumulate(uint32_t* ld_buffer, float* accum,
                                                              const float& log_amax, const float& log_amin,
                                                              const bool& enable_cast, const float& weight) {
@@ -542,7 +542,7 @@ __forceinline__ __device__ void logfmt_decode_and_accumulate(uint32_t* ld_buffer
     }
 }
 
-template <bool kUseLogFMT, int kHidden, int kNumMaxTopk>
+template <bool kUseLogFMT, int kHidden, int kNumMaxTopk, int kNumMaxUnrolls>
 __global__ __launch_bounds__(1024, 1) void
 combine(void* combined_x,
         void* rdma_recv_x, int* rdma_recv_flag, void* rdma_send_x,
@@ -570,10 +570,13 @@ combine(void* combined_x,
     // Data type staffs
     constexpr int kNumElemsPerInt4 = sizeof(int4) / sizeof(nv_bfloat16);
     constexpr int64_t hidden_bf16_int4 = kHidden / kNumElemsPerInt4;
-    // Use different unroll factors for send & recv phase
-    constexpr int kNumSendUnrolls = 4;
+
+    // Use different unroll factors for send and recv phases
+    constexpr int kNumSendUnrolls = kHidden % (32 * 4 * sizeof(int4) / sizeof(nv_bfloat16)) == 0 ? 4 : 2;
     constexpr int kNumRecvUnrolls = 2;
     constexpr int hidden_bf16_int4_pad = align(static_cast<int>(hidden_bf16_int4), 32 * kNumSendUnrolls);
+    EP_STATIC_ASSERT(kHidden % (32 * 2 * sizeof(int4) / sizeof(nv_bfloat16)) == 0, "Invalid hidden");
+    EP_STATIC_ASSERT(kNumSendUnrolls <= kNumMaxUnrolls and kNumRecvUnrolls <= kNumMaxUnrolls, "Invalid unrolls");
     EP_STATIC_ASSERT(hidden_bf16_int4 % kNumSendUnrolls == 0, "Invalid hidden");
     EP_STATIC_ASSERT(kNumSendUnrolls >= kNumRecvUnrolls, "Invalid unroll factors");
 
@@ -841,13 +844,13 @@ combine(void* combined_x,
                         bool enable_cast = cast_info[stage_idx][decode_warp_idx] & 1;
                         int tma_offset = kNumLogFMTPerWarpBytes * cast_prefix_count + kNumBF16PerWarpBytes * (decode_warp_idx - cast_prefix_count);
                         int division_idx = decode_warp_idx * kNumRecvUnrolls * 2 + lane_id * kNumRecvUnrolls / 16;
-                        logfmt_decode_and_accumulate<kHidden, kNumRecvUnrolls>(
+                        logfmt_decode_and_accumulate<kNumRecvUnrolls>(
                             reinterpret_cast<uint32_t*>(tma_ld_buffer[stage_idx] + tma_offset + (enable_cast ? kNumLogFMTPerWarpBytes : kNumBF16PerWarpBytes) / 32 * lane_id),
                             combined_values, log_amax[stage_idx][division_idx], log_amin[stage_idx][division_idx], enable_cast, topk_weight
                         );
                     } else {
                         int tma_offset = kNumBF16PerWarpBytes * decode_warp_idx;
-                        logfmt_decode_and_accumulate<kHidden, kNumRecvUnrolls>(
+                        logfmt_decode_and_accumulate<kNumRecvUnrolls>(
                             reinterpret_cast<uint32_t*>(tma_ld_buffer[stage_idx] + tma_offset + kNumBF16PerWarpBytes / 32 * lane_id),
                             combined_values, 0, 0, false, topk_weight
                         );
@@ -902,10 +905,10 @@ void combine(void* combined_x,
     EP_HOST_ASSERT(not (zero_copy and use_logfmt));
 
     constexpr int kNumStages = 3;
-    constexpr int kNumUnrolls = 4;
+    constexpr int kNumMaxUnrolls = 4;
     constexpr int kMaxNumGroups = 2;
     const int num_meta_bytes = hidden / 128 * 4;
-    const int num_send_tma_bytes = 32 * sizeof(int4) * kNumUnrolls + 16;
+    const int num_send_tma_bytes = 32 * sizeof(int4) * kNumMaxUnrolls + 16;
     const int smem_send_size = num_warps * (kNumStages * num_send_tma_bytes + num_meta_bytes);
     const int num_recv_tma_bytes = 16 * 2 + hidden * 2;
     const int smem_recv_size = kMaxNumGroups * (kNumStages * num_recv_tma_bytes + hidden * 2 + kNumStages * num_meta_bytes * 3);
@@ -913,8 +916,8 @@ void combine(void* combined_x,
 
 #define COMBINE_LAUNCH_CASE(hidden) { \
 auto combine_func = use_logfmt ? \
-    combine<true, hidden, kNumMaxTopk> : \
-    combine<false, hidden, kNumMaxTopk>; \
+    combine<true, hidden, kNumMaxTopk, kNumMaxUnrolls> : \
+    combine<false, hidden, kNumMaxTopk, kNumMaxUnrolls>; \
 SET_SHARED_MEMORY_FOR_TMA(combine_func); \
 LAUNCH_KERNEL(&cfg, combine_func, \
               combined_x, \
