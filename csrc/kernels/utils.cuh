@@ -537,8 +537,7 @@ __forceinline__ __device__ T warp_reduce(T value, Op op) {
     EP_STATIC_ASSERT(kNumLanesPerGroup == 32 or kNumLanesPerGroup == 16 or kNumLanesPerGroup == 8 or
                      kNumLanesPerGroup ==  4 or kNumLanesPerGroup == 2  or kNumLanesPerGroup == 1,
                      "Invalid number of lanes");
-    // TODO: always use mask `0xffffffff`
-    const uint32_t mask = __activemask();
+    constexpr uint32_t mask = 0xffffffff;
     if constexpr (kIntergroupReduce) {
         if constexpr (kNumLanesPerGroup <=  1) value = op(value, __shfl_xor_sync(mask, value,  1));
         if constexpr (kNumLanesPerGroup <=  2) value = op(value, __shfl_xor_sync(mask, value,  2));

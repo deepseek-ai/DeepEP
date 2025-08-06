@@ -443,7 +443,7 @@ __forceinline__ __device__ int logfmt_encode(uint32_t* ld_buffer, uint32_t* st_b
         const auto fused_rounding = rounding - log_amin * step_inv;
 
         auto encode = [=](const float& x) {
-            return __float2uint_rd(x == -INFINITY ? 0.0f : x * step_inv + fused_rounding);
+            return __float2uint_rd(x < log_amax - kMinClip ? 0.0f : x * step_inv + fused_rounding);
         };
 
         // Pack every 256 bits into 160 bits
@@ -467,31 +467,36 @@ __forceinline__ __device__ int logfmt_encode(uint32_t* ld_buffer, uint32_t* st_b
     return 32 * (kNumSendUnrolls * sizeof(int4) * 8 * (enable_cast ? 10 : 16) / 16 / 8);
 }
 
-template <int kNumSendUnrolls, int kNumRecvUnrolls>
-__forceinline__ __device__ void logfmt_check_amaxmin(uint64_t amaxmin2, float2* shared_log_amax,
+template <int kNumLanes, int kNumSendUnrolls, int kNumRecvUnrolls>
+__forceinline__ __device__ void logfmt_check_amaxmin(uint8_t* meta_buffer, float2* shared_log_amax,
                                                      float2* shared_log_amin, int* shared_cast_info,
                                                      const int lane_id) {
     constexpr float kLogThreshold = 0;
     constexpr float kMinClip = 32; // `== log_2(2 ^ (2 ^ 5))`
 
-    // Calculate log amin/amax float
-    const auto& bf162_amaxmin = reinterpret_cast<__nv_bfloat162*>(&amaxmin2);
-    float log_amax[2], log_amin[2];
-    bool enable_cast[2];
-    #pragma unroll
-    for (int i = 0; i < 2; ++ i) { 
-        auto amax = static_cast<float>(bf162_amaxmin[i].x);
-        auto amin = static_cast<float>(bf162_amaxmin[i].y);
-        log_amax[i] = log2f_approx(amax);
-        log_amin[i] = amin == 0 ? log_amax[i] - kMinClip : fmaxf(log2f_approx(amin), log_amax[i] - kMinClip);
-        enable_cast[i] = (log_amax[i] < kLogThreshold and log_amin[i] < log_amax[i]);
+    bool enable_cast = true;
+    if (lane_id < kNumLanes) {
+        // Calculate log amin/amax float
+        auto amaxmin2 = reinterpret_cast<uint64_t*>(meta_buffer)[lane_id];
+        const auto& bf162_amaxmin = reinterpret_cast<__nv_bfloat162*>(&amaxmin2);
+        float log_amax[2], log_amin[2];
+        #pragma unroll
+        for (int i = 0; i < 2; ++ i) { 
+            auto amax = static_cast<float>(bf162_amaxmin[i].x);
+            auto amin = static_cast<float>(bf162_amaxmin[i].y);
+            log_amax[i] = log2f_approx(amax);
+            log_amin[i] = amin == 0 ? log_amax[i] - kMinClip : fmaxf(log2f_approx(amin), log_amax[i] - kMinClip);
+            enable_cast = enable_cast and log_amax[i] < kLogThreshold and log_amin[i] < log_amax[i];
+        }
+        shared_log_amax[lane_id] = make_float2(log_amax[0], log_amax[1]);
+        shared_log_amin[lane_id] = make_float2(log_amin[0], log_amin[1]);
     }
-    shared_log_amax[lane_id] = make_float2(log_amax[0], log_amax[1]);
-    shared_log_amin[lane_id] = make_float2(log_amin[0], log_amin[1]);
 
-    const auto& cast_bit = warp_reduce_and<kNumSendUnrolls>(enable_cast[0] and enable_cast[1]) ? 1u << (lane_id / kNumRecvUnrolls): 0u;
+    const auto& cast_bit = warp_reduce_and<kNumSendUnrolls>(enable_cast) ? 1u << (lane_id / kNumRecvUnrolls): 0u;
     const auto& cast_prefix_count = std::__popcount(warp_reduce_or<kNumRecvUnrolls, true>(cast_bit) & ((1u << (lane_id / kNumRecvUnrolls)) - 1));
-    shared_cast_info[lane_id / kNumRecvUnrolls] = (cast_prefix_count << 1) | (cast_bit ? 1u : 0u);
+
+    if (lane_id < kNumLanes)
+        shared_cast_info[lane_id / kNumRecvUnrolls] = (cast_prefix_count << 1) | (cast_bit ? 1u : 0u);
 }
 
 template <int kHidden, int kNumRecvUnrolls>
@@ -812,12 +817,8 @@ combine(void* combined_x,
 
                     mbarrier_wait(empty_barriers[stage_idx], tma_phase[stage_idx]);
                     auto buffer = static_cast<uint8_t*>(rdma_recv_x) + (reg_topk_idx * num_max_dispatch_tokens_per_rank + token_idx) * num_bytes_per_slot;
-                    auto uint64_buffer = reinterpret_cast<uint64_t*>(buffer);
-                    // TODO: use the full warp
-                    if (lane_id < kNumDivisions / 2) {
-                        logfmt_check_amaxmin<kNumSendUnrolls, kNumRecvUnrolls>(uint64_buffer[lane_id], reinterpret_cast<float2*>(log_amax[stage_idx]),
-                                                                               reinterpret_cast<float2*>(log_amin[stage_idx]), cast_info[stage_idx], lane_id);
-                    }
+                    logfmt_check_amaxmin<kNumDivisions / 2, kNumSendUnrolls, kNumRecvUnrolls>(buffer, reinterpret_cast<float2*>(log_amax[stage_idx]),
+                                                                                              reinterpret_cast<float2*>(log_amin[stage_idx]), cast_info[stage_idx], lane_id);
                     if (elect_one_sync(lane_id)) {
                         int cast_count = (cast_info[stage_idx][num_decode_warps - 1] >> 1) + (cast_info[stage_idx][num_decode_warps - 1] & 1);
                         int num_tma_bytes = cast_count * kNumLogFMTPerWarpBytes + (num_decode_warps - cast_count) * kNumBF16PerWarpBytes;
