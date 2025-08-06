@@ -1654,6 +1654,7 @@ combine(int4* combined_x, float* combined_topk_weights,
                     start_time = clock64();
                     while (cached_nvl_channel_tail_idx <= expected_head) {
                         cached_nvl_channel_tail_idx = ld_acquire_sys_global(nvl_channel_tail.buffer(lane_id));
+                        if (forwarder_nvl_head[warp_id][lane_id] < expected_head) forwarder_nvl_head[warp_id][lane_id] = expected_head;
 
                         // Timeout check
                         if (clock64() - start_time > NUM_TIMEOUT_CYCLES and lane_id < NUM_MAX_NVL_PEERS) {
