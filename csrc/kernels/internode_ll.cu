@@ -843,18 +843,21 @@ combine(void* combined_x,
             }
         } else {
             // Reduction warps
+            float topk_weights_by_lane;
             for (int token_idx = sm_id + num_sms * group_idx; token_idx < num_combined_tokens; token_idx += num_sms * num_groups) {
-                if (lane_id < num_topk)
+                if (lane_id < num_topk) {
                     topk_idx_by_lane = static_cast<int>(__ldg(topk_idx + token_idx * num_topk + lane_id));
+                    topk_weights_by_lane = __ldg(topk_weights + token_idx * num_topk + lane_id);
+                }
+                __syncwarp();
 
                 float combined_values[kNumElemsPerInt4 * kNumRecvUnrolls] = {0.0f};
                 for (int i = 0; i < num_topk; ++ i) {
                     if (__shfl_sync(0xffffffff, topk_idx_by_lane, i) < 0)
                         continue;
+                    const auto& topk_weight = __shfl_sync(0xffffffff, topk_weights_by_lane, i);
 
-                    float topk_weight = __ldg(topk_weights + token_idx * num_topk + i);
                     mbarrier_wait(full_barriers[stage_idx], tma_phase[stage_idx]);
-
                     if constexpr (kUseLogFMT) {
                         int cast_prefix_count = cast_info[stage_idx][decode_warp_idx] >> 1;
                         bool enable_cast = cast_info[stage_idx][decode_warp_idx] & 1;
