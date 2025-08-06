@@ -73,7 +73,7 @@ dispatch(void* packed_recv_x, void* packed_recv_x_scales,
 
     // Message package: hidden data, FP8 scales, index at source
     // NOTES: currently we have 3 reserved int fields for future use
-    using vec_t = typename std::conditional<kUseFP8, int2, int4>::type;
+    using vec_t = std::conditional_t<kUseFP8, int2, int4>;
     const size_t num_bytes_per_msg = sizeof(int4) + (kUseFP8 ? (kHidden + num_scales * sizeof(float)) : (kHidden * sizeof(nv_bfloat16)));
     const size_t num_int4_per_msg = num_bytes_per_msg / sizeof(int4);
     EP_DEVICE_ASSERT(num_bytes_per_msg % sizeof(int4) == 0);
