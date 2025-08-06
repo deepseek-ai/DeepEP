@@ -1210,8 +1210,8 @@ void combine_pcie(cudaDataType_t type,
                   int num_recv_tokens, int num_combined_tokens, int hidden, int num_topk,
                   void* rdma_buffer_ptr, int num_max_rdma_chunked_send_tokens, int num_max_rdma_chunked_recv_tokens,
                   int rank, int num_ranks, cudaStream_t stream, int num_channels) {
-    constexpr int kNumCombineSenderWarps = 1;
-    constexpr int kNumCombineReceiverWarps = 1;
+    constexpr int kNumCombineSenderWarps = 8;
+    constexpr int kNumCombineReceiverWarps = 8;
     constexpr int kNumCombineCoordinatorWarps = 1;
 
     EP_HOST_ASSERT(type == CUDA_R_16BF);
