@@ -813,12 +813,13 @@ combine(void* combined_x,
         }
         asm volatile("bar.sync %0, %1;" :: "r"(group_idx + 1), "r"((num_decode_warps + 1) * 32));
 
-        int stage_idx = 0;
-        for (int token_idx = sm_id + num_sms * group_idx; token_idx < num_combined_tokens; token_idx += num_sms * num_groups) {
-            EP_STATIC_ASSERT(kNumMaxTopk <= 32, "Invalid number of topks");
-            int topk_idx_by_lane = lane_id < num_topk ? static_cast<int>(__ldg(topk_idx + token_idx * num_topk + lane_id)) : -1;
-            if (decode_warp_idx == num_decode_warps) {
-                // TMA load warp
+        int stage_idx = 0, topk_idx_by_lane = 0;
+        EP_STATIC_ASSERT(kNumMaxTopk <= 32, "Invalid number of topks");
+        if (decode_warp_idx == num_decode_warps) {
+            // TMA load warp
+            for (int token_idx = sm_id + num_sms * group_idx; token_idx < num_combined_tokens; token_idx += num_sms * num_groups) {
+                if (lane_id < num_topk)
+                    topk_idx_by_lane = static_cast<int>(__ldg(topk_idx + token_idx * num_topk + lane_id));
                 for (int i = 0; i < num_topk; ++ i) {
                     int topk_idx_reg = __shfl_sync(0xffffffff, topk_idx_by_lane, i);
                     if (topk_idx_reg < 0)
@@ -839,8 +840,13 @@ combine(void* combined_x,
                     __syncwarp();
                     stage_idx = (stage_idx + 1) % kNumStages;
                 }
-            } else if (decode_warp_idx < num_decode_warps) {
-                // Reduction warps
+            }
+        } else {
+            // Reduction warps
+            for (int token_idx = sm_id + num_sms * group_idx; token_idx < num_combined_tokens; token_idx += num_sms * num_groups) {
+                if (lane_id < num_topk)
+                    topk_idx_by_lane = static_cast<int>(__ldg(topk_idx + token_idx * num_topk + lane_id));
+
                 float combined_values[kNumElemsPerInt4 * kNumRecvUnrolls] = {0.0f};
                 for (int i = 0; i < num_topk; ++ i) {
                     if (__shfl_sync(0xffffffff, topk_idx_by_lane, i) < 0)
@@ -883,6 +889,8 @@ combine(void* combined_x,
                 __syncwarp();
             }
         }
+
+        // Flush all stores
         tma_store_wait<0>();
     }
 }
