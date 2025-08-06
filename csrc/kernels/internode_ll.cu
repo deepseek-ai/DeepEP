@@ -383,7 +383,7 @@ LAUNCH_KERNEL(&cfg, dispatch_func, \
 }
 
 template <int kNumSendUnrolls>
-__forceinline__ __device__ int logfmt_encode(uint32_t* ld_buffer, uint32_t* st_buffer, nv_bfloat162 *shared_amaxmin) {
+__forceinline__ __device__ int logfmt_encode(void* buffer, nv_bfloat162 *shared_amaxmin, const int& lane_id) {
     constexpr int kNumElemsPerInt4 = sizeof(int4) / sizeof(nv_bfloat16);
     constexpr float kLogThreshold = 0;
     constexpr float kMinClip = 32; // `== log_2(2 ^ (2 ^ 5))`
@@ -392,6 +392,10 @@ __forceinline__ __device__ int logfmt_encode(uint32_t* ld_buffer, uint32_t* st_b
 
     int4 int4_values[kNumSendUnrolls];
     const auto& uint32_values = reinterpret_cast<uint32_t*>(int4_values);
+
+    // Calculate lane offset
+    const auto& ld_buffer = reinterpret_cast<uint32_t*>(static_cast<uint8_t*>(buffer) + lane_id * (kNumSendUnrolls * sizeof(int4)));
+    const auto& st_buffer = reinterpret_cast<uint32_t*>(static_cast<uint8_t*>(buffer) + lane_id * (kNumSendUnrolls * sizeof(int4) * 10 / 16));
 
     // Local log amax
     float log_abs[kNumElemsPerInt4 * kNumSendUnrolls];
@@ -685,12 +689,9 @@ combine(void* combined_x,
 
                     // Wait the current TMA arrival
                     mbarrier_wait(tma_mbarrier[stage_idx], tma_phase[stage_idx]);
-                    const auto& ld_buffer = reinterpret_cast<uint32_t*>(tma_buffer[stage_idx] + lane_id * kNumSendUnrolls);
-
                     if constexpr (kUseLogFMT) {
                         // Cast if possible
-                        auto st_buffer = reinterpret_cast<uint32_t*>(tma_buffer[stage_idx]) + lane_id * kNumSendUnrolls * kNumElemsPerInt4 * 10 / 32;
-                        int num_tma_bytes = logfmt_encode<kNumSendUnrolls>(ld_buffer, st_buffer, meta_buffer + i * kNumElemsPerInt4 / 128);
+                        int num_tma_bytes = logfmt_encode<kNumSendUnrolls>(tma_buffer[stage_idx], meta_buffer + i * kNumElemsPerInt4 / 128, lane_id);
                         if (elect_one_sync(lane_id))
                             tma_store_1d(tma_buffer[stage_idx], reinterpret_cast<uint8_t*>(cpy_dst_int4_ptr) + tma_offset_bytes, num_tma_bytes);
                         tma_offset_bytes += num_tma_bytes;
