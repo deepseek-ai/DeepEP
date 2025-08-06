@@ -107,6 +107,7 @@ dispatch(void* packed_recv_x, void* packed_recv_x_scales,
             thread_id == 0 ? (*rdma_x_src_idx = token_idx) : 0;
 
             // FP8 cast
+            EP_STATIC_ASSERT(hidden_bf16_int4 % 32 == 0, "Must use the full warp to reduce");
             #pragma unroll
             for (int i = thread_id; i < hidden_bf16_int4; i += num_threads) {
                 // Read
@@ -428,7 +429,9 @@ __forceinline__ __device__ int logfmt_encode(void* buffer, nv_bfloat162 *shared_
     bf16_amin = warp_reduce_min<kNumLanesToReduce>(bf16_amin);
 
     // Write min/max into the shared memory
-    *shared_amaxmin = __nv_bfloat162(bf16_amax, bf16_amin);
+    if (shared_amaxmin != nullptr)
+        *shared_amaxmin = __nv_bfloat162(bf16_amax, bf16_amin);
+    __syncwarp();
 
     // Calculate log amin/amax float
     const auto& amax = static_cast<float>(bf16_amax);
@@ -462,11 +465,13 @@ __forceinline__ __device__ int logfmt_encode(void* buffer, nv_bfloat162 *shared_
                 st_buffer[i * 5 + k] = (concat[k] >> (k * 5)) | (concat[k + 1] << (27 - k * 5));
             st_buffer[i * 5 + 4] |= (local_signs >> 16 * i) << 16;
         }
+        tma_store_fence();
+        __syncwarp();
     }
-    tma_store_fence();
-    __syncwarp();
-    // TODO: make `enable_cast` as a template?
-    return 32 * (kNumSendUnrolls * sizeof(int4) * 8 * (enable_cast ? 10 : 16) / 16 / 8);
+
+    // Return TMA copy bytes
+    return enable_cast ? (32 * (kNumSendUnrolls * sizeof(int4) * 8 * 10 / 16 / 8)):
+                         (32 * (kNumSendUnrolls * sizeof(int4)));
 }
 
 template <int kNumLanes, int kNumSendUnrolls, int kNumRecvUnrolls>
@@ -691,7 +696,12 @@ combine(void* combined_x,
                     mbarrier_wait(tma_mbarrier[stage_idx], tma_phase[stage_idx]);
                     if constexpr (kUseLogFMT) {
                         // Cast if possible
-                        int num_tma_bytes = logfmt_encode<kNumSendUnrolls>(tma_buffer[stage_idx], meta_buffer + i * kNumElemsPerInt4 / 128, lane_id);
+                        constexpr int kNumInt4PerDivision = 128 / kNumElemsPerInt4;
+                        int num_tma_bytes = logfmt_encode<kNumSendUnrolls>(
+                            tma_buffer[stage_idx],
+                            // NOTES: only the leader lane will write the result
+                            (i % kNumInt4PerDivision == 0) ? meta_buffer + i / kNumInt4PerDivision : nullptr,
+                            lane_id);
                         if (elect_one_sync(lane_id))
                             tma_store_1d(tma_buffer[stage_idx], reinterpret_cast<uint8_t*>(cpy_dst_int4_ptr) + tma_offset_bytes, num_tma_bytes);
                         tma_offset_bytes += num_tma_bytes;
