@@ -306,7 +306,7 @@ def test_main_decoupled(num_sms: int, num_tokens: int, num_max_dispatch_tokens_p
     # noinspection PyShadowingNames
     def test_dispatch_hook(x, config, handle, return_recv_hook):
         _, _, _, _, _, _, hook = \
-            buffer.dispatch(x=x, config=config, handle=handle, async_finish=False, return_recv_hook=return_recv_hook, num_max_dispatch_tokens_per_rank=num_max_dispatch_tokens_per_rank)
+            buffer.dispatch(x=x, config=config, handle=handle, async_finish=False, return_recv_hook=return_recv_hook)
         large_gemm_with_hook(hook) if return_recv_hook else None
         torch.cuda.synchronize()
 
@@ -318,7 +318,7 @@ def test_main_decoupled(num_sms: int, num_tokens: int, num_max_dispatch_tokens_p
 
     def test_dispatch_combine_hook(x, config, handle, return_recv_hook):
         recv_x, _, _, _, _, _, hook = \
-            buffer.dispatch(x=x, config=config, handle=handle, async_finish=False, return_recv_hook=return_recv_hook, num_max_dispatch_tokens_per_rank=num_max_dispatch_tokens_per_rank)
+            buffer.dispatch(x=x, config=config, handle=handle, async_finish=False, return_recv_hook=return_recv_hook)
         large_gemm_with_hook(hook) if return_recv_hook else None
 
         recv_x = per_token_cast_back(*recv_x) if isinstance(recv_x, tuple) else recv_x
@@ -471,7 +471,7 @@ def test_main_decoupled(num_sms: int, num_tokens: int, num_max_dispatch_tokens_p
     # Tune combine performance
     best_time, best_results = 1e10, None
     for nvl_chunk_size in range(1, 13, 1):
-        for rdma_chunk_size in range(8, 33, 4):
+        for rdma_chunk_size in range(12, 33, 4):
             config = deep_ep.Config(num_sms, nvl_chunk_size, nvl_buffer_size, rdma_chunk_size, rdma_buffer_size)
             tune_args = {'x': recv_x, 'handle': handle_native, 'config': config}
             avg_t = bench(lambda: buffer.combine(**tune_args))[0]
