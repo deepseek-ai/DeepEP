@@ -710,6 +710,7 @@ combine(void* combined_x,
                         if (elect_one_sync(lane_id))
                             tma_store_1d(tma_buffer[stage_idx], cpy_dst_int4_ptr + i, get_num_tma_bytes(i));
                     }
+                    __syncwarp();
                 }
 
                 // Store metadata (min/max values) for LogFMT
