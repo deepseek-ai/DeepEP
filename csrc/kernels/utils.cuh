@@ -327,8 +327,10 @@ __device__ __forceinline__ void mbarrier_inval(uint64_t* mbar_ptr) {
     asm volatile("mbarrier.inval.shared::cta.b64 [%0];" :: "r"(mbar_int_ptr));
 }
 
-__device__ __forceinline__ void mbarrier_wait(uint64_t* mbar_ptr, uint32_t& phase) {
+template <bool kWithMultiStages = false>
+__device__ __forceinline__ void mbarrier_wait(uint64_t* mbar_ptr, uint32_t& phase, int stage_idx = 0) {
     auto mbar_int_ptr = static_cast<uint32_t>(__cvta_generic_to_shared(mbar_ptr));
+    const auto& wait = kWithMultiStages ? (phase >> stage_idx) & 1 : phase;
     asm volatile("{\n\t"
                  ".reg .pred       P1; \n\t"
                  "LAB_WAIT: \n\t"
@@ -336,8 +338,8 @@ __device__ __forceinline__ void mbarrier_wait(uint64_t* mbar_ptr, uint32_t& phas
                  "@P1 bra DONE; \n\t"
                  "bra     LAB_WAIT; \n\t"
                  "DONE: \n\t"
-                 "}" :: "r"(mbar_int_ptr), "r"(phase), "r"(0x989680));
-    phase ^= 1;
+                 "}" :: "r"(mbar_int_ptr), "r"(wait), "r"(0x989680));
+    phase ^= kWithMultiStages ? (1 << stage_idx) : 1;
 }
 
 __device__ __forceinline__ void mbarrier_arrive_and_expect_tx(uint64_t* mbar_ptr, int num_bytes) {

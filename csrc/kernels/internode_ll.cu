@@ -634,7 +634,7 @@ combine(void* combined_x,
         EP_STATIC_ASSERT(kNumStages == 3 and kNumPrefetch == 1, "Invalid stages");
 
         auto smem_ptr = smem_buffer + warp_id * (kNumStages * (kNumTMABufferBytes + 16) + kNumMetaBytes);
-        uint32_t tma_phase[kNumStages] = {0};
+        uint32_t tma_phase = 0;
         auto tma_buffers   = PatternVisitor([=](const int& i) { return reinterpret_cast<int4*>(smem_ptr + i * (kNumTMABufferBytes + 16)); });
         auto full_barriers = PatternVisitor([=](const int& i) { return reinterpret_cast<uint64_t*>(smem_ptr + i * (kNumTMABufferBytes + 16) + kNumTMABufferBytes); });
         auto meta_buffers  = kUseLogFMT ? reinterpret_cast<nv_bfloat162*>(smem_ptr + kNumStages * (kNumTMABufferBytes + 16)) : nullptr;
@@ -694,7 +694,7 @@ combine(void* combined_x,
                     __syncwarp();
 
                     // Wait the current TMA arrival
-                    mbarrier_wait(full_barriers[stage_idx], tma_phase[stage_idx]);
+                    mbarrier_wait<true>(full_barriers[stage_idx], tma_phase, stage_idx);
                     if constexpr (kUseLogFMT) {
                         // Cast if possible
                         constexpr int kNumInt4PerDivision = 128 / kNumElemsPerInt4;
