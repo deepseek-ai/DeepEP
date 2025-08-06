@@ -417,20 +417,18 @@ __forceinline__ __device__ int logfmt_encode(void* buffer, nv_bfloat162 *shared_
 
     // Reduce per 128 channels
     // TODO: figure out how hardware do 2-byte min/max
-    auto bf16_amax = __hmax(bf162_amax.x, bf162_amax.y);
-    auto bf16_amin = __hmin(bf162_amin.x, bf162_amin.y);
+    auto amax = std::max(static_cast<float>(bf162_amax.x), static_cast<float>(bf162_amax.y));
+    auto amin = std::min(static_cast<float>(bf162_amin.x), static_cast<float>(bf162_amin.y));
     constexpr static int kNumLanesToReduce = 128 * sizeof(nv_bfloat16) / (kNumSendUnrolls * sizeof(int4));
-    bf16_amax = warp_reduce_max<kNumLanesToReduce>(bf16_amax);
-    bf16_amin = warp_reduce_min<kNumLanesToReduce>(bf16_amin);
+    amax = warp_reduce_max<kNumLanesToReduce>(amax);
+    amin = warp_reduce_min<kNumLanesToReduce>(amin);
 
     // Write min/max into the shared memory
     if (shared_amaxmin != nullptr)
-        *shared_amaxmin = __nv_bfloat162(bf16_amax, bf16_amin);
+        *shared_amaxmin = __nv_bfloat162(amax, amin);
     __syncwarp();
 
     // Calculate log amin/amax float
-    const auto& amax = static_cast<float>(bf16_amax);
-    const auto& amin = static_cast<float>(bf16_amin);
     const auto& log_amax = log2f_approx(amax);
     const auto& log_amin = amin == 0 ? log_amax - kMinClip : fmaxf(log2f_approx(amin), log_amax - kMinClip);
     const bool& enable_cast = warp_reduce_and<kNumLanesToReduce, true>(log_amax < kLogThreshold and log_amin < log_amax);
