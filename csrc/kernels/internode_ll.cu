@@ -499,11 +499,11 @@ __forceinline__ __device__ void logfmt_check_amaxmin(uint8_t* meta_buffer, float
         shared_log_amin[lane_id] = make_float2(log_amin[0], log_amin[1]);
     }
 
-    const auto& cast_bit = warp_reduce_and<kNumSendUnrolls>(enable_cast) ? 1u << (lane_id / kNumRecvUnrolls): 0u;
-    const auto& cast_prefix_count = std::__popcount(warp_reduce_or<kNumRecvUnrolls, true>(cast_bit) & ((1u << (lane_id / kNumRecvUnrolls)) - 1));
+    const auto& casted = warp_reduce_and<kNumSendUnrolls>(enable_cast) ? 1u << (lane_id / kNumRecvUnrolls): 0u;
+    const auto& num_casted_prefix = std::__popcount(warp_reduce_or<kNumRecvUnrolls, true>(casted) & ((1u << (lane_id / kNumRecvUnrolls)) - 1));
 
-    if (lane_id < kNumLanes)
-        shared_cast_info[lane_id / kNumRecvUnrolls] = (cast_prefix_count << 1) | (cast_bit ? 1u : 0u);
+    if (lane_id < kNumLanes and lane_id % kNumRecvUnrolls == 0)
+        shared_cast_info[lane_id / kNumRecvUnrolls] = (num_casted_prefix << 1) | (casted ? 1u : 0u);
     __syncwarp();
 }
 
@@ -516,9 +516,9 @@ __forceinline__ __device__ void decode_and_accumulate(uint32_t* ld_buffer, float
         constexpr int kNumValues = 1 << (kNumBits - 1);
 
         const auto& step = (log_amax - log_amin) / static_cast<float>(kNumValues - 2);
-        auto decode = [=](const uint32_t &encoded, const uint32_t &op) {
+        auto decode = [=](const uint32_t &encoded, const uint32_t &sign) {
             const auto decoded = encoded == 0 ? .0f : exp2f_approx((encoded - 1) * step + log_amin);
-            return op ? -decoded : decoded;
+            return sign ? -decoded : decoded;
         };
 
         EP_STATIC_ASSERT(kNumRecvUnrolls == 2 or kNumRecvUnrolls == 4, "kNumRecvUnrolls == 2 or 4 only");
