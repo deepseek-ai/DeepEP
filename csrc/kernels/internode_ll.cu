@@ -815,16 +815,17 @@ combine(void* combined_x,
 
         int stage_idx = 0;
         for (int token_idx = sm_id + num_sms * group_idx; token_idx < num_combined_tokens; token_idx += num_sms * num_groups) {
+            EP_STATIC_ASSERT(kNumMaxTopk <= 32, "Invalid number of topks");
+            int topk_idx_by_lane = lane_id < num_topk ? static_cast<int>(__ldg(topk_idx + token_idx * num_topk + lane_id)) : -1;
             if (decode_warp_idx == num_decode_warps) {
                 // TMA load warp
-                #pragma unroll
                 for (int i = 0; i < num_topk; ++ i) {
-                    int reg_topk_idx = static_cast<int>(__ldg(topk_idx + token_idx * num_topk + i));
-                    if (reg_topk_idx < 0)
+                    int topk_idx_reg = __shfl_sync(0xffffffff, topk_idx_by_lane, i);
+                    if (topk_idx_reg < 0)
                         continue;
 
                     mbarrier_wait(empty_barriers[stage_idx], tma_phase[stage_idx]);
-                    auto buffer = static_cast<uint8_t*>(rdma_recv_x) + (reg_topk_idx * num_max_dispatch_tokens_per_rank + token_idx) * num_bytes_per_slot;
+                    auto buffer = static_cast<uint8_t*>(rdma_recv_x) + (topk_idx_reg * num_max_dispatch_tokens_per_rank + token_idx) * num_bytes_per_slot;
                     if constexpr (kUseLogFMT) {
                         logfmt_check_amaxmin<kNumDivisions / 2, kNumSendUnrolls, kNumRecvUnrolls>(buffer, reinterpret_cast<float2*>(log_amax[stage_idx]),
                                                                                                   reinterpret_cast<float2*>(log_amin[stage_idx]), cast_info[stage_idx], lane_id);
@@ -841,9 +842,8 @@ combine(void* combined_x,
             } else if (decode_warp_idx < num_decode_warps) {
                 // Reduction warps
                 float combined_values[kNumElemsPerInt4 * kNumRecvUnrolls] = {0.0f};
-                #pragma unroll
                 for (int i = 0; i < num_topk; ++ i) {
-                    if (__ldg(topk_idx + token_idx * num_topk + i) < 0)
+                    if (__shfl_sync(0xffffffff, topk_idx_by_lane, i) < 0)
                         continue;
 
                     float topk_weight = __ldg(topk_weights + token_idx * num_topk + i);
