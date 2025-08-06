@@ -504,11 +504,10 @@ __forceinline__ __device__ void logfmt_decode_and_accumulate(uint32_t* ld_buffer
                                                              const float& log_amax, const float& log_amin,
                                                              const bool& enable_cast, const float& weight) {
     if (enable_cast) {
-        constexpr int kNumElemsPerInt4 = sizeof(int4) / sizeof(nv_bfloat16);
         constexpr int kNumBits = 10;
         constexpr int kNumValues = 1 << (kNumBits - 1);
 
-        const auto step = (log_amax - log_amin) / static_cast<float>(kNumValues - 2);
+        const auto& step = (log_amax - log_amin) / static_cast<float>(kNumValues - 2);
         auto decode = [=](const uint32_t &encoded, const uint32_t &op) {
             const auto decoded = encoded == 0 ? .0f : exp2f_approx((encoded - 1) * step + log_amin);
             return op ? -decoded : decoded;
@@ -813,9 +812,10 @@ combine(void* combined_x,
 
                     mbarrier_wait(empty_barriers[stage_idx], tma_phase[stage_idx]);
                     auto buffer = static_cast<uint8_t*>(rdma_recv_x) + (reg_topk_idx * num_max_dispatch_tokens_per_rank + token_idx) * num_bytes_per_slot;
-                    if constexpr (kUseLogFMT)
+                    if constexpr (kUseLogFMT) {
                         logfmt_check_amaxmin<kNumDivisions / 2, kNumSendUnrolls, kNumRecvUnrolls>(buffer, reinterpret_cast<float2*>(log_amax[stage_idx]),
                                                                                                   reinterpret_cast<float2*>(log_amin[stage_idx]), cast_info[stage_idx], lane_id);
+                    }
                     if (elect_one_sync(lane_id)) {
                         int cast_count = kUseLogFMT ? (cast_info[stage_idx][num_decode_warps - 1] >> 1) + (cast_info[stage_idx][num_decode_warps - 1] & 1) : 0;
                         int num_tma_bytes = cast_count * kNumLogFMTPerWarpBytes + (num_decode_warps - cast_count) * kNumBF16PerWarpBytes;
@@ -845,8 +845,7 @@ combine(void* combined_x,
                             reinterpret_cast<uint32_t*>(tma_ld_buffer[stage_idx] + tma_offset + (enable_cast ? kNumLogFMTPerWarpBytes : kNumBF16PerWarpBytes) / 32 * lane_id),
                             combined_values, log_amax[stage_idx][division_idx], log_amin[stage_idx][division_idx], enable_cast, topk_weight
                         );
-                    }
-                    else {
+                    } else {
                         int tma_offset = kNumBF16PerWarpBytes * decode_warp_idx;
                         logfmt_decode_and_accumulate<kHidden, kNumRecvUnrolls>(
                             reinterpret_cast<uint32_t*>(tma_ld_buffer[stage_idx] + tma_offset + kNumBF16PerWarpBytes / 32 * lane_id),
@@ -868,6 +867,7 @@ combine(void* combined_x,
                 tma_store_fence();
                 if (elect_one_sync(lane_id))
                     tma_store_1d(tma_st_buffer[decode_warp_idx], static_cast<int4*>(combined_x) + token_idx * hidden_bf16_int4 + decode_warp_idx * kNumRecvUnrolls * 32, kNumBF16PerWarpBytes);
+                __syncwarp();
             }
         }
         tma_store_wait<0>();
