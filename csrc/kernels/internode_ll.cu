@@ -454,7 +454,7 @@ __forceinline__ __device__ int logfmt_encode(void* buffer, nv_bfloat162 *shared_
         // Pack every 256 bits into 160 bits
         EP_STATIC_ASSERT(kNumSendUnrolls == 2 or kNumSendUnrolls == 4, "kNumSendUnrolls == 2 or 4 only");
         uint32_t concat[6];
-        #pragma unroll 1
+        #pragma unroll
         for (int i = 0; i < kNumSendUnrolls / 2; ++ i) {
             #pragma unroll
             for (int k = 0; k < 5; ++ k)
