@@ -453,17 +453,19 @@ __forceinline__ __device__ int logfmt_encode(void* buffer, nv_bfloat162 *shared_
 
         // Pack every 256 bits into 160 bits
         EP_STATIC_ASSERT(kNumSendUnrolls == 2 or kNumSendUnrolls == 4, "kNumSendUnrolls == 2 or 4 only");
-        #pragma unroll
+        uint32_t concat[6];
+        #pragma unroll 1
         for (int i = 0; i < kNumSendUnrolls / 2; ++ i) {
-            uint32_t concat[6];
             #pragma unroll
             for (int k = 0; k < 5; ++ k)
                 concat[k] = encode(log_abs[i * 16 + k * 3]) | (encode(log_abs[i * 16 + k * 3 + 1]) << 9) | (encode(log_abs[i * 16 + k * 3 + 2]) << 18);
             concat[5] = encode(log_abs[i * 16 + 15]);
             #pragma unroll
-            for (int k = 0; k < 5; ++ k)
+            for (int k = 0; k < 4; ++ k)
                 st_buffer[i * 5 + k] = (concat[k] >> (k * 5)) | (concat[k + 1] << (27 - k * 5));
-            st_buffer[i * 5 + 4] |= (local_signs >> 16 * i) << 16;
+            concat[4] = (concat[4] >> (4 * 5)) | (concat[5] << (27 - 4 * 5));
+            concat[4] |= (i == 0) ? (local_signs << 16) : (local_signs & 0xffff0000u);
+            st_buffer[i * 5 + 4] = concat[4];
         }
         tma_store_fence();
         __syncwarp();
@@ -563,11 +565,11 @@ combine(void* combined_x,
         int num_experts, int rank, int num_ranks,
         int num_warp_groups, int num_warps_per_group,
         int phases, bool zero_copy) {
-    const auto sm_id = static_cast<int>(blockIdx.x);
-    const auto num_sms = static_cast<int>(gridDim.x);
+    const auto sm_id = __shfl_sync(0xffffffff, static_cast<int>(blockIdx.x), 0);
+    const auto num_sms = __shfl_sync(0xffffffff, static_cast<int>(gridDim.x), 0);
     const auto thread_id = static_cast<int>(threadIdx.x);
-    const auto num_threads = static_cast<int>(blockDim.x);
-    const auto warp_id = thread_id / 32, lane_id = get_lane_id();
+    const auto num_threads = __shfl_sync(0xffffffff, static_cast<int>(blockDim.x), 0);
+    const auto warp_id = __shfl_sync(0xffffffff, thread_id / 32, 0), lane_id = get_lane_id();
     const auto num_local_experts = num_experts / num_ranks;
     const auto warp_group_id = warp_id / num_warps_per_group;
     const auto sub_warp_id = warp_id % num_warps_per_group;
