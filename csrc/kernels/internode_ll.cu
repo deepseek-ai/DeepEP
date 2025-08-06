@@ -694,6 +694,7 @@ combine(void* combined_x,
                     __syncwarp();
 
                     // Wait the current TMA arrival
+                    EP_STATIC_ASSERT(kNumStages < 32, "Too many stages");
                     mbarrier_wait<true>(full_barriers[stage_idx], tma_phase, stage_idx);
                     if constexpr (kUseLogFMT) {
                         // Cast if possible
@@ -802,10 +803,10 @@ combine(void* combined_x,
         auto log_amin_buffers  = PatternVisitor([=](const int& i) { return reinterpret_cast<float*>(smem_group_ptr + kNumStages * kNumDivisionBytes + i * kNumDivisionBytes); });
         auto cast_info_buffers = PatternVisitor([=](const int& i) { return reinterpret_cast<int*>  (smem_group_ptr + kNumStages * kNumDivisionBytes * 2 + i * kNumDivisionBytes); });
 
-        uint32_t tma_phase[kNumStages];
-        #pragma unroll
-        for (int i = 0; i < kNumStages; ++ i)
-            tma_phase[i] = decode_warp_idx == num_decode_warps;
+        uint32_t tma_phase = 0;
+        EP_STATIC_ASSERT(kNumStages < 32, "Too many stages");
+        if (decode_warp_idx == num_decode_warps)
+            tma_phase = (1 << kNumStages) - 1;
 
         // Initialize m-barriers
         if (decode_warp_idx == num_decode_warps and lane_id < kNumStages) {
@@ -826,7 +827,7 @@ combine(void* combined_x,
                     if (topk_idx_reg < 0)
                         continue;
 
-                    mbarrier_wait(empty_barriers[stage_idx], tma_phase[stage_idx]);
+                    mbarrier_wait<true>(empty_barriers[stage_idx], tma_phase, stage_idx);
                     auto buffer = static_cast<uint8_t*>(rdma_recv_x) + (topk_idx_reg * num_max_dispatch_tokens_per_rank + token_idx) * num_bytes_per_slot;
                     if constexpr (kUseLogFMT) {
                         logfmt_check_amaxmin<kNumDivisions / 2, kNumSendUnrolls, kNumRecvUnrolls>(
@@ -863,7 +864,7 @@ combine(void* combined_x,
                         continue;
                     const auto& topk_weight = __shfl_sync(0xffffffff, topk_weights_by_lane, i);
 
-                    mbarrier_wait(full_barriers[stage_idx], tma_phase[stage_idx]);
+                    mbarrier_wait<true>(full_barriers[stage_idx], tma_phase, stage_idx);
                     if constexpr (kUseLogFMT) {
                         const auto& info = cast_info_buffers[stage_idx][decode_warp_idx];
                         bool enable_cast = info & 1;
