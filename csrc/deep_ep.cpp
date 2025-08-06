@@ -1636,12 +1636,12 @@ Buffer::pcie_combine(const torch::Tensor& recv_x, const std::optional<torch::Ten
     const void* bias_1_ptr = nullptr;
     if (bias_0.has_value()) {
         EP_HOST_ASSERT(bias_0->dim() == 2 && bias_0->is_contiguous());
-        EP_HOST_ASSERT(bias_0->size(0) == num_recv_tokens and bias_0->size(1) == hidden);
+        EP_HOST_ASSERT(bias_0->size(0) == num_combined_tokens and bias_0->size(1) == hidden);
         bias_0_ptr = bias_0->data_ptr();
     }
     if (bias_1.has_value()) {
         EP_HOST_ASSERT(bias_1->dim() == 2 && bias_1->is_contiguous());
-        EP_HOST_ASSERT(bias_1->size(0) == num_recv_tokens and bias_1->size(1) == hidden);
+        EP_HOST_ASSERT(bias_1->size(0) == num_combined_tokens and bias_1->size(1) == hidden);
         bias_1_ptr = bias_1->data_ptr();
     }
 
