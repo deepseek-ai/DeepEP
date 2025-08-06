@@ -507,9 +507,9 @@ __forceinline__ __device__ void logfmt_check_amaxmin(uint8_t* meta_buffer, float
 }
 
 template <int kNumRecvUnrolls>
-__forceinline__ __device__ void logfmt_decode_and_accumulate(uint32_t* ld_buffer, float* accum,
-                                                             const float& log_amax, const float& log_amin,
-                                                             const bool& enable_cast, const float& weight) {
+__forceinline__ __device__ void decode_and_accumulate(uint32_t* ld_buffer, float* accum,
+                                                      const float& log_amax, const float& log_amin,
+                                                      const bool& enable_cast, const float& weight) {
     if (enable_cast) {
         constexpr int kNumBits = 10;
         constexpr int kNumValues = 1 << (kNumBits - 1);
@@ -859,17 +859,18 @@ combine(void* combined_x,
 
                     mbarrier_wait(full_barriers[stage_idx], tma_phase[stage_idx]);
                     if constexpr (kUseLogFMT) {
-                        int cast_prefix_count = cast_info[stage_idx][decode_warp_idx] >> 1;
-                        bool enable_cast = cast_info[stage_idx][decode_warp_idx] & 1;
+                        const auto& info = cast_info[stage_idx][decode_warp_idx];
+                        bool enable_cast = info & 1;
+                        int cast_prefix_count = info >> 1;
                         int tma_offset = kNumLogFMTPerWarpBytes * cast_prefix_count + kNumBF16PerWarpBytes * (decode_warp_idx - cast_prefix_count);
-                        int division_idx = decode_warp_idx * kNumRecvUnrolls * 2 + lane_id * kNumRecvUnrolls / 16;
-                        logfmt_decode_and_accumulate<kNumRecvUnrolls>(
+                        int division_idx = decode_warp_idx * (kNumRecvUnrolls * 2) + lane_id * kNumRecvUnrolls / 16;
+                        decode_and_accumulate<kNumRecvUnrolls>(
                             reinterpret_cast<uint32_t*>(tma_ld_buffer[stage_idx] + tma_offset + (enable_cast ? kNumLogFMTPerWarpBytes : kNumBF16PerWarpBytes) / 32 * lane_id),
                             combined_values, log_amax[stage_idx][division_idx], log_amin[stage_idx][division_idx], enable_cast, topk_weight
                         );
                     } else {
                         int tma_offset = kNumBF16PerWarpBytes * decode_warp_idx;
-                        logfmt_decode_and_accumulate<kNumRecvUnrolls>(
+                        decode_and_accumulate<kNumRecvUnrolls>(
                             reinterpret_cast<uint32_t*>(tma_ld_buffer[stage_idx] + tma_offset + kNumBF16PerWarpBytes / 32 * lane_id),
                             combined_values, 0, 0, false, topk_weight
                         );
