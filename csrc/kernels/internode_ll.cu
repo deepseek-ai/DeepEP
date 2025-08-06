@@ -393,31 +393,26 @@ __forceinline__ __device__ int logfmt_encode(void* buffer, nv_bfloat162 *shared_
 
     int4 int4_values[kNumSendUnrolls];
     const auto& uint32_values = reinterpret_cast<uint32_t*>(int4_values);
+    const auto& bf162_values = reinterpret_cast<nv_bfloat162*>(int4_values);
 
     // Calculate lane offset
     const auto& ld_buffer = reinterpret_cast<uint32_t*>(static_cast<uint8_t*>(buffer) + lane_id * (kNumSendUnrolls * sizeof(int4)));
     const auto& st_buffer = reinterpret_cast<uint32_t*>(static_cast<uint8_t*>(buffer) + lane_id * (kNumSendUnrolls * sizeof(int4) * 10 / 16));
 
     // Local log amax
-    float log_abs[kNumElemsPerInt4 * kNumSendUnrolls];
     auto bf162_amax = __nv_bfloat162(CUDART_ZERO_BF16, CUDART_ZERO_BF16);
     auto bf162_amin = __nv_bfloat162(CUDART_INF_BF16, CUDART_INF_BF16);
     uint32_t local_signs = 0;
     #pragma unroll
-    for (int k = 0; k < kNumSendUnrolls * sizeof(int4) / sizeof(nv_bfloat162); ++ k) {
+    for (int k = 0; k < kNumSendUnrolls * kNumElemsPerInt4 / 2; ++ k) {
         // TODO: eliminate bank conflicts
         uint32_values[k] = ld_buffer[k];
-        auto uint32_abs = uint32_values[k] & 0x7fff7fff;
         local_signs |= ((uint32_values[k] >> 15) & 1) << (k * 2);
         local_signs |= ((uint32_values[k] >> 31) & 1) << (k * 2 + 1);
+        uint32_values[k] &= 0x7fff7fff;
 
-        const auto& bf162_abs = *reinterpret_cast<__nv_bfloat162*>(&uint32_abs);
-        bf162_amax = __hmax2(bf162_amax, bf162_abs);
-        bf162_amin = __hmin2(bf162_amin, bf162_abs);
-
-        const auto& float2_abs = __bfloat1622float2(bf162_abs);
-        log_abs[k * 2 + 0] = log2f_approx(float2_abs.x);
-        log_abs[k * 2 + 1] = log2f_approx(float2_abs.y);
+        bf162_amax = __hmax2(bf162_amax, bf162_values[k]);
+        bf162_amin = __hmin2(bf162_amin, bf162_values[k]);
     }
 
     // Reduce per 128 channels
@@ -454,12 +449,19 @@ __forceinline__ __device__ int logfmt_encode(void* buffer, nv_bfloat162 *shared_
         // Pack every 256 bits into 160 bits
         EP_STATIC_ASSERT(kNumSendUnrolls == 2 or kNumSendUnrolls == 4, "kNumSendUnrolls == 2 or 4 only");
         uint32_t concat[6];
-        #pragma unroll
+        float log_abs[kNumElemsPerInt4 * 2];
+        #pragma unroll 1
         for (int i = 0; i < kNumSendUnrolls / 2; ++ i) {
             #pragma unroll
+            for (int k = 0; k < kNumElemsPerInt4; ++ k) {
+                const auto& [x, y] =  __bfloat1622float2(bf162_values[i * kNumElemsPerInt4 + k]);
+                log_abs[k * 2 + 0] = log2f_approx(x);
+                log_abs[k * 2 + 1] = log2f_approx(y);
+            }
+            #pragma unroll
             for (int k = 0; k < 5; ++ k)
-                concat[k] = encode(log_abs[i * 16 + k * 3]) | (encode(log_abs[i * 16 + k * 3 + 1]) << 9) | (encode(log_abs[i * 16 + k * 3 + 2]) << 18);
-            concat[5] = encode(log_abs[i * 16 + 15]);
+                concat[k] = encode(log_abs[k * 3]) | (encode(log_abs[k * 3 + 1]) << 9) | (encode(log_abs[k * 3 + 2]) << 18);
+            concat[5] = encode(log_abs[15]);
             #pragma unroll
             for (int k = 0; k < 4; ++ k)
                 st_buffer[i * 5 + k] = (concat[k] >> (k * 5)) | (concat[k + 1] << (27 - k * 5));
