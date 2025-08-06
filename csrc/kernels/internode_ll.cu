@@ -383,7 +383,7 @@ LAUNCH_KERNEL(&cfg, dispatch_func, \
 }
 
 template <int kNumSendUnrolls>
-__forceinline__ __device__ int logfmt_encode(uint32_t* ld_buffer, uint32_t* st_buffer, uint32_t *shared_amaxmin) {
+__forceinline__ __device__ int logfmt_encode(uint32_t* ld_buffer, uint32_t* st_buffer, nv_bfloat162 *shared_amaxmin) {
     constexpr int kNumElemsPerInt4 = sizeof(int4) / sizeof(nv_bfloat16);
     constexpr float kLogThreshold = 0;
     constexpr float kMinClip = 32; // `== log_2(2 ^ (2 ^ 5))`
@@ -392,7 +392,6 @@ __forceinline__ __device__ int logfmt_encode(uint32_t* ld_buffer, uint32_t* st_b
 
     int4 int4_values[kNumSendUnrolls];
     const auto& uint32_values = reinterpret_cast<uint32_t*>(int4_values);
-    EP_STATIC_ASSERT(sizeof(uint32_t) == sizeof(nv_bfloat162), "Invalid length");
 
     // Local log amax
     float log_abs[kNumElemsPerInt4 * kNumSendUnrolls];
@@ -425,8 +424,7 @@ __forceinline__ __device__ int logfmt_encode(uint32_t* ld_buffer, uint32_t* st_b
     bf16_amin = warp_reduce_min<kNumLanesToReduce>(bf16_amin);
 
     // Write min/max into the shared memory
-    auto bf162_amaxmin = __nv_bfloat162(bf16_amax, bf16_amin);
-    *shared_amaxmin = *reinterpret_cast<uint32_t*>(&bf162_amaxmin);
+    *shared_amaxmin = __nv_bfloat162(bf16_amax, bf16_amin);
 
     // Calculate log amin/amax float
     const auto& amax = static_cast<float>(bf16_amax);
@@ -583,7 +581,7 @@ combine(void* combined_x,
     // Message package
     EP_STATIC_ASSERT(kHidden % 128 == 0, "Invalid hidden");
     constexpr int kNumDivisions = kHidden / 128;
-    constexpr int kNumMetaBytes = kNumDivisions * sizeof(uint32_t);
+    constexpr int kNumMetaBytes = kNumDivisions * sizeof(nv_bfloat162);
     constexpr size_t num_bytes_per_slot = kHidden * sizeof(nv_bfloat16) + kNumMetaBytes;
     EP_STATIC_ASSERT(num_bytes_per_slot % sizeof(int4) == 0, "Invalid vectorization");
 
@@ -629,7 +627,7 @@ combine(void* combined_x,
         uint32_t tma_phase[kNumStages] = {0};
         auto tma_buffer   = PatternVisitor([=](const int& i) { return reinterpret_cast<int4*>(smem_ptr + i * (kNumTMABufferBytes + 16)); });
         auto tma_mbarrier = PatternVisitor([=](const int& i) { return reinterpret_cast<uint64_t*>(smem_ptr + i * (kNumTMABufferBytes + 16) + kNumTMABufferBytes); });
-        auto meta_buffer  = kUseLogFMT ? reinterpret_cast<uint32_t*>(smem_ptr + kNumStages * (kNumTMABufferBytes + 16)) : nullptr;
+        auto meta_buffer  = kUseLogFMT ? reinterpret_cast<nv_bfloat162*>(smem_ptr + kNumStages * (kNumTMABufferBytes + 16)) : nullptr;
         EP_STATIC_ASSERT(kNumSendUnrolls * kNumStages <= 12, "TMA buffer size exceed limit");
 
         // Initialize m-barriers
