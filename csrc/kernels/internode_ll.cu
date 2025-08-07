@@ -430,7 +430,7 @@ __forceinline__ __device__ int logfmt_encode(void* buffer, nv_bfloat162 *shared_
 
     // Calculate log amin/amax float
     const auto& log_amax = log2f_approx(amax);
-    const auto& log_amin = amin == 0 ? log_amax - kMinClip : fmaxf(log2f_approx(amin), log_amax - kMinClip);
+    const auto& log_amin = fmaxf(log2f_approx(amin), log_amax - kMinClip);
     const bool& enable_cast = warp_reduce_and<kNumLanesToReduce, true>(log_amax < kLogThreshold and log_amin < log_amax);
 
     // Case into LogFMT-10 if satisfied
@@ -441,7 +441,7 @@ __forceinline__ __device__ int logfmt_encode(void* buffer, nv_bfloat162 *shared_
         const auto fused_rounding = rounding - log_amin * step_inv;
 
         auto encode = [=](const float& x) {
-            return __float2uint_rd(x < log_amax - kMinClip ? 0.0f : x * step_inv + fused_rounding);
+            return __float2uint_rd(fmaxf(x * step_inv + fused_rounding, 0));
         };
 
         // Pack every 256 bits into 160 bits
