@@ -61,6 +61,10 @@ def test_main(num_tokens: int, hidden: int, num_experts: int, num_topk: int,
                                                             async_finish=not return_recv_hook, return_recv_hook=return_recv_hook)
                             hook() if return_recv_hook else event.current_stream_wait()
                         packed_recv_x = (packed_recv_x[0], packed_recv_x[1].contiguous()) if dispatch_use_fp8 else packed_recv_x
+                        if dispatch_use_fp8 and packed_recv_x[1][0][0].dim() == 1: # fix hidden == 512
+                            t=packed_recv_x[1]
+                            t=torch.tensor(t.detach().view(-1), dtype=t.dtype, device=t.device).reshape(t.shape).contiguous()
+                            packed_recv_x = (packed_recv_x[0], t)
                         simulated_gemm_x = per_token_cast_back(packed_recv_x[0].view(-1, hidden), packed_recv_x[1].view(-1, hidden // 128)).view(packed_recv_x[0].shape) \
                             if dispatch_use_fp8 else packed_recv_x.clone()
                         all_topk_idx = torch.empty((num_ranks, num_tokens, num_topk), dtype=topk_idx.dtype, device='cuda')
@@ -77,6 +81,8 @@ def test_main(num_tokens: int, hidden: int, num_experts: int, num_topk: int,
                             assert num_valid_tokens == (recv_layout_range & int_mask).sum().item(), f'{num_valid_tokens} != {recv_layout_range & int_mask}.sum().item()'
                             assert num_valid_tokens == (all_topk_idx == expert_id).sum().item(), f'{num_valid_tokens} != {(all_topk_idx == expert_id).sum().item()}'
 
+                            if num_valid_tokens == 0: # from recv 0 from a src_rank
+                                continue
                             # Check received data
                             if current_x is x:
                                 recv_x = recv_x[:num_valid_tokens]
@@ -87,11 +93,11 @@ def test_main(num_tokens: int, hidden: int, num_experts: int, num_topk: int,
                                     assert calc_diff(recv_x[:, -1], recv_src_info.view(-1)) < 0.007
                                 else:
                                     assert (recv_x[:, -128:] - recv_src_info.view(-1, 1) % num_tokens).sum().item() == 0
-                                for j in range(num_ranks):
+                                for j in range(num_ranks): # loop each src rank
                                     begin_idx, count = (recv_layout_range[j] >> 32).item(), (recv_layout_range[j] & int_mask).item()
                                     if not round_scale:
                                         assert (recv_x_amin == j - rank_offset).sum().item() == (all_topk_idx[j] == expert_id).sum().item()
-                                    assert (recv_x[begin_idx:begin_idx + count][:-128] - j).sum().item() == 0
+                                    assert (recv_x[begin_idx:begin_idx + count][:, -128:] - recv_src_info[begin_idx:begin_idx + count].reshape(count,1)).sum().item() == 0
                             if dispatch_use_fp8:
                                 hash_value ^= hash_tensor(packed_recv_x[0][i, :num_valid_tokens])
                                 hash_value ^= hash_tensor(packed_recv_x[1][i, :num_valid_tokens])
