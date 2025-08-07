@@ -440,32 +440,22 @@ __forceinline__ __device__ int logfmt_encode(void* buffer, nv_bfloat162 *shared_
         const auto rounding = 2.0f - log2f_approx((1.0f + exp2f_approx(step)) * 0.5f) * step_inv;
         const auto fused_rounding = rounding - log_amin * step_inv;
 
-        auto encode = [=](const float& x) {
-            return __float2uint_rd(fmaxf(x * step_inv + fused_rounding, 0));
-        };
-
         // Pack every 256 bits into 160 bits
         EP_STATIC_ASSERT(kNumSendUnrolls == 2 or kNumSendUnrolls == 4, "kNumSendUnrolls == 2 or 4 only");
-        uint32_t concat[6];
-        float log_abs[kNumElemsPerInt4 * 2];
+        uint32_t encoded[kNumElemsPerInt4 * 2];
         #pragma unroll 1
         for (int i = 0; i < kNumSendUnrolls / 2; ++ i) {
             #pragma unroll
             for (int k = 0; k < kNumElemsPerInt4; ++ k) {
-                const auto& [x, y] =  __bfloat1622float2(bf162_values[i * kNumElemsPerInt4 + k]);
-                log_abs[k * 2 + 0] = log2f_approx(x);
-                log_abs[k * 2 + 1] = log2f_approx(y);
+                const auto& [x, y] = __bfloat1622float2(bf162_values[i * kNumElemsPerInt4 + k]);
+                encoded[k * 2 + 0] = __float2uint_rd(fmaxf(log2f_approx(x) * step_inv + fused_rounding, 0));
+                encoded[k * 2 + 1] = __float2uint_rd(fmaxf(log2f_approx(y) * step_inv + fused_rounding, 0));
             }
-            #pragma unroll
-            for (int k = 0; k < 5; ++ k)
-                concat[k] = encode(log_abs[k * 3]) | (encode(log_abs[k * 3 + 1]) << 9) | (encode(log_abs[k * 3 + 2]) << 18);
-            concat[5] = encode(log_abs[15]);
-            #pragma unroll
-            for (int k = 0; k < 4; ++ k)
-                st_buffer[i * 5 + k] = (concat[k] >> (k * 5)) | (concat[k + 1] << (27 - k * 5));
-            concat[4] = (concat[4] >> (4 * 5)) | (concat[5] << (27 - 4 * 5));
-            concat[4] |= (i == 0) ? (local_signs << 16) : (local_signs & 0xffff0000u);
-            st_buffer[i * 5 + 4] = concat[4];
+            st_buffer[i * 5 + 0] = (encoded[ 0] >> 0) | (encoded[ 1] << 9) | (encoded[ 2] << 18) | (encoded[ 3] << 27);
+            st_buffer[i * 5 + 1] = (encoded[ 3] >> 5) | (encoded[ 4] << 4) | (encoded[ 5] << 13) | (encoded[ 6] << 22) | (encoded[7]  << 31);
+            st_buffer[i * 5 + 2] = (encoded[ 7] >> 1) | (encoded[ 8] << 8) | (encoded[ 9] << 17) | (encoded[10] << 26);
+            st_buffer[i * 5 + 3] = (encoded[10] >> 6) | (encoded[11] << 3) | (encoded[12] << 12) | (encoded[13] << 21) | (encoded[14] << 30);
+            st_buffer[i * 5 + 4] = (encoded[14] >> 2) | (encoded[15] << 7) | ((i == 0) ? (local_signs << 16) : (local_signs & 0xffff0000u));
         }
         tma_store_fence();
         __syncwarp();
