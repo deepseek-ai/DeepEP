@@ -77,6 +77,8 @@ def test_main(num_tokens: int, hidden: int, num_experts: int, num_topk: int,
                             assert num_valid_tokens == (recv_layout_range & int_mask).sum().item(), f'{num_valid_tokens} != {recv_layout_range & int_mask}.sum().item()'
                             assert num_valid_tokens == (all_topk_idx == expert_id).sum().item(), f'{num_valid_tokens} != {(all_topk_idx == expert_id).sum().item()}'
 
+                            if num_valid_tokens == 0:
+                                continue
                             # Check received data
                             if current_x is x:
                                 recv_x = recv_x[:num_valid_tokens]
