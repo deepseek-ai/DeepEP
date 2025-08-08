@@ -1647,14 +1647,15 @@ combine(int4* combined_x, float* combined_topk_weights,
                     // Read expected head
                     EP_STATIC_ASSERT(kNumRDMARanks <= 32, "Invalid number of RDMA peers");
                     int expected_head = -1;
-                    if (lane_id < NUM_MAX_NVL_PEERS)
+                    if (lane_id < NUM_MAX_NVL_PEERS) {
                         expected_head = ld_nc_global(combined_nvl_head + token_idx * NUM_MAX_NVL_PEERS + lane_id);
+                        expected_head < 0 ? (forwarder_nvl_head[warp_id][lane_id] = -expected_head - 1) : (forwarder_nvl_head[warp_id][lane_id] = expected_head);
+                    }
 
                     // Wait lanes to be ready
                     start_time = clock64();
                     while (cached_nvl_channel_tail_idx <= expected_head) {
                         cached_nvl_channel_tail_idx = ld_acquire_sys_global(nvl_channel_tail.buffer(lane_id));
-                        if (forwarder_nvl_head[warp_id][lane_id] < expected_head) forwarder_nvl_head[warp_id][lane_id] = expected_head;
 
                         // Timeout check
                         if (clock64() - start_time > NUM_TIMEOUT_CYCLES and lane_id < NUM_MAX_NVL_PEERS) {
@@ -1852,6 +1853,7 @@ void combine(cudaDataType_t type,
     EP_HOST_ASSERT(num_forwarder_warps > NUM_MAX_NVL_PEERS and num_forwarder_warps % num_rdma_ranks == 0);
     EP_HOST_ASSERT(num_max_nvl_chunked_recv_tokens % num_rdma_ranks == 0);
     EP_HOST_ASSERT(num_max_nvl_chunked_recv_tokens / num_rdma_ranks > std::max(num_max_rdma_chunked_send_tokens, num_max_nvl_chunked_send_tokens));
+    EP_HOST_ASSERT(num_max_nvl_chunked_recv_tokens / num_rdma_ranks - num_warps_per_forwarder >= num_max_nvl_chunked_send_tokens);
     EP_HOST_ASSERT(num_max_rdma_chunked_send_tokens >= num_warps_per_forwarder);
     EP_HOST_ASSERT(type == CUDA_R_16BF);
 
