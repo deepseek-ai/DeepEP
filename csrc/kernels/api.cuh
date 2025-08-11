@@ -171,8 +171,6 @@ void combine(void* combined_x,
 // Internode kernels
 namespace pcie {
 
-int get_source_meta_bytes();
-
 void cached_notify_pcie(int hidden_int4, int num_scales, int num_topk_idx, int num_topk_weights,
                    int num_ranks, int num_channels, int num_combined_tokens, int* combined_rdma_head,
                    void* rdma_buffer_ptr, int num_max_rdma_chunked_recv_tokens,
@@ -189,7 +187,7 @@ void notify_dispatch_pcie(const int* num_tokens_per_rank, int* moe_recv_counter_
                      cudaStream_t stream, int64_t num_rdma_bytes,
                      bool low_latency_mode);
 
-void dispatch_pcie(void* recv_x, float* recv_x_scales, int64_t* recv_topk_idx, float* recv_topk_weights, void* recv_src_meta,
+void dispatch_pcie(void* recv_x, float* recv_x_scales, int64_t* recv_topk_idx, float* recv_topk_weights, 
                    const void* x, const float* x_scales, const int64_t* topk_idx, const float* topk_weights,
                    const int* rdma_channel_prefix_matrix,
                    const int* recv_rdma_rank_prefix_sum,

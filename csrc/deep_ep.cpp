@@ -1340,7 +1340,7 @@ bool is_sm90_compiled() {
 }
 
 std::tuple<torch::Tensor, std::optional<torch::Tensor>, std::optional<torch::Tensor>, 
-std::optional<torch::Tensor>,std::vector<int>, torch::Tensor, std::optional<torch::Tensor>, torch::Tensor, std::optional<torch::Tensor>, std::optional<torch::Tensor>, std::optional<EventHandle>>
+std::optional<torch::Tensor>,std::vector<int>, torch::Tensor, std::optional<torch::Tensor>, torch::Tensor, std::optional<torch::Tensor>, std::optional<EventHandle>>
 Buffer::pcie_dispatch(const torch::Tensor& x, const std::optional<torch::Tensor>& x_scales,
                       const std::optional<torch::Tensor>& topk_idx, const std::optional<torch::Tensor>& topk_weights,
                       const std::optional<torch::Tensor>& num_tokens_per_rank,
@@ -1353,7 +1353,7 @@ Buffer::pcie_dispatch(const torch::Tensor& x, const std::optional<torch::Tensor>
 
     const int num_channels = config.num_sms / 2;
     EP_HOST_ASSERT(config.num_sms % 2 == 0);
-    // For now, we only support 1-32 ranks
+    // For now, we only support 2-32 ranks
     EP_HOST_ASSERT(0 < num_ranks and num_ranks <= 32);
 
     bool cached_mode = cached_rdma_channel_prefix_matrix.has_value();
@@ -1505,14 +1505,11 @@ Buffer::pcie_dispatch(const torch::Tensor& x, const std::optional<torch::Tensor>
     // Allocate new tensors
     auto recv_x = torch::empty({num_recv_tokens, hidden}, x.options());
     auto recv_topk_idx = std::optional<torch::Tensor>(), recv_topk_weights = std::optional<torch::Tensor>(), recv_x_scales = std::optional<torch::Tensor>();
-    auto recv_src_meta = std::optional<torch::Tensor>();
     auto recv_rdma_channel_prefix_matrix = std::optional<torch::Tensor>();
     auto send_rdma_head = std::optional<torch::Tensor>();
     
     // not cache mode
     if (not cached_mode) {
-        // TODO: check recv_src_meta usage
-        recv_src_meta = torch::empty({num_recv_tokens, pcie::get_source_meta_bytes()}, dtype(torch::kByte).device(torch::kCUDA));
         recv_rdma_channel_prefix_matrix = torch::empty({num_ranks, num_channels}, dtype(torch::kInt32).device(torch::kCUDA));
         send_rdma_head = torch::empty({num_tokens, num_ranks}, dtype(torch::kInt32).device(torch::kCUDA));
     }
@@ -1538,7 +1535,6 @@ Buffer::pcie_dispatch(const torch::Tensor& x, const std::optional<torch::Tensor>
     // Launch Kernel
     pcie::dispatch_pcie(
         recv_x.data_ptr(), recv_x_scales_ptr, recv_topk_idx_ptr, recv_topk_weights_ptr, 
-        cached_mode ? nullptr : recv_src_meta->data_ptr(),
         x.data_ptr(), x_scales_ptr, topk_idx_ptr, topk_weights_ptr,
         rdma_channel_prefix_matrix.data_ptr<int>(),
         recv_rdma_rank_prefix_sum.data_ptr<int>(),
@@ -1563,7 +1559,7 @@ Buffer::pcie_dispatch(const torch::Tensor& x, const std::optional<torch::Tensor>
         for (auto& to: {x_scales, topk_idx, topk_weights,
                         num_tokens_per_rank, num_tokens_per_expert,
                         recv_topk_idx, recv_topk_weights, recv_x_scales,
-                        recv_rdma_channel_prefix_matrix, send_rdma_head,recv_src_meta}) {
+                        recv_rdma_channel_prefix_matrix, send_rdma_head}) {
             to.has_value() ? to->record_stream(comm_stream) : void();
             if (allocate_on_comm_stream)
                 to.has_value() ? to->record_stream(compute_stream) : void();
@@ -1578,7 +1574,7 @@ Buffer::pcie_dispatch(const torch::Tensor& x, const std::optional<torch::Tensor>
     return {recv_x, recv_x_scales, recv_topk_idx, recv_topk_weights, num_recv_tokens_per_expert_list,
             rdma_channel_prefix_matrix, 
             recv_rdma_channel_prefix_matrix, recv_rdma_rank_prefix_sum,
-            recv_src_meta, send_rdma_head, event};
+            send_rdma_head, event};
 #else
     EP_HOST_ASSERT(false and "NVSHMEM is disabled during compilation");
     return {};

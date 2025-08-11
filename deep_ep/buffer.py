@@ -463,9 +463,8 @@ class Buffer:
             assert topk_idx is None and topk_weights is None
             is_token_in_rank, \
                 rdma_channel_prefix_matrix, recv_rdma_channel_prefix_matrix, recv_rdma_rank_prefix_sum, \
-                recv_src_meta, send_rdma_head = handle
-            num_recv_tokens = recv_src_meta.size(0)
-            recv_x, recv_x_scales, _, _, _, _, _, _, _, _, event = self.runtime.pcie_dispatch(
+                num_recv_tokens, send_rdma_head = handle
+            recv_x, recv_x_scales, _, _, _, _, _, _, _, event = self.runtime.pcie_dispatch(
                 x, x_scales, topk_idx, topk_weights,
                 None, is_token_in_rank, None,
                 num_recv_tokens,
@@ -476,14 +475,14 @@ class Buffer:
             assert num_tokens_per_rank is not None and is_token_in_rank is not None and num_tokens_per_expert is not None
             recv_x, recv_x_scales, recv_topk_idx, recv_topk_weights, num_recv_tokens_per_expert_list, \
                 rdma_channel_prefix_matrix, recv_rdma_channel_prefix_matrix, recv_rdma_rank_prefix_sum, \
-                recv_src_meta, send_rdma_head, event = self.runtime.pcie_dispatch(
+                send_rdma_head, event = self.runtime.pcie_dispatch(
                 x, x_scales, topk_idx, topk_weights,
                 num_tokens_per_rank, is_token_in_rank, num_tokens_per_expert,
                 0, None, None,
                 expert_alignment, config, getattr(previous_event, 'event', None), async_finish, allocate_on_comm_stream)
             handle = (is_token_in_rank, 
                     rdma_channel_prefix_matrix, recv_rdma_channel_prefix_matrix, recv_rdma_rank_prefix_sum, 
-                    recv_src_meta, send_rdma_head)
+                    recv_x.shape[0], send_rdma_head)
             return (recv_x, recv_x_scales) if x_scales is not None else recv_x, recv_topk_idx, recv_topk_weights, num_recv_tokens_per_expert_list, handle, EventOverlap(event)
 
     # noinspection PyTypeChecker
@@ -504,7 +503,7 @@ class Buffer:
         is_combined_token_in_rank, \
             _, \
             recv_gbl_channel_prefix_matrix, recv_rank_prefix_sum, \
-            src_meta, send_rdma_head = handle
+            _, send_rdma_head = handle
         bias_0, bias_1 = Buffer._unpack_bias(bias)
 
         num_combined_tokens = is_combined_token_in_rank.shape[0]
