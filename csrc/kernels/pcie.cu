@@ -9,35 +9,6 @@ namespace deep_ep {
 
 namespace pcie {
 
-//TODO: Remove this struct after combine done
-struct SourceMeta {
-    int src_rdma_rank, is_token_in_nvl_rank_bits;
-
-    EP_STATIC_ASSERT(NUM_MAX_NVL_PEERS == 8, "Invalid number of maximum NVL peers");
-
-    __forceinline__ SourceMeta() = default;
-
-    // TODO: faster encoding
-    __device__ __forceinline__ SourceMeta(int rdma_rank, const bool* is_token_in_nvl_ranks) {
-        src_rdma_rank = rdma_rank;
-        is_token_in_nvl_rank_bits = is_token_in_nvl_ranks[0];
-        #pragma unroll
-        for (int i = 1; i < NUM_MAX_NVL_PEERS; ++ i)
-            is_token_in_nvl_rank_bits |= is_token_in_nvl_ranks[i] << i;
-    }
-
-    __device__ __forceinline__ bool is_token_in_nvl_rank(int nvl_rank) const {
-        return (is_token_in_nvl_rank_bits >> nvl_rank) & 1;
-    }
-};
-
-EP_STATIC_ASSERT(sizeof(SourceMeta) % sizeof(int) == 0, "Invalid size of `SourceMeta`");
-
-
-int get_source_meta_bytes() {
-    return sizeof(SourceMeta);
-}
-
 __host__ __device__ __forceinline__
 int get_num_bytes_per_pcie_token(int hidden_int4, int num_scales, int num_topk_idx, int num_topk_weights) {
     return static_cast<int>(align(hidden_int4 * sizeof(int4) + num_scales * sizeof(float) + num_topk_idx * sizeof(int) + num_topk_weights * sizeof(float), sizeof(int4)));
@@ -296,7 +267,7 @@ template <int kNumRanks,bool kCachedMode,
           int kNumDispatchRDMASenderWarps,
           int kNumDispatchReceiverWarps, int kNumDispatchReceiverCoordinatorWarps,int kNumTopkRanks = get_num_topk_rdma_ranks(kNumRanks)>
 __global__ void __launch_bounds__(((kNumDispatchRDMASenderWarps + 1) * 32), 1)
-dispatch_pcie(int4* recv_x, float* recv_x_scales, int64_t* recv_topk_idx, float* recv_topk_weights, SourceMeta* recv_src_meta,
+dispatch_pcie(int4* recv_x, float* recv_x_scales, int64_t* recv_topk_idx, float* recv_topk_weights, 
          const int4* x, const float* x_scales, const int64_t* topk_idx, const float* topk_weights,
 	     const int* rdma_channel_prefix_matrix,//[num_ranks,num_channels] for sender
          const int* recv_rdma_rank_prefix_sum, // notify dispatch传入的，逻辑上[num_ranks]
@@ -448,17 +419,12 @@ dispatch_pcie(int4* recv_x, float* recv_x_scales, int64_t* recv_topk_idx, float*
 
             // Broadcast tails
 
-            // SourceMeta src_meta;
             int num_topk_ranks = 0;
             void* dst_send_buffers[kNumTopkRanks];
             #pragma unroll
             for (int i = 0, slot_idx; i < kNumRanks; ++ i) if ((slot_idx = __shfl_sync(0xffffffff, rdma_tail_idx, i)) >= 0) {
                 slot_idx = slot_idx % num_max_rdma_chunked_recv_tokens;
                 auto recv_is_token_in_rank_uint64 = broadcast(is_token_in_rank_uint64, i);
-                // auto recv_is_token_in_rank_values = reinterpret_cast<const bool*>(&recv_is_token_in_rank_uint64);
-                // if (lane_id == num_topk_ranks)
-                //     //TODO，SourceMeta不再需要判定nvl的相关信息
-                //     src_meta = SourceMeta(rank, recv_is_token_in_rank_values);
                 dst_send_buffers[num_topk_ranks ++] = reinterpret_cast<uint8_t*>(broadcast(send_buffer, i)) + slot_idx * num_bytes_per_pcie_token;
             }
             EP_DEVICE_ASSERT(num_topk_ranks <= kNumTopkRanks);
@@ -474,12 +440,6 @@ dispatch_pcie(int4* recv_x, float* recv_x_scales, int64_t* recv_topk_idx, float*
             for (int i = 0; i < num_topk_ranks; ++ i){
                 dst_send_buffers[i] = reinterpret_cast<int4*>(dst_send_buffers[i]) + hidden_int4;
             }
-            // // Copy source metadata into symmetric send buffer
-            // if (lane_id < num_topk_ranks)
-            //     st_na_global(reinterpret_cast<SourceMeta*>(dst_send_buffers[lane_id]), src_meta);
-            // #pragma unroll
-            // for (int i = 0; i < num_topk_ranks; ++ i)
-            //     dst_send_buffers[i] = reinterpret_cast<SourceMeta*>(dst_send_buffers[i]) + 1;
 
             // Copy `x_scales` into symmetric send buffer
             #pragma unroll
@@ -774,8 +734,7 @@ dispatch_pcie(int4* recv_x, float* recv_x_scales, int64_t* recv_topk_idx, float*
     }
 }
 
-// TODO: remove this recv_src_meta
-void dispatch_pcie(void* recv_x, float* recv_x_scales, int64_t* recv_topk_idx, float* recv_topk_weights, void* recv_src_meta,
+void dispatch_pcie(void* recv_x, float* recv_x_scales, int64_t* recv_topk_idx, float* recv_topk_weights, 
                    const void* x, const float* x_scales, const int64_t* topk_idx, const float* topk_weights,
                    const int* rdma_channel_prefix_matrix,
                    const int* recv_rdma_rank_prefix_sum,
@@ -795,7 +754,7 @@ void dispatch_pcie(void* recv_x, float* recv_x_scales, int64_t* recv_topk_idx, f
         pcie::dispatch_pcie<num_ranks, true, kNumDispatchRDMASenderWarps, kNumDispatchReceiverWarps, kNumDispatchReceiverCoordinatorWarps> : \
         pcie::dispatch_pcie<num_ranks, false, kNumDispatchRDMASenderWarps, kNumDispatchReceiverWarps, kNumDispatchReceiverCoordinatorWarps>; \
     LAUNCH_KERNEL(&cfg, dispatch_func, \
-                  reinterpret_cast<int4*>(recv_x), recv_x_scales, recv_topk_idx, recv_topk_weights, reinterpret_cast<pcie::SourceMeta*>(recv_src_meta), \
+                  reinterpret_cast<int4*>(recv_x), recv_x_scales, recv_topk_idx, recv_topk_weights,  \
                   reinterpret_cast<const int4*>(x), x_scales, topk_idx, topk_weights, \
                   rdma_channel_prefix_matrix, \
                   recv_rdma_rank_prefix_sum, recv_rdma_channel_prefix_matrix, send_rdma_head, \
