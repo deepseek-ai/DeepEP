@@ -309,7 +309,20 @@ For two-micro-batch overlapping, you can refer to the following figure. With our
 
 #### Easier potential overall design
 
-The current DeepEP implementation uses queues for communication buffers which save memory but introduce complexity and potential deadlocks. If you're implementing your own version based on DeepEP, consider using fixed-size buffers allocated to maximum capacity for simplicity and better performance. For a detailed discussion of this alternative approach, see https://github.com/deepseek-ai/DeepEP/issues/39.
+The current DeepEP implementation uses queues for communication buffers which save memory but introduce complexity and potential deadlocks. As suggested in [issue #39](https://github.com/deepseek-ai/DeepEP/issues/39), we are working on an alternative approach that uses fixed-size buffers allocated to maximum capacity. This simplifies the design and eliminates potential deadlocks from queue-based communication.
+
+This approach:
+1. Allocates buffers directly based on the maximum possible number of tokens
+2. Allows direct address calculation when sending, eliminating the need for a dynamic queue
+3. Implements a dynamic buffer resizing strategy that expands the buffer when any rank's buffer size is insufficient and shrinks the buffer when it hasn't been fully utilized for an extended period
+
+You can enable this experimental feature by setting `dynamic_buffer_resize=True` when creating a [Buffer](file:///mnt/workspace/DeepEP/deep_ep/buffer.py#L14-L634) instance:
+
+```python
+buffer = Buffer(group, num_nvl_bytes, num_rdma_bytes, dynamic_buffer_resize=True)
+```
+
+While this approach may use more GPU memory (the exact amount depends on the specific scenario), the implementation is much simpler. You can more easily add new features, and the performance ceiling might be slightly better.
 
 #### Undefined-behavior PTX usage
 
