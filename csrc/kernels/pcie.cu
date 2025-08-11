@@ -146,46 +146,33 @@ notify_dispatch_pcie(const int* num_tokens_per_rank, int* moe_recv_counter_mappe
         if (thread_id == 32)
             nvshmem_sync_all();
     } else {
-        // NOTE:暂时保留node-rank的拓扑，如果sm一一对应rank的话会使用过量的sm
         // Calculate meta data
-        int dst_node_rank = sm_id - 1;
+        int dst_rank = sm_id - 1;
         for (int channel_id = warp_id; channel_id < num_channels; channel_id += num_warps) {
             int token_start_idx, token_end_idx;
             get_channel_task_range(num_tokens, num_channels, channel_id, token_start_idx, token_end_idx);
 
             // Iterate over tokens
-            int per_node_rank_count[NUM_MAX_NVL_PEERS] = {0};
+            int per_rank_count = 0;
             for (int64_t i = token_start_idx + lane_id; i < token_end_idx; i += 32) {
-                EP_STATIC_ASSERT(NUM_MAX_NVL_PEERS * sizeof(bool) == sizeof(uint64_t), "Invalid number of NVL peers");
-                auto is_token_in_rank_uint64 = *reinterpret_cast<const uint64_t*>(is_token_in_rank + i * num_ranks + dst_node_rank * NUM_MAX_NVL_PEERS);
-                auto is_token_in_rank_values = reinterpret_cast<const bool*>(&is_token_in_rank_uint64);
-                #pragma unroll
-                for (int j = 0; j < NUM_MAX_NVL_PEERS; ++ j)
-                    per_node_rank_count[j] += is_token_in_rank_values[j];
+                per_rank_count += is_token_in_rank[i * kNumRanks + dst_rank];
             }
-
-            // Warp reduce
-            #pragma unroll
-            for (int i = 0; i < NUM_MAX_NVL_PEERS; ++ i)
-                per_node_rank_count[i] = warp_reduce_sum(per_node_rank_count[i]);
-
+            per_rank_count = warp_reduce_sum(per_rank_count);
             // Write into channel matrix
             if (lane_id == 0) {
-                #pragma unroll
-                for (int i = 0; i < NUM_MAX_NVL_PEERS; ++ i)
-                    rdma_channel_prefix_matrix[(dst_node_rank * NUM_MAX_NVL_PEERS + i) * num_channels + channel_id] = per_node_rank_count[i];
+                rdma_channel_prefix_matrix[dst_rank * num_channels + channel_id] = per_rank_count;
             }
         }
         // Calculate prefix sum
         __syncthreads();
 
-        EP_STATIC_ASSERT(NUM_MAX_NVL_PEERS <= 32, "Invalid number of NVL peers");
-        if (thread_id < NUM_MAX_NVL_PEERS) {
-            auto prefix_row = rdma_channel_prefix_matrix + (dst_node_rank * NUM_MAX_NVL_PEERS + thread_id) * num_channels;
+        // Pre-compute prefix sum for all channels
+        if (thread_id == 0) {
+            auto prefix_row = rdma_channel_prefix_matrix + dst_rank * num_channels;
             #pragma unroll
             for (int i = 1; i < num_channels; ++ i)
                 prefix_row[i] += prefix_row[i - 1];
-        }       
+        }
     }
 }
 
@@ -209,7 +196,6 @@ void notify_dispatch_pcie(const int* num_tokens_per_rank, int* moe_recv_counter_
                   rdma_buffer_ptr, rank); } break
 
     constexpr int kNumThreads = 512;
-    const auto num_nodes = num_ranks / NUM_MAX_NVL_PEERS;
 
     // Get clean meta
     auto pcie_clean_meta = get_pcie_clean_meta(hidden_int4, num_scales, num_topk, num_topk, num_ranks, num_max_rdma_chunked_recv_tokens, num_channels);
@@ -217,7 +203,7 @@ void notify_dispatch_pcie(const int* num_tokens_per_rank, int* moe_recv_counter_
     EP_HOST_ASSERT(num_rdma_bytes < std::numeric_limits<int>::max());
 
     // Launch kernel
-    SETUP_LAUNCH_CONFIG(1 + num_nodes, kNumThreads, stream);
+    SETUP_LAUNCH_CONFIG(1 + num_ranks, kNumThreads, stream);
     SWITCH_RANKS(NOTIFY_DISPATCH_PCIE_LAUNCH_CASE);
 #undef NOTIFY_DISPATCH_PCIE_LAUNCH_CASE
 }
