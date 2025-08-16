@@ -69,7 +69,9 @@ public:
     }
 
     __device__ __forceinline__ void advance(int shift) {
+#ifdef __CUDACC__
         #pragma unroll
+#endif
         for (int i = 0; i < kNumRanks; ++ i)
             ptrs[i] = ptrs[i] + shift * sizeof(dtype_t);
     }

@@ -2,56 +2,41 @@ import os
 import subprocess
 import setuptools
 import importlib
-
+import re
 from pathlib import Path
 from torch.utils.cpp_extension import BuildExtension, CUDAExtension
 
 
-# Wheel specific: the wheels only include the soname of the host library `libnvshmem_host.so.X`
-def get_nvshmem_host_lib_name(base_dir):
-    path = Path(base_dir).joinpath('lib')
-    for file in path.rglob('libnvshmem_host.so.*'):
-        return file.name
-    raise ModuleNotFoundError('libnvshmem_host.so not found')
+def get_nvcc_version():
+    try:
+        output = subprocess.check_output(["nvcc", "--version"], stderr=subprocess.STDOUT)
+        output = output.decode("utf-8")
+        match = re.search(r"release\s+(\d+\.\d+)", output)
+        if match:
+            return match.group(1)
+        return None
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return None
 
 
 if __name__ == '__main__':
-    disable_nvshmem = False
-    nvshmem_dir = os.getenv('NVSHMEM_DIR', None)
-    nvshmem_host_lib = 'libnvshmem_host.so'
-    if nvshmem_dir is None:
-        try:
-            nvshmem_dir = importlib.util.find_spec("nvidia.nvshmem").submodule_search_locations[0]
-            nvshmem_host_lib = get_nvshmem_host_lib_name(nvshmem_dir)
-            import nvidia.nvshmem as nvshmem
-        except (ModuleNotFoundError, AttributeError, IndexError):
-            print('Warning: `NVSHMEM_DIR` is not specified, and the NVSHMEM module is not installed. All internode and low-latency features are disabled\n')
-            disable_nvshmem = True
-    else:
-        disable_nvshmem = False
-
-    if not disable_nvshmem:
-        assert os.path.exists(nvshmem_dir), f'The specified NVSHMEM directory does not exist: {nvshmem_dir}'
+    libraries = []
 
     cxx_flags = ['-O3', '-Wno-deprecated-declarations', '-Wno-unused-variable',
                  '-Wno-sign-compare', '-Wno-reorder', '-Wno-attributes']
     nvcc_flags = ['-O3', '-Xcompiler', '-O3']
     sources = ['csrc/deep_ep.cpp', 'csrc/kernels/runtime.cu', 'csrc/kernels/layout.cu', 'csrc/kernels/intranode.cu']
     include_dirs = ['csrc/']
-    library_dirs = []
+    library_dirs = ['/usr/local/lib64']
     nvcc_dlink = []
     extra_link_args = []
 
-    # NVSHMEM flags
-    if disable_nvshmem:
-        cxx_flags.append('-DDISABLE_NVSHMEM')
-        nvcc_flags.append('-DDISABLE_NVSHMEM')
-    else:
-        sources.extend(['csrc/kernels/internode.cu', 'csrc/kernels/internode_ll.cu'])
-        include_dirs.extend([f'{nvshmem_dir}/include'])
-        library_dirs.extend([f'{nvshmem_dir}/lib'])
-        nvcc_dlink.extend(['-dlink', f'-L{nvshmem_dir}/lib', '-lnvshmem_device'])
-        extra_link_args.extend([f'-l:{nvshmem_host_lib}', '-l:libnvshmem_device.a', f'-Wl,-rpath,{nvshmem_dir}/lib'])
+    # This workaround is needed because NVCC 12.9 has a bug (https://nvbugspro.nvidia.com/bug/5595631 for details) which fails UCX compilation
+    nvcc_version = get_nvcc_version()
+    assert nvcc_version is not None, 'Could not get NVCC version'
+    if nvcc_version == '12.9':
+        cxx_flags.append('-D_LIBCUDACXX_ATOMIC_UNSAFE_AUTOMATIC_STORAGE')
+        nvcc_flags.append('-D_LIBCUDACXX_ATOMIC_UNSAFE_AUTOMATIC_STORAGE')
 
     if int(os.getenv('DISABLE_SM90_FEATURES', 0)):
         # Prefer A100
@@ -62,7 +47,7 @@ if __name__ == '__main__':
         nvcc_flags.append('-DDISABLE_SM90_FEATURES')
 
         # Disable internode and low-latency kernels
-        assert disable_nvshmem
+        assert True
     else:
         # Prefer H800 series
         os.environ['TORCH_CUDA_ARCH_LIST'] = os.getenv('TORCH_CUDA_ARCH_LIST', '9.0')
@@ -80,6 +65,54 @@ if __name__ == '__main__':
         cxx_flags.append('-DDISABLE_AGGRESSIVE_PTX_INSTRS')
         nvcc_flags.append('-DDISABLE_AGGRESSIVE_PTX_INSTRS')
 
+    nvcc_dlink_libs = []
+    extra_link_libs = []
+
+    if os.getenv('ENABLE_DEBUG_LOGS', '0') == '1':
+        print('Debug logs enabled')
+        cxx_flags.append('-DENABLE_DEBUG_LOGS')
+        nvcc_flags.append('-DENABLE_DEBUG_LOGS')
+
+    # Get the library path for NIXL
+    nixl_lib_path = os.getenv('NIXL_LIB_PATH', None)
+    assert nixl_lib_path and os.path.exists(nixl_lib_path), 'NIXL_LIB_PATH must be set and valid'
+    print(f'NIXL library path: {nixl_lib_path}')
+
+    # Get colon-separated include paths
+    nixl_include_paths_str = os.getenv('NIXL_INCLUDE_PATHS', '')
+    nixl_include_paths = [p for p in nixl_include_paths_str.split(':') if p]
+    print(f'NIXL include paths: {nixl_include_paths}')
+    include_dirs.extend(nixl_include_paths)
+
+    library_dirs.append(nixl_lib_path)
+    library_dirs.append(os.path.join(nixl_lib_path, 'core'))
+    library_dirs.append(os.path.join(nixl_lib_path, 'plugins'))
+
+    nvcc_dlink_libs.extend(['-lnixl'])
+    extra_link_libs.extend(['-lnixl'])
+    libraries.append('nixl')
+
+    sources.extend(['csrc/kernels/internode_ll.cu', 'csrc/kernels/internode.cu'])
+
+    # Create linker flags from all library directories
+    link_flags = [f'-L{lib_dir}' for lib_dir in library_dirs]
+    rpath_flags = [f'-Wl,-rpath,{lib_dir}' for lib_dir in library_dirs]
+
+    nvcc_dlink = ['-dlink'] + link_flags + nvcc_dlink_libs
+    extra_link_args = extra_link_libs + rpath_flags
+
+    # Debug build flags (host and device)
+    debug_env = os.getenv('DEEPEP_DEBUG', os.getenv('DEBUG', '0'))
+    if str(debug_env).lower() in ('1', 'true', 'yes', 'on'):
+        print('Debug build enabled: adding host/device debug flags and disabling optimizations')
+        # Remove optimization flags if present
+        cxx_flags = [flag for flag in cxx_flags if flag != '-O3']
+        nvcc_flags = [flag for flag in nvcc_flags if flag != '-O3']
+        # Enable host debug info and keep frame pointers
+        cxx_flags.extend(['-g', '-O0', '-fno-omit-frame-pointer'])
+        # Enable device debug info; also pass host flags through NVCC
+        nvcc_flags.extend(['-G', '-g', '-lineinfo', '-Xcompiler', '-g', '-Xcompiler', '-fno-omit-frame-pointer'])
+
     # Put them together
     extra_compile_args = {
         'cxx': cxx_flags,
@@ -96,7 +129,6 @@ if __name__ == '__main__':
     print(f' > Compilation flags: {extra_compile_args}')
     print(f' > Link flags: {extra_link_args}')
     print(f' > Arch list: {os.environ["TORCH_CUDA_ARCH_LIST"]}')
-    print(f' > NVSHMEM path: {nvshmem_dir}')
     print()
 
     # noinspection PyBroadException
@@ -117,6 +149,7 @@ if __name__ == '__main__':
                 name='deep_ep_cpp',
                 include_dirs=include_dirs,
                 library_dirs=library_dirs,
+                libraries=libraries,
                 sources=sources,
                 extra_compile_args=extra_compile_args,
                 extra_link_args=extra_link_args

@@ -58,10 +58,4 @@ typedef int __nv_fp8x4_e4m3;
 typedef uint8_t __nv_fp8_storage_t;
 #endif
 
-#ifndef DISABLE_NVSHMEM
-#include <nvshmem.h>
-#include <nvshmemx.h>
 #include <infiniband/mlx5dv.h>
-#include <non_abi/device/threadgroup/nvshmemi_common_device_defines.cuh>
-#include <device_host_transport/nvshmem_common_ibgda.h>
-#endif

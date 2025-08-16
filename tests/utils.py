@@ -8,7 +8,7 @@ import os
 import sys
 import torch
 import torch.distributed as dist
-from typing import Optional, Union
+from typing import Optional, Union, Callable
 
 
 def init_dist(local_rank: int, num_local_ranks: int):
@@ -27,11 +27,11 @@ def init_dist(local_rank: int, num_local_ranks: int):
     }
     if 'device_id' in sig.parameters:
         # noinspection PyTypeChecker
-        params['device_id'] = torch.device(f'cuda:{local_rank}')
+        params['device_id'] = torch.device(f'cuda:0') # TODO: restore to local_rank once ucx fixes lane-selection
     dist.init_process_group(**params)
     torch.set_default_dtype(torch.bfloat16)
     torch.set_default_device('cuda')
-    torch.cuda.set_device(local_rank)
+    torch.cuda.set_device(0) # TODO: restore to local_rank once ucx fixes lane-selection
 
     return dist.get_rank(), dist.get_world_size(), dist.new_group(list(range(num_local_ranks * num_nodes)))
 
@@ -158,7 +158,7 @@ class suppress_stdout_stderr:
 
 def bench_kineto(fn, kernel_names: Union[str, tuple], num_tests: int = 30, suppress_kineto_output: bool = False,
                  trace_path: Optional[str] = None, barrier_comm_profiling: bool = False,
-                 num_kernels_per_period: int = 1):
+                 num_kernels_per_period: int = 1, barrier_fn: Optional[Callable] = None):
     # Profile
     suppress = suppress_stdout_stderr if suppress_kineto_output else empty_suppress
     with suppress():
@@ -170,7 +170,10 @@ def bench_kineto(fn, kernel_names: Union[str, tuple], num_tests: int = 30, suppr
                     lhs = torch.randn((8192, 8192), dtype=torch.float, device='cuda')
                     rhs = torch.randn((8192, 8192), dtype=torch.float, device='cuda')
                     lhs @ rhs
-                    dist.all_reduce(torch.ones(1, dtype=torch.float, device='cuda'))
+                    if barrier_fn is not None:
+                        barrier_fn()
+                    else:
+                        dist.all_reduce(torch.ones(1, dtype=torch.float, device='cuda'))
                 for _ in range(num_tests):
                     fn()
                 torch.cuda.synchronize()

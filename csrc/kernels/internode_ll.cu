@@ -1,7 +1,12 @@
 #include "configs.cuh"
 #include "exception.cuh"
 #include "launch.cuh"
-#include "ibgda_device.cuh"
+
+#include "api.cuh"
+#include "nixl_device.cuh"
+#include "utils.cuh"
+#include <cooperative_groups.h>
+namespace cg = cooperative_groups;
 
 namespace deep_ep {
 
@@ -11,7 +16,8 @@ template <int kNumThreads> __launch_bounds__(kNumThreads, 1)
 __global__ void clean_low_latency_buffer(int* clean_0, int num_clean_int_0,
                                          int* clean_1, int num_clean_int_1) {
     // Barrier before cleaning (in case of unfinished chunked EP)
-    nvshmemx_barrier_all_block();
+    // TODO: NIXL DEEPEP - Implement this
+    EP_DEVICE_ASSERT(false);
 
     // Clean
     auto thread_id = static_cast<int>(threadIdx.x);
@@ -23,7 +29,8 @@ __global__ void clean_low_latency_buffer(int* clean_0, int num_clean_int_0,
         clean_1[i] = 0;
 
     // Barrier after cleaning (make sure the low-latency mode works fine)
-    nvshmemx_barrier_all_block();
+    // TODO: NIXL DEEPEP - Implement this
+    EP_DEVICE_ASSERT(false);
 }
 
 void clean_low_latency_buffer(int* clean_0, int num_clean_int_0,
@@ -50,7 +57,7 @@ dispatch(void* packed_recv_x, void* packed_recv_x_scales,
          int num_tokens, int num_max_dispatch_tokens_per_rank,
          int num_topk, int num_experts, int rank, int num_ranks,
          int num_warp_groups, int num_warps_per_group,
-         bool round_scale, int phases) {
+         bool round_scale, int phases, internode_ll::gpu_nixl_ctx nixl_ctx) {
     const auto sm_id = static_cast<int>(blockIdx.x);
     const auto thread_id = static_cast<int>(threadIdx.x);
     const auto warp_id = thread_id / 32, lane_id = get_lane_id();
@@ -159,9 +166,12 @@ dispatch(void* packed_recv_x, void* packed_recv_x_scales,
                                      dst_expert_local_idx * num_ranks * num_max_dispatch_tokens_per_rank * num_bytes_per_msg +
                                      rank * num_max_dispatch_tokens_per_rank * num_bytes_per_msg +
                                      slot_idx * num_bytes_per_msg;
-                const auto dst_p2p_ptr = nvshmemi_get_p2p_ptr(dst_ptr, rank, dst_rank);
+                const auto dst_p2p_ptr = nixl_ctx.rdma_p2p_ptr_get(dst_ptr, dst_rank);
                 if (dst_p2p_ptr == 0) {
-                    nvshmemi_ibgda_put_nbi_warp(dst_ptr, src_ptr, num_bytes_per_msg, dst_rank, dst_expert_local_idx, lane_id, slot_idx);
+                    nixlGpuXferReqH batch_req = nixl_ctx.batch_get(dst_expert_local_idx, dst_rank);
+                    size_t src_offset = nixl_ctx.batch_offset_get(src_ptr);
+                    size_t dst_offset = nixl_ctx.batch_offset_get(dst_ptr);
+                    EP_DEVICE_ASSERT(nixlGpuPostSingleWriteXferReq<nixl_gpu_level_t::WARP>(batch_req, 0, src_offset, dst_offset, num_bytes_per_msg, 0, (slot_idx + 1) % 4 == 0) == NIXL_IN_PROG);
                 } else {
                     // NOTES: only 2 load iterations for 7K hidden with 8 unrolls
                     const auto* src_int4_ptr = reinterpret_cast<const int4*>(src_ptr);
@@ -177,13 +187,8 @@ dispatch(void* packed_recv_x, void* packed_recv_x_scales,
     } else if (warp_id == num_warps - 1) {
         EP_DEVICE_ASSERT(num_sms > 1);
         if (sm_id == 0) {
-            // The first SM is also responsible for checking QPs
-            EP_DEVICE_ASSERT(ibgda_get_state()->num_rc_per_pe >= num_local_experts);
-
             // The first SM is also responsible for cleaning the next buffer
-            #pragma unroll
-            for (int i = lane_id; i < num_next_clean_int; i += 32)
-                next_clean[i] = 0;
+            nixl_ctx.clean_counters_warp(lane_id);
 
             // Notify before executing `int_p`
             __syncwarp();
@@ -225,12 +230,15 @@ dispatch(void* packed_recv_x, void* packed_recv_x_scales,
 
         // Wait local sends issued and send expert counts
         while (ld_acquire_global(atomic_finish_counter_per_expert + responsible_expert_idx) != FINISHED_SUM_TAG * 2);
-        auto dst_ptr = reinterpret_cast<uint64_t>(rdma_recv_count + dst_expert_local_idx * num_ranks + rank);
-        auto dst_p2p_ptr = nvshmemi_get_p2p_ptr(dst_ptr, rank, dst_rank);
-        if (dst_p2p_ptr == 0) {
-            nvshmemi_ibgda_amo_nonfetch_add(reinterpret_cast<int*>(dst_ptr), -num_tokens_sent - 1, dst_rank, dst_expert_local_idx);
+
+        uint64_t *p2p_counter = nixl_ctx.counter_p2p_ptr_get(dst_expert_local_idx, dst_rank);
+        if (p2p_counter == nullptr) {
+            nixlGpuXferReqH remote_counter = nixl_ctx.remote_counter_get(dst_expert_local_idx, dst_rank);
+            /* WARNING: original counter value is negative, I chose different encoding since our counters are uint64_ts */
+            EP_DEVICE_ASSERT(nixlGpuPostSignalXferReq<nixl_gpu_level_t::THREAD>(remote_counter, 0, num_tokens_sent + 1, 0) == NIXL_IN_PROG); 
         } else {
-            st_release_sys_global(reinterpret_cast<int*>(dst_p2p_ptr), -num_tokens_sent - 1);
+            /* WARNING: original counter value is negative, I chose different encoding since our counters are uint64_ts */
+            st_release_sys_global(p2p_counter, static_cast<uint64_t>(num_tokens_sent + 1));
         }
 
         // Clean workspace for next use
@@ -275,9 +283,18 @@ dispatch(void* packed_recv_x, void* packed_recv_x_scales,
         EP_DEVICE_ASSERT(num_warps_per_group > 1 and num_warp_groups < 15);
         if (sub_warp_id == 1 and lane_id == 0) {
             auto start_time = clock64();
-            while ((num_recv_tokens = ld_acquire_sys_global(rdma_recv_count + local_expert_idx * num_ranks + src_rank)) == 0);
+            uint64_t *local_counter = nixl_ctx.local_counter_get(local_expert_idx, src_rank);
+            int poll_count = 0;
+            uint64_t current_value = 0;
+            while ((current_value = ld_acquire_sys_global(local_counter)) == 0) {
+                poll_count++;
+                if (poll_count % 10000000 == 0) {
+                    printf("[DEEPEP-LL-DISPATCH] RANK %2d | POLL_HANG: expert[%d] from rank[%d] still waiting after %d polls, counter_val=%lu\n", 
+                           rank, local_expert_idx, src_rank, poll_count, current_value);
+                }
+            }
+            num_recv_tokens = current_value - 1;
             auto wait_recv_cost = clock64() - start_time;
-            num_recv_tokens = -num_recv_tokens - 1;
             recv_token_begin_idx = atomicAdd(packed_recv_count + local_expert_idx, num_recv_tokens);
             shared_num_recv_tokens[warp_group_id] = num_recv_tokens;
             shared_recv_token_begin_idx[warp_group_id] = recv_token_begin_idx;
@@ -346,7 +363,7 @@ void dispatch(void* packed_recv_x, void* packed_recv_x_scales,
               int num_topk, int num_experts, int rank, int num_ranks,
               bool use_fp8, bool round_scale, bool use_ue8m0,
               void* workspace, int num_device_sms,
-              cudaStream_t stream, int phases) {
+              cudaStream_t stream, int phases, internode_ll::gpu_nixl_ctx nixl_ctx) {
     constexpr int kNumMaxTopK = 9;
     const int num_warp_groups = ceil_div(num_experts, num_device_sms);
     const int num_warps_per_group = 32 / num_warp_groups;
@@ -385,7 +402,7 @@ LAUNCH_KERNEL(&cfg, dispatch_func, \
               num_tokens, num_max_dispatch_tokens_per_rank, \
               num_topk, num_experts, rank, num_ranks, \
               num_warp_groups, num_warps_per_group, \
-              round_scale, phases); } break
+              round_scale, phases, nixl_ctx); } break
 
     SETUP_LAUNCH_CONFIG(num_sms, num_warps * 32, stream);
     SWITCH_HIDDEN(DISPATCH_LAUNCH_CASE);
@@ -564,7 +581,7 @@ combine(void* combined_x,
         int num_max_dispatch_tokens_per_rank,
         int num_experts, int rank, int num_ranks,
         int num_warp_groups, int num_warps_per_group,
-        int phases, bool zero_copy) {
+        int phases, bool zero_copy, internode_ll::gpu_nixl_ctx nixl_ctx) {
     const auto sm_id = __shfl_sync(0xffffffff, static_cast<int>(blockIdx.x), 0);
     const auto num_sms = __shfl_sync(0xffffffff, static_cast<int>(gridDim.x), 0);
     const auto thread_id = static_cast<int>(threadIdx.x);
@@ -603,9 +620,7 @@ combine(void* combined_x,
 
     // Clean up next buffer
     if (sm_id == 0 and warp_group_id == 0 and sub_warp_id == 0) {
-        #pragma unroll
-        for (int i = lane_id; i < num_next_clean_int; i += 32)
-            next_clean[i] = 0;
+        nixl_ctx.clean_counters_warp(lane_id);
 
         // Notify before executing `int_p`
         __syncwarp();
@@ -669,7 +684,7 @@ combine(void* combined_x,
             const auto src_idx = __shfl_sync(0xffffffff, __ldg(local_src_info + token_idx), 0);
             const auto buf_ptr = reinterpret_cast<int64_t>(rdma_send_x_vec_row);
             const auto dst_ptr = reinterpret_cast<uint64_t>(rdma_recv_x) + (global_expert_idx * num_max_dispatch_tokens_per_rank + src_idx) * num_bytes_per_slot;
-            const auto dst_p2p_ptr = nvshmemi_get_p2p_ptr(dst_ptr, rank, dst_rank);
+            const auto dst_p2p_ptr = nixl_ctx.rdma_p2p_ptr_get(dst_ptr, dst_rank);
             int num_send_bytes = hidden * sizeof(nv_bfloat16);
 
             if (not zero_copy or dst_p2p_ptr != 0) {
@@ -731,8 +746,12 @@ combine(void* combined_x,
 
             // Issue RDMA
             // NOTES: for zero-copy mode, we assume the data is already in the send buffer
-            if (dst_p2p_ptr == 0)
-                nvshmemi_ibgda_put_nbi_warp(dst_ptr, buf_ptr, num_send_bytes, dst_rank, local_expert_idx, lane_id, token_idx - offset);
+            if (dst_p2p_ptr == 0) {
+                nixlGpuXferReqH batch_req = nixl_ctx.batch_get(local_expert_idx, dst_rank);
+                size_t src_offset = nixl_ctx.batch_offset_get(buf_ptr);
+                size_t dst_offset = nixl_ctx.batch_offset_get(dst_ptr);
+                EP_DEVICE_ASSERT(nixlGpuPostSingleWriteXferReq<nixl_gpu_level_t::WARP>(batch_req, 0, src_offset, dst_offset, num_send_bytes, 0, (token_idx - offset + 1) % 4 == 0) == NIXL_IN_PROG);
+            }
         }
 
         // Put the finishing flag
@@ -740,12 +759,12 @@ combine(void* combined_x,
         asm volatile("bar.sync %0, %1;" :: "r"(warp_group_id + 1), "r"(num_warps_per_group * 32));
         if (sub_warp_id == 1 and lane_id == 0) {
             while (ld_acquire_global(atomic_clean_flag) == 0);
-            auto dst_ptr = reinterpret_cast<uint64_t>(rdma_recv_flag + global_expert_idx);
-            auto dst_p2p_ptr = nvshmemi_get_p2p_ptr(dst_ptr, rank, dst_rank);
-            if (dst_p2p_ptr == 0) {
-                nvshmemi_ibgda_amo_nonfetch_add(reinterpret_cast<int*>(dst_ptr), 1, dst_rank, local_expert_idx);
+            uint64_t *p2p_counter = nixl_ctx.counter_p2p_ptr_get(local_expert_idx, dst_rank);
+            if (p2p_counter == nullptr) {
+                nixlGpuXferReqH remote_counter = nixl_ctx.remote_counter_get(local_expert_idx, dst_rank);
+                EP_DEVICE_ASSERT(nixlGpuPostSignalXferReq<nixl_gpu_level_t::THREAD>(remote_counter, 0, 1, 0) == NIXL_IN_PROG); 
             } else {
-                st_release_sys_global(reinterpret_cast<int*>(dst_p2p_ptr), 1);
+                st_release_sys_global(p2p_counter, 1);
             }
             atomic_add_release_global(atomic_clean_flag, -1);
         }
@@ -760,6 +779,8 @@ combine(void* combined_x,
         __syncwarp();
     }
 
+    cg::this_grid().sync();
+
     // Receiving phase
     LOW_LATENCY_COMBINE_RECV:
     if ((phases & LOW_LATENCY_RECV_PHASE) == 0)
@@ -769,12 +790,17 @@ combine(void* combined_x,
     if (responsible_expert_idx < num_experts) {
         EP_DEVICE_ASSERT(num_warps_per_group > 1);
         if (sub_warp_id == 0 and lane_id == 0) {
-            auto start_time = clock64();
-            while (ld_acquire_sys_global(rdma_recv_flag + responsible_expert_idx) == 0);
-            auto wait_recv_cost = clock64() - start_time;
-            if (combine_wait_recv_cost_stats != nullptr) {
-                const auto& src_rank = responsible_expert_idx / num_local_experts;
-                atomicAdd(reinterpret_cast<unsigned long long*>(combine_wait_recv_cost_stats + src_rank), wait_recv_cost);
+            auto src_rank = responsible_expert_idx / num_local_experts;
+            auto local_expert_idx = responsible_expert_idx % num_local_experts;
+            uint64_t *local_counter = nixl_ctx.local_counter_get(local_expert_idx, src_rank);
+            int poll_count = 0;
+            uint64_t current_value = 0;
+            while ((current_value = ld_acquire_sys_global(local_counter)) == 0) {
+                poll_count++;
+                if (poll_count % 10000000 == 0) {
+                    printf("[DEEPEP-LL-COMBINE] RANK %2d | POLL_HANG: expert[%d] from rank[%d] still waiting after %d polls, counter_val=%lu\n", 
+                            rank, local_expert_idx, src_rank, poll_count, current_value);
+                }
             }
         }
     }
@@ -927,15 +953,16 @@ void combine(void* combined_x,
              int num_topk, int num_experts, int rank, int num_ranks,
              bool use_logfmt,
              void* workspace, int num_device_sms,
-             cudaStream_t stream, int phases, bool zero_copy) {
+             cudaStream_t stream, int phases, bool zero_copy, internode_ll::gpu_nixl_ctx nixl_ctx) {
     constexpr int kNumMaxTopk = 9;
     const int num_warp_groups = ceil_div(num_experts, num_device_sms);
     const int num_warps_per_group = 32 / num_warp_groups;
     const int num_recv_per_sm = ceil_div(num_combined_tokens, num_device_sms);
-    EP_HOST_ASSERT(num_warp_groups > 0 and num_warps_per_group > 0 and num_recv_per_sm > 0);
+    EP_HOST_ASSERT(num_warp_groups > 0 and num_warps_per_group > 0 and num_recv_per_sm >= 0);
 
     const auto num_warps = num_warp_groups * num_warps_per_group;
-    const auto num_sms = max(ceil_div(num_experts, num_warp_groups), ceil_div(num_combined_tokens, num_recv_per_sm));
+    const auto num_sms = max(ceil_div(num_experts, num_warp_groups),
+                             num_recv_per_sm == 0 ? 1 : ceil_div(num_combined_tokens, num_recv_per_sm));
 
     // Check workspace
     auto atomic_clean_flag = static_cast<int*>(workspace);
@@ -977,11 +1004,35 @@ LAUNCH_KERNEL(&cfg, combine_func, \
               num_max_dispatch_tokens_per_rank, \
               num_experts, rank, num_ranks, \
               num_warp_groups, num_warps_per_group, \
-              phases, zero_copy); } break
+              phases, zero_copy, nixl_ctx); } break
 
     SETUP_LAUNCH_CONFIG(num_sms, num_warps * 32, stream);
     SWITCH_HIDDEN(COMBINE_LAUNCH_CASE);
 #undef COMBINE_LAUNCH_CASE
+}
+
+__global__ static void sync_kernel(internode_ll::gpu_nixl_ctx nixl_ctx) {
+    if (threadIdx.x < nixl_ctx.num_ranks && threadIdx.x != nixl_ctx.rank) {
+        auto local_counter = nixl_ctx.local_sync_counter_get(threadIdx.x);
+        auto remote_counter = nixl_ctx.remote_sync_counter_get(threadIdx.x);
+
+        /* Rank is not initialized yet */
+        if (remote_counter == nullptr)
+            return;
+
+        // write atomic to remote rank
+        EP_DEVICE_ASSERT(nixlGpuPostSignalXferReq<nixl_gpu_level_t::THREAD>(remote_counter, 0, 1, 0) == NIXL_IN_PROG); 
+
+        // wait for atomic from remote rank
+        while (ld_acquire_sys_global(local_counter) == 0);
+
+        *local_counter = 0;
+    }
+}
+
+void sync(internode_ll::gpu_nixl_ctx nixl_ctx, cudaStream_t stream) {
+    SETUP_LAUNCH_CONFIG(1, nixl_ctx.num_ranks, stream);
+    LAUNCH_KERNEL(&cfg, sync_kernel, nixl_ctx);
 }
 
 } // namespace internode_ll

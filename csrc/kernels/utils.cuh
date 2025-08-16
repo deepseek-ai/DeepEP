@@ -67,7 +67,15 @@ __device__  __forceinline__ void st_release_sys_global(const int *ptr, int val) 
     asm volatile("st.release.sys.global.s32 [%0], %1;"::"l"(ptr), "r"(val) : "memory");
 }
 
+__device__  __forceinline__ void st_release_sys_global(const uint64_t *ptr, uint64_t val) {
+    asm volatile("st.release.sys.global.u64 [%0], %1;"::"l"(ptr), "l"(val) : "memory");
+}
+
 __device__  __forceinline__ void st_release_cta(const int *ptr, int val) {
+    asm volatile("st.release.cta.s32 [%0], %1;"::"l"(ptr), "r"(val) : "memory");
+}
+
+__device__  __forceinline__ void st_release_cta(const volatile int *ptr, int val) {
     asm volatile("st.release.cta.s32 [%0], %1;"::"l"(ptr), "r"(val) : "memory");
 }
 
@@ -89,6 +97,12 @@ __device__ __forceinline__ int ld_acquire_global(const int *ptr) {
     return ret;
 }
 
+__device__ __forceinline__ uint64_t ld_acquire_global(const uint64_t *ptr) {
+    uint64_t ret;
+    asm volatile("ld.acquire.gpu.global.u64 %0, [%1];" : "=l"(ret) : "l"(ptr));
+    return ret;
+}
+
 __device__ __forceinline__ int atomic_add_release_sys_global(const int* ptr, int value) {
     int ret;
     asm volatile("atom.add.release.sys.global.s32 %0, [%1], %2;" : "=r"(ret) : "l"(ptr), "r"(value));
@@ -101,7 +115,26 @@ __device__ __forceinline__ int atomic_add_release_global(const int* ptr, int val
     return ret;
 }
 
+__device__ __forceinline__ int atomic_add_release_global(const uint64_t* ptr, uint64_t value) {
+    uint64_t ret;
+    asm volatile("atom.add.release.gpu.global.u64 %0, [%1], %2;" : "=l"(ret) : "l"(ptr), "l"(value));
+    return ret;
+}
+
+
+__device__ __forceinline__ uint64_t atomic_add_release_cta(const uint64_t* ptr, uint64_t value) {
+    uint64_t ret;
+    asm volatile("atom.add.release.cta.u64 %0, [%1], %2;" : "=l"(ret) : "l"(ptr), "l"(value));
+    return ret;
+}
+
 __device__ __forceinline__ int ld_acquire_cta(const int *ptr) {
+    int ret;
+    asm volatile("ld.acquire.cta.s32 %0, [%1];" : "=r"(ret) : "l"(ptr));
+    return ret;
+}
+
+__device__ __forceinline__ int ld_acquire_cta(const volatile int *ptr) {
     int ret;
     asm volatile("ld.acquire.cta.s32 %0, [%1];" : "=r"(ret) : "l"(ptr));
     return ret;

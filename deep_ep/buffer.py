@@ -1,14 +1,13 @@
 import os
 import torch
 import torch.distributed as dist
-from typing import Callable, List, Tuple, Optional, Union
+from typing import Callable, List, Tuple, Optional, Union, Literal
 
 # noinspection PyUnresolvedReferences
 import deep_ep_cpp
 # noinspection PyUnresolvedReferences
 from deep_ep_cpp import Config, EventHandle
 from .utils import EventOverlap, check_nvlink_connections
-
 
 class Buffer:
     """
@@ -655,3 +654,100 @@ class Buffer:
         """
         src_info, layout_range, num_max_dispatch_tokens_per_rank, hidden, num_experts = handle
         return self.runtime.get_next_low_latency_combine_buffer(num_max_dispatch_tokens_per_rank, hidden, num_experts)
+
+    # NIXL API
+    @classmethod
+    def nixl_buffer(self, low_latency_mode: bool = False,
+                 low_latency_nvlink_backend: Literal['nixl', 'ipc', 'none'] = 'nixl',
+                 explicitly_destroy: bool = False, rank: int = 0,
+                 group: dist.ProcessGroup = None, comm: Optional["mpi4py.MPI.Comm"] = None) -> None:
+        """
+        Initialize the nixl communication buffer.
+
+        Arguments:
+            low_latency_mode: whether to enable low-latency mode.
+            low_latency_nvlink_backend: the backend for low-latency mode, you can choose from 'nixl', 'ipc' and 'none' (which disables NVLink entirely).
+            explicitly_destroy: If this flag is set to True, you need to explicitly call `destroy()` to release resources;
+                otherwise, the resources will be released by the destructor.
+                Note: Releasing resources in the destructor may cause Python's exception handling process to hang.
+            rank: the rank number.
+            group: the communication group (optional for low-latency mode).
+            comm: the mpi4py.MPI.Comm communicator to use in case the group parameter is absent (optional for low-latency mode).
+        """
+        instance = Buffer.__new__(Buffer)
+        instance.rank = rank
+        instance.group_size = 0 # Will be updated by `update_memory_buffers`
+        instance.low_latency_mode = low_latency_mode
+        instance.explicitly_destroy = explicitly_destroy
+        instance.group = group
+        instance.comm = comm
+        assert not (group and comm)
+
+        # Configure NVLINK backend for low-latency mode
+        os.environ['DEEPEP_LL_NVLINK_IPC'] = '1' if low_latency_nvlink_backend == 'ipc' else '0'
+        if low_latency_nvlink_backend != 'nixl':
+            os.environ["UCX_TLS"] = "^cuda_ipc"
+
+        instance.runtime = deep_ep_cpp.Buffer(instance.rank, low_latency_mode, explicitly_destroy)
+
+        return instance
+
+    def update_memory_buffers(self, num_ranks: int, num_experts_per_rank: int, num_nvl_bytes: int, num_rdma_bytes: int):
+        """
+        Allocate remote memory for the communication buffer.
+
+        Arguments:
+            num_ranks: the number of ranks.
+            num_experts_per_rank: the number of experts per rank.
+            num_nvl_bytes: the buffer size for intranode NVLink communication.
+            num_rdma_bytes: the buffer size for internode (also for intranode with low-latency mode) RDMA communication.
+        """
+        self.group_size = num_ranks
+        self.num_nvl_bytes = num_nvl_bytes
+        self.num_rdma_bytes = num_rdma_bytes
+        os.environ['NIXL_DEEPEP_NUM_CHANNELS'] = str(num_experts_per_rank)
+        self.runtime.update_memory_buffers(num_ranks, num_nvl_bytes, num_rdma_bytes)
+
+    def connect_ranks(self, remote_ranks: List[int]) -> None:
+        """
+        Add connections to remote ranks.
+
+        Arguments:
+            remote_ranks: List of remote rank IDs to establish connections with.
+                         The current rank will be automatically filtered out.
+        """
+        if self.low_latency_mode:
+            self.runtime.connect_ranks(remote_ranks)
+            return
+
+        if self.group is not None:
+            def all_gather_object(obj):
+                object_list = [None] * self.group_size
+                dist.all_gather_object(object_list, obj, self.group)
+                return object_list
+        elif self.comm is not None:
+            def all_gather_object(obj):
+                return self.comm.allgather(obj)
+        else:
+            raise ValueError("Either 'group' or 'comm' must be configured.")
+
+        local_ipc_handle = self.runtime.get_local_ipc_handle()
+        ipc_handles = all_gather_object(local_ipc_handle)
+
+        self.runtime.connect_ranks(remote_ranks, ipc_handles)
+
+    def remove_ranks(self, remote_ranks: List[int]) -> None:
+        """
+        Remove connections to remote ranks.
+
+        Arguments:
+            remote_ranks: List of remote rank IDs to remove connections from.
+                         These ranks must be at the end of the current remote_ranks list.
+        """
+        self.runtime.remove_ranks(remote_ranks)
+
+    def low_latency_sync(self) -> None:
+        """
+        Synchronize all ranks.
+        """
+        self.runtime.low_latency_sync()

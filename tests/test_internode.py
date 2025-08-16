@@ -226,16 +226,24 @@ def test_main(args: argparse.Namespace, num_sms: int,
 
 # noinspection PyUnboundLocalVariable,PyShadowingNames
 def test_loop(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
+    pxb_nics = ["mlx5_0", "mlx5_3", "mlx5_4", "mlx5_5", "mlx5_6", "mlx5_9", "mlx5_10", "mlx5_11"]
+    tcp_nics = ',ibp154s0,ibp192s0,ibp206s0,ibp220s0,ibp94s0'
+    os.environ['UCX_NET_DEVICES'] = f'cuda0-{pxb_nics[local_rank]}:1' + tcp_nics
+    os.environ['CUDA_VISIBLE_DEVICES'] = str(local_rank)
+
     num_nodes = int(os.getenv('WORLD_SIZE', 1))
     rank, num_ranks, group = init_dist(local_rank, num_local_ranks)
     if args.test_ll_compatibility:
         ll_num_tokens, ll_hidden, ll_num_experts, ll_num_topk = 16, 5120, 256, 9
 
     num_sms = 24
-    num_qps_per_rank = max(num_sms, ll_num_experts // num_ranks if args.test_ll_compatibility else 0)
+    num_qps_per_rank = max(num_sms // 2, ll_num_experts // num_ranks if args.test_ll_compatibility else 0)
 
-    buffer = deep_ep.Buffer(group, int(2e9), int(1e9), low_latency_mode=args.test_ll_compatibility,
-                            num_qps_per_rank=num_qps_per_rank, explicitly_destroy=True)
+    # Initialize NIXL buffer
+    buffer = deep_ep.Buffer.nixl_buffer(rank=rank, low_latency_mode=False, explicitly_destroy=True, group=group)
+    buffer.update_memory_buffers(num_ranks=num_ranks, num_experts_per_rank=num_qps_per_rank, num_nvl_bytes=int(2e9), num_rdma_bytes=int(1e9))
+    buffer.connect_ranks([i for i in range(num_ranks) if i != rank])
+
     assert num_local_ranks == 8 and num_ranks > 8
     torch.manual_seed(rank)
 
