@@ -12,12 +12,8 @@
 
 namespace deep_ep {
 
-Buffer::Buffer(int rank, int num_ranks, int64_t num_nvl_bytes, int64_t num_rdma_bytes, bool low_latency_mode, bool explicitly_destroy):
-        rank(rank), num_ranks(num_ranks),
-        num_nvl_bytes(num_nvl_bytes), num_rdma_bytes(num_rdma_bytes),
-        low_latency_mode(low_latency_mode),
-        explicitly_destroy(explicitly_destroy),
-        comm_stream(at::cuda::getStreamFromPool(true)) {
+Buffer::Buffer(int rank, int num_ranks, int64_t num_nvl_bytes, int64_t num_rdma_bytes, bool low_latency_mode, bool explicitly_destroy)
+        : num_nvl_bytes(num_nvl_bytes), num_rdma_bytes(num_rdma_bytes), low_latency_mode(low_latency_mode), explicitly_destroy(explicitly_destroy) {
     // Metadata memory
     int64_t barrier_signal_bytes = NUM_MAX_NVL_PEERS * sizeof(int);
     int64_t buffer_ptr_bytes = NUM_MAX_NVL_PEERS * sizeof(void*);
@@ -59,6 +55,8 @@ Buffer::Buffer(int rank, int num_ranks, int64_t num_nvl_bytes, int64_t num_rdma_
     }
 
     // Create 32 MiB workspace
+}
+
     CUDA_CHECK(cudaMalloc(&workspace, NUM_WORKSPACE_BYTES));
     CUDA_CHECK(cudaMemsetAsync(workspace, 0, NUM_WORKSPACE_BYTES, comm_stream));
 
@@ -240,8 +238,17 @@ void Buffer::sync(const std::vector<int> &device_ids,
 }
 
 std::tuple<torch::Tensor, std::optional<torch::Tensor>, torch::Tensor, torch::Tensor, std::optional<EventHandle>>
-Buffer::get_dispatch_layout(const torch::Tensor& topk_idx, int num_experts,
-                            std::optional<EventHandle>& previous_event, bool async, bool allocate_on_comm_stream) {
+Buffer::get_dispatch_layout(const torch::Tensor& topk_idx,
+                            int num_experts, std::optional<EventHandle>& previous_event,
+                            bool async, bool allocate_on_comm_stream) {
+    // Track maximum tokens observed for dynamic buffer resizing
+    // This is part of the "Easier Potential Overall Design" implementation
+    // Instead of using queues, we track the maximum tokens to inform buffer allocation
+    int num_tokens = static_cast<int>(topk_idx.size(0));
+    if (dynamic_buffer_resize && num_tokens > max_tokens_observed) {
+        max_tokens_observed = num_tokens;
+    }
+    
     EP_HOST_ASSERT(topk_idx.dim() == 2);
     EP_HOST_ASSERT(topk_idx.is_contiguous());
     EP_HOST_ASSERT(num_experts > 0);
