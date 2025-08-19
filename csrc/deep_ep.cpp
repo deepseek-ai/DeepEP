@@ -1477,7 +1477,7 @@ Buffer::pcie_dispatch(const torch::Tensor& x, const std::optional<torch::Tensor>
                                     hidden_int4, num_scales, num_topk, expert_alignment,
                                     rdma_channel_prefix_matrix.data_ptr<int>(), recv_rdma_rank_prefix_sum.data_ptr<int>(),
                                     rdma_buffer_ptr, config.num_max_rdma_chunked_recv_tokens,rank, comm_stream,
-                                    config.get_pcie_buffer_size_hint(hidden_int4 * sizeof(int4), num_ranks), false);
+                                    config.get_pcie_buffer_size_hint(hidden_int4 * sizeof(int4), num_ranks));
         //Synchronize total received tokens and tokens per expert
         auto start_time = std::chrono::high_resolution_clock::now();
         while (true) {

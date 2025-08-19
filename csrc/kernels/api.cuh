@@ -184,8 +184,7 @@ void notify_dispatch_pcie(const int* num_tokens_per_rank, int* moe_recv_counter_
                      int hidden_int4, int num_scales, int num_topk, int expert_alignment,
                      int* rdma_channel_prefix_matrix, int* recv_rdma_rank_prefix_sum,
                      void* rdma_buffer_ptr, int num_max_rdma_chunked_recv_tokens,int rank,
-                     cudaStream_t stream, int64_t num_rdma_bytes,
-                     bool low_latency_mode);
+                     cudaStream_t stream, int64_t num_rdma_bytes);
 
 void dispatch_pcie(void* recv_x, float* recv_x_scales, int64_t* recv_topk_idx, float* recv_topk_weights, 
                    const void* x, const float* x_scales, const int64_t* topk_idx, const float* topk_weights,
