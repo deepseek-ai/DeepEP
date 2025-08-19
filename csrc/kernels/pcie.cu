@@ -23,7 +23,7 @@ std::pair<int, int> get_pcie_clean_meta(int hidden_int4, int num_scales, int num
 }
 
 
-template <bool kLowLatencyMode, int kNumRanks>
+template <int kNumRanks>
 __global__ void
 notify_dispatch_pcie(const int* num_tokens_per_rank, int* moe_recv_counter_mapped, int num_ranks,
                 const int* num_tokens_per_expert, int* moe_recv_expert_counter_mapped, int num_experts,
@@ -153,12 +153,9 @@ void notify_dispatch_pcie(const int* num_tokens_per_rank, int* moe_recv_counter_
                      int hidden_int4, int num_scales, int num_topk, int expert_alignment,
                      int* rdma_channel_prefix_matrix, int* recv_rdma_rank_prefix_sum,
                      void* rdma_buffer_ptr, int num_max_rdma_chunked_recv_tokens,int rank,
-                     cudaStream_t stream, int64_t num_rdma_bytes,
-                     bool low_latency_mode) {
-#define NOTIFY_DISPATCH_PCIE_LAUNCH_CASE(num_ranks) { \
-    auto notify_dispatch_pcie_func = low_latency_mode ? \
-        notify_dispatch_pcie<true, num_ranks> : notify_dispatch_pcie<false, num_ranks>; \
-    LAUNCH_KERNEL(&cfg, notify_dispatch_pcie_func, \
+                     cudaStream_t stream, int64_t num_rdma_bytes) {
+#define NOTIFY_DISPATCH_PCIE_LAUNCH_CASE(ranks) { \
+    LAUNCH_KERNEL(&cfg, notify_dispatch_pcie<ranks>, \
                   num_tokens_per_rank, moe_recv_counter_mapped, num_ranks, \
                   num_tokens_per_expert, moe_recv_expert_counter_mapped, num_experts, \
                   is_token_in_rank, num_tokens, num_channels, expert_alignment, \
@@ -843,7 +840,6 @@ combine_pcie(int4* combined_x, float* combined_topk_weights,
     };
 
     const auto sm_id = static_cast<int>(blockIdx.x);
-    const auto num_threads = static_cast<int>(blockDim.x), num_warps = num_threads / 32;
     const auto thread_id = static_cast<int>(threadIdx.x), warp_id = thread_id / 32, lane_id = get_lane_id();
     const auto num_channels = static_cast<int>(gridDim.x) / 2, channel_id = sm_id / 2;
     const bool is_receiver_sm = sm_id % 2 == 1;
