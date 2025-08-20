@@ -12,9 +12,9 @@ import test_low_latency
 
 import sys
 
-def test_main(num_tokens: int, num_sms: int, local_rank: int, num_ranks: int, rank: int, buffer: deep_ep.Buffer, group: dist.ProcessGroup):
+def test_main(num_sms: int, local_rank: int, num_ranks: int, rank: int, buffer: deep_ep.Buffer, group: dist.ProcessGroup):
     # Settings
-    num_tokens, hidden, num_topk, num_experts = num_tokens, 7168, 8, (256 // num_ranks) * num_ranks
+    num_tokens, hidden, num_topk, num_experts = 4096, 7168, 8, (256 // num_ranks) * num_ranks
     assert num_experts % num_ranks == 0
     if local_rank == 0: 
         print(f'[config] num_tokens={num_tokens}, hidden={hidden}, num_topk={num_topk}', flush=True)
@@ -69,6 +69,7 @@ def test_main(num_tokens: int, num_sms: int, local_rank: int, num_ranks: int, ra
     time.sleep(1)
 
     # Config
+    # set nvl buffer size as 8/16 means nothing just for compatibility
     rdma_buffer_size = 128
     config = deep_ep.Config(num_sms, 8, 16, 16, rdma_buffer_size)
 
@@ -102,7 +103,6 @@ def test_main(num_tokens: int, num_sms: int, local_rank: int, num_ranks: int, ra
                     assert gbl_num_tokens_per_expert.view(num_ranks, -1)[rank].tolist() == recv_num_tokens_per_expert_list
                     if current_x is not x_pure_rand:
                         check_data(recv_x, recv_rdma_rank_prefix_sum)
-                    recv_topk_weights_clone = None
                     if with_topk:
                         # Check `topk_idx`
                         assert (recv_topk_idx.eq(-1) | ((recv_topk_idx >= 0) & (recv_topk_idx < (num_experts // num_ranks)))).sum().item() == recv_topk_idx.numel()
@@ -142,14 +142,11 @@ def test_main(num_tokens: int, num_sms: int, local_rank: int, num_ranks: int, ra
                         check_topk_weights = combined_topk_weights if (current_x is x_pure_rand) else (combined_topk_weights / is_token_in_rank.sum(dim=1).unsqueeze(1))
                         ref_topk_weights = topk_weights_pure_rand if current_x is x_pure_rand else topk_weights
                         assert calc_diff(check_topk_weights, ref_topk_weights) < 1e-9
-                    # sys.exit()
                     # # For later tuning
                     dispatch_bf16_rdma_send_bytes = num_rdma_token_sent * hidden * 2
                     if local_rank == 0:
                         print(' passed', flush=True)
 
-    print(f'rank: {rank}, num_rdma_token_sent: {num_rdma_token_sent}')
-    dispatch_bf16_rdma_send_bytes = dispatch_bf16_rdma_send_bytes
     # Tune dispatch performance
     fp8_factor = (1 + 4 / 128) / 2
     for current_x in filter(lambda elem: elem is not None, (x_e4m3, x )):
@@ -189,27 +186,17 @@ def test_main(num_tokens: int, num_sms: int, local_rank: int, num_ranks: int, ra
 # noinspection PyUnboundLocalVariable
 def test_loop(local_rank: int, num_local_ranks: int):
     rank, num_ranks, group = init_dist(local_rank, num_local_ranks)
-    test_ll_compatibility, num_rdma_bytes = False, 0
-    if test_ll_compatibility:
-        ll_num_tokens, ll_hidden, ll_num_experts, ll_num_topk = 16, 5120, 256, 9
-        num_rdma_bytes = deep_ep.Buffer.get_low_latency_rdma_size_hint(ll_num_tokens, ll_hidden, num_ranks, ll_num_experts)
 
     num_sms = 20
-    num_qps_per_rank = max(num_sms, ll_num_experts // num_ranks if test_ll_compatibility else 0)
-    buffer = deep_ep.Buffer(group, 0, int(1e9), low_latency_mode=test_ll_compatibility,pcie_mode=True,
+    num_qps_per_rank = num_sms
+    buffer = deep_ep.Buffer(group, 0, int(1e9),pcie_mode=True,
                             num_qps_per_rank=num_qps_per_rank)
     torch.manual_seed(rank)
 
-    num_tokens = 4096
     for i in (num_sms, ):
-        test_main(num_tokens, i, local_rank, num_ranks, rank, buffer, group)
+        test_main(i, local_rank, num_ranks, rank, buffer, group)
         if local_rank == 0:
             print('', flush=True)
-
-    # Test compatibility with low latency functions
-    if test_ll_compatibility:
-        buffer.clean_low_latency_buffer(ll_num_tokens, ll_hidden, ll_num_experts)
-        test_low_latency.test_main(ll_num_tokens, ll_hidden, ll_num_experts, ll_num_topk, rank, num_ranks, group, buffer, seed=1)
 
     # Destroy the communication group
     dist.barrier()
