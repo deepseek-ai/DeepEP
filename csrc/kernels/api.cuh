@@ -137,11 +137,13 @@ namespace internode_ll {
 
 void clean_low_latency_buffer(int* clean_0, int num_clean_int_0,
                               int* clean_1, int num_clean_int_1,
+                              int rank, int num_ranks, int* mask_buffer, int* sync_buffer,
                               cudaStream_t stream);
 
 void dispatch(void* packed_recv_x, void* packed_recv_x_scales,
               int* packed_recv_src_info, int64_t* packed_recv_layout_range,
               int* packed_recv_count,
+              int* mask_buffer,
               int* cumulative_local_expert_recv_stats,
               int64_t* dispatch_wait_recv_cost_stats,
               void* rdma_recv_x, int* rdma_recv_count, void* rdma_x,
@@ -157,6 +159,7 @@ void combine(void* combined_x,
              void* rdma_recv_x, int* rdma_recv_flag, void* rdma_send_x,
              const void* x, const int64_t* topk_idx, const float* topk_weights,
              const int* src_info, const int64_t* layout_range,
+             int* mask_buffer,
              int64_t* combine_wait_recv_cost_stats,
              int* next_clean, int num_next_clean_int,
              int num_combined_tokens, int hidden, int num_max_dispatch_tokens_per_rank,
@@ -164,6 +167,12 @@ void combine(void* combined_x,
              bool use_logfmt,
              void* workspace, int num_device_sms,
              cudaStream_t stream, int phases, bool zero_copy);
+
+void query_mask_buffer(int* mask_buffer_ptr, int num_ranks, int* output_mask_tensor, cudaStream_t stream);
+
+void update_mask_buffer(int* mask_buffer_ptr, int rank_to_mask, bool mask, cudaStream_t stream);
+
+void clean_mask_buffer(int* mask_buffer_ptr, int num_ranks, cudaStream_t stream);
 
 } // namespace internode_ll
 

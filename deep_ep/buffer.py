@@ -35,6 +35,7 @@ class Buffer:
                  allow_nvlink_for_low_latency_mode: bool = True,
                  allow_mnnvl: bool = False,
                  explicitly_destroy: bool = False,
+                 enable_elastic: bool = False,
                  comm: Optional["mpi4py.MPI.Comm"] = None) -> None:
         """
         Initialize the communication buffer.
@@ -51,6 +52,7 @@ class Buffer:
                 Warning: PCIe connections may lead to errors due to memory ordering issues,
                 please make sure all connections are via NVLink.
             allow_mnnvl: whether to allow MNNVL
+            enable_elastic: whether to enable elastic mode. The enable mode allocates a mask buffer to support masking ranks dynamically.
             explicitly_destroy: If this flag is set to True, you need to explicitly call `destroy()` to release resources;
                 otherwise, the resources will be released by the destructor.
                 Note: Releasing resources in the destructor may cause Python's exception handling process to hang.
@@ -81,7 +83,8 @@ class Buffer:
         self.num_rdma_bytes = num_rdma_bytes
         self.low_latency_mode = low_latency_mode
         self.explicitly_destroy = explicitly_destroy
-        self.runtime = deep_ep_cpp.Buffer(self.rank, self.group_size, num_nvl_bytes, num_rdma_bytes, low_latency_mode, explicitly_destroy)
+        self.enable_elastic = enable_elastic
+        self.runtime = deep_ep_cpp.Buffer(self.rank, self.group_size, num_nvl_bytes, num_rdma_bytes, low_latency_mode, explicitly_destroy, enable_elastic)
 
         # Synchronize device IDs
         local_device_id = self.runtime.get_local_device_id()
@@ -647,6 +650,34 @@ class Buffer:
                                                                    out)
         tensors_to_record = (x, topk_idx, topk_weights, src_info, layout_range, combined_x)
         return combined_x, EventOverlap(event, tensors_to_record if async_finish else None), hook
+
+    def low_latency_update_mask_buffer(self, rank_to_mask: int, mask: bool = False):
+        """
+        Mask (unmask) a rank during communication (dispatch, combine, and clean)
+
+        Arguments: 
+            rank: the rank to mask (unmask).
+            mask: if True, will mask the rank (do not recvfrom/sendto the rank), otherwise will unmask the rank.
+
+        """
+        self.runtime.low_latency_update_mask_buffer(rank_to_mask, mask)
+
+    def low_latency_query_mask_buffer(self, mask_status: torch.Tensor):
+        """
+        Query the mask status of all ranks
+
+        Arguments: 
+            mask_status: `[num_ranks]` with `torch.int`, the mask status of each rank. `1` means mask and `0` means unmasked.
+
+        """
+        self.runtime.low_latency_query_mask_buffer(mask_status)
+
+    def low_latency_clean_mask_buffer(self):
+        """
+        Clean the mask buffer
+
+        """
+        self.runtime.low_latency_clean_mask_buffer()
 
     def get_next_low_latency_combine_buffer(self, handle: object):
         """
