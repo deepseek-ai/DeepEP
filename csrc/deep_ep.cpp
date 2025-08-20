@@ -12,9 +12,11 @@
 
 namespace deep_ep {
 
-Buffer::Buffer(int rank, int num_ranks, int64_t num_nvl_bytes, int64_t num_rdma_bytes, bool low_latency_mode, bool explicitly_destroy):
+Buffer::Buffer(int rank, int num_ranks, int64_t num_nvl_bytes, int64_t num_rdma_bytes, bool low_latency_mode, bool explicitly_destroy,
+               bool enable_elastic):
         rank(rank), num_ranks(num_ranks),
         num_nvl_bytes(num_nvl_bytes), num_rdma_bytes(num_rdma_bytes),
+        enable_elastic(enable_elastic),
         low_latency_mode(low_latency_mode),
         explicitly_destroy(explicitly_destroy),
         comm_stream(at::cuda::getStreamFromPool(true)) {
@@ -167,6 +169,8 @@ void Buffer::destroy() {
         CUDA_CHECK(cudaDeviceSynchronize());
         internode::barrier();
         internode::free(rdma_buffer_ptr);
+        internode::free(mask_buffer_ptr);
+        internode::free(sync_buffer_ptr);
         internode::finalize();
     }
 #endif
@@ -228,6 +232,16 @@ void Buffer::sync(const std::vector<int> &device_ids,
 
         // Clean buffer (mainly for low-latency mode)
         CUDA_CHECK(cudaMemset(rdma_buffer_ptr, 0, num_rdma_bytes));
+
+        // Allocate and clean elastic buffer
+        if(enable_elastic) {
+            int num_mask_buffer_bytes = num_ranks * sizeof(int);
+            int num_sync_buffer_bytes = num_ranks * sizeof(int);
+            mask_buffer_ptr = reinterpret_cast<int*>(internode::alloc(num_mask_buffer_bytes, NUM_BUFFER_ALIGNMENT_BYTES));
+            sync_buffer_ptr = reinterpret_cast<int*>(internode::alloc(num_sync_buffer_bytes, NUM_BUFFER_ALIGNMENT_BYTES));
+            CUDA_CHECK(cudaMemset(mask_buffer_ptr, 0, num_mask_buffer_bytes));
+            CUDA_CHECK(cudaMemset(sync_buffer_ptr, 0, num_sync_buffer_bytes));
+        }
 
         // Barrier
         internode::barrier();
@@ -1081,6 +1095,7 @@ void Buffer::clean_low_latency_buffer(int num_max_dispatch_tokens_per_rank, int 
 
     internode_ll::clean_low_latency_buffer(clean_meta_0.first, clean_meta_0.second,
                                            clean_meta_1.first, clean_meta_1.second,
+                                           rank, num_ranks, mask_buffer_ptr, sync_buffer_ptr,
                                            at::cuda::getCurrentCUDAStream());
 #else
     EP_HOST_ASSERT(false and "NVSHMEM is disabled during compilation");
@@ -1169,6 +1184,7 @@ Buffer::low_latency_dispatch(const torch::Tensor& x, const torch::Tensor& topk_i
         internode_ll::dispatch(packed_recv_x.data_ptr(), packed_recv_x_scales_ptr,
                                packed_recv_src_info.data_ptr<int>(), packed_recv_layout_range.data_ptr<int64_t>(),
                                packed_recv_count.data_ptr<int>(),
+                               mask_buffer_ptr,
                                cumulative_local_expert_recv_stats.has_value() ? cumulative_local_expert_recv_stats->data_ptr<int>() : nullptr,
                                dispatch_wait_recv_cost_stats.has_value() ? dispatch_wait_recv_cost_stats->data_ptr<int64_t>() : nullptr,
                                buffer.dispatch_rdma_recv_data_buffer, buffer.dispatch_rdma_recv_count_buffer,
@@ -1276,6 +1292,7 @@ Buffer::low_latency_combine(const torch::Tensor& x, const torch::Tensor& topk_id
                               buffer.combine_rdma_send_buffer,
                               x.data_ptr(), topk_idx.data_ptr<int64_t>(), topk_weights.data_ptr<float>(),
                               src_info.data_ptr<int>(), layout_range.data_ptr<int64_t>(),
+                              mask_buffer_ptr,
                               combine_wait_recv_cost_stats.has_value() ? combine_wait_recv_cost_stats->data_ptr<int64_t>() : nullptr,
                               next_clean_meta.first, next_clean_meta.second,
                               num_combined_tokens, hidden, num_max_dispatch_tokens_per_rank,
@@ -1337,6 +1354,26 @@ bool is_sm90_compiled() {
 #endif
 }
 
+void Buffer::low_latency_update_mask_buffer(int rank_to_mask, bool mask) {
+    EP_HOST_ASSERT(mask_buffer_ptr != nullptr and "Elastic mode must be enabled");
+    EP_HOST_ASSERT(rank_to_mask >= 0 and rank_to_mask < num_ranks);
+    internode_ll::update_mask_buffer(mask_buffer_ptr, rank_to_mask, mask, at::cuda::getCurrentCUDAStream());
+}
+
+void Buffer::low_latency_query_mask_buffer(const torch::Tensor& mask_status) {
+    EP_HOST_ASSERT(mask_buffer_ptr != nullptr and "Elastic mode must be enabled");
+    EP_HOST_ASSERT(mask_status.numel() == num_ranks && mask_status.scalar_type() == torch::kInt32);
+
+    internode_ll::query_mask_buffer(mask_buffer_ptr, num_ranks,
+                                    reinterpret_cast<int*>(mask_status.data_ptr()),
+                                    at::cuda::getCurrentCUDAStream());
+}
+
+void Buffer::low_latency_clean_mask_buffer() {
+    EP_HOST_ASSERT(mask_buffer_ptr != nullptr and "Elastic mode must be enabled");
+    internode_ll::clean_mask_buffer(mask_buffer_ptr, num_ranks, at::cuda::getCurrentCUDAStream());
+}
+
 } // namespace deep_ep
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
@@ -1356,7 +1393,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         .def("current_stream_wait", &deep_ep::EventHandle::current_stream_wait);
 
     pybind11::class_<deep_ep::Buffer>(m, "Buffer")
-        .def(pybind11::init<int, int, int64_t, int64_t, bool, bool>())
+        .def(pybind11::init<int, int, int64_t, int64_t, bool, bool, bool>())
         .def("is_available", &deep_ep::Buffer::is_available)
         .def("get_num_rdma_ranks", &deep_ep::Buffer::get_num_rdma_ranks)
         .def("get_rdma_rank", &deep_ep::Buffer::get_rdma_rank)
@@ -1376,6 +1413,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         .def("clean_low_latency_buffer", &deep_ep::Buffer::clean_low_latency_buffer)
         .def("low_latency_dispatch", &deep_ep::Buffer::low_latency_dispatch)
         .def("low_latency_combine", &deep_ep::Buffer::low_latency_combine)
+        .def("low_latency_update_mask_buffer", &deep_ep::Buffer::low_latency_update_mask_buffer)
+        .def("low_latency_query_mask_buffer", &deep_ep::Buffer::low_latency_query_mask_buffer)
+        .def("low_latency_clean_mask_buffer", &deep_ep::Buffer::low_latency_clean_mask_buffer)
         .def("get_next_low_latency_combine_buffer", &deep_ep::Buffer::get_next_low_latency_combine_buffer);
 
     m.def("is_sm90_compiled", deep_ep::is_sm90_compiled);
