@@ -472,7 +472,7 @@ ibgda_poll_cq(nvshmemi_ibgda_device_cq_t *cq, uint64_t idx) {
     const auto cqe64 = static_cast<mlx5_cqe64*>(cq->cqe);
     const uint32_t ncqes = cq->ncqes;
     memory_fence_cta();
-
+    if (*cq->cons_idx >= idx) return;
     // NOTES: this while loop is part of do-while below.
     // `wqe_counter` is the HW consumer index. However, we always maintain `index + 1`.
     // To be able to compare with the index, we need to use `wqe_counter + 1`.
