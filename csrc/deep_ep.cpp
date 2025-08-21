@@ -13,10 +13,10 @@
 namespace deep_ep {
 
 Buffer::Buffer(int rank, int num_ranks, int64_t num_nvl_bytes, int64_t num_rdma_bytes, bool low_latency_mode, bool explicitly_destroy,
-               bool enable_elastic):
+               bool enable_elastic, int num_coll_buffer_bytes):
         rank(rank), num_ranks(num_ranks),
         num_nvl_bytes(num_nvl_bytes), num_rdma_bytes(num_rdma_bytes),
-        enable_elastic(enable_elastic),
+        enable_elastic(enable_elastic), num_coll_buffer_bytes(num_coll_buffer_bytes),
         low_latency_mode(low_latency_mode),
         explicitly_destroy(explicitly_destroy),
         comm_stream(at::cuda::getStreamFromPool(true)) {
@@ -169,6 +169,7 @@ void Buffer::destroy() {
         CUDA_CHECK(cudaDeviceSynchronize());
         internode::barrier();
         internode::free(rdma_buffer_ptr);
+        internode::free(coll_buffer_ptr);
         internode::free(mask_buffer_ptr);
         internode::free(sync_buffer_ptr);
         internode::finalize();
@@ -241,6 +242,10 @@ void Buffer::sync(const std::vector<int> &device_ids,
             sync_buffer_ptr = reinterpret_cast<int*>(internode::alloc(num_sync_buffer_bytes, NUM_BUFFER_ALIGNMENT_BYTES));
             CUDA_CHECK(cudaMemset(mask_buffer_ptr, 0, num_mask_buffer_bytes));
             CUDA_CHECK(cudaMemset(sync_buffer_ptr, 0, num_sync_buffer_bytes));
+        }
+        if (num_coll_buffer_bytes > 0) {
+            coll_buffer_ptr = reinterpret_cast<int*>(internode::alloc(num_coll_buffer_bytes, NUM_BUFFER_ALIGNMENT_BYTES));
+            CUDA_CHECK(cudaMemset(coll_buffer_ptr, 0, num_coll_buffer_bytes));
         }
 
         // Barrier
@@ -1354,6 +1359,43 @@ bool is_sm90_compiled() {
 #endif
 }
 
+std::optional<EventHandle> Buffer::low_latency_allgather(const torch::Tensor& in_out_tensor,
+                                                         bool use_default_stream, bool async) {
+#ifndef DISABLE_NVSHMEM
+    EP_HOST_ASSERT(low_latency_mode);
+
+    // Tensor checks
+    EP_HOST_ASSERT(in_out_tensor.scalar_type() == torch::kInt32);
+    EP_HOST_ASSERT(in_out_tensor.numel() % num_ranks == 0);
+    int num_output_bytes = in_out_tensor.numel() * in_out_tensor.element_size();
+    int num_input_bytes = num_output_bytes / num_ranks;
+    EP_HOST_ASSERT(num_output_bytes <= num_coll_buffer_bytes);
+
+    auto compute_stream = at::cuda::getCurrentCUDAStream();
+    auto launch_stream = use_default_stream ? compute_stream : comm_stream;
+
+    // Kernel launch
+    internode_ll::allgather(in_out_tensor.data_ptr(), coll_buffer_ptr, num_input_bytes,
+                            rank, num_ranks, mask_buffer_ptr, sync_buffer_ptr,
+                            launch_stream);
+
+    // Wait streams
+    std::optional<EventHandle> event;
+    if (async) {
+        // NOTES: we must ensure the all tensors will not be deallocated before the stream-wait happens,
+        // so in Python API, we must wrap all tensors into the event handle.
+        event = EventHandle(launch_stream);
+    } else {
+        stream_wait(compute_stream, launch_stream);
+    }
+    return event;
+
+#else
+    EP_HOST_ASSERT(false and "NVSHMEM is disabled during compilation");
+    return {};
+#endif
+}
+
 void Buffer::low_latency_update_mask_buffer(int rank_to_mask, bool mask) {
     EP_HOST_ASSERT(mask_buffer_ptr != nullptr and "Elastic mode must be enabled");
     EP_HOST_ASSERT(rank_to_mask >= 0 and rank_to_mask < num_ranks);
@@ -1393,7 +1435,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         .def("current_stream_wait", &deep_ep::EventHandle::current_stream_wait);
 
     pybind11::class_<deep_ep::Buffer>(m, "Buffer")
-        .def(pybind11::init<int, int, int64_t, int64_t, bool, bool, bool>())
+        .def(pybind11::init<int, int, int64_t, int64_t, bool, bool, bool, int>())
         .def("is_available", &deep_ep::Buffer::is_available)
         .def("get_num_rdma_ranks", &deep_ep::Buffer::get_num_rdma_ranks)
         .def("get_rdma_rank", &deep_ep::Buffer::get_rdma_rank)
@@ -1413,6 +1455,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         .def("clean_low_latency_buffer", &deep_ep::Buffer::clean_low_latency_buffer)
         .def("low_latency_dispatch", &deep_ep::Buffer::low_latency_dispatch)
         .def("low_latency_combine", &deep_ep::Buffer::low_latency_combine)
+        .def("low_latency_allgather", &deep_ep::Buffer::low_latency_allgather)
         .def("low_latency_update_mask_buffer", &deep_ep::Buffer::low_latency_update_mask_buffer)
         .def("low_latency_query_mask_buffer", &deep_ep::Buffer::low_latency_query_mask_buffer)
         .def("low_latency_clean_mask_buffer", &deep_ep::Buffer::low_latency_clean_mask_buffer)

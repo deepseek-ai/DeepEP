@@ -23,13 +23,17 @@ class Api(Enum):
     dispatch = 0
     combine = 1
     clean = 2
+    allgather = 3
 
 failure_cases = {
     # round -> [rank, Api]
     1: [1, Api.dispatch],
     3: [3, Api.combine],
     5: [5, Api.clean],
+    7: [7, Api.allgather],
 }
+
+allgather_intput_ints = 10
 
 def api_loop(num_tokens: int, hidden: int, num_experts: int, rank: int, num_ranks: int, rank_offset: int,
              x: torch.Tensor, topk_idx: torch.Tensor, all_topk_idx: torch.Tensor, topk_weights: torch.Tensor,
@@ -46,7 +50,7 @@ def api_loop(num_tokens: int, hidden: int, num_experts: int, rank: int, num_rank
 
     mask_status = torch.zeros((num_ranks, ), dtype=torch.int, device='cuda')
 
-    gather_tensor = torch.zeros(num_ranks, dtype=torch.int32, device='cuda')
+    gather_tensor = torch.zeros(num_ranks, allgather_intput_ints, dtype=torch.int32, device='cuda')
 
     expected_failed_ranks = set()
 
@@ -167,6 +171,22 @@ def api_loop(num_tokens: int, hidden: int, num_experts: int, rank: int, num_rank
         buffer.clean_low_latency_buffer(num_tokens, hidden, num_experts)
         check_mask_buffer_query(r, Api.clean)
 
+        # Allgather
+        if simulate_failure_and_exit(r, Api.allgather):
+            return
+
+        gather_tensor.fill_(0)
+        gather_tensor[rank] = rank_offset - rank
+        buffer.low_latency_allgather(gather_tensor)
+        check_mask_buffer_query(r, Api.allgather)
+
+        ## Check allgather result correctness
+        expected = torch.zeros_like(gather_tensor)
+        for src_rank in range(num_ranks):
+            if src_rank not in expected_failed_ranks:
+                expected[src_rank] = rank_offset - src_rank
+        assert torch.allclose(gather_tensor, expected), f"Rank {rank} allgather result is not correct"
+
     check_mask_buffer_clean()
     
     buffer.destroy()
@@ -241,7 +261,8 @@ def test_loop(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
         'allow_nvlink_for_low_latency_mode': not args.disable_nvlink, 
         'explicitly_destroy': True,
         'allow_mnnvl': args.allow_mnnvl, 
-        'enable_elastic': True
+        'enable_elastic': True,
+        'num_coll_buffer_bytes': num_ranks * allgather_intput_ints * 4
     }
     test_main(num_tokens, hidden, num_experts, num_topk, rank, num_ranks, group, buffer_params,
               use_logfmt=args.use_logfmt, seed=1)
