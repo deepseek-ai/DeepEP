@@ -63,6 +63,44 @@ class EventOverlap:
             self.event.current_stream_wait()
 
 
+def check_nvlink_requirements(group: dist.ProcessGroup, 
+                              allow_nvlink_for_normal_mode: bool = True,
+                              allow_nvlink_for_low_latency_mode: bool = True,
+                              low_latency_mode: bool = False) -> None:
+    """
+    Check NVLink requirements based on the mode and configuration.
+    
+    Arguments:
+        group: the communication group.
+        allow_nvlink_for_normal_mode: whether NVLink is allowed for normal mode.
+        allow_nvlink_for_low_latency_mode: whether NVLink is allowed for low-latency mode.
+        low_latency_mode: whether running in low-latency mode.
+    """
+    # Determine which setting to check
+    allow_nvlink = allow_nvlink_for_low_latency_mode if low_latency_mode else allow_nvlink_for_normal_mode
+    if not allow_nvlink:
+        return 
+    
+    # noinspection PyUnresolvedReferences
+    import pynvml
+    
+    pynvml.nvmlInit()
+    devices = os.environ.get('CUDA_VISIBLE_DEVICES', '0,1,2,3,4,5,6,7').strip(',').split(',')
+    physical_device_indices = [0] * group.size()
+    physical_device_indices[group.rank()] = int(devices[torch.cuda.current_device()])
+    dist.all_gather_object(physical_device_indices, physical_device_indices[group.rank()], group)
+    
+    handles = [pynvml.nvmlDeviceGetHandleByIndex(i) for i in physical_device_indices]
+    for i in range(len(handles)):
+        for j in range(i + 1, len(handles)):
+            status = pynvml.nvmlDeviceGetP2PStatus(handles[i], handles[j], pynvml.NVML_P2P_CAPS_INDEX_NVLINK)
+            assert status == pynvml.NVML_P2P_STATUS_OK, \
+                f'No NVLink connection between GPU {physical_device_indices[i]} and GPU {physical_device_indices[j]}, ' \
+                f'but allow_nvlink_for_{"low_latency" if low_latency_mode else "normal"}_mode=True'
+    
+    pynvml.nvmlShutdown()
+
+
 def check_nvlink_connections(group: dist.ProcessGroup):
     """
     Check NVLink connection between every pair of GPUs.
