@@ -12,12 +12,20 @@
 
 namespace deep_ep {
 
+<<<<<<< HEAD
 Buffer::Buffer(int rank, int num_ranks, int64_t num_nvl_bytes, int64_t num_rdma_bytes, bool low_latency_mode, bool explicitly_destroy,bool pcie_mode):
         rank(rank), num_ranks(num_ranks),
         num_nvl_bytes(num_nvl_bytes), num_rdma_bytes(num_rdma_bytes),
         low_latency_mode(low_latency_mode),
         explicitly_destroy(explicitly_destroy),
         pcie_mode(pcie_mode),
+=======
+Buffer::Buffer(int rank, int num_ranks, int64_t num_nvl_bytes, int64_t num_rdma_bytes, bool low_latency_mode,bool disable_nvlink_for_normal_mode):
+        rank(rank), num_ranks(num_ranks),
+        num_nvl_bytes(num_nvl_bytes), num_rdma_bytes(num_rdma_bytes),
+        low_latency_mode(low_latency_mode),
+        disable_nvlink_for_normal_mode(disable_nvlink_for_normal_mode),
+>>>>>>> 1234180 (rename and nvl check added)
         comm_stream(at::cuda::getStreamFromPool(true)) {
     // Metadata memory
     int64_t barrier_signal_bytes = NUM_MAX_NVL_PEERS * sizeof(int);
@@ -26,18 +34,18 @@ Buffer::Buffer(int rank, int num_ranks, int64_t num_nvl_bytes, int64_t num_rdma_
 
     // Common checks
     EP_HOST_ASSERT(num_nvl_bytes % NUM_BUFFER_ALIGNMENT_BYTES == 0 and (num_nvl_bytes <= std::numeric_limits<int>::max() or num_rdma_bytes == 0));
-    EP_HOST_ASSERT(num_rdma_bytes % NUM_BUFFER_ALIGNMENT_BYTES == 0 and (low_latency_mode or pcie_mode or num_rdma_bytes <= std::numeric_limits<int>::max()));
-    EP_HOST_ASSERT(0 <= rank and rank < num_ranks and (num_ranks <= NUM_MAX_NVL_PEERS * NUM_MAX_RDMA_PEERS or low_latency_mode or pcie_mode));
+    EP_HOST_ASSERT(num_rdma_bytes % NUM_BUFFER_ALIGNMENT_BYTES == 0 and (low_latency_mode or disable_nvlink_for_normal_mode or num_rdma_bytes <= std::numeric_limits<int>::max()));
+    EP_HOST_ASSERT(0 <= rank and rank < num_ranks and (num_ranks <= NUM_MAX_NVL_PEERS * NUM_MAX_RDMA_PEERS or low_latency_mode or disable_nvlink_for_normal_mode));
     EP_HOST_ASSERT(num_ranks < NUM_MAX_NVL_PEERS or num_ranks % NUM_MAX_NVL_PEERS == 0);
     if (num_rdma_bytes > 0)
-        EP_HOST_ASSERT(num_ranks > NUM_MAX_NVL_PEERS or low_latency_mode or pcie_mode);
+        EP_HOST_ASSERT(num_ranks > NUM_MAX_NVL_PEERS or low_latency_mode or disable_nvlink_for_normal_mode);
 
     // Get ranks
     CUDA_CHECK(cudaGetDevice(&device_id));
     rdma_rank = rank / NUM_MAX_NVL_PEERS, nvl_rank = rank % NUM_MAX_NVL_PEERS;
     num_rdma_ranks = std::max(1, num_ranks / NUM_MAX_NVL_PEERS), num_nvl_ranks = std::min(num_ranks, NUM_MAX_NVL_PEERS);
 #ifdef DISABLE_NVSHMEM
-    EP_HOST_ASSERT(num_rdma_ranks == 1 and not low_latency_mode and not pcie_mode and "NVSHMEM is disabled during compilation");
+    EP_HOST_ASSERT(num_rdma_ranks == 1 and not low_latency_mode and not disable_nvlink_for_normal_mode and "NVSHMEM is disabled during compilation");
 #endif
 
     // Get device info
@@ -45,7 +53,7 @@ Buffer::Buffer(int rank, int num_ranks, int64_t num_nvl_bytes, int64_t num_rdma_
     CUDA_CHECK(cudaGetDeviceProperties(&device_prop, device_id));
     num_device_sms = device_prop.multiProcessorCount;
 
-    // lowlatency mode or pcie mode nvl_bytes = 0
+    // lowlatency mode or normal mode w/o nvl  nvl_bytes = 0
     if (num_nvl_bytes > 0) {
         // Local IPC: alloc local memory and set local IPC handles
         CUDA_CHECK(cudaMalloc(&buffer_ptrs[nvl_rank], num_nvl_bytes + barrier_signal_bytes + buffer_ptr_bytes + barrier_signal_ptr_bytes));
@@ -220,9 +228,9 @@ void Buffer::sync(const std::vector<int> &device_ids,
         std::vector<uint8_t> root_unique_id(root_unique_id_opt->size());
         auto root_unique_id_str = root_unique_id_opt->cast<std::string>();
         std::memcpy(root_unique_id.data(), root_unique_id_str.c_str(), root_unique_id_opt->size());
-        auto nvshmem_rank = low_latency_mode or pcie_mode ? rank : rdma_rank;
-        auto num_nvshmem_ranks = low_latency_mode or pcie_mode ? num_ranks : num_rdma_ranks;
-        EP_HOST_ASSERT(nvshmem_rank == internode::init(root_unique_id, nvshmem_rank, num_nvshmem_ranks, low_latency_mode, pcie_mode));
+        auto nvshmem_rank = low_latency_mode or disable_nvlink_for_normal_mode ? rank : rdma_rank;
+        auto num_nvshmem_ranks = low_latency_mode or disable_nvlink_for_normal_mode ? num_ranks : num_rdma_ranks;
+        EP_HOST_ASSERT(nvshmem_rank == internode::init(root_unique_id, nvshmem_rank, num_nvshmem_ranks, low_latency_mode, disable_nvlink_for_normal_mode));
         internode::barrier();
 
         // Allocate
@@ -1341,7 +1349,7 @@ bool is_sm90_compiled() {
 
 std::tuple<torch::Tensor, std::optional<torch::Tensor>, std::optional<torch::Tensor>, 
 std::optional<torch::Tensor>,std::vector<int>, torch::Tensor, std::optional<torch::Tensor>, torch::Tensor, std::optional<torch::Tensor>, std::optional<EventHandle>>
-Buffer::pcie_dispatch(const torch::Tensor& x, const std::optional<torch::Tensor>& x_scales,
+Buffer::dispatch_pcie(const torch::Tensor& x, const std::optional<torch::Tensor>& x_scales,
                       const std::optional<torch::Tensor>& topk_idx, const std::optional<torch::Tensor>& topk_weights,
                       const std::optional<torch::Tensor>& num_tokens_per_rank,
                       const torch::Tensor& is_token_in_rank, const std::optional<torch::Tensor>& num_tokens_per_expert,
@@ -1582,7 +1590,7 @@ Buffer::pcie_dispatch(const torch::Tensor& x, const std::optional<torch::Tensor>
 }
 
 std::tuple<torch::Tensor, std::optional<torch::Tensor>, std::optional<EventHandle>>
-Buffer::pcie_combine(const torch::Tensor& recv_x, const std::optional<torch::Tensor>& recv_topk_weights,
+Buffer::combine_pcie(const torch::Tensor& recv_x, const std::optional<torch::Tensor>& recv_topk_weights,
                      const std::optional<torch::Tensor>& bias_0, const std::optional<torch::Tensor>& bias_1,
                      const torch::Tensor& combined_rdma_head,
                      const torch::Tensor& recv_gbl_channel_prefix_matrix, const torch::Tensor& recv_rank_prefix_sum,
@@ -1741,8 +1749,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         .def("intranode_combine", &deep_ep::Buffer::intranode_combine)
         .def("internode_dispatch", &deep_ep::Buffer::internode_dispatch)
         .def("internode_combine", &deep_ep::Buffer::internode_combine)
-        .def("pcie_dispatch", &deep_ep::Buffer::pcie_dispatch)
-        .def("pcie_combine", &deep_ep::Buffer::pcie_combine)
+        .def("dispatch_pcie", &deep_ep::Buffer::dispatch_pcie)
+        .def("combine_pcie", &deep_ep::Buffer::combine_pcie)
         .def("clean_low_latency_buffer", &deep_ep::Buffer::clean_low_latency_buffer)
         .def("low_latency_dispatch", &deep_ep::Buffer::low_latency_dispatch)
         .def("low_latency_combine", &deep_ep::Buffer::low_latency_combine)

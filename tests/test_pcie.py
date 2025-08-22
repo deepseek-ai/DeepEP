@@ -189,8 +189,7 @@ def test_loop(local_rank: int, num_local_ranks: int):
 
     num_sms = 20
     num_qps_per_rank = num_sms
-    buffer = deep_ep.Buffer(group, 0, int(1e9),pcie_mode=True,
-                            num_qps_per_rank=num_qps_per_rank)
+    buffer = deep_ep.Buffer(group, 0, int(1e9),num_qps_per_rank=num_qps_per_rank,allow_nvlink_for_normal_mode=False)
     torch.manual_seed(rank)
 
     for i in (num_sms, ):

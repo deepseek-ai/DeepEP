@@ -112,6 +112,9 @@ if __name__ == '__main__':
         packages=setuptools.find_packages(
             include=['deep_ep']
         ),
+        install_requires=[
+            'pynvml',
+        ],
         ext_modules=[
             CUDAExtension(
                 name='deep_ep_cpp',
