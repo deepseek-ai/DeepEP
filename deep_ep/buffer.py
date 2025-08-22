@@ -7,7 +7,7 @@ from typing import Callable, List, Tuple, Optional, Union
 import deep_ep_cpp
 # noinspection PyUnresolvedReferences
 from deep_ep_cpp import Config, EventHandle
-from .utils import EventOverlap, check_nvlink_connections, check_nvlink_requirements
+from .utils import EventOverlap, check_nvlink_connections
 
 
 class Buffer:
@@ -53,7 +53,7 @@ class Buffer:
             allow_mnnvl: whether to allow MNNVL
         """
         # Check NVLink requirements based on configuration
-        check_nvlink_requirements(group, allow_nvlink_for_normal_mode, allow_nvlink_for_low_latency_mode, low_latency_mode)
+        check_nvlink_connections(group, allow_nvlink_for_normal_mode, allow_nvlink_for_low_latency_mode, low_latency_mode)
 
         # Initialize the CPP runtime
         self.rank = group.rank()
