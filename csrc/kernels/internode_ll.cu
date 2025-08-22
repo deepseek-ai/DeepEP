@@ -489,7 +489,7 @@ __forceinline__ __device__ void logfmt_check_amaxmin(uint8_t* meta_buffer, float
         const auto& bf162_amaxmin = reinterpret_cast<__nv_bfloat162*>(&amaxmin2);
         float log_amax[2], log_amin[2];
         #pragma unroll
-        for (int i = 0; i < 2; ++ i) { 
+        for (int i = 0; i < 2; ++ i) {
             auto amax = static_cast<float>(bf162_amaxmin[i].x);
             auto amin = static_cast<float>(bf162_amaxmin[i].y);
             log_amax[i] = log2f_approx(amax);

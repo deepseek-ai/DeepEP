@@ -272,7 +272,7 @@ nvshmemi_ibgda_rma_p(int *rptr, const int value, int dst_pe, int qp_id, uint32_t
     uint64_t raddr;
     auto qp = ibgda_get_rc(dst_pe, qp_id);
     ibgda_get_rkey(reinterpret_cast<uint64_t>(rptr), dst_pe, &raddr, &rkey, qp->dev_idx);
-    
+
     // Write WQEs
     uint64_t base_wqe_idx = ibgda_reserve_wqe_slots(qp, 1);
     void *wqe_ptrs;
@@ -351,13 +351,13 @@ nvshmemi_ibgda_put_nbi_warp(uint64_t req_rptr, uint64_t req_lptr, size_t bytes, 
     auto remaining_bytes = bytes;
     while (remaining_bytes > 0) {
         if (lane_id == num_wqes) {
-            my_chunk_size = min(remaining_bytes, 
-                                ibgda_get_lkey_and_rkey(my_laddr = req_lptr, 
-                                                        &my_lkey, 
-                                                        req_rptr, 
-                                                        dst_pe, 
-                                                        &my_raddr, 
-                                                        &my_rkey, 
+            my_chunk_size = min(remaining_bytes,
+                                ibgda_get_lkey_and_rkey(my_laddr = req_lptr,
+                                                        &my_lkey,
+                                                        req_rptr,
+                                                        dst_pe,
+                                                        &my_raddr,
+                                                        &my_rkey,
                                                         qp->dev_idx));
         }
 
@@ -464,7 +464,7 @@ __device__ __forceinline__ uint64_t nvshmemi_get_p2p_ptr(const uint64_t& ptr, co
     return peer_base + (ptr - reinterpret_cast<uint64_t>(nvshmemi_device_state_d.heap_base));
 }
 
-// This is a simplified version of NVSHMEM's `ibgda_poll_cq`. 
+// This is a simplified version of NVSHMEM's `ibgda_poll_cq`.
 // Note that this implementation does not guarantee thread safety,
 // so we must ensure that no other threads are concurrently using the same QP.
 __device__ static __forceinline__ void

@@ -597,7 +597,7 @@ Buffer::intranode_combine(const torch::Tensor& x, const std::optional<torch::Ten
                                      num_channels, num_recv_tokens, num_channels * num_ranks * 2,
                                      barrier_signal_ptrs_gpu, rank, num_ranks,
                                      comm_stream);
-    
+
     // Assign bias pointers
     auto bias_opts = std::vector<std::optional<torch::Tensor>>({bias_0, bias_1});
     void* bias_ptrs[2] = {nullptr, nullptr};
@@ -1007,7 +1007,7 @@ Buffer::internode_combine(const torch::Tensor& x, const std::optional<torch::Ten
                              barrier_signal_ptrs_gpu, rank, comm_stream,
                              config.get_rdma_buffer_size_hint(hidden_int4 * sizeof(int4), num_ranks),
                              num_nvl_bytes, false, low_latency_mode);
-    
+
     // Assign bias pointers
     auto bias_opts = std::vector<std::optional<torch::Tensor>>({bias_0, bias_1});
     void* bias_ptrs[2] = {nullptr, nullptr};
