@@ -39,7 +39,7 @@ void clean_low_latency_buffer(int* clean_0, int num_clean_int_0,
 template <bool kUseFP8, bool kUseUE8M0, int kHidden>
 __global__ __launch_bounds__(1024, 1) void
 dispatch(void* packed_recv_x, void* packed_recv_x_scales,
-         int* packed_recv_src_info, int64_t* packed_recv_layout_range,
+         int64_t* packed_recv_src_info, int64_t* packed_recv_layout_range,
          int* packed_recv_count,
          int* cumulative_local_expert_recv_stats,
          int64_t* dispatch_wait_recv_cost_stats,
@@ -299,7 +299,7 @@ dispatch(void* packed_recv_x, void* packed_recv_x_scales,
             // Copy source info
             const auto src_src_idx = reinterpret_cast<int*>(rdma_recv_x_uint8 + i * num_bytes_per_msg);
             if (lane_id == 0)
-                recv_src_info[recv_token_begin_idx + i] = ld_nc_global(src_src_idx);
+                recv_src_info[recv_token_begin_idx + i] = pack2<int, int64_t>(ld_nc_global(src_src_idx), src_rank);
             __syncwarp();
 
             // Copy data
@@ -335,7 +335,7 @@ dispatch(void* packed_recv_x, void* packed_recv_x_scales,
 }
 
 void dispatch(void* packed_recv_x, void* packed_recv_x_scales,
-              int* packed_recv_src_info, int64_t* packed_recv_layout_range,
+              int64_t* packed_recv_src_info, int64_t* packed_recv_layout_range,
               int* packed_recv_count,
               int* cumulative_local_expert_recv_stats,
               int64_t* dispatch_wait_recv_cost_stats,
@@ -556,7 +556,8 @@ __global__ __launch_bounds__(1024, 1) void
 combine(void* combined_x,
         void* rdma_recv_x, int* rdma_recv_flag, void* rdma_send_x,
         const void* x, const int64_t* topk_idx, const float* topk_weights,
-        const int* src_info, const int64_t* layout_range,
+        const int64_t* src_info, const int64_t* layout_range,
+        bool overlap, int* packed_recv_count, int* comp_signal, int block_m, int threshold, 
         int64_t* combine_wait_recv_cost_stats,
         int* next_clean, int num_next_clean_int,
         int* atomic_clean_flag,
@@ -567,6 +568,7 @@ combine(void* combined_x,
         int phases, bool zero_copy) {
     const auto sm_id = __shfl_sync(0xffffffff, static_cast<int>(blockIdx.x), 0);
     const auto num_sms = __shfl_sync(0xffffffff, static_cast<int>(gridDim.x), 0);
+    const auto num_warps = num_warp_groups * num_warps_per_group;
     const auto thread_id = static_cast<int>(threadIdx.x);
     const auto num_threads = __shfl_sync(0xffffffff, static_cast<int>(blockDim.x), 0);
     const auto warp_id = __shfl_sync(0xffffffff, thread_id / 32, 0), lane_id = get_lane_id();
@@ -596,6 +598,9 @@ combine(void* combined_x,
     constexpr int kNumMetaBytes = kNumDivisions * sizeof(nv_bfloat162);
     constexpr size_t num_bytes_per_slot = kHidden * sizeof(nv_bfloat16) + kNumMetaBytes;
     EP_STATIC_ASSERT(num_bytes_per_slot % sizeof(int4) == 0, "Invalid vectorization");
+    
+    // Parameters for IBGDA sends outer loop, declared upfront to bypass goto initialization restrictions.
+    int initial_idx, loop_bound, step_size;
 
     // Sending phase
     if ((phases & LOW_LATENCY_SEND_PHASE) == 0)
@@ -613,10 +618,41 @@ combine(void* combined_x,
             atomic_add_release_global(atomic_clean_flag, num_experts);
     }
 
-    // Issue IBGDA sends
-    if (responsible_expert_idx < num_experts) {
-        const auto dst_rank = responsible_expert_idx / num_local_experts;
-        const auto local_expert_idx = responsible_expert_idx % num_local_experts;
+    // Shared between warps in sms for overlap mode, where each sm only has one warp group
+    __shared__ int shared_vaild_signal_prefix_sum[288];
+    __shared__ int shared_vaild_signal_sum, shared_local_expert_idx;
+
+    // Compute prefix sums of valid signal counts per local expert
+    if (overlap) {
+        if (sub_warp_id == 0 and lane_id == 0) {
+            shared_vaild_signal_prefix_sum[0] = ceil_div(packed_recv_count[0], block_m);
+            shared_local_expert_idx = 0;
+            #pragma unroll
+            for (int i = 1; i < num_local_experts; i++) {
+                shared_vaild_signal_prefix_sum[i] = shared_vaild_signal_prefix_sum[i-1] + ceil_div(packed_recv_count[i], block_m);
+            }
+            shared_vaild_signal_sum = shared_vaild_signal_prefix_sum[num_local_experts-1];
+        }
+        __syncthreads();
+    }
+
+    // Issue IBGDA sends, non-overlap mode only loops once
+    initial_idx = overlap ? sm_id : responsible_expert_idx;
+    loop_bound  = overlap ? shared_vaild_signal_sum : num_experts;
+    step_size   = overlap ? num_sms : num_experts;
+    for (int vaild_signal_idx = initial_idx; vaild_signal_idx < loop_bound; vaild_signal_idx += step_size) {
+        
+        // Find the owning local_expert_idx by scanning the prefix-sum array
+        if (overlap) {
+            if (sub_warp_id == 0 and lane_id == 0) {
+                while (vaild_signal_idx >= shared_vaild_signal_prefix_sum[shared_local_expert_idx])
+                    shared_local_expert_idx++;
+            }
+            __syncthreads();
+        }
+        
+        auto dst_rank = responsible_expert_idx / num_local_experts;
+        const auto local_expert_idx = overlap ? shared_local_expert_idx : responsible_expert_idx % num_local_experts;
         const auto global_expert_idx = rank * num_local_experts + local_expert_idx;
         const auto layout = __ldg(layout_range + local_expert_idx * num_ranks + dst_rank);
         const auto local_x = static_cast<const int4*>(x) +
@@ -628,6 +664,22 @@ combine(void* combined_x,
         // Unpack layout
         int offset, num_tokens_to_send;
         unpack2(layout, num_tokens_to_send, offset);
+
+        // Wait the corresponding comp_signal to reach the threshold
+        int num_tokens_per_expert, num_signal_per_expert, local_expert_signal_idx;
+        const int* gemm_comp_signal;
+        if (overlap) {
+            num_tokens_per_expert = packed_recv_count[local_expert_idx];
+            num_signal_per_expert = ceil_div(num_ranks * num_max_dispatch_tokens_per_rank, block_m);
+            local_expert_signal_idx = (local_expert_idx == 0) ? vaild_signal_idx : 
+                                      vaild_signal_idx - shared_vaild_signal_prefix_sum[local_expert_idx-1];
+            gemm_comp_signal = comp_signal + num_signal_per_expert * local_expert_idx + local_expert_signal_idx;
+        
+            if (sub_warp_id == 0 and lane_id == 0 and packed_recv_count[local_expert_idx] != 0) {
+                while (ld_acquire_global(gemm_comp_signal) != threshold);
+            }
+            __syncthreads();
+        }
 
         // TMA stuffs
         constexpr int kNumTMABufferBytes = sizeof(int4) * 32 * kNumSendUnrolls;
@@ -660,13 +712,17 @@ combine(void* combined_x,
         };
 
         // Issue IBGDA send
-        for (int token_idx = offset + sub_warp_id; token_idx < offset + num_tokens_to_send; token_idx += num_warps_per_group) {
+        auto token_start_idx = overlap ? local_expert_signal_idx * block_m : offset;
+        auto token_end_idx = overlap ? min((local_expert_signal_idx + 1) * block_m, num_tokens_per_expert) : (offset + num_tokens_to_send);
+        for (int token_idx = sub_warp_id + token_start_idx; token_idx < token_end_idx; token_idx += num_warps_per_group) {
             const auto x_int4 = local_x + token_idx * hidden_bf16_int4;
             const auto rdma_send_type_row = reinterpret_cast<int*>(rdma_send_x_vec + token_idx * num_bytes_per_slot);
             const auto rdma_send_x_vec_row = reinterpret_cast<uint8_t*>(rdma_send_type_row);
 
             // Copy directly to local rank, or copy to buffer and issue RDMA
-            const auto src_idx = __shfl_sync(0xffffffff, __ldg(local_src_info + token_idx), 0);
+            if (overlap)
+                dst_rank = __shfl_sync(0xffffffff, static_cast<int>(__ldg(local_src_info + token_idx) >> 32), 0);
+            const auto src_idx = __shfl_sync(0xffffffff, static_cast<int>(__ldg(local_src_info + token_idx) & 0xffffffff), 0);
             const auto buf_ptr = reinterpret_cast<int64_t>(rdma_send_x_vec_row);
             const auto dst_ptr = reinterpret_cast<uint64_t>(rdma_recv_x) + (global_expert_idx * num_max_dispatch_tokens_per_rank + src_idx) * num_bytes_per_slot;
             const auto dst_p2p_ptr = nvshmemi_get_p2p_ptr(dst_ptr, rank, dst_rank);
@@ -732,24 +788,26 @@ combine(void* combined_x,
             // Issue RDMA
             // NOTES: for zero-copy mode, we assume the data is already in the send buffer
             if (dst_p2p_ptr == 0)
-                nvshmemi_ibgda_put_nbi_warp(dst_ptr, buf_ptr, num_send_bytes, dst_rank, local_expert_idx, lane_id, token_idx - offset);
+                nvshmemi_ibgda_put_nbi_warp(dst_ptr, buf_ptr, num_send_bytes, dst_rank, local_expert_idx, lane_id, token_idx);
         }
-
-        // Put the finishing flag
-        EP_DEVICE_ASSERT(num_warps_per_group > 1 and num_warp_groups < 16);
         asm volatile("bar.sync %0, %1;" :: "r"(warp_group_id + 1), "r"(num_warps_per_group * 32));
-        if (sub_warp_id == 1 and lane_id == 0) {
-            while (ld_acquire_global(atomic_clean_flag) == 0);
-            auto dst_ptr = reinterpret_cast<uint64_t>(rdma_recv_flag + global_expert_idx);
-            auto dst_p2p_ptr = nvshmemi_get_p2p_ptr(dst_ptr, rank, dst_rank);
-            if (dst_p2p_ptr == 0) {
-                nvshmemi_ibgda_amo_nonfetch_add(reinterpret_cast<int*>(dst_ptr), 1, dst_rank, local_expert_idx);
-            } else {
-                st_release_sys_global(reinterpret_cast<int*>(dst_p2p_ptr), 1);
+
+        // Put the finishing flag for non-overlap mode
+        if (overlap == false) {
+            EP_DEVICE_ASSERT(num_warps_per_group > 1 and num_warp_groups < 16);
+            if (sub_warp_id == 1 and lane_id == 0) {
+                while (ld_acquire_global(atomic_clean_flag) == 0);
+                auto dst_ptr = reinterpret_cast<uint64_t>(rdma_recv_flag + global_expert_idx);
+                auto dst_p2p_ptr = nvshmemi_get_p2p_ptr(dst_ptr, rank, dst_rank);
+                if (dst_p2p_ptr == 0) {
+                    nvshmemi_ibgda_amo_nonfetch_add(reinterpret_cast<int*>(dst_ptr), 1, dst_rank, local_expert_idx);
+                } else {
+                    st_release_sys_global(reinterpret_cast<int*>(dst_p2p_ptr), 1);
+                }
+                atomic_add_release_global(atomic_clean_flag, -1);
             }
-            atomic_add_release_global(atomic_clean_flag, -1);
+            __syncwarp();
         }
-        __syncwarp();
 
         // Destroy m-barriers
         if (lane_id < kNumStages) {
@@ -758,6 +816,27 @@ combine(void* combined_x,
             fence_barrier_init();
         }
         __syncwarp();
+    }
+
+    // Put the finishing flag for overlap mode
+    if (overlap) {
+        cg::this_grid().sync();
+        if (sm_id == 0) {
+            for (int local_expert_idx = warp_id; local_expert_idx < num_local_experts; local_expert_idx += num_warps) {
+                auto global_expert_idx = rank * num_local_experts + local_expert_idx;
+                for (int dst_rank = lane_id; dst_rank < num_ranks; dst_rank += 32) {
+                    while (ld_acquire_global(atomic_clean_flag) == 0);
+                    auto dst_ptr = reinterpret_cast<uint64_t>(rdma_recv_flag + global_expert_idx);
+                    auto dst_p2p_ptr = nvshmemi_get_p2p_ptr(dst_ptr, rank, dst_rank);
+                    if (dst_p2p_ptr == 0) {
+                        nvshmemi_ibgda_amo_nonfetch_add(reinterpret_cast<int*>(dst_ptr), 1, dst_rank, local_expert_idx);
+                    } else {
+                        st_release_sys_global(reinterpret_cast<int*>(dst_p2p_ptr), 1);
+                    }
+                    atomic_add_release_global(atomic_clean_flag, -1);
+                }
+            }
+        }
     }
 
     // Receiving phase
@@ -920,22 +999,35 @@ combine(void* combined_x,
 void combine(void* combined_x,
              void* rdma_recv_x, int* rdma_recv_flag, void* rdma_send_x,
              const void* x, const int64_t* topk_idx, const float* topk_weights,
-             const int* src_info, const int64_t* layout_range,
+             const int64_t* src_info, const int64_t* layout_range,
+             bool overlap, int* packed_recv_count, int* comp_signal, int block_m, int threshold,
              int64_t* combine_wait_recv_cost_stats,
              int* next_clean, int num_next_clean_int,
              int num_combined_tokens, int hidden, int num_max_dispatch_tokens_per_rank,
              int num_topk, int num_experts, int rank, int num_ranks,
              bool use_logfmt,
-             void* workspace, int num_device_sms,
+             void* workspace, int num_device_sms, int num_sms,
              cudaStream_t stream, int phases, bool zero_copy) {
     constexpr int kNumMaxTopk = 9;
-    const int num_warp_groups = ceil_div(num_experts, num_device_sms);
-    const int num_warps_per_group = 32 / num_warp_groups;
-    const int num_recv_per_sm = ceil_div(num_combined_tokens, num_device_sms);
-    EP_HOST_ASSERT(num_warp_groups > 0 and num_warps_per_group > 0 and num_recv_per_sm > 0);
+    int num_warp_groups, num_warps_per_group, num_recv_per_sm, num_warps;
 
-    const auto num_warps = num_warp_groups * num_warps_per_group;
-    const auto num_sms = max(ceil_div(num_experts, num_warp_groups), ceil_div(num_combined_tokens, num_recv_per_sm));
+    if (overlap == true and phases == LOW_LATENCY_SEND_PHASE) {
+        num_warp_groups = 1;
+        num_warps_per_group = 32;
+        num_recv_per_sm = ceil_div(num_combined_tokens, num_device_sms);
+        EP_HOST_ASSERT(num_warp_groups > 0 and num_warps_per_group > 0 and num_recv_per_sm > 0);
+
+        num_warps = num_warp_groups * num_warps_per_group;
+    }
+    else {
+        num_warp_groups = ceil_div(num_experts, num_device_sms);
+        num_warps_per_group = 32 / num_warp_groups;
+        num_recv_per_sm = ceil_div(num_combined_tokens, num_device_sms);
+        EP_HOST_ASSERT(num_warp_groups > 0 and num_warps_per_group > 0 and num_recv_per_sm > 0);
+
+        num_warps = num_warp_groups * num_warps_per_group;
+        num_sms = max(ceil_div(num_experts, num_warp_groups), ceil_div(num_combined_tokens, num_recv_per_sm));
+    }
 
     // Check workspace
     auto atomic_clean_flag = static_cast<int*>(workspace);
@@ -970,6 +1062,7 @@ LAUNCH_KERNEL(&cfg, combine_func, \
               combined_x, \
               rdma_recv_x, rdma_recv_flag, rdma_send_x, \
               x, topk_idx, topk_weights, src_info, layout_range, \
+              overlap, packed_recv_count, comp_signal, block_m, threshold, \
               combine_wait_recv_cost_stats, \
               next_clean, num_next_clean_int, \
               atomic_clean_flag, \

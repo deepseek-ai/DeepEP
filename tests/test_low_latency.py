@@ -9,7 +9,7 @@ from functools import partial
 from typing import Optional
 
 import deep_ep
-from utils import init_dist, bench, bench_kineto, calc_diff, hash_tensor, per_token_cast_back
+from utils import init_dist, bench, bench_kineto, calc_diff, hash_tensor, per_token_cast_back, ceil_div
 
 
 def test_main(num_tokens: int, hidden: int, num_experts: int, num_topk: int,
@@ -83,12 +83,12 @@ def test_main(num_tokens: int, hidden: int, num_experts: int, num_topk: int,
                             if current_x is x:
                                 recv_x = recv_x[:num_valid_tokens]
                                 recv_x_amin = recv_x[:, :-128].amin(dim=-1)
-                                recv_src_info = recv_src_info[:num_valid_tokens]
+                                src_token_idx = recv_src_info[:num_valid_tokens] & int_mask
                                 assert torch.equal(recv_x_amin, recv_x[:, :-128].amax(dim=-1))
                                 if round_scale:
-                                    assert calc_diff(recv_x[:, -1], recv_src_info.view(-1)) < 0.007
+                                    assert calc_diff(recv_x[:, -1], src_token_idx.view(-1)) < 0.007
                                 else:
-                                    assert (recv_x[:, -128:] - recv_src_info.view(-1, 1) % num_tokens).sum().item() == 0
+                                    assert (recv_x[:, -128:] - src_token_idx.view(-1, 1) % num_tokens).sum().item() == 0
                                 for j in range(num_ranks):
                                     begin_idx, count = (recv_layout_range[j] >> 32).item(), (recv_layout_range[j] & int_mask).item()
                                     if not round_scale:
@@ -102,19 +102,34 @@ def test_main(num_tokens: int, hidden: int, num_experts: int, num_topk: int,
 
                         # Check combine correctness
                         for zero_copy in (False, ) if use_logfmt else (False, True):
-                            if zero_copy:
-                                buffer.get_next_low_latency_combine_buffer(handle)[:, :, :] = simulated_gemm_x
-                            out = torch.empty((num_tokens, hidden), dtype=torch.bfloat16, device='cuda')
-                            combined_x, event, hook = buffer.low_latency_combine(simulated_gemm_x, topk_idx, topk_weights, handle,
-                                                                                use_logfmt=use_logfmt,
-                                                                                async_finish=not return_recv_hook, zero_copy=zero_copy,
-                                                                                return_recv_hook=return_recv_hook, out=out)
-                            hook() if return_recv_hook else event.current_stream_wait()
-                            if do_check:
-                                diff = calc_diff(current_x * topk_weights.masked_fill(topk_idx == -1, 0).sum(dim=1).view(-1, 1), combined_x)
-                                assert torch.isnan(combined_x).sum().item() == 0
-                                assert diff < (9e-4 if dispatch_use_fp8 else 1e-5), f'Error: {diff=}, {dispatch_use_fp8=}, {zero_copy=}'
-                                hash_value ^= hash_tensor(combined_x)
+                            for overlap in (False, True) if return_recv_hook else (False, ):
+                                if zero_copy:
+                                    buffer.get_next_low_latency_combine_buffer(handle)[:, :, :] = simulated_gemm_x
+                                out = torch.empty((num_tokens, hidden), dtype=torch.bfloat16, device='cuda')
+                                if overlap:
+                                    block_m, threshold, num_sms = 64, 10, 3
+                                    total_num_per_expert = ceil_div(num_tokens * num_ranks, block_m)
+                                    comp_signal = torch.zeros(num_local_experts * total_num_per_expert, dtype=torch.int32, device='cuda')
+                                    for i in range(num_local_experts):
+                                        vaild_num = ceil_div(packed_recv_count[i], block_m)
+                                        comp_signal[i * total_num_per_expert : i * total_num_per_expert + vaild_num] = threshold
+                                    combined_x, event, hook = buffer.ll_overlap_combine(simulated_gemm_x, topk_idx, topk_weights, handle,
+                                                                                    overlap = overlap, packed_recv_count = packed_recv_count,
+                                                                                    comp_signal = comp_signal, block_m = block_m, threshold = threshold, num_sms = num_sms,
+                                                                                    use_logfmt=use_logfmt,
+                                                                                    async_finish=not return_recv_hook, zero_copy=zero_copy,
+                                                                                    return_recv_hook=return_recv_hook, out=out)
+                                else:
+                                    combined_x, event, hook = buffer.low_latency_combine(simulated_gemm_x, topk_idx, topk_weights, handle,
+                                                                                        use_logfmt=use_logfmt,
+                                                                                        async_finish=not return_recv_hook, zero_copy=zero_copy,
+                                                                                        return_recv_hook=return_recv_hook, out=out)
+                                hook() if return_recv_hook else event.current_stream_wait()
+                                if do_check:
+                                    diff = calc_diff(current_x * topk_weights.masked_fill(topk_idx == -1, 0).sum(dim=1).view(-1, 1), combined_x)
+                                    assert torch.isnan(combined_x).sum().item() == 0
+                                    assert diff < (9e-4 if dispatch_use_fp8 else 1e-5), f'Error: {diff=}, {dispatch_use_fp8=}, {zero_copy=}'
+                                    hash_value ^= hash_tensor(combined_x)
 
     # noinspection PyShadowingNames
     def large_gemm_with_hook(hook):
