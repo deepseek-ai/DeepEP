@@ -8,7 +8,7 @@ namespace internode_ll {
 
 // NOTE extracted from `dispatch` body
 template <bool kUseFP8, bool kUseNVFP4, int kHidden>
-struct DispatchConstTemplate {
+struct DispatchConstsTemplate {
     // FP8 staffs
     static constexpr int kNumPerChannels = kUseNVFP4 ? 16 : 128;
     static constexpr int num_scales = kHidden / kNumPerChannels;
@@ -31,7 +31,7 @@ struct DispatchConstTemplate {
 
 template <bool kUseFP8, bool kUseUE8M0, bool kUseNVFP4, int kHidden>
 __forceinline__ __device__ int dispatch_send() {
-    using DispatchConst = DispatchConstTemplate<kUseFP8, kUseNVFP4, kHidden>;
+    using Consts = DispatchConstsTemplate<kUseFP8, kUseNVFP4, kHidden>;
 
     // Expert counts
     constexpr int kNumMaxWarpGroups = 32;
@@ -197,7 +197,7 @@ __forceinline__ __device__ int dispatch_send() {
 
 template <bool kUseFP8, bool kUseUE8M0, bool kUseNVFP4, int kHidden>
 __forceinline__ __device__ int dispatch_recv() {
-    using DispatchConst = DispatchConstTemplate<kUseFP8, kUseNVFP4, kHidden>;
+    using Consts = DispatchConstsTemplate<kUseFP8, kUseNVFP4, kHidden>;
 
     // May extract UE8M0 from the scales
     using scale_t = std::conditional_t<kUseUE8M0 || kUseNVFP4, uint8_t, float>;
