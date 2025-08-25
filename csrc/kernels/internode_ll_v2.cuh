@@ -47,18 +47,20 @@ __forceinline__ __device__ int dispatch_send(int local_thread_id) {
     // 1. The first-kind warps for FP8 cast and sending top-k tokens
     // 2. The last warp for reading `topk_idx` and count for per-expert information
 
-    // NOTE remove the last warp
+    // NOTE remove the last warp (and thus the if)
     // if (warp_id < num_warps - 1) {
-        constexpr int kNumElemsPerRead = sizeof(int4) / sizeof(nv_bfloat16);
-        EP_STATIC_ASSERT(kHidden % (32 * kNumElemsPerRead) == 0, "Invalid hidden");
-        EP_STATIC_ASSERT(kNumElemsPerRead * 32 % Consts::kNumPerChannels == 0, "Invalid vectorization");
 
-        // NOTE no need "-1" b/c we do not reserve one warp for counting anymore
-        // const auto num_threads = (num_warps - 1) * 32;
-        const auto num_threads = num_warps * 32;
+    constexpr int kNumElemsPerRead = sizeof(int4) / sizeof(nv_bfloat16);
+    EP_STATIC_ASSERT(kHidden % (32 * kNumElemsPerRead) == 0, "Invalid hidden");
+    EP_STATIC_ASSERT(kNumElemsPerRead * 32 % Consts::kNumPerChannels == 0, "Invalid vectorization");
 
-        const size_t hidden_bf16_int4 = kHidden / kNumElemsPerRead;
+    // NOTE no need "-1" b/c we do not reserve one warp for counting anymore
+    // const auto num_threads = (num_warps - 1) * 32;
+    const auto num_threads = num_warps * 32;
 
+    const size_t hidden_bf16_int4 = kHidden / kNumElemsPerRead;
+
+    for (int local_expert_idx = 0; local_expert_idx < num_local_experts; ++local_expert_idx) {
         for (int token_idx = sm_id; token_idx < num_tokens; token_idx += num_sms) {
             // const auto x_int4 = static_cast<const int4*>(x) + token_idx * hidden_bf16_int4;
 
@@ -150,6 +152,7 @@ __forceinline__ __device__ int dispatch_send(int local_thread_id) {
                 lane_id == 0 ? atomic_add_release_global(atomic_finish_counter_per_expert + dst_expert_idx, 1) : 0;
             }
         }
+    }
 
 //     } else if (warp_id == num_warps - 1) {
 //         EP_DEVICE_ASSERT(num_sms > 1);
