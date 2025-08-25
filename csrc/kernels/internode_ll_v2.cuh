@@ -27,6 +27,7 @@ __forceinline__ __device__ int dispatch_send(int local_thread_id) {
     // constexpr int kNumMaxWarpGroups = 32;
     // __shared__ int shared_num_tokens_sent_per_expert[kNumMaxWarpGroups];
 
+    // TODO can hide if gmem read is too slow
     int num_tokens_of_responsible_expert = TODO;
 
     if ((sm_id == 0) and (warp_id == 0)) {
