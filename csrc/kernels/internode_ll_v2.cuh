@@ -27,6 +27,19 @@ __forceinline__ __device__ int dispatch_send(int local_thread_id) {
     constexpr int kNumMaxWarpGroups = 32;
     __shared__ int shared_num_tokens_sent_per_expert[kNumMaxWarpGroups];
 
+    if ((sm_id == 0) and (warp_id == 0)) {
+        // The first SM is also responsible for cleaning the next buffer
+        #pragma unroll
+        for (int i = lane_id; i < num_next_clean_int; i += 32)
+            next_clean[i] = 0;
+
+        // Notify before executing `int_p`
+        __syncwarp();
+        #pragma unroll
+        for (int i = lane_id; i < num_experts; i += 32)
+            atomic_add_release_global(atomic_finish_counter_per_expert + i, FINISHED_SUM_TAG);
+    }
+
     // There are 2 kinds of warps in this part:
     // 1. The first-kind warps for FP8 cast and sending top-k tokens
     // 2. The last warp for reading `topk_idx` and count for per-expert information
@@ -140,16 +153,7 @@ __forceinline__ __device__ int dispatch_send(int local_thread_id) {
 //             // The first SM is also responsible for checking QPs
 //             EP_DEVICE_ASSERT(ibgda_get_state()->num_rc_per_pe >= num_local_experts);
 //
-//             // The first SM is also responsible for cleaning the next buffer
-//             #pragma unroll
-//             for (int i = lane_id; i < num_next_clean_int; i += 32)
-//                 next_clean[i] = 0;
-//
-//             // Notify before executing `int_p`
-//             __syncwarp();
-//             #pragma unroll
-//             for (int i = lane_id; i < num_experts; i += 32)
-//                 atomic_add_release_global(atomic_finish_counter_per_expert + i, FINISHED_SUM_TAG);
+//             // NOTE (the `next_clean` + notify part is moved)
 //         }
 //
 //         // This SM should be responsible for some destination experts, read `topk_idx` for them
