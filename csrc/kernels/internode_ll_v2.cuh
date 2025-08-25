@@ -398,6 +398,11 @@ void dispatch_v2(void* packed_recv_x, void* packed_recv_x_scales,
     auto atomic_finish_counter_per_expert = atomic_counter_per_expert + num_experts;
     EP_HOST_ASSERT(num_experts * sizeof(int) * 2 <= NUM_WORKSPACE_BYTES);
 
+    // NOTE add
+    EP_HOST_ASSERT(num_warp_groups >= 2);
+    const int num_send_warp_groups = num_warp_groups - 1;
+    const int num_recv_warp_groups = 1;
+
     // FP8 checks
     if (use_ue8m0)
         EP_HOST_ASSERT(round_scale and "UE8M0 SF requires `round_scale=True`");
@@ -422,7 +427,7 @@ LAUNCH_KERNEL(&cfg, dispatch_func, \
               next_clean, num_next_clean_int, \
               num_tokens, num_max_dispatch_tokens_per_rank, \
               num_topk, num_experts, rank, num_ranks, \
-              num_warp_groups, num_warps_per_group, \
+              num_send_warp_groups, num_recv_warp_groups, num_warps_per_group, \
               round_scale, phases); } break
 
     SETUP_LAUNCH_CONFIG(num_sms, num_warps * 32, stream);
