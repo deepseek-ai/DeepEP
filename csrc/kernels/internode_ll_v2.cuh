@@ -6,65 +6,7 @@
 namespace deep_ep {
 namespace internode_ll {
 
-template <bool kUseFP8, bool kUseUE8M0, bool kUseNVFP4, int kHidden>
-__global__ __launch_bounds__(1024, 1) void
-dispatch_v2(void* packed_recv_x, void* packed_recv_x_scales,
-         int* packed_recv_src_info, int64_t* packed_recv_layout_range,
-         int* packed_recv_count,
-         int* cumulative_local_expert_recv_stats,
-         int64_t* dispatch_wait_recv_cost_stats,
-         void* rdma_recv_x, int* rdma_recv_count, void* rdma_x,
-         const void* x, const int64_t* topk_idx,
-         int* atomic_counter_per_expert, int* atomic_finish_counter_per_expert,
-         int* next_clean, int num_next_clean_int,
-         int num_tokens, int num_max_dispatch_tokens_per_rank,
-         int num_topk, int num_experts, int rank, int num_ranks,
-         int num_warp_groups, int num_warps_per_group,
-         bool round_scale, int phases) {
-    const auto sm_id = static_cast<int>(blockIdx.x);
-    const auto thread_id = static_cast<int>(threadIdx.x);
-    const auto warp_id = thread_id / 32, lane_id = get_lane_id();
-    const auto num_sms = static_cast<int>(gridDim.x);
-    const auto num_warps = num_warp_groups * num_warps_per_group;
-    const auto num_local_experts = num_experts / num_ranks;
-    const auto warp_group_id = warp_id / num_warps_per_group;
-    const auto sub_warp_id = warp_id % num_warps_per_group;
-    const auto responsible_expert_idx = sm_id * num_warp_groups + warp_group_id;
-
-    // May extract UE8M0 from the scales
-    using scale_t = std::conditional_t<kUseUE8M0 || kUseNVFP4, uint8_t, float>;
-    using packed_t = std::conditional_t<kUseUE8M0 || kUseNVFP4, uint32_t, float>;
-    EP_STATIC_ASSERT(sizeof(packed_t) % sizeof(scale_t) == 0, "Invalid vector length");
-    EP_STATIC_ASSERT(!(kUseFP8 && kUseNVFP4), "FP8 and NVFP4 cannot be used together");
-
-    // FP8 staffs
-    constexpr int kNumPerChannels = kUseNVFP4 ? 16 : 128;
-    const int num_scales = kHidden / kNumPerChannels;
-    constexpr size_t hidden_bytes =
-        kUseNVFP4
-            ? kHidden * sizeof(__nv_fp8_storage_t) / 2
-            : kHidden * (kUseFP8 ? sizeof(__nv_fp8_storage_t) : sizeof(nv_bfloat16));
-    const size_t hidden_int4 = hidden_bytes / sizeof(int4);
-
-    // Message package: index at source (int), 3 reserved int fields, hidden data, FP8 scales
-    // NOTES: currently we have 3 reserved int fields for future use
-    using vec_t = std::conditional_t<
-        kUseNVFP4,
-        int32_t,
-        std::conditional_t<kUseFP8, int2, int4>>;
-    using rdma_x_scale_t = std::conditional_t<kUseNVFP4, uint8_t, float>;
-    const size_t num_bytes_per_msg = sizeof(int4) + ((kUseFP8 || kUseNVFP4) ? (hidden_bytes + num_scales * sizeof(rdma_x_scale_t)) : hidden_bytes);
-    const size_t num_int4_per_msg = num_bytes_per_msg / sizeof(int4);
-    EP_DEVICE_ASSERT(num_bytes_per_msg % sizeof(int4) == 0);
-
-    // Expert counts
-    constexpr int kNumMaxWarpGroups = 32;
-    __shared__ int shared_num_tokens_sent_per_expert[kNumMaxWarpGroups];
-
-    // Sending phase
-    if ((phases & LOW_LATENCY_SEND_PHASE) == 0)
-        goto LOW_LATENCY_DISPATCH_RECV;
-
+__forceinline__ __device__ int dispatch_send() {
     // There are 2 kinds of warps in this part:
     // 1. The first-kind warps for FP8 cast and sending top-k tokens
     // 2. The last warp for reading `topk_idx` and count for per-expert information
@@ -222,16 +164,9 @@ dispatch_v2(void* packed_recv_x, void* packed_recv_x_scales,
             packed_recv_count[dst_expert_local_idx] = 0;
     }
     __syncwarp();
+}
 
-    // Receiving phase
-    LOW_LATENCY_DISPATCH_RECV:
-    if ((phases & LOW_LATENCY_RECV_PHASE) == 0)
-        return;
-
-    // For send-and-recv kernels, we need a grid sync for making `packed_recv_count` visible
-    if (phases & LOW_LATENCY_SEND_PHASE)
-        cg::this_grid().sync();
-
+__forceinline__ __device__ int dispatch_recv() {
     // Receiving and packing
     if (responsible_expert_idx < num_experts) {
         const auto src_rank = responsible_expert_idx / num_local_experts;
@@ -328,6 +263,79 @@ dispatch_v2(void* packed_recv_x, void* packed_recv_x_scales,
             }
         }
     }
+}
+
+template <bool kUseFP8, bool kUseUE8M0, bool kUseNVFP4, int kHidden>
+__global__ __launch_bounds__(1024, 1) void
+dispatch_v2(void* packed_recv_x, void* packed_recv_x_scales,
+         int* packed_recv_src_info, int64_t* packed_recv_layout_range,
+         int* packed_recv_count,
+         int* cumulative_local_expert_recv_stats,
+         int64_t* dispatch_wait_recv_cost_stats,
+         void* rdma_recv_x, int* rdma_recv_count, void* rdma_x,
+         const void* x, const int64_t* topk_idx,
+         int* atomic_counter_per_expert, int* atomic_finish_counter_per_expert,
+         int* next_clean, int num_next_clean_int,
+         int num_tokens, int num_max_dispatch_tokens_per_rank,
+         int num_topk, int num_experts, int rank, int num_ranks,
+         int num_warp_groups, int num_warps_per_group,
+         bool round_scale, int phases) {
+    const auto sm_id = static_cast<int>(blockIdx.x);
+    const auto thread_id = static_cast<int>(threadIdx.x);
+    const auto warp_id = thread_id / 32, lane_id = get_lane_id();
+    const auto num_sms = static_cast<int>(gridDim.x);
+    const auto num_warps = num_warp_groups * num_warps_per_group;
+    const auto num_local_experts = num_experts / num_ranks;
+    const auto warp_group_id = warp_id / num_warps_per_group;
+    const auto sub_warp_id = warp_id % num_warps_per_group;
+    const auto responsible_expert_idx = sm_id * num_warp_groups + warp_group_id;
+
+    // May extract UE8M0 from the scales
+    using scale_t = std::conditional_t<kUseUE8M0 || kUseNVFP4, uint8_t, float>;
+    using packed_t = std::conditional_t<kUseUE8M0 || kUseNVFP4, uint32_t, float>;
+    EP_STATIC_ASSERT(sizeof(packed_t) % sizeof(scale_t) == 0, "Invalid vector length");
+    EP_STATIC_ASSERT(!(kUseFP8 && kUseNVFP4), "FP8 and NVFP4 cannot be used together");
+
+    // FP8 staffs
+    constexpr int kNumPerChannels = kUseNVFP4 ? 16 : 128;
+    const int num_scales = kHidden / kNumPerChannels;
+    constexpr size_t hidden_bytes =
+        kUseNVFP4
+            ? kHidden * sizeof(__nv_fp8_storage_t) / 2
+            : kHidden * (kUseFP8 ? sizeof(__nv_fp8_storage_t) : sizeof(nv_bfloat16));
+    const size_t hidden_int4 = hidden_bytes / sizeof(int4);
+
+    // Message package: index at source (int), 3 reserved int fields, hidden data, FP8 scales
+    // NOTES: currently we have 3 reserved int fields for future use
+    using vec_t = std::conditional_t<
+        kUseNVFP4,
+        int32_t,
+        std::conditional_t<kUseFP8, int2, int4>>;
+    using rdma_x_scale_t = std::conditional_t<kUseNVFP4, uint8_t, float>;
+    const size_t num_bytes_per_msg = sizeof(int4) + ((kUseFP8 || kUseNVFP4) ? (hidden_bytes + num_scales * sizeof(rdma_x_scale_t)) : hidden_bytes);
+    const size_t num_int4_per_msg = num_bytes_per_msg / sizeof(int4);
+    EP_DEVICE_ASSERT(num_bytes_per_msg % sizeof(int4) == 0);
+
+    // Expert counts
+    constexpr int kNumMaxWarpGroups = 32;
+    __shared__ int shared_num_tokens_sent_per_expert[kNumMaxWarpGroups];
+
+    // Sending phase
+    if ((phases & LOW_LATENCY_SEND_PHASE) == 0)
+        goto LOW_LATENCY_DISPATCH_RECV;
+
+    dispatch_send();
+
+    // Receiving phase
+    LOW_LATENCY_DISPATCH_RECV:
+    if ((phases & LOW_LATENCY_RECV_PHASE) == 0)
+        return;
+
+    // For send-and-recv kernels, we need a grid sync for making `packed_recv_count` visible
+    if (phases & LOW_LATENCY_SEND_PHASE)
+        cg::this_grid().sync();
+
+    dispatch_recv();
 }
 
 void dispatch_v2(void* packed_recv_x, void* packed_recv_x_scales,
