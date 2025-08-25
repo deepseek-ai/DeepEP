@@ -336,7 +336,7 @@ dispatch(void* packed_recv_x, void* packed_recv_x_scales,
     }
 }
 
-void dispatch(void* packed_recv_x, void* packed_recv_x_scales,
+void dispatch(bool enable_v2, void* packed_recv_x, void* packed_recv_x_scales,
               int* packed_recv_src_info, int64_t* packed_recv_layout_range,
               int* packed_recv_count,
               int* cumulative_local_expert_recv_stats,
@@ -349,6 +349,24 @@ void dispatch(void* packed_recv_x, void* packed_recv_x_scales,
               bool use_fp8, bool round_scale, bool use_ue8m0,
               void* workspace, int num_device_sms,
               cudaStream_t stream, int phases) {
+    if (enable_v2) {
+        return dispatch_v2(
+            packed_recv_x, packed_recv_x_scales,
+            packed_recv_src_info, packed_recv_layout_range,
+            packed_recv_count,
+            cumulative_local_expert_recv_stats,
+            dispatch_wait_recv_cost_stats,
+            rdma_recv_x, rdma_recv_count, rdma_x,
+            x, topk_idx,
+            next_clean, num_next_clean_int,
+            num_tokens, hidden, num_max_dispatch_tokens_per_rank,
+            num_topk, num_experts, rank, num_ranks,
+            use_fp8, round_scale, use_ue8m0,
+            workspace, num_device_sms,
+            stream, phases
+        );
+    }
+
     constexpr int kNumMaxTopK = 9;
     const int num_warp_groups = ceil_div(num_experts, num_device_sms);
     const int num_warps_per_group = 32 / num_warp_groups;
@@ -919,7 +937,7 @@ combine(void* combined_x,
     }
 }
 
-void combine(void* combined_x,
+void combine(bool enable_v2, void* combined_x,
              void* rdma_recv_x, int* rdma_recv_flag, void* rdma_send_x,
              const void* x, const int64_t* topk_idx, const float* topk_weights,
              const int* src_info, const int64_t* layout_range,
@@ -930,6 +948,22 @@ void combine(void* combined_x,
              bool use_logfmt,
              void* workspace, int num_device_sms,
              cudaStream_t stream, int phases, bool zero_copy) {
+    if (enable_v2) {
+        return combine_v2(
+            combined_x,
+            rdma_recv_x, rdma_recv_flag, rdma_send_x,
+            x, topk_idx, topk_weights,
+            src_info, layout_range,
+            combine_wait_recv_cost_stats,
+            next_clean, num_next_clean_int,
+            num_combined_tokens, hidden, num_max_dispatch_tokens_per_rank,
+            num_topk, num_experts, rank, num_ranks,
+            use_logfmt,
+            workspace, num_device_sms,
+            stream, phases, zero_copy
+        );
+    }
+
     constexpr int kNumMaxTopk = 9;
     const int num_warp_groups = ceil_div(num_experts, num_device_sms);
     const int num_warps_per_group = 32 / num_warp_groups;
