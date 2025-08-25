@@ -347,26 +347,28 @@ __forceinline__ __device__ int dispatch_recv(int local_thread_id, int num_warp_g
 
             // Copy scales
             if constexpr (kUseFP8) {
-                EP_DEVICE_ASSERT(Consts::num_scales <= 64);
-                // Equivalent CuTe layout:
-                //   (num_tokens, (num_packed, num_elems_per_pack)):(num_elems_per_pack, (num_tokens * num_elems_per_pack, 1))
-                const auto src_scales = reinterpret_cast<float*>(reinterpret_cast<uint8_t*>(src_data) + Consts::hidden_bytes);
-                const auto num_elems_per_pack = static_cast<int>(sizeof(packed_t) / sizeof(scale_t));
-                const auto token_idx = recv_token_begin_idx + i;
-                const auto token_stride = num_elems_per_pack;
-                const auto pack_stride = num_ranks * num_max_dispatch_tokens_per_rank * num_elems_per_pack;
-                if (lane_id < Consts::num_scales) {
-                    const auto pack_idx = lane_id / num_elems_per_pack;
-                    const auto elem_idx = lane_id % num_elems_per_pack;
-                    auto scale = extract_required_scale_format<kUseUE8M0>(ld_nc_global(src_scales + lane_id));
-                    recv_x_scales[token_idx * token_stride + pack_idx * pack_stride + elem_idx] = scale;
-                }
-                if (lane_id + 32 < Consts::num_scales) {
-                    const auto pack_idx = (lane_id + 32) / num_elems_per_pack;
-                    const auto elem_idx = (lane_id + 32) % num_elems_per_pack;
-                    auto scale = extract_required_scale_format<kUseUE8M0>(ld_nc_global(src_scales + lane_id + 32));
-                    recv_x_scales[token_idx * token_stride + pack_idx * pack_stride + elem_idx] = scale;
-                }
+                // NOTE simply remove to simplify code
+                EP_DEVICE_ASSERT(false);
+//                 EP_DEVICE_ASSERT(Consts::num_scales <= 64);
+//                 // Equivalent CuTe layout:
+//                 //   (num_tokens, (num_packed, num_elems_per_pack)):(num_elems_per_pack, (num_tokens * num_elems_per_pack, 1))
+//                 const auto src_scales = reinterpret_cast<float*>(reinterpret_cast<uint8_t*>(src_data) + Consts::hidden_bytes);
+//                 const auto num_elems_per_pack = static_cast<int>(sizeof(packed_t) / sizeof(scale_t));
+//                 const auto token_idx = recv_token_begin_idx + i;
+//                 const auto token_stride = num_elems_per_pack;
+//                 const auto pack_stride = num_ranks * num_max_dispatch_tokens_per_rank * num_elems_per_pack;
+//                 if (lane_id < Consts::num_scales) {
+//                     const auto pack_idx = lane_id / num_elems_per_pack;
+//                     const auto elem_idx = lane_id % num_elems_per_pack;
+//                     auto scale = extract_required_scale_format<kUseUE8M0>(ld_nc_global(src_scales + lane_id));
+//                     recv_x_scales[token_idx * token_stride + pack_idx * pack_stride + elem_idx] = scale;
+//                 }
+//                 if (lane_id + 32 < Consts::num_scales) {
+//                     const auto pack_idx = (lane_id + 32) / num_elems_per_pack;
+//                     const auto elem_idx = (lane_id + 32) % num_elems_per_pack;
+//                     auto scale = extract_required_scale_format<kUseUE8M0>(ld_nc_global(src_scales + lane_id + 32));
+//                     recv_x_scales[token_idx * token_stride + pack_idx * pack_stride + elem_idx] = scale;
+//                 }
             } else if constexpr (kUseNVFP4) {
                 // TODO wait for new swizzle layout
                 // Equivalent CuTe layout:
