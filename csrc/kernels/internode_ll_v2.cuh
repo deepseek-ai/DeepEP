@@ -341,7 +341,15 @@ dispatch_v2(void* packed_recv_x, void* packed_recv_x_scales,
          int num_send_warp_groups, int num_recv_warp_groups,
          int num_warps_per_group,
          bool round_scale, int phases) {
+    const auto num_send_threads = num_send_warp_groups * num_warps_per_group * 32;
     const auto raw_thread_id = static_cast<int>(threadIdx.x);
+    if (raw_thread_id < num_send_threads) {
+        const auto send_thread_id = raw_thread_id;
+        TODO_send;
+    } else {
+        const auto recv_thread_id = raw_thread_id - num_send_threads;
+        TODO_recv;
+    }
 
     // Sending phase
     if ((phases & LOW_LATENCY_SEND_PHASE) == 0)
