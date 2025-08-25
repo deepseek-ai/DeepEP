@@ -88,6 +88,7 @@ __forceinline__ __device__ int dispatch_send(int local_thread_id) {
             // auto dst_expert_idx = warp_id < num_topk ? static_cast<int>(__ldg(topk_idx + token_idx * num_topk + warp_id)) : -1;
 
             // NOTE do not use `rdma_x` but use `x`
+            // NOTE the new code will write `x_src_idx` multiple times w/ same value, thus wasting but correct
             // local_thread_id == 0 ? (*rdma_x_src_idx = token_idx) : 0;
             local_thread_id == 0 ? (*x_src_idx = token_idx) : 0;
 
