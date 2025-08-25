@@ -21,14 +21,16 @@ __forceinline__ __device__ int dispatch_send(int local_thread_id) {
     const auto num_local_experts = num_experts / num_ranks;
     const auto warp_group_id = warp_id / num_warps_per_group;
     const auto sub_warp_id = warp_id % num_warps_per_group;
-    const auto responsible_expert_idx = sm_id * num_warp_groups + warp_group_id;
+
+    // NOTE renamed `responsible_expert_idx` -> `count_send_responsible_expert_idx`
+    const auto count_send_responsible_expert_idx = sm_id * num_warp_groups + warp_group_id;
 
     // Expert counts
     // constexpr int kNumMaxWarpGroups = 32;
     // __shared__ int shared_num_tokens_sent_per_expert[kNumMaxWarpGroups];
 
     // TODO can hide if gmem read is too slow
-    int num_tokens_of_responsible_expert = count_per_expert[responsible_expert_idx];
+    int num_tokens_of_count_send_responsible_expert = count_per_expert[count_send_responsible_expert_idx];
 
     if ((sm_id == 0) and (warp_id == 0)) {
         // The first SM is also responsible for cleaning the next buffer
@@ -64,9 +66,9 @@ __forceinline__ __device__ int dispatch_send(int local_thread_id) {
         // NOTE change from "linearly scan token_idx= 0,1,2,..." to "linearly scan shuffled_token_idx"
         // for (int token_idx = sm_id; token_idx < num_tokens; token_idx += num_sms) {
         for (
-            int shuffled_token_idx = TODO_wrong(sm_id);
-            token_idx < TODO_wrong(num_tokens_of_responsible_expert);
-            token_idx += TODO_wrong(num_sms)
+            int shuffled_token_idx = TODO;
+            token_idx < TODO;
+            token_idx += TODO
         ) {
             // TODO may overlap to optimize
             int token_idx = TODO;
@@ -201,16 +203,16 @@ __forceinline__ __device__ int dispatch_send(int local_thread_id) {
     __syncthreads();
 
     // Issue count sends
-    if (responsible_expert_idx < num_experts and sub_warp_id == 0 and lane_id == 0) {
-        const auto dst_rank = responsible_expert_idx / num_local_experts;
-        const auto dst_expert_local_idx = responsible_expert_idx % num_local_experts;
+    if (count_send_responsible_expert_idx < num_experts and sub_warp_id == 0 and lane_id == 0) {
+        const auto dst_rank = count_send_responsible_expert_idx / num_local_experts;
+        const auto dst_expert_local_idx = count_send_responsible_expert_idx % num_local_experts;
 
-        // const auto num_tokens_sent = shared_num_tokens_sent_per_expert[responsible_expert_idx - sm_id * num_warp_groups];
-        const int num_tokens_sent = num_tokens_of_responsible_expert;
+        // const auto num_tokens_sent = shared_num_tokens_sent_per_expert[count_send_responsible_expert_idx - sm_id * num_warp_groups];
+        const int num_tokens_sent = num_tokens_of_count_send_responsible_expert;
 
         // Wait local sends issued and send expert counts
         while (
-            ld_acquire_global(atomic_finish_counter_per_expert + responsible_expert_idx) !=
+            ld_acquire_global(atomic_finish_counter_per_expert + count_send_responsible_expert_idx) !=
             // NOTE changed
             // FINISHED_SUM_TAG * 2
             FINISHED_SUM_TAG + num_tokens_of_responsible_expert
@@ -224,8 +226,8 @@ __forceinline__ __device__ int dispatch_send(int local_thread_id) {
         }
 
         // Clean workspace for next use
-        atomic_counter_per_expert[responsible_expert_idx] = 0;
-        atomic_finish_counter_per_expert[responsible_expert_idx] = 0;
+        atomic_counter_per_expert[count_send_responsible_expert_idx] = 0;
+        atomic_finish_counter_per_expert[count_send_responsible_expert_idx] = 0;
 
         // NOTE packed_recv_count zeroing is removed
 //         // Clean `packed_recv_count`
