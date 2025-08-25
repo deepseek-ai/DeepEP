@@ -27,6 +27,8 @@ __forceinline__ __device__ int dispatch_send(int local_thread_id) {
     constexpr int kNumMaxWarpGroups = 32;
     __shared__ int shared_num_tokens_sent_per_expert[kNumMaxWarpGroups];
 
+    int num_tokens_of_responsible_expert = TODO;
+
     if ((sm_id == 0) and (warp_id == 0)) {
         // The first SM is also responsible for cleaning the next buffer
         #pragma unroll
@@ -189,7 +191,12 @@ __forceinline__ __device__ int dispatch_send(int local_thread_id) {
         const auto num_tokens_sent = shared_num_tokens_sent_per_expert[responsible_expert_idx - sm_id * num_warp_groups];
 
         // Wait local sends issued and send expert counts
-        while (ld_acquire_global(atomic_finish_counter_per_expert + responsible_expert_idx) != FINISHED_SUM_TAG * 2);
+        while (
+            ld_acquire_global(atomic_finish_counter_per_expert + responsible_expert_idx) !=
+            // NOTE changed
+            // FINISHED_SUM_TAG * 2
+            FINISHED_SUM_TAG + num_tokens_of_responsible_expert
+        );
         auto dst_ptr = reinterpret_cast<uint64_t>(rdma_recv_count + dst_expert_local_idx * num_ranks + rank);
         auto dst_p2p_ptr = nvshmemi_get_p2p_ptr(dst_ptr, rank, dst_rank);
         if (dst_p2p_ptr == 0) {
