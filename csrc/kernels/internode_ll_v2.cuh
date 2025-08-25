@@ -108,7 +108,11 @@ __forceinline__ __device__ int dispatch_send(int local_thrad_id) {
 //                     rdma_x_vec[i] = *reinterpret_cast<vec_t*>(&int4_value);
 //                 }
 //             }
-//             asm volatile("bar.sync 1, %0;" :: "r"(num_threads));
+
+            // NOTE this cannot be removed even if we do not do casting
+            // b/c we need to write to `rdma_x_src_idx`
+            // (but we may optimize it later)
+            asm volatile("bar.sync 1, %0;" :: "r"(num_threads));
 
             // Issue IBGDA sends
             if (dst_expert_idx >= 0) {
