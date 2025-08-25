@@ -9,7 +9,7 @@ namespace deep_ep {
 namespace internode_ll {
 
 template <bool kUseFP8, bool kUseUE8M0, bool kUseNVFP4, int kHidden>
-__forceinline__ __device__ int dispatch_send(int local_thread_id) {
+__forceinline__ __device__ int dispatch_send(int local_thread_id, int num_warp_groups) {
     using Consts = DispatchConstsTemplate<kUseFP8, kUseNVFP4, kHidden>;
     EP_DEVICE_ASSERT(Consts::num_bytes_per_msg % sizeof(int4) == 0);
 
@@ -62,13 +62,19 @@ __forceinline__ __device__ int dispatch_send(int local_thread_id) {
 
     const size_t hidden_bf16_int4 = kHidden / kNumElemsPerRead;
 
+    // NOTE
+    // before: one SM = one token, one warp = one dst rank of that token, only use first 8 warps of the SM (?)
+    // after: flatten all warps in all SMs, then reorder to (..., num_ranks) grid, then one warp = one dst rank of one token
+    //
+    // WARN: cannot have too many warps per SM, o/w not all SMs will have work
+    //
     for (int local_expert_idx = 0; local_expert_idx < num_local_experts; ++local_expert_idx) {
-        // NOTE
-        // before: one SM = one token, one warp = one dst rank of that token, only use first 8 warps of the SM (?)
-        // after: flatten all warps in all SMs, then one warp = one dst rank of one token
-        //
-        // WARN: cannot have too many warps per SM, o/w not all SMs will have work
-        //
+        const int flatten_sm_id_and_warp_id = sm_id * num_warps + warp_id;
+        // TODO this will cause workload imbalance?
+        const int TODO = flatten_sm_id_and_warp_id / num_ranks;
+        const int dst_rank = flatten_sm_id_and_warp_id % num_ranks;
+        const int dst_expert_idx = dst_rank * num_local_experts + local_expert_idx;
+
         // for (int token_idx = sm_id; token_idx < num_tokens; token_idx += num_sms) {
         for (
             int shuffled_token_idx = TODO;
@@ -77,7 +83,6 @@ __forceinline__ __device__ int dispatch_send(int local_thread_id) {
         ) {
             // TODO may overlap to optimize
             int token_idx = TODO;
-            int dst_expert_idx = TODO;
 
             // const auto x_int4 = static_cast<const int4*>(x) + token_idx * hidden_bf16_int4;
 
@@ -245,7 +250,7 @@ __forceinline__ __device__ int dispatch_send(int local_thread_id) {
 }
 
 template <bool kUseFP8, bool kUseUE8M0, bool kUseNVFP4, int kHidden>
-__forceinline__ __device__ int dispatch_recv(int local_thread_id) {
+__forceinline__ __device__ int dispatch_recv(int local_thread_id, int num_warp_groups) {
     using Consts = DispatchConstsTemplate<kUseFP8, kUseNVFP4, kHidden>;
 
     // NOTE copied from dispatch body
@@ -391,10 +396,10 @@ dispatch_v2(void* packed_recv_x, void* packed_recv_x_scales,
     const auto raw_thread_id = static_cast<int>(threadIdx.x);
     if (raw_thread_id < num_send_threads) {
         const auto send_thread_id = raw_thread_id;
-        dispatch_send<kUseFP8, kUseUE8M0, kUseNVFP4, kHidden>(send_thread_id, TODO_args);
+        dispatch_send<kUseFP8, kUseUE8M0, kUseNVFP4, kHidden>(send_thread_id, num_send_warp_groups, TODO_args);
     } else {
         const auto recv_thread_id = raw_thread_id - num_send_threads;
-        dispatch_recv<kUseFP8, kUseUE8M0, kUseNVFP4, kHidden>(recv_thread_id, TODO_args);
+        dispatch_recv<kUseFP8, kUseUE8M0, kUseNVFP4, kHidden>(recv_thread_id, num_recv_warp_groups, TODO_args);
     }
 
 // NOTE removed
