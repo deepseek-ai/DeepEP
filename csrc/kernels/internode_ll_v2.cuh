@@ -396,6 +396,7 @@ void dispatch_v2(void* packed_recv_x, void* packed_recv_x_scales,
     auto atomic_finish_counter_per_expert = atomic_counter_per_expert + num_experts;
     EP_HOST_ASSERT(num_experts * sizeof(int) * 2 <= NUM_WORKSPACE_BYTES);
 
+    // TODO inefficient, may change it
     // NOTE add
     EP_HOST_ASSERT(num_warp_groups >= 2);
     const int num_send_warp_groups = num_warp_groups - 1;
