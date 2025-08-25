@@ -181,12 +181,21 @@ __forceinline__ __device__ int dispatch_send(int local_thread_id, int num_warp_g
         __syncthreads();
 
         // NOTE mv from do-once to do-per-local-expert
+        //
+        // NOTE
+        // before: one (sm_id, warp_group_id) = one responsible_expert_idx = send counter to that (dst rank, dst local expert)
+        //         thus use one thread per warp_group
+        // after: one sm_id = one dst_rank = send counter to that (dsk_rank, const local_expert_idx)
+        //         thus use one thread per SM
+        //
         // Issue count sends
-        const int count_send_responsible_expert_idx = TODO;
-        if (count_send_responsible_expert_idx < num_experts and sub_warp_id == 0 and lane_id == 0) {
-            const auto dst_rank = count_send_responsible_expert_idx / num_local_experts;
-
+        EP_DEBUG_DEVICE_ASSERT(num_sms >= num_ranks);
+        const int dst_rank = sm_id;
+        // NOTE changed
+        // if (count_send_responsible_expert_idx < num_experts and sub_warp_id == 0 and lane_id == 0) {
+        if ((dst_rank < num_ranks) and (local_thread_id == 0)) {
             // NOTE changed
+            // const auto dst_rank = count_send_responsible_expert_idx / num_local_experts;
             // const auto dst_expert_local_idx = count_send_responsible_expert_idx % num_local_experts;
             const auto dst_expert_local_idx = local_expert_idx;
 
