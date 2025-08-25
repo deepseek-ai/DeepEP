@@ -30,7 +30,7 @@ struct DispatchConstsTemplate {
 }
 
 template <bool kUseFP8, bool kUseUE8M0, bool kUseNVFP4, int kHidden>
-__forceinline__ __device__ int dispatch_send(int local_thrad_id) {
+__forceinline__ __device__ int dispatch_send(int local_thread_id) {
     using Consts = DispatchConstsTemplate<kUseFP8, kUseNVFP4, kHidden>;
     EP_DEVICE_ASSERT(Consts::num_bytes_per_msg % sizeof(int4) == 0);
 
@@ -212,7 +212,7 @@ __forceinline__ __device__ int dispatch_send(int local_thrad_id) {
 }
 
 template <bool kUseFP8, bool kUseUE8M0, bool kUseNVFP4, int kHidden>
-__forceinline__ __device__ int dispatch_recv(int local_thrad_id) {
+__forceinline__ __device__ int dispatch_recv(int local_thread_id) {
     using Consts = DispatchConstsTemplate<kUseFP8, kUseNVFP4, kHidden>;
 
     // NOTE copied from dispatch body
