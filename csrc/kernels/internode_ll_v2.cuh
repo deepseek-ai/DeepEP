@@ -30,11 +30,17 @@ __forceinline__ __device__ int dispatch_send(int local_thread_id) {
     // There are 2 kinds of warps in this part:
     // 1. The first-kind warps for FP8 cast and sending top-k tokens
     // 2. The last warp for reading `topk_idx` and count for per-expert information
-    if (warp_id < num_warps - 1) {
+
+    // NOTE remove the last warp
+    // if (warp_id < num_warps - 1) {
         constexpr int kNumElemsPerRead = sizeof(int4) / sizeof(nv_bfloat16);
         EP_STATIC_ASSERT(kHidden % (32 * kNumElemsPerRead) == 0, "Invalid hidden");
         EP_STATIC_ASSERT(kNumElemsPerRead * 32 % Consts::kNumPerChannels == 0, "Invalid vectorization");
-        const auto num_threads = (num_warps - 1) * 32;
+
+        // NOTE no need "-1" b/c we do not reserve one warp for counting anymore
+        // const auto num_threads = (num_warps - 1) * 32;
+        const auto num_threads = num_warps * 32;
+
         const size_t hidden_bf16_int4 = kHidden / kNumElemsPerRead;
 
         for (int token_idx = sm_id; token_idx < num_tokens; token_idx += num_sms) {
@@ -127,47 +133,49 @@ __forceinline__ __device__ int dispatch_send(int local_thread_id) {
                 lane_id == 0 ? atomic_add_release_global(atomic_finish_counter_per_expert + dst_expert_idx, 1) : 0;
             }
         }
-    } else if (warp_id == num_warps - 1) {
-        EP_DEVICE_ASSERT(num_sms > 1);
-        if (sm_id == 0) {
-            // The first SM is also responsible for checking QPs
-            EP_DEVICE_ASSERT(ibgda_get_state()->num_rc_per_pe >= num_local_experts);
 
-            // The first SM is also responsible for cleaning the next buffer
-            #pragma unroll
-            for (int i = lane_id; i < num_next_clean_int; i += 32)
-                next_clean[i] = 0;
+//     } else if (warp_id == num_warps - 1) {
+//         EP_DEVICE_ASSERT(num_sms > 1);
+//         if (sm_id == 0) {
+//             // The first SM is also responsible for checking QPs
+//             EP_DEVICE_ASSERT(ibgda_get_state()->num_rc_per_pe >= num_local_experts);
+//
+//             // The first SM is also responsible for cleaning the next buffer
+//             #pragma unroll
+//             for (int i = lane_id; i < num_next_clean_int; i += 32)
+//                 next_clean[i] = 0;
+//
+//             // Notify before executing `int_p`
+//             __syncwarp();
+//             #pragma unroll
+//             for (int i = lane_id; i < num_experts; i += 32)
+//                 atomic_add_release_global(atomic_finish_counter_per_expert + i, FINISHED_SUM_TAG);
+//         }
+//
+//         // This SM should be responsible for some destination experts, read `topk_idx` for them
+//         int expert_count[kNumMaxWarpGroups] = {0};
+//         const auto expert_begin_idx = sm_id * num_warp_groups;
+//         const auto expert_end_idx = min(expert_begin_idx + num_warp_groups, num_experts);
+//
+//         // Per lane count
+//         #pragma unroll 8
+//         for (int i = lane_id; i < num_tokens * num_topk; i += 32) {
+//             auto idx = static_cast<int>(__ldg(topk_idx + i));
+//             if (idx >= expert_begin_idx and idx < expert_end_idx)
+//                 expert_count[idx - expert_begin_idx] ++;
+//         }
+//
+//         // Warp reduce
+//         #pragma unroll
+//         for (int i = expert_begin_idx; i < expert_end_idx; ++ i) {
+//             auto sum = warp_reduce_sum(expert_count[i - expert_begin_idx]);
+//             if (lane_id == 0) {
+//                 shared_num_tokens_sent_per_expert[i - expert_begin_idx] = sum;
+//                 atomic_add_release_global(atomic_finish_counter_per_expert + i, FINISHED_SUM_TAG - sum);
+//             }
+//         }
+//     }
 
-            // Notify before executing `int_p`
-            __syncwarp();
-            #pragma unroll
-            for (int i = lane_id; i < num_experts; i += 32)
-                atomic_add_release_global(atomic_finish_counter_per_expert + i, FINISHED_SUM_TAG);
-        }
-
-        // This SM should be responsible for some destination experts, read `topk_idx` for them
-        int expert_count[kNumMaxWarpGroups] = {0};
-        const auto expert_begin_idx = sm_id * num_warp_groups;
-        const auto expert_end_idx = min(expert_begin_idx + num_warp_groups, num_experts);
-
-        // Per lane count
-        #pragma unroll 8
-        for (int i = lane_id; i < num_tokens * num_topk; i += 32) {
-            auto idx = static_cast<int>(__ldg(topk_idx + i));
-            if (idx >= expert_begin_idx and idx < expert_end_idx)
-                expert_count[idx - expert_begin_idx] ++;
-        }
-
-        // Warp reduce
-        #pragma unroll
-        for (int i = expert_begin_idx; i < expert_end_idx; ++ i) {
-            auto sum = warp_reduce_sum(expert_count[i - expert_begin_idx]);
-            if (lane_id == 0) {
-                shared_num_tokens_sent_per_expert[i - expert_begin_idx] = sum;
-                atomic_add_release_global(atomic_finish_counter_per_expert + i, FINISHED_SUM_TAG - sum);
-            }
-        }
-    }
     __syncthreads();
 
     // Issue count sends
