@@ -560,7 +560,7 @@ combine(void* combined_x,
         bool overlap, int* packed_recv_count, int* comp_signal, int block_m, int threshold, 
         int64_t* combine_wait_recv_cost_stats,
         int* next_clean, int num_next_clean_int,
-        int* atomic_clean_flag,
+        int* atomic_clean_flag, int* atomic_finish_counter_per_expert,
         int num_combined_tokens, int hidden, int num_topk,
         int num_max_dispatch_tokens_per_rank,
         int num_experts, int rank, int num_ranks,
@@ -568,7 +568,6 @@ combine(void* combined_x,
         int phases, bool zero_copy) {
     const auto sm_id = __shfl_sync(0xffffffff, static_cast<int>(blockIdx.x), 0);
     const auto num_sms = __shfl_sync(0xffffffff, static_cast<int>(gridDim.x), 0);
-    const auto num_warps = num_warp_groups * num_warps_per_group;
     const auto thread_id = static_cast<int>(threadIdx.x);
     const auto num_threads = __shfl_sync(0xffffffff, static_cast<int>(blockDim.x), 0);
     const auto warp_id = __shfl_sync(0xffffffff, thread_id / 32, 0), lane_id = get_lane_id();
@@ -625,11 +624,12 @@ combine(void* combined_x,
     // Compute prefix sums of valid signal counts per local expert
     if (overlap) {
         if (sub_warp_id == 0 and lane_id == 0) {
-            shared_vaild_signal_prefix_sum[0] = ceil_div(packed_recv_count[0], block_m);
+            shared_vaild_signal_prefix_sum[0] = (packed_recv_count[0] == 0 ? 1 : ceil_div(packed_recv_count[0], block_m));
             shared_local_expert_idx = 0;
             #pragma unroll
             for (int i = 1; i < num_local_experts; i++) {
-                shared_vaild_signal_prefix_sum[i] = shared_vaild_signal_prefix_sum[i-1] + ceil_div(packed_recv_count[i], block_m);
+                shared_vaild_signal_prefix_sum[i] = shared_vaild_signal_prefix_sum[i-1] + 
+                                                    (packed_recv_count[i] == 0 ? 1 : ceil_div(packed_recv_count[i], block_m));
             }
             shared_vaild_signal_sum = shared_vaild_signal_prefix_sum[num_local_experts-1];
         }
@@ -792,8 +792,35 @@ combine(void* combined_x,
         }
         asm volatile("bar.sync %0, %1;" :: "r"(warp_group_id + 1), "r"(num_warps_per_group * 32));
 
-        // Put the finishing flag for non-overlap mode
-        if (overlap == false) {
+        if (overlap) {
+            // Put the finishing flag for overlap mode
+            if (warp_id == 0 and lane_id == 0)
+                atomicAdd(atomic_finish_counter_per_expert + shared_local_expert_idx, 1);
+            __syncthreads();
+
+            if ((local_expert_signal_idx + 1) * block_m >= num_tokens_per_expert) {
+                if (warp_id == 0) {
+                    auto global_expert_idx = rank * num_local_experts + shared_local_expert_idx;
+                    for (int dst_rank = lane_id; dst_rank < num_ranks; dst_rank += 32) {
+                        if (packed_recv_count[shared_local_expert_idx] != 0)
+                            while (ld_acquire_global(atomic_finish_counter_per_expert + shared_local_expert_idx) != ceil_div(num_tokens_per_expert, block_m));
+                        auto dst_ptr = reinterpret_cast<uint64_t>(rdma_recv_flag + global_expert_idx);
+                        auto dst_p2p_ptr = nvshmemi_get_p2p_ptr(dst_ptr, rank, dst_rank);
+                        if (dst_p2p_ptr == 0) {
+                            nvshmemi_ibgda_amo_nonfetch_add(reinterpret_cast<int*>(dst_ptr), 1, dst_rank, shared_local_expert_idx);
+                        } else {
+                            st_release_sys_global(reinterpret_cast<int*>(dst_p2p_ptr), 1);
+                        }
+                        atomic_add_release_global(atomic_clean_flag, -1);
+                    }
+                    if (lane_id == 0)
+                        atomic_finish_counter_per_expert[shared_local_expert_idx] = 0;
+                }
+            }
+            __syncthreads();
+        }
+        else {
+            // Put the finishing flag for non-overlap mode
             EP_DEVICE_ASSERT(num_warps_per_group > 1 and num_warp_groups < 16);
             if (sub_warp_id == 1 and lane_id == 0) {
                 while (ld_acquire_global(atomic_clean_flag) == 0);
@@ -816,27 +843,6 @@ combine(void* combined_x,
             fence_barrier_init();
         }
         __syncwarp();
-    }
-
-    // Put the finishing flag for overlap mode
-    if (overlap) {
-        cg::this_grid().sync();
-        if (sm_id == 0) {
-            for (int local_expert_idx = warp_id; local_expert_idx < num_local_experts; local_expert_idx += num_warps) {
-                auto global_expert_idx = rank * num_local_experts + local_expert_idx;
-                for (int dst_rank = lane_id; dst_rank < num_ranks; dst_rank += 32) {
-                    while (ld_acquire_global(atomic_clean_flag) == 0);
-                    auto dst_ptr = reinterpret_cast<uint64_t>(rdma_recv_flag + global_expert_idx);
-                    auto dst_p2p_ptr = nvshmemi_get_p2p_ptr(dst_ptr, rank, dst_rank);
-                    if (dst_p2p_ptr == 0) {
-                        nvshmemi_ibgda_amo_nonfetch_add(reinterpret_cast<int*>(dst_ptr), 1, dst_rank, local_expert_idx);
-                    } else {
-                        st_release_sys_global(reinterpret_cast<int*>(dst_p2p_ptr), 1);
-                    }
-                    atomic_add_release_global(atomic_clean_flag, -1);
-                }
-            }
-        }
     }
 
     // Receiving phase
@@ -1031,7 +1037,8 @@ void combine(void* combined_x,
 
     // Check workspace
     auto atomic_clean_flag = static_cast<int*>(workspace);
-    EP_HOST_ASSERT(sizeof(int) <= NUM_WORKSPACE_BYTES);
+    auto atomic_finish_counter_per_expert = atomic_clean_flag + 1;
+    EP_HOST_ASSERT((1 + num_experts) * sizeof(int) <= NUM_WORKSPACE_BYTES);
     EP_HOST_ASSERT(num_topk <= kNumMaxTopk);
 
     // Online cast cannot use zero-copy
@@ -1065,7 +1072,7 @@ LAUNCH_KERNEL(&cfg, combine_func, \
               overlap, packed_recv_count, comp_signal, block_m, threshold, \
               combine_wait_recv_cost_stats, \
               next_clean, num_next_clean_int, \
-              atomic_clean_flag, \
+              atomic_clean_flag, atomic_finish_counter_per_expert, \
               num_combined_tokens, hidden, num_topk, \
               num_max_dispatch_tokens_per_rank, \
               num_experts, rank, num_ranks, \
