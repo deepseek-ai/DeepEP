@@ -510,6 +510,7 @@ dispatch(int4* recv_x, float* recv_x_scales, int64_t* recv_topk_idx, float* recv
                 dst_send_buffers[num_topk_ranks ++] = reinterpret_cast<uint8_t*>(broadcast(send_buffer, i)) + slot_idx * num_bytes_per_rdma_token;
             }
             EP_DEVICE_ASSERT(num_topk_ranks <= kNumTopkRDMARanks);
+
             // Copy `x` into symmetric send buffer
             auto st_broadcast = [=](const int key, const int4& value) {
                 #pragma unroll
@@ -1571,13 +1572,13 @@ combine(int4* combined_x, float* combined_topk_weights,
                                                                          combined_topk_weights + token_idx * num_topk,
                                                                          bias_0 == nullptr ? nullptr : bias_0 + token_idx * hidden_int4,
                                                                          bias_1 == nullptr ? nullptr : bias_1 + token_idx * hidden_int4,
-                                                                                                                                             num_max_rdma_chunked_recv_tokens, recv_fn, recv_tw_fn);
-         }
+                                                                         num_max_rdma_chunked_recv_tokens, recv_fn, recv_tw_fn);
+            }
 
-                  // Retired
-         __syncwarp();
-         if (lane_id == 0)
-             rdma_receiver_retired[warp_id] = true;
+            // Retired
+            __syncwarp();
+            if (lane_id == 0)
+                rdma_receiver_retired[warp_id] = true;
         } else {
             // Coordinator
             // Sync shared memory status
