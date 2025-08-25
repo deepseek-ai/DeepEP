@@ -448,6 +448,17 @@ combine_v2(void* combined_x,
             int offset, num_tokens_to_send;
             unpack2(layout, num_tokens_to_send, offset);
 
+            if (src_signals != nullptr) {
+                // TODO shall we let 1st expert be separately computed and then do *not* wait for it
+                // if ((threadIdx.x == 0) and (local_expert_idx > 0)) {
+                if (threadIdx.x == 0) {
+                    wait_signal(src_signals + local_expert_idx, src_signal_expect_value);
+                }
+
+                // TODO original code uses NamedBarrier, better than this?
+                __syncthreads();
+            }
+
             // TMA stuffs
             constexpr int kNumTMABufferBytes = sizeof(int4) * 32 * kNumSendUnrolls;
             constexpr int kNumStages = 3;
