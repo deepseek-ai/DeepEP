@@ -29,7 +29,10 @@ struct DispatchConstTemplate {
     static constexpr size_t num_int4_per_msg = num_bytes_per_msg / sizeof(int4);
 }
 
+template <bool kUseFP8, bool kUseUE8M0, bool kUseNVFP4, int kHidden>
 __forceinline__ __device__ int dispatch_send() {
+    using DispatchConst = DispatchConstTemplate<kUseFP8, kUseNVFP4, kHidden>;
+
     // Expert counts
     constexpr int kNumMaxWarpGroups = 32;
     __shared__ int shared_num_tokens_sent_per_expert[kNumMaxWarpGroups];
@@ -192,7 +195,10 @@ __forceinline__ __device__ int dispatch_send() {
     __syncwarp();
 }
 
+template <bool kUseFP8, bool kUseUE8M0, bool kUseNVFP4, int kHidden>
 __forceinline__ __device__ int dispatch_recv() {
+    using DispatchConst = DispatchConstTemplate<kUseFP8, kUseNVFP4, kHidden>;
+
     // May extract UE8M0 from the scales
     using scale_t = std::conditional_t<kUseUE8M0 || kUseNVFP4, uint8_t, float>;
     using packed_t = std::conditional_t<kUseUE8M0 || kUseNVFP4, uint32_t, float>;
@@ -328,7 +334,7 @@ dispatch_v2(void* packed_recv_x, void* packed_recv_x_scales,
     if ((phases & LOW_LATENCY_SEND_PHASE) == 0)
         goto LOW_LATENCY_DISPATCH_RECV;
 
-    dispatch_send(TODO_args);
+    dispatch_send<kUseFP8, kUseUE8M0, kUseNVFP4, kHidden>(TODO_args);
 
     // Receiving phase
     LOW_LATENCY_DISPATCH_RECV:
@@ -339,7 +345,7 @@ dispatch_v2(void* packed_recv_x, void* packed_recv_x_scales,
     if (phases & LOW_LATENCY_SEND_PHASE)
         cg::this_grid().sync();
 
-    dispatch_recv(TODO_args);
+    dispatch_recv<kUseFP8, kUseUE8M0, kUseNVFP4, kHidden>(TODO_args);
 }
 
 void dispatch_v2(void* packed_recv_x, void* packed_recv_x_scales,
