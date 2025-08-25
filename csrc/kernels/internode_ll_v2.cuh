@@ -28,7 +28,7 @@ __forceinline__ __device__ int dispatch_send(int local_thread_id) {
     // __shared__ int shared_num_tokens_sent_per_expert[kNumMaxWarpGroups];
 
     // TODO can hide if gmem read is too slow
-    int num_tokens_of_responsible_expert = TODO;
+    int num_tokens_of_responsible_expert = count_per_expert[responsible_expert_idx];
 
     if ((sm_id == 0) and (warp_id == 0)) {
         // The first SM is also responsible for cleaning the next buffer
@@ -70,6 +70,7 @@ __forceinline__ __device__ int dispatch_send(int local_thread_id) {
             // const auto rdma_x_scales = reinterpret_cast<Consts::rdma_x_scale_t*>(reinterpret_cast<uint8_t*>(rdma_x_vec) + Consts::hidden_bytes);
 
             // Overlap top-k index read and source token index writes
+            TODO_here_only_use_first_8_warps_which_is_wasting;
             auto dst_expert_idx = warp_id < num_topk ? static_cast<int>(__ldg(topk_idx + token_idx * num_topk + warp_id)) : -1;
             // NOTE do not use `rdma_x` but use `x`
             // local_thread_id == 0 ? (*rdma_x_src_idx = token_idx) : 0;
@@ -361,6 +362,8 @@ dispatch_v2(void* packed_recv_x, void* packed_recv_x_scales,
          int num_send_warp_groups, int num_recv_warp_groups,
          int num_warps_per_group,
          bool round_scale, int phases) {
+    TODO_arg(count_per_expert, token_ids_of_expert);
+
     const auto num_send_threads = num_send_warp_groups * num_warps_per_group * 32;
     const auto raw_thread_id = static_cast<int>(threadIdx.x);
     if (raw_thread_id < num_send_threads) {
