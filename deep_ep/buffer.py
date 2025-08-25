@@ -92,7 +92,7 @@ class Buffer:
         # Synchronize NVSHMEM unique IDs
         root_unique_id = None
         if self.runtime.get_num_rdma_ranks() > 1 or low_latency_mode:
-            # Enable IBGDA 
+            # Enable IBGDA
             assert num_qps_per_rank > 0
             os.environ['NVSHMEM_DISABLE_P2P'] = '0' if allow_nvlink_for_low_latency_mode else '1'
             os.environ['NVSHMEM_IB_ENABLE_IBGDA'] = '1'
@@ -125,7 +125,7 @@ class Buffer:
     def destroy(self):
         """
         Destroy the cpp runtime and release resources.
-        
+
         """
 
         assert self.explicitly_destroy, '`explicitly_destroy` flag must be set'
@@ -175,13 +175,13 @@ class Buffer:
             size: the RDMA buffer size recommended.
         """
         return deep_ep_cpp.get_low_latency_rdma_size_hint(num_max_dispatch_tokens_per_rank, hidden, num_ranks, num_experts)
-    
+
     def get_comm_stream(self) -> torch.Stream:
         """
         Get the communication stream.
 
         Returns:
-            stream: the communication stream. 
+            stream: the communication stream.
         """
         ts: torch.Stream = self.runtime.get_comm_stream()
         return torch.cuda.Stream(stream_id=ts.stream_id, device_index=ts.device_index, device_type=ts.device_type)
