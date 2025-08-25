@@ -65,7 +65,10 @@ __forceinline__ __device__ int dispatch_send(int local_thread_id) {
     for (int local_expert_idx = 0; local_expert_idx < num_local_experts; ++local_expert_idx) {
         // NOTE
         // before: one SM = one token, one warp = one dst rank of that token, only use first 8 warps of the SM (?)
-        // after:
+        // after: flatten all warps in all SMs, then one warp = one dst rank of one token
+        //
+        // WARN: cannot have too many warps per SM, o/w not all SMs will have work
+        //
         // for (int token_idx = sm_id; token_idx < num_tokens; token_idx += num_sms) {
         for (
             int shuffled_token_idx = TODO;
@@ -421,9 +424,16 @@ void dispatch_v2(void* packed_recv_x, void* packed_recv_x_scales,
     TODO_args(use_nvfp4, dst_signals);
     constexpr int kNumMaxTopK = 9;
     const int num_warp_groups = ceil_div(num_experts, num_device_sms);
-    const int num_warps_per_group = 32 / num_warp_groups;
+
+    // NOTE temporarily reduce num warps per group to avoid workload imbalance in dispatch_send
+    // TODO may increase it later e.g. for dispatch_recv
+    const int num_warps_per_group = 8;
+    // const int num_warps_per_group = 32 / num_warp_groups;
+
     EP_HOST_ASSERT(num_warp_groups > 0 and num_warps_per_group > 0);
-    EP_HOST_ASSERT(kNumMaxTopK + 1 <= num_warp_groups * num_warps_per_group);
+
+    // NOTE no longer need one SM to send all topk destinations
+    // EP_HOST_ASSERT(kNumMaxTopK + 1 <= num_warp_groups * num_warps_per_group);
 
     const auto num_warps = num_warp_groups * num_warps_per_group;
     const auto num_sms = ceil_div(num_experts, num_warp_groups);
