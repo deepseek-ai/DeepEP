@@ -343,6 +343,7 @@ void dispatch_v2(void* packed_recv_x, void* packed_recv_x_scales,
               bool use_fp8, bool round_scale, bool use_ue8m0,
               void* workspace, int num_device_sms,
               cudaStream_t stream, int phases) {
+    TODO_args(use_nvfp4, dst_signals);
     constexpr int kNumMaxTopK = 9;
     const int num_warp_groups = ceil_div(num_experts, num_device_sms);
     const int num_warps_per_group = 32 / num_warp_groups;
@@ -808,6 +809,7 @@ void combine_v2(void* combined_x,
              bool use_logfmt,
              void* workspace, int num_device_sms,
              cudaStream_t stream, int phases, bool zero_copy) {
+    TODO_args(src_signals);
     // NOTE reduce combine_send num sm
     if ((phases & LOW_LATENCY_RECV_PHASE) == 0) {
         num_device_sms = 32;
