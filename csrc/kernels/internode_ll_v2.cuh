@@ -430,7 +430,7 @@ dispatch_v2(void* packed_recv_x, void* packed_recv_x_scales,
          int num_send_warp_groups, int num_recv_warp_groups,
          int num_warps_per_group,
          bool round_scale, int phases) {
-    TODO_arg(count_per_expert, token_ids_of_expert);
+    TODO_arg(count_per_expert, token_ids_of_expert, dst_signals);
 
     const auto num_send_threads = num_send_warp_groups * num_warps_per_group * 32;
     const auto raw_thread_id = static_cast<int>(threadIdx.x);
