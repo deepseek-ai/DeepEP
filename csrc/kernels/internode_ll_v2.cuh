@@ -34,6 +34,16 @@ __forceinline__ __device__ int dispatch_send() {
     using Consts = DispatchConstsTemplate<kUseFP8, kUseNVFP4, kHidden>;
     EP_DEVICE_ASSERT(Consts::num_bytes_per_msg % sizeof(int4) == 0);
 
+    // NOTE copied from dispatch body
+    const auto sm_id = static_cast<int>(blockIdx.x);
+    const auto num_sms = static_cast<int>(gridDim.x);
+    const auto warp_id = thread_id / 32, lane_id = get_lane_id();
+    const auto num_warps = num_warp_groups * num_warps_per_group;
+    const auto num_local_experts = num_experts / num_ranks;
+    const auto warp_group_id = warp_id / num_warps_per_group;
+    const auto sub_warp_id = warp_id % num_warps_per_group;
+    const auto responsible_expert_idx = sm_id * num_warp_groups + warp_group_id;
+
     // Expert counts
     constexpr int kNumMaxWarpGroups = 32;
     __shared__ int shared_num_tokens_sent_per_expert[kNumMaxWarpGroups];
@@ -200,6 +210,16 @@ template <bool kUseFP8, bool kUseUE8M0, bool kUseNVFP4, int kHidden>
 __forceinline__ __device__ int dispatch_recv() {
     using Consts = DispatchConstsTemplate<kUseFP8, kUseNVFP4, kHidden>;
 
+    // NOTE copied from dispatch body
+    const auto sm_id = static_cast<int>(blockIdx.x);
+    const auto num_sms = static_cast<int>(gridDim.x);
+    const auto warp_id = thread_id / 32, lane_id = get_lane_id();
+    const auto num_warps = num_warp_groups * num_warps_per_group;
+    const auto num_local_experts = num_experts / num_ranks;
+    const auto warp_group_id = warp_id / num_warps_per_group;
+    const auto sub_warp_id = warp_id % num_warps_per_group;
+    const auto responsible_expert_idx = sm_id * num_warp_groups + warp_group_id;
+
     // May extract UE8M0 from the scales
     using scale_t = std::conditional_t<kUseUE8M0 || kUseNVFP4, uint8_t, float>;
     using packed_t = std::conditional_t<kUseUE8M0 || kUseNVFP4, uint32_t, float>;
@@ -317,17 +337,11 @@ dispatch_v2(void* packed_recv_x, void* packed_recv_x_scales,
          int* next_clean, int num_next_clean_int,
          int num_tokens, int num_max_dispatch_tokens_per_rank,
          int num_topk, int num_experts, int rank, int num_ranks,
-         int num_warp_groups, int num_warps_per_group,
+         // NOTE split num_warp_groups
+         int num_send_warp_groups, int num_recv_warp_groups,
+         int num_warps_per_group,
          bool round_scale, int phases) {
-    const auto sm_id = static_cast<int>(blockIdx.x);
-    const auto thread_id = static_cast<int>(threadIdx.x);
-    const auto warp_id = thread_id / 32, lane_id = get_lane_id();
-    const auto num_sms = static_cast<int>(gridDim.x);
-    const auto num_warps = num_warp_groups * num_warps_per_group;
-    const auto num_local_experts = num_experts / num_ranks;
-    const auto warp_group_id = warp_id / num_warps_per_group;
-    const auto sub_warp_id = warp_id % num_warps_per_group;
-    const auto responsible_expert_idx = sm_id * num_warp_groups + warp_group_id;
+    const auto raw_thread_id = static_cast<int>(threadIdx.x);
 
     // Sending phase
     if ((phases & LOW_LATENCY_SEND_PHASE) == 0)
