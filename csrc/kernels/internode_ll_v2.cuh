@@ -428,8 +428,14 @@ combine_v2(void* combined_x,
     if (responsible_expert_idx < num_experts) {
         for (int local_expert_idx = 0; local_expert_idx < num_local_experts; ++local_expert_idx) {
             const auto dst_rank = responsible_expert_idx / num_local_experts;
-            // NOTE changed to for-loop
-//             const auto local_expert_idx = responsible_expert_idx % num_local_experts;
+
+            // NOTE
+            // before: "one warp group --- all tokens for one (dsk_rank, local_expert_idx)"
+            // after: "multiple warp groups --- cooperate on tokens for one (dsk_rank, local_expert_idx)"
+            // const auto local_expert_idx = responsible_expert_idx % num_local_experts;
+            const auto token_cooperate_part_idx = responsible_expert_idx % num_local_experts;
+            const auto num_token_cooperate_parts = num_local_experts;
+
             const auto global_expert_idx = rank * num_local_experts + local_expert_idx;
             const auto layout = __ldg(layout_range + local_expert_idx * num_ranks + dst_rank);
             const auto local_x = static_cast<const int4*>(x) +
