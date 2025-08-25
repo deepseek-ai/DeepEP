@@ -6,6 +6,29 @@
 namespace deep_ep {
 namespace internode_ll {
 
+// NOTE extracted from `dispatch` body
+template <bool kUseFP8, bool kUseNVFP4, int kHidden>
+struct DispatchConstTemplate {
+    // FP8 staffs
+    static constexpr int kNumPerChannels = kUseNVFP4 ? 16 : 128;
+    static constexpr int num_scales = kHidden / kNumPerChannels;
+    static constexpr size_t hidden_bytes =
+        kUseNVFP4
+            ? kHidden * sizeof(__nv_fp8_storage_t) / 2
+            : kHidden * (kUseFP8 ? sizeof(__nv_fp8_storage_t) : sizeof(nv_bfloat16));
+    static constexpr size_t hidden_int4 = hidden_bytes / sizeof(int4);
+
+    // Message package: index at source (int), 3 reserved int fields, hidden data, FP8 scales
+    // NOTES: currently we have 3 reserved int fields for future use
+    using vec_t = std::conditional_t<
+        kUseNVFP4,
+        int32_t,
+        std::conditional_t<kUseFP8, int2, int4>>;
+    using rdma_x_scale_t = std::conditional_t<kUseNVFP4, uint8_t, float>;
+    static constexpr size_t num_bytes_per_msg = sizeof(int4) + ((kUseFP8 || kUseNVFP4) ? (hidden_bytes + num_scales * sizeof(rdma_x_scale_t)) : hidden_bytes);
+    static constexpr size_t num_int4_per_msg = num_bytes_per_msg / sizeof(int4);
+}
+
 __forceinline__ __device__ int dispatch_send() {
     // Expert counts
     constexpr int kNumMaxWarpGroups = 32;
@@ -299,24 +322,6 @@ dispatch_v2(void* packed_recv_x, void* packed_recv_x_scales,
     const auto sub_warp_id = warp_id % num_warps_per_group;
     const auto responsible_expert_idx = sm_id * num_warp_groups + warp_group_id;
 
-    // FP8 staffs
-    constexpr int kNumPerChannels = kUseNVFP4 ? 16 : 128;
-    constexpr int num_scales = kHidden / kNumPerChannels;
-    constexpr size_t hidden_bytes =
-        kUseNVFP4
-            ? kHidden * sizeof(__nv_fp8_storage_t) / 2
-            : kHidden * (kUseFP8 ? sizeof(__nv_fp8_storage_t) : sizeof(nv_bfloat16));
-    constexpr size_t hidden_int4 = hidden_bytes / sizeof(int4);
-
-    // Message package: index at source (int), 3 reserved int fields, hidden data, FP8 scales
-    // NOTES: currently we have 3 reserved int fields for future use
-    using vec_t = std::conditional_t<
-        kUseNVFP4,
-        int32_t,
-        std::conditional_t<kUseFP8, int2, int4>>;
-    using rdma_x_scale_t = std::conditional_t<kUseNVFP4, uint8_t, float>;
-    constexpr size_t num_bytes_per_msg = sizeof(int4) + ((kUseFP8 || kUseNVFP4) ? (hidden_bytes + num_scales * sizeof(rdma_x_scale_t)) : hidden_bytes);
-    constexpr size_t num_int4_per_msg = num_bytes_per_msg / sizeof(int4);
     EP_DEVICE_ASSERT(num_bytes_per_msg % sizeof(int4) == 0);
 
     // Sending phase
