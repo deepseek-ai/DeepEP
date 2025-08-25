@@ -780,6 +780,11 @@ void combine_v2(void* combined_x,
              bool use_logfmt,
              void* workspace, int num_device_sms,
              cudaStream_t stream, int phases, bool zero_copy) {
+    // NOTE reduce combine_send num sm
+    if ((phases & LOW_LATENCY_RECV_PHASE) == 0) {
+        num_device_sms = 32;
+    }
+
     constexpr int kNumMaxTopk = 9;
     const int num_warp_groups = ceil_div(num_experts, num_device_sms);
     const int num_warps_per_group = 32 / num_warp_groups;
