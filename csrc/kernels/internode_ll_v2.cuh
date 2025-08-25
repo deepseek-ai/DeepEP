@@ -63,7 +63,9 @@ __forceinline__ __device__ int dispatch_send(int local_thread_id) {
     const size_t hidden_bf16_int4 = kHidden / kNumElemsPerRead;
 
     for (int local_expert_idx = 0; local_expert_idx < num_local_experts; ++local_expert_idx) {
-        // NOTE change from "linearly scan token_idx= 0,1,2,..." to "linearly scan shuffled_token_idx"
+        // NOTE
+        // before: one SM = one token, one warp = one dst rank of that token, only use first 8 warps of the SM (?)
+        // after:
         // for (int token_idx = sm_id; token_idx < num_tokens; token_idx += num_sms) {
         for (
             int shuffled_token_idx = TODO;
@@ -90,6 +92,7 @@ __forceinline__ __device__ int dispatch_send(int local_thread_id) {
             // NOTE do not use `rdma_x` but use `x`
             // NOTE the new code will write `x_src_idx` multiple times w/ same value, thus wasting but correct
             // local_thread_id == 0 ? (*rdma_x_src_idx = token_idx) : 0;
+            TODO_should_no_longer_be_local_thread_id_zero;
             local_thread_id == 0 ? (*x_src_idx = token_idx) : 0;
 
             // NOTE no read or cast in fp4
