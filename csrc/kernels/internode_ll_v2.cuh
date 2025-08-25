@@ -426,6 +426,39 @@ combine_v2(void* combined_x,
 
     // Issue IBGDA sends
     if (responsible_expert_idx < num_experts) {
+        // NOTE move tma-related to outside local_expert_idx loop
+        // ------------------------------------------ START tma-related -------------------------------------------------
+        // TMA stuffs
+        constexpr int kNumTMABufferBytes = sizeof(int4) * 32 * kNumSendUnrolls;
+        constexpr int kNumStages = 3;
+        constexpr int kNumPrefetch = 1;
+        EP_STATIC_ASSERT(kNumStages == 3 and kNumPrefetch == 1, "Invalid stages");
+
+        auto smem_ptr = smem_buffer + warp_id * (kNumStages * (kNumTMABufferBytes + 16) + kNumMetaBytes);
+        uint32_t tma_phase = 0;
+        auto tma_buffers   = PatternVisitor([=](const int& i) { return reinterpret_cast<int4*>(smem_ptr + i * (kNumTMABufferBytes + 16)); });
+        auto full_barriers = PatternVisitor([=](const int& i) { return reinterpret_cast<uint64_t*>(smem_ptr + i * (kNumTMABufferBytes + 16) + kNumTMABufferBytes); });
+        auto meta_buffers  = kUseLogFMT ? reinterpret_cast<nv_bfloat162*>(smem_ptr + kNumStages * (kNumTMABufferBytes + 16)) : nullptr;
+        EP_STATIC_ASSERT(kNumSendUnrolls * kNumStages <= 12, "TMA buffer size exceed limit");
+
+        // Initialize m-barriers
+        if (lane_id < kNumStages) {
+            mbarrier_init(full_barriers[lane_id], 1);
+            fence_view_async_shared();
+            fence_barrier_init();
+        }
+        __syncwarp();
+
+        constexpr int kNumIters = hidden_bf16_int4_pad / (32 * kNumSendUnrolls);
+        auto tma_load_and_arrive = [&](const int& stage_idx, const int4* gmem_ptr, const int& num_bytes) {
+            tma_load_1d(tma_buffers[stage_idx], gmem_ptr, full_barriers[stage_idx], num_bytes);
+            mbarrier_arrive_and_expect_tx(full_barriers[stage_idx], num_bytes);
+        };
+        auto get_num_tma_bytes = [&](const int& offset_int4) {
+            return min(kNumTMABufferBytes, static_cast<int>((hidden_bf16_int4 - offset_int4) * sizeof(int4)));
+        };
+        // -------------------------------------------- END tma-related -----------------------------------------------
+    
         // NOTE
         // before: "one warp group --- all tokens for one (dsk_rank, local_expert_idx)"
         // after: "multiple warp groups --- cooperate on tokens for one (dsk_rank, local_expert_idx)"
@@ -460,36 +493,6 @@ combine_v2(void* combined_x,
                 // TODO original code uses NamedBarrier, better than this?
                 __syncthreads();
             }
-
-            // TMA stuffs
-            constexpr int kNumTMABufferBytes = sizeof(int4) * 32 * kNumSendUnrolls;
-            constexpr int kNumStages = 3;
-            constexpr int kNumPrefetch = 1;
-            EP_STATIC_ASSERT(kNumStages == 3 and kNumPrefetch == 1, "Invalid stages");
-
-            auto smem_ptr = smem_buffer + warp_id * (kNumStages * (kNumTMABufferBytes + 16) + kNumMetaBytes);
-            uint32_t tma_phase = 0;
-            auto tma_buffers   = PatternVisitor([=](const int& i) { return reinterpret_cast<int4*>(smem_ptr + i * (kNumTMABufferBytes + 16)); });
-            auto full_barriers = PatternVisitor([=](const int& i) { return reinterpret_cast<uint64_t*>(smem_ptr + i * (kNumTMABufferBytes + 16) + kNumTMABufferBytes); });
-            auto meta_buffers  = kUseLogFMT ? reinterpret_cast<nv_bfloat162*>(smem_ptr + kNumStages * (kNumTMABufferBytes + 16)) : nullptr;
-            EP_STATIC_ASSERT(kNumSendUnrolls * kNumStages <= 12, "TMA buffer size exceed limit");
-
-            // Initialize m-barriers
-            if (lane_id < kNumStages) {
-                mbarrier_init(full_barriers[lane_id], 1);
-                fence_view_async_shared();
-                fence_barrier_init();
-            }
-            __syncwarp();
-
-            constexpr int kNumIters = hidden_bf16_int4_pad / (32 * kNumSendUnrolls);
-            auto tma_load_and_arrive = [&](const int& stage_idx, const int4* gmem_ptr, const int& num_bytes) {
-                tma_load_1d(tma_buffers[stage_idx], gmem_ptr, full_barriers[stage_idx], num_bytes);
-                mbarrier_arrive_and_expect_tx(full_barriers[stage_idx], num_bytes);
-            };
-            auto get_num_tma_bytes = [&](const int& offset_int4) {
-                return min(kNumTMABufferBytes, static_cast<int>((hidden_bf16_int4 - offset_int4) * sizeof(int4)));
-            };
 
             // Issue IBGDA send
             // NOTE changed
