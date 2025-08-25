@@ -65,10 +65,11 @@ __forceinline__ __device__ int dispatch_send(int local_thread_id, int num_warp_g
     //
     // NOTE: deliberately be (warp_id, sm_id) instead of (sm_id, warp_id)
     //       to allow work be distributed to all SMs when few work
+    const int num_cooperate_parts = num_sms * num_warps / num_ranks;
+    EP_DEVICE_ASSERT(num_sms * num_warps == num_cooperate_parts * num_ranks); // even division
     const int flatten_id = warp_id * num_sm + sm_id;
     const int cooperate_part_idx = flatten_id / num_ranks;
     const int dst_rank = flatten_id % num_ranks;
-    EP_DEVICE_ASSERT(num_sms * num_warps == num_cooperate_parts * num_ranks); // even division
     for (int local_expert_idx = 0; local_expert_idx < num_local_experts; ++local_expert_idx) {
         const int dst_expert_idx = dst_rank * num_local_experts + local_expert_idx;
 
