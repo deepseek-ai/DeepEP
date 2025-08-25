@@ -57,7 +57,6 @@ std::pair<int, int> get_rdma_clean_meta(int hidden_int4, int num_scales, int num
     };
 }
 
-<<<<<<< HEAD
 int get_num_bytes_per_pcie_token(int hidden_int4, int num_scales, int num_topk_idx, int num_topk_weights) {
     return static_cast<int>(align(hidden_int4 * sizeof(int4) + num_scales * sizeof(float) + num_topk_idx * sizeof(int) + num_topk_weights * sizeof(float), sizeof(int4)));
 }
@@ -72,10 +71,6 @@ std::pair<int, int> get_pcie_clean_meta(int hidden_int4, int num_scales, int num
 
 __host__ __device__ __forceinline__
 std::pair<int, int> get_nvl_clean_meta(int hidden_int4, int num_scales, int num_topk_idx, int num_topk_weights, int num_rdma_ranks, int num_nvl_ranks, int num_nvl_recv_buffer_tokens, int num_channels, bool is_dispatch) {
-=======
-__host__ __device__ __forceinline__
-std::pair<int, int> get_nvl_clean_meta(int hidden_int4, int num_scales, int num_topk_idx, int num_topk_weights, int num_rdma_ranks, int num_nvl_ranks, int num_nvl_recv_buffer_tokens, int num_sms) {
->>>>>>> afa0ceb (refactor pcie ,flexible num_rank supported)
     // Return `int32_t` offset and to clean
     EP_STATIC_ASSERT(sizeof(SourceMeta) % sizeof(int) == 0, "Invalid size of `SourceMeta`");
 
@@ -556,6 +551,7 @@ dispatch(int4* recv_x, float* recv_x_scales, int64_t* recv_topk_idx, float* recv
                 dst_send_buffers[num_topk_ranks ++] = reinterpret_cast<uint8_t*>(broadcast(send_buffer, i)) + slot_idx * num_bytes_per_token;
             }
             EP_DEVICE_ASSERT(num_topk_ranks <= kNumTopkRDMARanks);
+
             // Copy `x` into symmetric send buffer
             auto st_broadcast = [=](const int key, const int4& value) {
                 #pragma unroll
@@ -1854,10 +1850,10 @@ combine(int4* combined_x, float* combined_topk_weights,
                                                                                       nullptr, dummy_tma_phases);
             }
 
-                  // Retired
-         __syncwarp();
-         if (lane_id == 0)
-             rdma_receiver_retired[warp_id] = true;
+            // Retired
+            __syncwarp();
+            if (lane_id == 0)
+                rdma_receiver_retired[warp_id] = true;
         } else {
             // Coordinator
             // Sync shared memory status

@@ -80,7 +80,7 @@ private:
     int* moe_recv_rdma_counter_mapped = nullptr;
 
 public:
-    Buffer(int rank, int num_ranks, int64_t num_nvl_bytes, int64_t num_rdma_bytes, bool low_latency_mode, bool explicitly_destroy,bool pcie_mode);
+    Buffer(int rank, int num_ranks, int64_t num_nvl_bytes, int64_t num_rdma_bytes, bool low_latency_mode, bool explicitly_destroy,bool disable_nvlink_for_normal_mode);
 
     ~Buffer() noexcept(false);
 

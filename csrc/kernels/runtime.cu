@@ -46,7 +46,7 @@ std::vector<uint8_t> get_unique_id() {
     return result;
 }
 
-int init(const std::vector<uint8_t> &root_unique_id_val, int rank, int num_ranks, bool low_latency_mode,bool pcie_mode) {
+int init(const std::vector<uint8_t> &root_unique_id_val, int rank, int num_ranks, bool low_latency_mode,bool disable_nvlink_for_normal_mode) {
     nvshmemx_uniqueid_t root_unique_id;
     nvshmemx_init_attr_t attr;
     std::memcpy(&root_unique_id, root_unique_id_val.data(), sizeof(nvshmemx_uniqueid_t));
@@ -55,19 +55,17 @@ int init(const std::vector<uint8_t> &root_unique_id_val, int rank, int num_ranks
 
     // Create sub-RDMA teams
     // NOTES: if `num_ranks <= NUM_MAX_NVL_PEERS` then only low-latency kernels are used
-    if ((low_latency_mode or pcie_mode) and num_ranks > NUM_MAX_NVL_PEERS and 0 == 1) {
+    if ((low_latency_mode or disable_nvlink_for_normal_mode) and num_ranks > NUM_MAX_NVL_PEERS) {
         EP_HOST_ASSERT(cpu_rdma_team == NVSHMEM_TEAM_INVALID);
         EP_HOST_ASSERT(num_ranks % NUM_MAX_NVL_PEERS == 0);
         EP_HOST_ASSERT(nvshmem_team_split_strided(NVSHMEM_TEAM_WORLD, rank % NUM_MAX_NVL_PEERS, NUM_MAX_NVL_PEERS,
                                                   num_ranks / NUM_MAX_NVL_PEERS, &cpu_rdma_team_config, 0, &cpu_rdma_team) == 0);
         EP_HOST_ASSERT(cpu_rdma_team != NVSHMEM_TEAM_INVALID);
     }
-    
 
     nvshmem_barrier_all();
     return nvshmem_my_pe();
 }
-
 
 void* alloc(size_t size, size_t alignment) {
     return nvshmem_align(alignment, size);

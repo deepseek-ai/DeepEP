@@ -81,14 +81,9 @@ class Buffer:
         self.num_nvl_bytes = num_nvl_bytes
         self.num_rdma_bytes = num_rdma_bytes
         self.low_latency_mode = low_latency_mode
-<<<<<<< HEAD
-        self.pcie_mode = pcie_mode
-        self.explicitly_destroy = explicitly_destroy
-        self.runtime = deep_ep_cpp.Buffer(self.rank, self.group_size, num_nvl_bytes, num_rdma_bytes, low_latency_mode, explicitly_destroy, pcie_mode)
-=======
         self.disable_nvlink_for_normal_mode = not allow_nvlink_for_normal_mode
-        self.runtime = deep_ep_cpp.Buffer(self.rank, self.group_size, num_nvl_bytes, num_rdma_bytes, low_latency_mode, self.disable_nvlink_for_normal_mode)
->>>>>>> 1234180 (rename and nvl check added)
+        self.explicitly_destroy = explicitly_destroy
+        self.runtime = deep_ep_cpp.Buffer(self.rank, self.group_size, num_nvl_bytes, num_rdma_bytes, low_latency_mode, explicitly_destroy, self.disable_nvlink_for_normal_mode)
 
         # Synchronize device IDs
         local_device_id = self.runtime.get_local_device_id()
@@ -122,18 +117,10 @@ class Buffer:
                 os.environ['NVSHMEM_DISABLE_MNNVL'] = '1'
 
             # Synchronize using the root ID
-<<<<<<< HEAD
-            if (low_latency_mode and self.rank == 0) or (not low_latency_mode and self.runtime.get_rdma_rank() == 0) or (pcie_mode and self.rank == 0):
-                root_unique_id = self.runtime.get_local_nvshmem_unique_id()
-            nvshmem_unique_ids = all_gather_object(root_unique_id)
-            root_unique_id = nvshmem_unique_ids[0 if low_latency_mode or pcie_mode else self.runtime.get_root_rdma_rank(True)]
-=======
-            nvshmem_unique_ids = [None, ] * self.group_size
             if (low_latency_mode and self.rank == 0) or (not low_latency_mode and self.runtime.get_rdma_rank() == 0) or (self.disable_nvlink_for_normal_mode and self.rank == 0):
                 root_unique_id = self.runtime.get_local_nvshmem_unique_id()
-            dist.all_gather_object(nvshmem_unique_ids, root_unique_id, group)
+            nvshmem_unique_ids = all_gather_object(root_unique_id)
             root_unique_id = nvshmem_unique_ids[0 if low_latency_mode or self.disable_nvlink_for_normal_mode else self.runtime.get_root_rdma_rank(True)]
->>>>>>> 1234180 (rename and nvl check added)
 
         # Make CPP runtime available
         self.runtime.sync(device_ids, ipc_handles, root_unique_id)
