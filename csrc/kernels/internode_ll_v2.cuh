@@ -341,9 +341,9 @@ dispatch_v2(void* packed_recv_x, void* packed_recv_x_scales,
          int* packed_recv_count,
          int* cumulative_local_expert_recv_stats,
          int64_t* dispatch_wait_recv_cost_stats,
-         void* rdma_recv_x, int* rdma_recv_count, void* rdma_x,
-         // const void* x, // NOTE removed
-         const int64_t* topk_idx,
+         void* rdma_recv_x, int* rdma_recv_count,
+         // void* rdma_x, // NOTE removed
+         const void* x, const int64_t* topk_idx,
          int* atomic_counter_per_expert, int* atomic_finish_counter_per_expert,
          int* next_clean, int num_next_clean_int,
          int num_tokens, int num_max_dispatch_tokens_per_rank,
