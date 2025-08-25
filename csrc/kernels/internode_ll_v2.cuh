@@ -27,48 +27,47 @@ __forceinline__ __device__ int dispatch_send() {
             auto dst_expert_idx = warp_id < num_topk ? static_cast<int>(__ldg(topk_idx + token_idx * num_topk + warp_id)) : -1;
             thread_id == 0 ? (*rdma_x_src_idx = token_idx) : 0;
 
+            // NOTE no read or cast in fp4
             // FP8 cast
-            if constexpr (!kUseNVFP4) {
-                EP_STATIC_ASSERT(hidden_bf16_int4 % 32 == 0, "Must use the full warp to reduce");
-                #pragma unroll
-                for (int i = thread_id; i < hidden_bf16_int4; i += num_threads) {
-                    // Read
-                    auto int4_value = __ldg(x_int4 + i);
-
-                    if constexpr (kUseFP8) {
-                        // Calculate local amax
-                        auto bf16_values = reinterpret_cast<nv_bfloat16*>(&int4_value);
-                        float fp32_values[kNumElemsPerRead];
-                        float amax = kFP8Margin, scale, scale_inv;
-                        #pragma unroll
-                        for (int j = 0; j < kNumElemsPerRead; ++ j) {
-                            fp32_values[j] = static_cast<float>(bf16_values[j]);
-                            amax = fmaxf(amax, fabsf(fp32_values[j]));
-                        }
-
-                        // Reduce amax and scale
-                        EP_STATIC_ASSERT(kNumElemsPerRead * 32 / kNumPerChannels == 2, "Invalid vectorization");
-                        amax = warp_reduce_max<16>(amax);
-                        calculate_fp8_scales(amax, scale, scale_inv, round_scale);
-                        if (lane_id == 0 or lane_id == 16)
-                            rdma_x_scales[i * kNumElemsPerRead / 128] = scale_inv;
-
-                        // Cast into send buffer
-                        vec_t int2_value;
-                        auto fp8x2_values = reinterpret_cast<__nv_fp8x2_storage_t*>(&int2_value);
-                        #pragma unroll
-                        for (int j = 0; j < kNumElemsPerRead; j += 2) {
-                            float2 fp32x2 = {fp32_values[j] * scale, fp32_values[j + 1] * scale};
-                            fp8x2_values[j / 2] = __nv_cvt_float2_to_fp8x2(fp32x2, __NV_SATFINITE, __NV_E4M3);
-                        }
-                        rdma_x_vec[i] = int2_value;
-                    } else {
-                        // Reinterpret-cast is for C++14 compatibility
-                        rdma_x_vec[i] = *reinterpret_cast<vec_t*>(&int4_value);
-                    }
-                }
-                asm volatile("bar.sync 1, %0;" :: "r"(num_threads));
-            }
+//             EP_STATIC_ASSERT(hidden_bf16_int4 % 32 == 0, "Must use the full warp to reduce");
+//             #pragma unroll
+//             for (int i = thread_id; i < hidden_bf16_int4; i += num_threads) {
+//                 // Read
+//                 auto int4_value = __ldg(x_int4 + i);
+//
+//                 if constexpr (kUseFP8) {
+//                     // Calculate local amax
+//                     auto bf16_values = reinterpret_cast<nv_bfloat16*>(&int4_value);
+//                     float fp32_values[kNumElemsPerRead];
+//                     float amax = kFP8Margin, scale, scale_inv;
+//                     #pragma unroll
+//                     for (int j = 0; j < kNumElemsPerRead; ++ j) {
+//                         fp32_values[j] = static_cast<float>(bf16_values[j]);
+//                         amax = fmaxf(amax, fabsf(fp32_values[j]));
+//                     }
+//
+//                     // Reduce amax and scale
+//                     EP_STATIC_ASSERT(kNumElemsPerRead * 32 / kNumPerChannels == 2, "Invalid vectorization");
+//                     amax = warp_reduce_max<16>(amax);
+//                     calculate_fp8_scales(amax, scale, scale_inv, round_scale);
+//                     if (lane_id == 0 or lane_id == 16)
+//                         rdma_x_scales[i * kNumElemsPerRead / 128] = scale_inv;
+//
+//                     // Cast into send buffer
+//                     vec_t int2_value;
+//                     auto fp8x2_values = reinterpret_cast<__nv_fp8x2_storage_t*>(&int2_value);
+//                     #pragma unroll
+//                     for (int j = 0; j < kNumElemsPerRead; j += 2) {
+//                         float2 fp32x2 = {fp32_values[j] * scale, fp32_values[j + 1] * scale};
+//                         fp8x2_values[j / 2] = __nv_cvt_float2_to_fp8x2(fp32x2, __NV_SATFINITE, __NV_E4M3);
+//                     }
+//                     rdma_x_vec[i] = int2_value;
+//                 } else {
+//                     // Reinterpret-cast is for C++14 compatibility
+//                     rdma_x_vec[i] = *reinterpret_cast<vec_t*>(&int4_value);
+//                 }
+//             }
+//             asm volatile("bar.sync 1, %0;" :: "r"(num_threads));
 
             // Issue IBGDA sends
             if (dst_expert_idx >= 0) {
