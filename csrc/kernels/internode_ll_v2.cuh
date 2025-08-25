@@ -61,8 +61,8 @@ __forceinline__ __device__ int dispatch_send(int local_thread_id) {
         for (int token_idx = sm_id; token_idx < num_tokens; token_idx += num_sms) {
             const auto x_int4 = static_cast<const int4*>(x) + token_idx * hidden_bf16_int4;
             const auto rdma_x_src_idx = reinterpret_cast<int*>(static_cast<uint8_t*>(rdma_x) + token_idx * Consts::num_bytes_per_msg);
-            const auto rdma_x_vec = reinterpret_cast<Consts::vec_t*>(reinterpret_cast<uint8_t*>(rdma_x_src_idx) + sizeof(int4));
-            const auto rdma_x_scales = reinterpret_cast<Consts::rdma_x_scale_t*>(reinterpret_cast<uint8_t*>(rdma_x_vec) + Consts::hidden_bytes);
+//             const auto rdma_x_vec = reinterpret_cast<Consts::vec_t*>(reinterpret_cast<uint8_t*>(rdma_x_src_idx) + sizeof(int4));
+//             const auto rdma_x_scales = reinterpret_cast<Consts::rdma_x_scale_t*>(reinterpret_cast<uint8_t*>(rdma_x_vec) + Consts::hidden_bytes);
 
             // Overlap top-k index read and source token index writes
             auto dst_expert_idx = warp_id < num_topk ? static_cast<int>(__ldg(topk_idx + token_idx * num_topk + warp_id)) : -1;
