@@ -290,10 +290,17 @@ __forceinline__ __device__ int dispatch_recv(int local_thread_id, int num_warp_g
 //     if (phases & LOW_LATENCY_SEND_PHASE)
 //         cg::this_grid().sync();
 
+    // TODO a lot of SM is wasted, optimize it later
+    //
+    // NOTE
+    // before: one (sm_id, warp_group_id) = one responsible_expert_idx = handle all tokens for one (src_rank, local_expert_idx)
+    // after: one sm_id = handle all tokens for one (src_rank, const local_expert_idx)
+
     // Receiving and packing
     if (responsible_expert_idx < num_experts) {
         const auto src_rank = responsible_expert_idx / num_local_experts;
         const auto local_expert_idx = responsible_expert_idx % num_local_experts;
+
         const auto rdma_recv_x_uint8 = static_cast<uint8_t*>(rdma_recv_x) +
                 local_expert_idx * num_ranks * num_max_dispatch_tokens_per_rank * Consts::num_bytes_per_msg +
                 src_rank * num_max_dispatch_tokens_per_rank * Consts::num_bytes_per_msg;
