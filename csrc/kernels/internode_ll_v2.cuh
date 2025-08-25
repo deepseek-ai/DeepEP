@@ -199,9 +199,10 @@ __forceinline__ __device__ int dispatch_send(int local_thrad_id) {
         atomic_counter_per_expert[responsible_expert_idx] = 0;
         atomic_finish_counter_per_expert[responsible_expert_idx] = 0;
 
-        // Clean `packed_recv_count`
-        if (dst_rank == 0)
-            packed_recv_count[dst_expert_local_idx] = 0;
+        // NOTE packed_recv_count zeroing is removed
+//         // Clean `packed_recv_count`
+//         if (dst_rank == 0)
+//             packed_recv_count[dst_expert_local_idx] = 0;
     }
     __syncwarp();
 }
@@ -226,10 +227,10 @@ __forceinline__ __device__ int dispatch_recv(int local_thrad_id) {
     EP_STATIC_ASSERT(sizeof(packed_t) % sizeof(scale_t) == 0, "Invalid vector length");
     EP_STATIC_ASSERT(!(kUseFP8 && kUseNVFP4), "FP8 and NVFP4 cannot be used together");
 
-    TODO_remove;
-    // For send-and-recv kernels, we need a grid sync for making `packed_recv_count` visible
-    if (phases & LOW_LATENCY_SEND_PHASE)
-        cg::this_grid().sync();
+// NOTE packed_recv_count zeroing is removed
+//     // For send-and-recv kernels, we need a grid sync for making `packed_recv_count` visible
+//     if (phases & LOW_LATENCY_SEND_PHASE)
+//         cg::this_grid().sync();
 
     // Receiving and packing
     if (responsible_expert_idx < num_experts) {

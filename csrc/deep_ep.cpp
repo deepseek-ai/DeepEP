@@ -1094,6 +1094,7 @@ Buffer::low_latency_dispatch(bool enable_v2, const torch::Tensor& x, const torch
                              int num_max_dispatch_tokens_per_rank, int num_experts,
                              bool use_fp8, bool round_scale, bool use_ue8m0,
                              bool async, bool return_recv_hook) {
+    TODO_arg(zeroed_tensor);
 #ifndef DISABLE_NVSHMEM
     EP_HOST_ASSERT(low_latency_mode);
 
@@ -1141,7 +1142,15 @@ Buffer::low_latency_dispatch(bool enable_v2, const torch::Tensor& x, const torch
                                       x.options().dtype(use_fp8 ? torch::kFloat8_e4m3fn: torch::kBFloat16));
     auto packed_recv_src_info = torch::empty({num_local_experts, num_ranks * num_max_dispatch_tokens_per_rank}, torch::dtype(torch::kInt32).device(torch::kCUDA));
     auto packed_recv_layout_range = torch::empty({num_local_experts, num_ranks}, torch::dtype(torch::kInt64).device(torch::kCUDA));
-    auto packed_recv_count = torch::empty({num_local_experts}, torch::dtype(torch::kInt32).device(torch::kCUDA));
+
+    // NOTE let users do the zeroing
+    // auto packed_recv_count = torch::empty({num_local_experts}, torch::dtype(torch::kInt32).device(torch::kCUDA));
+    auto packed_recv_count = zeroed_tensor;
+    EP_HOST_ASSERT(packed_recv_count.dim() == 1);
+    EP_HOST_ASSERT(packed_recv_count.size(0) == num_local_experts);
+    EP_HOST_ASSERT(packed_recv_count.dtype() == torch::kInt32);
+    EP_HOST_ASSERT(packed_recv_count.device().is_cuda());
+    EP_HOST_ASSERT(packed_recv_count.stride() == 1);
 
     // Allocate column-majored scales
     auto packed_recv_x_scales = std::optional<torch::Tensor>();
