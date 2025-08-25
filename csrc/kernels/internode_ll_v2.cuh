@@ -458,7 +458,7 @@ combine_v2(void* combined_x,
             return min(kNumTMABufferBytes, static_cast<int>((hidden_bf16_int4 - offset_int4) * sizeof(int4)));
         };
         // -------------------------------------------- END tma-related -----------------------------------------------
-    
+
         // NOTE
         // before: "one warp group --- all tokens for one (dsk_rank, local_expert_idx)"
         // after: "multiple warp groups --- cooperate on tokens for one (dsk_rank, local_expert_idx)"
