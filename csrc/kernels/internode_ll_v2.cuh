@@ -32,6 +32,7 @@ struct DispatchConstsTemplate {
 template <bool kUseFP8, bool kUseUE8M0, bool kUseNVFP4, int kHidden>
 __forceinline__ __device__ int dispatch_send() {
     using Consts = DispatchConstsTemplate<kUseFP8, kUseNVFP4, kHidden>;
+    EP_DEVICE_ASSERT(Consts::num_bytes_per_msg % sizeof(int4) == 0);
 
     // Expert counts
     constexpr int kNumMaxWarpGroups = 32;
@@ -43,15 +44,15 @@ __forceinline__ __device__ int dispatch_send() {
     if (warp_id < num_warps - 1) {
         constexpr int kNumElemsPerRead = sizeof(int4) / sizeof(nv_bfloat16);
         EP_STATIC_ASSERT(kHidden % (32 * kNumElemsPerRead) == 0, "Invalid hidden");
-        EP_STATIC_ASSERT(kNumElemsPerRead * 32 % kNumPerChannels == 0, "Invalid vectorization");
+        EP_STATIC_ASSERT(kNumElemsPerRead * 32 % Consts::kNumPerChannels == 0, "Invalid vectorization");
         const auto num_threads = (num_warps - 1) * 32;
         const size_t hidden_bf16_int4 = kHidden / kNumElemsPerRead;
 
         for (int token_idx = sm_id; token_idx < num_tokens; token_idx += num_sms) {
             const auto x_int4 = static_cast<const int4*>(x) + token_idx * hidden_bf16_int4;
-            const auto rdma_x_src_idx = reinterpret_cast<int*>(static_cast<uint8_t*>(rdma_x) + token_idx * num_bytes_per_msg);
-            const auto rdma_x_vec = reinterpret_cast<vec_t*>(reinterpret_cast<uint8_t*>(rdma_x_src_idx) + sizeof(int4));
-            const auto rdma_x_scales = reinterpret_cast<rdma_x_scale_t*>(reinterpret_cast<uint8_t*>(rdma_x_vec) + hidden_bytes);
+            const auto rdma_x_src_idx = reinterpret_cast<int*>(static_cast<uint8_t*>(rdma_x) + token_idx * Consts::num_bytes_per_msg);
+            const auto rdma_x_vec = reinterpret_cast<Consts::vec_t*>(reinterpret_cast<uint8_t*>(rdma_x_src_idx) + sizeof(int4));
+            const auto rdma_x_scales = reinterpret_cast<Consts::rdma_x_scale_t*>(reinterpret_cast<uint8_t*>(rdma_x_vec) + Consts::hidden_bytes);
 
             // Overlap top-k index read and source token index writes
             auto dst_expert_idx = warp_id < num_topk ? static_cast<int>(__ldg(topk_idx + token_idx * num_topk + warp_id)) : -1;
@@ -107,17 +108,17 @@ __forceinline__ __device__ int dispatch_send() {
                 const auto dst_expert_local_idx = dst_expert_idx % num_local_experts;
                 const auto src_ptr = reinterpret_cast<uint64_t>(rdma_x_src_idx);
                 const auto dst_ptr = reinterpret_cast<uint64_t>(rdma_recv_x) +
-                                     dst_expert_local_idx * num_ranks * num_max_dispatch_tokens_per_rank * num_bytes_per_msg +
-                                     rank * num_max_dispatch_tokens_per_rank * num_bytes_per_msg +
-                                     slot_idx * num_bytes_per_msg;
+                                     dst_expert_local_idx * num_ranks * num_max_dispatch_tokens_per_rank * Consts::num_bytes_per_msg +
+                                     rank * num_max_dispatch_tokens_per_rank * Consts::num_bytes_per_msg +
+                                     slot_idx * Consts::num_bytes_per_msg;
                 const auto dst_p2p_ptr = nvshmemi_get_p2p_ptr(dst_ptr, rank, dst_rank);
                 if (dst_p2p_ptr == 0) {
-                    nvshmemi_ibgda_put_nbi_warp(dst_ptr, src_ptr, num_bytes_per_msg, dst_rank, dst_expert_local_idx, lane_id, slot_idx);
+                    nvshmemi_ibgda_put_nbi_warp(dst_ptr, src_ptr, Consts::num_bytes_per_msg, dst_rank, dst_expert_local_idx, lane_id, slot_idx);
                 } else {
                     // NOTES: only 2 load iterations for 7K hidden with 8 unrolls
                     const auto* src_int4_ptr = reinterpret_cast<const int4*>(src_ptr);
                     const auto* dst_int4_ptr = reinterpret_cast<int4*>(dst_p2p_ptr);
-                    UNROLLED_WARP_COPY(8, lane_id, num_int4_per_msg, dst_int4_ptr, src_int4_ptr, ld_nc_global, st_na_global);
+                    UNROLLED_WARP_COPY(8, lane_id, Consts::num_int4_per_msg, dst_int4_ptr, src_int4_ptr, ld_nc_global, st_na_global);
                 }
 
                 // Increase counter after finishing
@@ -210,13 +211,13 @@ __forceinline__ __device__ int dispatch_recv() {
         const auto src_rank = responsible_expert_idx / num_local_experts;
         const auto local_expert_idx = responsible_expert_idx % num_local_experts;
         const auto rdma_recv_x_uint8 = static_cast<uint8_t*>(rdma_recv_x) +
-                local_expert_idx * num_ranks * num_max_dispatch_tokens_per_rank * num_bytes_per_msg +
-                src_rank * num_max_dispatch_tokens_per_rank * num_bytes_per_msg;
+                local_expert_idx * num_ranks * num_max_dispatch_tokens_per_rank * Consts::num_bytes_per_msg +
+                src_rank * num_max_dispatch_tokens_per_rank * Consts::num_bytes_per_msg;
         const auto recv_x_int4 = static_cast<int4*>(packed_recv_x) +
-                local_expert_idx * num_ranks * num_max_dispatch_tokens_per_rank * hidden_int4;
+                local_expert_idx * num_ranks * num_max_dispatch_tokens_per_rank * Consts::hidden_int4;
         const auto recv_src_info = packed_recv_src_info + local_expert_idx * num_ranks * num_max_dispatch_tokens_per_rank;
         const auto recv_range = packed_recv_layout_range + local_expert_idx * num_ranks;
-        const auto num_aligned_scales = align<int>(num_scales, sizeof(float) / sizeof(scale_t));
+        const auto num_aligned_scales = align<int>(Consts::num_scales, sizeof(float) / sizeof(scale_t));
         const auto recv_x_scales = static_cast<scale_t*>(packed_recv_x_scales) + local_expert_idx * num_ranks * num_max_dispatch_tokens_per_rank * num_aligned_scales;
 
         // Shared between sub-warps in warp groups
@@ -249,7 +250,7 @@ __forceinline__ __device__ int dispatch_recv() {
         // Copy tokens
         for (int i = sub_warp_id; i < num_recv_tokens; i += num_warps_per_group) {
             // Copy source info
-            const auto src_src_idx = reinterpret_cast<int*>(rdma_recv_x_uint8 + i * num_bytes_per_msg);
+            const auto src_src_idx = reinterpret_cast<int*>(rdma_recv_x_uint8 + i * Consts::num_bytes_per_msg);
             if (lane_id == 0)
                 recv_src_info[recv_token_begin_idx + i] = ld_nc_global(src_src_idx);
             __syncwarp();
@@ -257,26 +258,26 @@ __forceinline__ __device__ int dispatch_recv() {
             // Copy data
             // NOTES: only 2 load iterations for 7K hidden with 7 unrolls
             const auto src_data = reinterpret_cast<int4*>(reinterpret_cast<uint8_t*>(src_src_idx) + sizeof(int4));
-            const auto dst_data = recv_x_int4 + (recv_token_begin_idx + i) * hidden_int4;
-            UNROLLED_WARP_COPY(7, lane_id, hidden_int4, dst_data, src_data, ld_nc_global, st_na_global);
+            const auto dst_data = recv_x_int4 + (recv_token_begin_idx + i) * Consts::hidden_int4;
+            UNROLLED_WARP_COPY(7, lane_id, Consts::hidden_int4, dst_data, src_data, ld_nc_global, st_na_global);
 
             // Copy scales
             if constexpr (kUseFP8) {
-                EP_DEVICE_ASSERT(num_scales <= 64);
+                EP_DEVICE_ASSERT(Consts::num_scales <= 64);
                 // Equivalent CuTe layout:
                 //   (num_tokens, (num_packed, num_elems_per_pack)):(num_elems_per_pack, (num_tokens * num_elems_per_pack, 1))
-                const auto src_scales = reinterpret_cast<float*>(reinterpret_cast<uint8_t*>(src_data) + hidden_bytes);
+                const auto src_scales = reinterpret_cast<float*>(reinterpret_cast<uint8_t*>(src_data) + Consts::hidden_bytes);
                 const auto num_elems_per_pack = static_cast<int>(sizeof(packed_t) / sizeof(scale_t));
                 const auto token_idx = recv_token_begin_idx + i;
                 const auto token_stride = num_elems_per_pack;
                 const auto pack_stride = num_ranks * num_max_dispatch_tokens_per_rank * num_elems_per_pack;
-                if (lane_id < num_scales) {
+                if (lane_id < Consts::num_scales) {
                     const auto pack_idx = lane_id / num_elems_per_pack;
                     const auto elem_idx = lane_id % num_elems_per_pack;
                     auto scale = extract_required_scale_format<kUseUE8M0>(ld_nc_global(src_scales + lane_id));
                     recv_x_scales[token_idx * token_stride + pack_idx * pack_stride + elem_idx] = scale;
                 }
-                if (lane_id + 32 < num_scales) {
+                if (lane_id + 32 < Consts::num_scales) {
                     const auto pack_idx = (lane_id + 32) / num_elems_per_pack;
                     const auto elem_idx = (lane_id + 32) % num_elems_per_pack;
                     auto scale = extract_required_scale_format<kUseUE8M0>(ld_nc_global(src_scales + lane_id + 32));
@@ -286,13 +287,13 @@ __forceinline__ __device__ int dispatch_recv() {
                 // TODO wait for new swizzle layout
                 // Equivalent CuTe layout:
                 //   (num_tokens, (num_packed, num_elems_per_pack)):(num_elems_per_pack, (num_tokens * num_elems_per_pack, 1))
-                const auto src_scales = reinterpret_cast<uint8_t*>(reinterpret_cast<uint8_t*>(src_data) + hidden_bytes);
+                const auto src_scales = reinterpret_cast<uint8_t*>(reinterpret_cast<uint8_t*>(src_data) + Consts::hidden_bytes);
                 const auto num_elems_per_pack = static_cast<int>(sizeof(packed_t) / sizeof(scale_t));
                 const auto token_idx = recv_token_begin_idx + i;
                 const auto token_stride = num_elems_per_pack;
                 const auto pack_stride = num_ranks * num_max_dispatch_tokens_per_rank * num_elems_per_pack;
                 #pragma unroll
-                for (int j = lane_id; j < num_scales; j += 32) {
+                for (int j = lane_id; j < Consts::num_scales; j += 32) {
                     const auto pack_idx = j / num_elems_per_pack;
                     const auto elem_idx = j % num_elems_per_pack;
                     auto scale = ld_nc_global(src_scales + j);
@@ -327,8 +328,6 @@ dispatch_v2(void* packed_recv_x, void* packed_recv_x_scales,
     const auto warp_group_id = warp_id / num_warps_per_group;
     const auto sub_warp_id = warp_id % num_warps_per_group;
     const auto responsible_expert_idx = sm_id * num_warp_groups + warp_group_id;
-
-    EP_DEVICE_ASSERT(num_bytes_per_msg % sizeof(int4) == 0);
 
     // Sending phase
     if ((phases & LOW_LATENCY_SEND_PHASE) == 0)
