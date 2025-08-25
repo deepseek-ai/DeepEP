@@ -226,6 +226,11 @@ __forceinline__ __device__ int dispatch_recv() {
     EP_STATIC_ASSERT(sizeof(packed_t) % sizeof(scale_t) == 0, "Invalid vector length");
     EP_STATIC_ASSERT(!(kUseFP8 && kUseNVFP4), "FP8 and NVFP4 cannot be used together");
 
+    TODO_remove;
+    // For send-and-recv kernels, we need a grid sync for making `packed_recv_count` visible
+    if (phases & LOW_LATENCY_SEND_PHASE)
+        cg::this_grid().sync();
+
     // Receiving and packing
     if (responsible_expert_idx < num_experts) {
         const auto src_rank = responsible_expert_idx / num_local_experts;
@@ -345,28 +350,21 @@ dispatch_v2(void* packed_recv_x, void* packed_recv_x_scales,
     const auto raw_thread_id = static_cast<int>(threadIdx.x);
     if (raw_thread_id < num_send_threads) {
         const auto send_thread_id = raw_thread_id;
-        TODO_send;
+        dispatch_send<kUseFP8, kUseUE8M0, kUseNVFP4, kHidden>(TODO_args);
     } else {
         const auto recv_thread_id = raw_thread_id - num_send_threads;
-        TODO_recv;
+        dispatch_recv<kUseFP8, kUseUE8M0, kUseNVFP4, kHidden>(TODO_args);
     }
 
-    // Sending phase
-    if ((phases & LOW_LATENCY_SEND_PHASE) == 0)
-        goto LOW_LATENCY_DISPATCH_RECV;
-
-    dispatch_send<kUseFP8, kUseUE8M0, kUseNVFP4, kHidden>(TODO_args);
-
-    // Receiving phase
-    LOW_LATENCY_DISPATCH_RECV:
-    if ((phases & LOW_LATENCY_RECV_PHASE) == 0)
-        return;
-
-    // For send-and-recv kernels, we need a grid sync for making `packed_recv_count` visible
-    if (phases & LOW_LATENCY_SEND_PHASE)
-        cg::this_grid().sync();
-
-    dispatch_recv<kUseFP8, kUseUE8M0, kUseNVFP4, kHidden>(TODO_args);
+// NOTE removed
+//     // Sending phase
+//     if ((phases & LOW_LATENCY_SEND_PHASE) == 0)
+//         goto LOW_LATENCY_DISPATCH_RECV;
+//
+//     // Receiving phase
+//     LOW_LATENCY_DISPATCH_RECV:
+//     if ((phases & LOW_LATENCY_RECV_PHASE) == 0)
+//         return;
 }
 
 void dispatch_v2(void* packed_recv_x, void* packed_recv_x_scales,
