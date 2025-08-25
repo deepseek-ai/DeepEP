@@ -63,7 +63,11 @@ __forceinline__ __device__ int dispatch_send(int local_thread_id) {
     for (int local_expert_idx = 0; local_expert_idx < num_local_experts; ++local_expert_idx) {
         // NOTE change from "linearly scan token_idx= 0,1,2,..." to "linearly scan shuffled_token_idx"
         // for (int token_idx = sm_id; token_idx < num_tokens; token_idx += num_sms) {
-        for (int shuffled_token_idx = sm_id; token_idx < num_tokens_of_responsible_expert; token_idx += num_sms) {
+        for (
+            int shuffled_token_idx = sm_id;
+            token_idx < TODO_wrong(num_tokens_of_responsible_expert);
+            token_idx += num_sms
+        ) {
             // TODO may overlap to optimize
             int token_idx = token_ids_of_expert[shuffled_token_idx];
 
@@ -78,7 +82,9 @@ __forceinline__ __device__ int dispatch_send(int local_thread_id) {
 
             // Overlap top-k index read and source token index writes
             TODO_here_only_use_first_8_warps_which_is_wasting;
+            TODO_this_logic_is_wrong;
             auto dst_expert_idx = warp_id < num_topk ? static_cast<int>(__ldg(topk_idx + token_idx * num_topk + warp_id)) : -1;
+
             // NOTE do not use `rdma_x` but use `x`
             // local_thread_id == 0 ? (*rdma_x_src_idx = token_idx) : 0;
             local_thread_id == 0 ? (*x_src_idx = token_idx) : 0;
