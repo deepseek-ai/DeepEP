@@ -61,25 +61,26 @@ __forceinline__ __device__ int dispatch_send(int local_thread_id, int num_warp_g
 
     // NOTE
     // before: one SM = one token, one warp = one dst rank of that token, only use first 8 warps of the SM (?)
-    // after: flatten all warps in all SMs, then reorder to (..., num_ranks) grid, then one warp = one dst rank of one token
-    //
-    // WARN: cannot have too many warps per SM, o/w not all SMs will have work
-    //
+    // after: flatten all warps in all SMs, then reshape to (num_cooperate_parts, num_ranks) grid, then one warp = one dst rank of one token
+    const int flatten_sm_id_and_warp_id = sm_id * num_warps + warp_id;
+    const int cooperate_part_idx = flatten_sm_id_and_warp_id / num_ranks;
+    const int dst_rank = flatten_sm_id_and_warp_id % num_ranks;
+    EP_DEVICE_ASSERT(num_sms * num_warps == num_cooperate_parts * num_ranks); // even division
     for (int local_expert_idx = 0; local_expert_idx < num_local_experts; ++local_expert_idx) {
-        const int flatten_sm_id_and_warp_id = sm_id * num_warps + warp_id;
-        TODO; // TODO this will cause workload imbalance?
-        const int TODO = flatten_sm_id_and_warp_id / num_ranks;
-        const int dst_rank = flatten_sm_id_and_warp_id % num_ranks;
         const int dst_expert_idx = dst_rank * num_local_experts + local_expert_idx;
 
+        // TODO may hide latency if needed
+        const int num_tokens_of_dst_expert = count_per_expert[dst_expert_idx];
+
+        // NOTE changed
         // for (int token_idx = sm_id; token_idx < num_tokens; token_idx += num_sms) {
         for (
-            int shuffled_token_idx = TODO;
-            token_idx < TODO;
-            token_idx += TODO
+            int pseudo_token_idx = TODO;
+            pseudo_token_idx < TODO;
+            pseudo_token_idx += TODO
         ) {
             // TODO may overlap to optimize
-            int token_idx = TODO;
+            int token_idx = token_ids_of_expert[dst_expert_idx * token_ids_of_expert_stride_0 + pseudo_token_idx];
 
             // const auto x_int4 = static_cast<const int4*>(x) + token_idx * hidden_bf16_int4;
 
