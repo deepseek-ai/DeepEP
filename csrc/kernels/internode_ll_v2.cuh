@@ -62,6 +62,7 @@ __forceinline__ __device__ int dispatch_send(int local_thread_id, int num_warp_g
     // NOTE
     // before: one SM = one token, one warp = one dst rank of that token, only use first 8 warps of the SM (?)
     // after: flatten all warps in all SMs, then reshape to (num_cooperate_parts, num_ranks) grid, then one warp = one dst rank of one token
+    //
     const int flatten_sm_id_and_warp_id = sm_id * num_warps + warp_id;
     const int cooperate_part_idx = flatten_sm_id_and_warp_id / num_ranks;
     const int dst_rank = flatten_sm_id_and_warp_id % num_ranks;
@@ -72,7 +73,7 @@ __forceinline__ __device__ int dispatch_send(int local_thread_id, int num_warp_g
         // TODO may hide latency if needed
         const int num_tokens_of_dst_expert = count_per_expert[dst_expert_idx];
 
-        // NOTE changed
+        // NOTE changed, see "before-after" above
         // for (int token_idx = sm_id; token_idx < num_tokens; token_idx += num_sms) {
         for (
             int pseudo_token_idx = TODO;
