@@ -166,6 +166,12 @@ __forceinline__ __device__ int dispatch_send() {
 }
 
 __forceinline__ __device__ int dispatch_recv() {
+    // May extract UE8M0 from the scales
+    using scale_t = std::conditional_t<kUseUE8M0 || kUseNVFP4, uint8_t, float>;
+    using packed_t = std::conditional_t<kUseUE8M0 || kUseNVFP4, uint32_t, float>;
+    EP_STATIC_ASSERT(sizeof(packed_t) % sizeof(scale_t) == 0, "Invalid vector length");
+    EP_STATIC_ASSERT(!(kUseFP8 && kUseNVFP4), "FP8 and NVFP4 cannot be used together");
+
     // Receiving and packing
     if (responsible_expert_idx < num_experts) {
         const auto src_rank = responsible_expert_idx / num_local_experts;
@@ -288,12 +294,6 @@ dispatch_v2(void* packed_recv_x, void* packed_recv_x_scales,
     const auto warp_group_id = warp_id / num_warps_per_group;
     const auto sub_warp_id = warp_id % num_warps_per_group;
     const auto responsible_expert_idx = sm_id * num_warp_groups + warp_group_id;
-
-    // May extract UE8M0 from the scales
-    using scale_t = std::conditional_t<kUseUE8M0 || kUseNVFP4, uint8_t, float>;
-    using packed_t = std::conditional_t<kUseUE8M0 || kUseNVFP4, uint32_t, float>;
-    EP_STATIC_ASSERT(sizeof(packed_t) % sizeof(scale_t) == 0, "Invalid vector length");
-    EP_STATIC_ASSERT(!(kUseFP8 && kUseNVFP4), "FP8 and NVFP4 cannot be used together");
 
     // FP8 staffs
     constexpr int kNumPerChannels = kUseNVFP4 ? 16 : 128;
