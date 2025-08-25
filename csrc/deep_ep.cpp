@@ -9,6 +9,7 @@
 #include "deep_ep.hpp"
 #include "kernels/api.cuh"
 #include "kernels/configs.cuh"
+#include "kernels/internode_ll_v2_inc.cuh"
 
 namespace deep_ep {
 
@@ -1098,14 +1099,17 @@ Buffer::low_latency_dispatch(bool enable_v2, const torch::Tensor& x, const torch
 #ifndef DISABLE_NVSHMEM
     EP_HOST_ASSERT(low_latency_mode);
 
+    constexpr int HIDDEN_DIM = 7168;
+
     // Tensor checks
     // By default using `ptp128c` FP8 cast
 
     // NOTE `x` is packed now
     // EP_HOST_ASSERT(x.dim() == 2 and x.is_contiguous() and x.scalar_type() == torch::kBFloat16);
     // EP_HOST_ASSERT(x.size(1) % sizeof(int4) == 0 and x.size(1) % 128 == 0);
+    using Consts = DispatchConstsTemplate<false, true, HIDDEN_DIM>;
     EP_HOST_ASSERT(x.dim() == 2 and x.is_contiguous() and x.scalar_type() == torch::Uint8);
-    EP_HOST_ASSERT(x.size(1) == TODO);
+    EP_HOST_ASSERT(x.size(1) == Consts::num_bytes_per_msg);
 
     EP_HOST_ASSERT(x.size(0) == topk_idx.size(0) and x.size(0) <= num_max_dispatch_tokens_per_rank);
     EP_HOST_ASSERT(topk_idx.dim() == 2 and topk_idx.is_contiguous());
@@ -1124,7 +1128,9 @@ Buffer::low_latency_dispatch(bool enable_v2, const torch::Tensor& x, const torch
         EP_HOST_ASSERT(dispatch_wait_recv_cost_stats->size(0) == num_ranks);
     }
 
-    auto num_tokens = static_cast<int>(x.size(0)), hidden = static_cast<int>(x.size(1));
+    // auto num_tokens = static_cast<int>(x.size(0)), hidden = static_cast<int>(x.size(1));
+    auto num_tokens = static_cast<int>(x.size(0)), hidden = HIDDEN_DIM;
+
     auto num_topk = static_cast<int>(topk_idx.size(1));
     auto num_local_experts = num_experts / num_ranks;
 
@@ -1144,7 +1150,7 @@ Buffer::low_latency_dispatch(bool enable_v2, const torch::Tensor& x, const torch
 
     // Allocate packed tensors
     auto packed_recv_x = torch::empty({num_local_experts, num_ranks * num_max_dispatch_tokens_per_rank, hidden},
-                                      TODO);
+                                      torch::dtype(use_fp8 ? torch::kFloat8_e4m3fn: torch::kBFloat16).device(torch::kCUDA));
                                       // x.options().dtype(use_fp8 ? torch::kFloat8_e4m3fn: torch::kBFloat16));
     auto packed_recv_src_info = torch::empty({num_local_experts, num_ranks * num_max_dispatch_tokens_per_rank}, torch::dtype(torch::kInt32).device(torch::kCUDA));
     auto packed_recv_layout_range = torch::empty({num_local_experts, num_ranks}, torch::dtype(torch::kInt64).device(torch::kCUDA));
