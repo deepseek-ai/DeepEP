@@ -324,7 +324,7 @@ dispatch_v2(void* packed_recv_x, void* packed_recv_x_scales,
     if ((phases & LOW_LATENCY_SEND_PHASE) == 0)
         goto LOW_LATENCY_DISPATCH_RECV;
 
-    dispatch_send();
+    dispatch_send(TODO_args);
 
     // Receiving phase
     LOW_LATENCY_DISPATCH_RECV:
@@ -335,7 +335,7 @@ dispatch_v2(void* packed_recv_x, void* packed_recv_x_scales,
     if (phases & LOW_LATENCY_SEND_PHASE)
         cg::this_grid().sync();
 
-    dispatch_recv();
+    dispatch_recv(TODO_args);
 }
 
 void dispatch_v2(void* packed_recv_x, void* packed_recv_x_scales,
