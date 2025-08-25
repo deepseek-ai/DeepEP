@@ -404,6 +404,10 @@ __forceinline__ __device__ int dispatch_recv(int local_thread_id, int num_warp_g
                     }
                 }
             }
+
+            if (dst_signals != nullptr) {
+                atomic_add_release_global(dst_signals + local_expert_idx, 1);
+            }
         }
     }
 }
