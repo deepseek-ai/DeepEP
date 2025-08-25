@@ -61,7 +61,9 @@ __forceinline__ __device__ int dispatch_send(int local_thread_id, int num_warp_g
 
     // NOTE
     // before: one SM = one token, one warp = one dst rank of that token, only use first 8 warps of the SM (?)
-    // after: flatten all (warp_id, sm_id), then reshape to (num_cooperate_parts, num_ranks) grid, then one warp = one dst rank of one token
+    // after: flatten all (warp_id, sm_id),
+    //        then reshape to (num_cooperate_parts, num_ranks) grid,
+    //        then one warp = one pseudo_token_idx (i.e. one dst rank of one token)
     //
     // NOTE: deliberately be (warp_id, sm_id) instead of (sm_id, warp_id)
     //       to allow work be distributed to all SMs when few work
