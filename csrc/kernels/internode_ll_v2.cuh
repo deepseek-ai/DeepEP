@@ -187,7 +187,10 @@ __forceinline__ __device__ int dispatch_send(int local_thread_id, int num_warp_g
         // Issue count sends
         if (count_send_responsible_expert_idx < num_experts and sub_warp_id == 0 and lane_id == 0) {
             const auto dst_rank = count_send_responsible_expert_idx / num_local_experts;
-            const auto dst_expert_local_idx = count_send_responsible_expert_idx % num_local_experts;
+
+            // NOTE changed
+            // const auto dst_expert_local_idx = count_send_responsible_expert_idx % num_local_experts;
+            const auto dst_expert_local_idx = local_expert_idx;
 
             // const auto num_tokens_sent = shared_num_tokens_sent_per_expert[count_send_responsible_expert_idx - sm_id * num_warp_groups];
             const int num_tokens_sent = num_tokens_of_count_send_responsible_expert;
