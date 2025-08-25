@@ -96,10 +96,10 @@ __forceinline__ __device__ int dispatch_send(int local_thread_id, int num_warp_g
             // auto dst_expert_idx = warp_id < num_topk ? static_cast<int>(__ldg(topk_idx + token_idx * num_topk + warp_id)) : -1;
 
             // NOTE do not use `rdma_x` but use `x`
-            // NOTE the new code will write `x_src_idx` multiple times w/ same value, thus wasting but correct
+            // NOTE use lane_id instead of local_thread id
+            // NOTE and the new code will write `x_src_idx` *MULTIPLE* times w/ same value, thus wasting but correct
             // local_thread_id == 0 ? (*rdma_x_src_idx = token_idx) : 0;
-            TODO_should_no_longer_be_local_thread_id_zero;
-            local_thread_id == 0 ? (*x_src_idx = token_idx) : 0;
+            lane_id == 0 ? (*x_src_idx = token_idx) : 0;
 
             // NOTE no read or cast in fp4
             // FP8 cast
