@@ -60,13 +60,19 @@ __forceinline__ __device__ int dispatch_send(int local_thread_id) {
 
         for (int token_idx = sm_id; token_idx < num_tokens; token_idx += num_sms) {
 //             const auto x_int4 = static_cast<const int4*>(x) + token_idx * hidden_bf16_int4;
-            const auto rdma_x_src_idx = reinterpret_cast<int*>(static_cast<uint8_t*>(rdma_x) + token_idx * Consts::num_bytes_per_msg);
+
+            // NOTE do not use `rdma_x` but use `x`
+//             const auto rdma_x_src_idx = reinterpret_cast<int*>(static_cast<uint8_t*>(rdma_x) + token_idx * Consts::num_bytes_per_msg);
+            const auto x_src_idx = reinterpret_cast<int*>(static_cast<uint8_t*>(x) + token_idx * Consts::num_bytes_per_msg);
+
 //             const auto rdma_x_vec = reinterpret_cast<Consts::vec_t*>(reinterpret_cast<uint8_t*>(rdma_x_src_idx) + sizeof(int4));
 //             const auto rdma_x_scales = reinterpret_cast<Consts::rdma_x_scale_t*>(reinterpret_cast<uint8_t*>(rdma_x_vec) + Consts::hidden_bytes);
 
             // Overlap top-k index read and source token index writes
             auto dst_expert_idx = warp_id < num_topk ? static_cast<int>(__ldg(topk_idx + token_idx * num_topk + warp_id)) : -1;
-            local_thread_id == 0 ? (*rdma_x_src_idx = token_idx) : 0;
+            // NOTE do not use `rdma_x` but use `x`
+            // local_thread_id == 0 ? (*rdma_x_src_idx = token_idx) : 0;
+            local_thread_id == 0 ? (*x_src_idx = token_idx) : 0;
 
             // NOTE no read or cast in fp4
             // FP8 cast
@@ -120,7 +126,9 @@ __forceinline__ __device__ int dispatch_send(int local_thread_id) {
                 slot_idx = __shfl_sync(0xffffffff, slot_idx, 0);
                 const auto dst_rank = dst_expert_idx / num_local_experts;
                 const auto dst_expert_local_idx = dst_expert_idx % num_local_experts;
-                const auto src_ptr = reinterpret_cast<uint64_t>(rdma_x_src_idx);
+                // NOTE do not use `rdma_x` but use `x`
+                // const auto src_ptr = reinterpret_cast<uint64_t>(rdma_x_src_idx);
+                const auto src_ptr = reinterpret_cast<uint64_t>(x_src_idx);
                 const auto dst_ptr = reinterpret_cast<uint64_t>(rdma_recv_x) +
                                      dst_expert_local_idx * num_ranks * num_max_dispatch_tokens_per_rank * Consts::num_bytes_per_msg +
                                      rank * num_max_dispatch_tokens_per_rank * Consts::num_bytes_per_msg +
