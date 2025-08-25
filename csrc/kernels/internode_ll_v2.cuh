@@ -30,14 +30,14 @@ struct DispatchConstsTemplate {
 }
 
 template <bool kUseFP8, bool kUseUE8M0, bool kUseNVFP4, int kHidden>
-__forceinline__ __device__ int dispatch_send() {
+__forceinline__ __device__ int dispatch_send(int local_thrad_id) {
     using Consts = DispatchConstsTemplate<kUseFP8, kUseNVFP4, kHidden>;
     EP_DEVICE_ASSERT(Consts::num_bytes_per_msg % sizeof(int4) == 0);
 
     // NOTE copied from dispatch body
     const auto sm_id = static_cast<int>(blockIdx.x);
     const auto num_sms = static_cast<int>(gridDim.x);
-    const auto warp_id = thread_id / 32, lane_id = get_lane_id();
+    const auto warp_id = local_thread_id / 32, lane_id = get_lane_id();
     const auto num_warps = num_warp_groups * num_warps_per_group;
     const auto num_local_experts = num_experts / num_ranks;
     const auto warp_group_id = warp_id / num_warps_per_group;
@@ -66,13 +66,13 @@ __forceinline__ __device__ int dispatch_send() {
 
             // Overlap top-k index read and source token index writes
             auto dst_expert_idx = warp_id < num_topk ? static_cast<int>(__ldg(topk_idx + token_idx * num_topk + warp_id)) : -1;
-            thread_id == 0 ? (*rdma_x_src_idx = token_idx) : 0;
+            local_thread_id == 0 ? (*rdma_x_src_idx = token_idx) : 0;
 
             // NOTE no read or cast in fp4
             // FP8 cast
 //             EP_STATIC_ASSERT(hidden_bf16_int4 % 32 == 0, "Must use the full warp to reduce");
 //             #pragma unroll
-//             for (int i = thread_id; i < hidden_bf16_int4; i += num_threads) {
+//             for (int i = local_thread_id; i < hidden_bf16_int4; i += num_threads) {
 //                 // Read
 //                 auto int4_value = __ldg(x_int4 + i);
 //
@@ -207,13 +207,13 @@ __forceinline__ __device__ int dispatch_send() {
 }
 
 template <bool kUseFP8, bool kUseUE8M0, bool kUseNVFP4, int kHidden>
-__forceinline__ __device__ int dispatch_recv() {
+__forceinline__ __device__ int dispatch_recv(int local_thrad_id) {
     using Consts = DispatchConstsTemplate<kUseFP8, kUseNVFP4, kHidden>;
 
     // NOTE copied from dispatch body
     const auto sm_id = static_cast<int>(blockIdx.x);
     const auto num_sms = static_cast<int>(gridDim.x);
-    const auto warp_id = thread_id / 32, lane_id = get_lane_id();
+    const auto warp_id = local_thread_id / 32, lane_id = get_lane_id();
     const auto num_warps = num_warp_groups * num_warps_per_group;
     const auto num_local_experts = num_experts / num_ranks;
     const auto warp_group_id = warp_id / num_warps_per_group;
@@ -350,10 +350,10 @@ dispatch_v2(void* packed_recv_x, void* packed_recv_x_scales,
     const auto raw_thread_id = static_cast<int>(threadIdx.x);
     if (raw_thread_id < num_send_threads) {
         const auto send_thread_id = raw_thread_id;
-        dispatch_send<kUseFP8, kUseUE8M0, kUseNVFP4, kHidden>(TODO_args);
+        dispatch_send<kUseFP8, kUseUE8M0, kUseNVFP4, kHidden>(send_thread_id, TODO_args);
     } else {
         const auto recv_thread_id = raw_thread_id - num_send_threads;
-        dispatch_recv<kUseFP8, kUseUE8M0, kUseNVFP4, kHidden>(TODO_args);
+        dispatch_recv<kUseFP8, kUseUE8M0, kUseNVFP4, kHidden>(recv_thread_id, TODO_args);
     }
 
 // NOTE removed
