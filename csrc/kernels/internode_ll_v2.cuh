@@ -22,15 +22,12 @@ __forceinline__ __device__ int dispatch_send(int local_thread_id, int num_warp_g
     const auto warp_group_id = warp_id / num_warps_per_group;
     const auto sub_warp_id = warp_id % num_warps_per_group;
 
-    // NOTE renamed `responsible_expert_idx` -> `count_send_responsible_expert_idx`
-    const auto count_send_responsible_expert_idx = sm_id * num_warp_groups + warp_group_id;
+    // NOTE renamed `responsible_expert_idx` -> `count_send_responsible_expert_idx`, and then removed
+    // const auto count_send_responsible_expert_idx = sm_id * num_warp_groups + warp_group_id;
 
     // Expert counts
     // constexpr int kNumMaxWarpGroups = 32;
     // __shared__ int shared_num_tokens_sent_per_expert[kNumMaxWarpGroups];
-
-    // TODO can hide if gmem read is too slow
-    int num_tokens_of_count_send_responsible_expert = count_per_expert[count_send_responsible_expert_idx];
 
     if ((sm_id == 0) and (warp_id == 0)) {
         // The first SM is also responsible for cleaning the next buffer
@@ -185,6 +182,7 @@ __forceinline__ __device__ int dispatch_send(int local_thread_id, int num_warp_g
 
         // NOTE mv from do-once to do-per-local-expert
         // Issue count sends
+        const int count_send_responsible_expert_idx = TODO;
         if (count_send_responsible_expert_idx < num_experts and sub_warp_id == 0 and lane_id == 0) {
             const auto dst_rank = count_send_responsible_expert_idx / num_local_experts;
 
@@ -192,8 +190,9 @@ __forceinline__ __device__ int dispatch_send(int local_thread_id, int num_warp_g
             // const auto dst_expert_local_idx = count_send_responsible_expert_idx % num_local_experts;
             const auto dst_expert_local_idx = local_expert_idx;
 
+            // TODO can hide the gmem read if too slow
             // const auto num_tokens_sent = shared_num_tokens_sent_per_expert[count_send_responsible_expert_idx - sm_id * num_warp_groups];
-            const int num_tokens_sent = num_tokens_of_count_send_responsible_expert;
+            const int num_tokens_sent = count_per_expert[count_send_responsible_expert_idx];
 
             // Wait local sends issued and send expert counts
             while (
