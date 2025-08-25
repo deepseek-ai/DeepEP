@@ -24,8 +24,8 @@ __forceinline__ __device__ int dispatch_send(int local_thread_id) {
     const auto responsible_expert_idx = sm_id * num_warp_groups + warp_group_id;
 
     // Expert counts
-    constexpr int kNumMaxWarpGroups = 32;
-    __shared__ int shared_num_tokens_sent_per_expert[kNumMaxWarpGroups];
+    // constexpr int kNumMaxWarpGroups = 32;
+    // __shared__ int shared_num_tokens_sent_per_expert[kNumMaxWarpGroups];
 
     int num_tokens_of_responsible_expert = TODO;
 
@@ -188,7 +188,9 @@ __forceinline__ __device__ int dispatch_send(int local_thread_id) {
     if (responsible_expert_idx < num_experts and sub_warp_id == 0 and lane_id == 0) {
         const auto dst_rank = responsible_expert_idx / num_local_experts;
         const auto dst_expert_local_idx = responsible_expert_idx % num_local_experts;
-        const auto num_tokens_sent = shared_num_tokens_sent_per_expert[responsible_expert_idx - sm_id * num_warp_groups];
+
+        // const auto num_tokens_sent = shared_num_tokens_sent_per_expert[responsible_expert_idx - sm_id * num_warp_groups];
+        const int num_tokens_sent = num_tokens_of_responsible_expert;
 
         // Wait local sends issued and send expert counts
         while (
