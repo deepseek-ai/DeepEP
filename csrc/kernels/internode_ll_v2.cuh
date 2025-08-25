@@ -426,12 +426,13 @@ combine_v2(void* combined_x,
 
     // Issue IBGDA sends
     if (responsible_expert_idx < num_experts) {
+        // NOTE
+        // before: "one warp group --- all tokens for one (dsk_rank, local_expert_idx)"
+        // after: "multiple warp groups --- cooperate on tokens for one (dsk_rank, local_expert_idx)"
         for (int local_expert_idx = 0; local_expert_idx < num_local_experts; ++local_expert_idx) {
             const auto dst_rank = responsible_expert_idx / num_local_experts;
 
-            // NOTE
-            // before: "one warp group --- all tokens for one (dsk_rank, local_expert_idx)"
-            // after: "multiple warp groups --- cooperate on tokens for one (dsk_rank, local_expert_idx)"
+            // NOTE changed
             // const auto local_expert_idx = responsible_expert_idx % num_local_experts;
             const auto token_cooperate_part_idx = responsible_expert_idx % num_local_experts;
             const auto num_token_cooperate_parts = num_local_experts;
@@ -448,6 +449,7 @@ combine_v2(void* combined_x,
             int offset, num_tokens_to_send;
             unpack2(layout, num_tokens_to_send, offset);
 
+            // NOTE added
             if (src_signals != nullptr) {
                 // TODO shall we let 1st expert be separately computed and then do *not* wait for it
                 // if ((threadIdx.x == 0) and (local_expert_idx > 0)) {
@@ -490,7 +492,15 @@ combine_v2(void* combined_x,
             };
 
             // Issue IBGDA send
-            for (int token_idx = offset + sub_warp_id; token_idx < offset + num_tokens_to_send; token_idx += num_warps_per_group) {
+            // NOTE changed
+            // for (int token_idx = offset + sub_warp_id; token_idx < offset + num_tokens_to_send; token_idx += num_warps_per_group) {
+            const int num_tokens_to_send_per_cooperate_part = ceil_div(num_tokens_to_send, num_token_cooperate_parts);
+            const int token_idx_part_end = offset + min(num_tokens_to_send, num_tokens_to_send_per_cooperate_part * (token_cooperate_part_idx + 1));
+            for (
+                int token_idx = offset + num_tokens_to_send_per_cooperate_part * token_cooperate_part_idx + sub_warp_id;
+                token_idx < token_idx_part_end;
+                token_idx += num_warps_per_group
+            ) {
                 const auto x_int4 = local_x + token_idx * hidden_bf16_int4;
                 const auto rdma_send_type_row = reinterpret_cast<int*>(rdma_send_x_vec + token_idx * num_bytes_per_slot);
                 const auto rdma_send_x_vec_row = reinterpret_cast<uint8_t*>(rdma_send_type_row);
