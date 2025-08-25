@@ -7,6 +7,10 @@ namespace deep_ep {
 namespace internode_ll {
 
 __forceinline__ __device__ int dispatch_send() {
+    // Expert counts
+    constexpr int kNumMaxWarpGroups = 32;
+    __shared__ int shared_num_tokens_sent_per_expert[kNumMaxWarpGroups];
+
     // There are 2 kinds of warps in this part:
     // 1. The first-kind warps for FP8 cast and sending top-k tokens
     // 2. The last warp for reading `topk_idx` and count for per-expert information
@@ -314,10 +318,6 @@ dispatch_v2(void* packed_recv_x, void* packed_recv_x_scales,
     const size_t num_bytes_per_msg = sizeof(int4) + ((kUseFP8 || kUseNVFP4) ? (hidden_bytes + num_scales * sizeof(rdma_x_scale_t)) : hidden_bytes);
     const size_t num_int4_per_msg = num_bytes_per_msg / sizeof(int4);
     EP_DEVICE_ASSERT(num_bytes_per_msg % sizeof(int4) == 0);
-
-    // Expert counts
-    constexpr int kNumMaxWarpGroups = 32;
-    __shared__ int shared_num_tokens_sent_per_expert[kNumMaxWarpGroups];
 
     // Sending phase
     if ((phases & LOW_LATENCY_SEND_PHASE) == 0)
