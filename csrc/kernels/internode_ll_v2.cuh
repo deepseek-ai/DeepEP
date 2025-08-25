@@ -303,6 +303,7 @@ __forceinline__ __device__ int dispatch_recv(int local_thread_id, int num_warp_g
     // Receiving and packing
     // NOTE if -> for
     // if (responsible_expert_idx < num_experts) {
+    EP_DEVICE_ASSERT(num_warp_groups == 1); // not consider multi warp_group case below
     const auto src_rank = sm_id;
     if (src_rank < num_ranks) {
         for (int local_expert_idx = 0; local_expert_idx < num_local_experts; ++local_expert_idx) {
