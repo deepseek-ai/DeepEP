@@ -64,12 +64,13 @@ __forceinline__ __device__ int dispatch_send(int local_thread_id) {
         // NOTE change from "linearly scan token_idx= 0,1,2,..." to "linearly scan shuffled_token_idx"
         // for (int token_idx = sm_id; token_idx < num_tokens; token_idx += num_sms) {
         for (
-            int shuffled_token_idx = sm_id;
+            int shuffled_token_idx = TODO_wrong(sm_id);
             token_idx < TODO_wrong(num_tokens_of_responsible_expert);
-            token_idx += num_sms
+            token_idx += TODO_wrong(num_sms)
         ) {
             // TODO may overlap to optimize
-            int token_idx = token_ids_of_expert[shuffled_token_idx];
+            int token_idx = TODO;
+            int dst_expert_idx = TODO;
 
             // const auto x_int4 = static_cast<const int4*>(x) + token_idx * hidden_bf16_int4;
 
@@ -81,9 +82,8 @@ __forceinline__ __device__ int dispatch_send(int local_thread_id) {
             // const auto rdma_x_scales = reinterpret_cast<Consts::rdma_x_scale_t*>(reinterpret_cast<uint8_t*>(rdma_x_vec) + Consts::hidden_bytes);
 
             // Overlap top-k index read and source token index writes
-            TODO_here_only_use_first_8_warps_which_is_wasting;
-            TODO_this_logic_is_wrong;
-            auto dst_expert_idx = warp_id < num_topk ? static_cast<int>(__ldg(topk_idx + token_idx * num_topk + warp_id)) : -1;
+            // NOTE the parallel strategy is changed
+            // auto dst_expert_idx = warp_id < num_topk ? static_cast<int>(__ldg(topk_idx + token_idx * num_topk + warp_id)) : -1;
 
             // NOTE do not use `rdma_x` but use `x`
             // local_thread_id == 0 ? (*rdma_x_src_idx = token_idx) : 0;
