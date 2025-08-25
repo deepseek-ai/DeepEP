@@ -3,6 +3,7 @@
 #include "launch.cuh"
 #include "ibgda_device.cuh"
 
+// temporary hack to put it into cuh
 #include "internode_ll_common.cuh"
 #include "internode_ll_v2.cuh"
 
