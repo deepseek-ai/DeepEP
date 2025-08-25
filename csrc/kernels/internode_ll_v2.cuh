@@ -61,11 +61,13 @@ __forceinline__ __device__ int dispatch_send(int local_thread_id, int num_warp_g
 
     // NOTE
     // before: one SM = one token, one warp = one dst rank of that token, only use first 8 warps of the SM (?)
-    // after: flatten all warps in all SMs, then reshape to (num_cooperate_parts, num_ranks) grid, then one warp = one dst rank of one token
+    // after: flatten all (warp_id, sm_id), then reshape to (num_cooperate_parts, num_ranks) grid, then one warp = one dst rank of one token
     //
-    const int flatten_sm_id_and_warp_id = sm_id * num_warps + warp_id;
-    const int cooperate_part_idx = flatten_sm_id_and_warp_id / num_ranks;
-    const int dst_rank = flatten_sm_id_and_warp_id % num_ranks;
+    // NOTE: deliberately be (warp_id, sm_id) instead of (sm_id, warp_id)
+    //       to allow work be distributed to all SMs when few work
+    const int flatten_warp_id_and_sm_id = warp_id * num_sm + sm_id;
+    const int cooperate_part_idx = flatten_warp_id_and_sm_id / num_ranks;
+    const int dst_rank = flatten_warp_id_and_sm_id % num_ranks;
     EP_DEVICE_ASSERT(num_sms * num_warps == num_cooperate_parts * num_ranks); // even division
     for (int local_expert_idx = 0; local_expert_idx < num_local_experts; ++local_expert_idx) {
         const int dst_expert_idx = dst_rank * num_local_experts + local_expert_idx;
