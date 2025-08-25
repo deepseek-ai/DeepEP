@@ -61,7 +61,12 @@ __forceinline__ __device__ int dispatch_send(int local_thread_id) {
     const size_t hidden_bf16_int4 = kHidden / kNumElemsPerRead;
 
     for (int local_expert_idx = 0; local_expert_idx < num_local_experts; ++local_expert_idx) {
-        for (int token_idx = sm_id; token_idx < num_tokens; token_idx += num_sms) {
+        // NOTE change from "linearly scan token_idx= 0,1,2,..." to "linearly scan shuffled_token_idx"
+        // for (int token_idx = sm_id; token_idx < num_tokens; token_idx += num_sms) {
+        for (int shuffled_token_idx = sm_id; token_idx < num_tokens_of_responsible_expert; token_idx += num_sms) {
+            // TODO may overlap to optimize
+            int token_idx = token_ids_of_expert[shuffled_token_idx];
+
             // const auto x_int4 = static_cast<const int4*>(x) + token_idx * hidden_bf16_int4;
 
             // NOTE do not use `rdma_x` but use `x`
