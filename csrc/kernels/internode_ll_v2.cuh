@@ -59,7 +59,7 @@ __forceinline__ __device__ int dispatch_send(int local_thread_id) {
         const size_t hidden_bf16_int4 = kHidden / kNumElemsPerRead;
 
         for (int token_idx = sm_id; token_idx < num_tokens; token_idx += num_sms) {
-            const auto x_int4 = static_cast<const int4*>(x) + token_idx * hidden_bf16_int4;
+//             const auto x_int4 = static_cast<const int4*>(x) + token_idx * hidden_bf16_int4;
             const auto rdma_x_src_idx = reinterpret_cast<int*>(static_cast<uint8_t*>(rdma_x) + token_idx * Consts::num_bytes_per_msg);
 //             const auto rdma_x_vec = reinterpret_cast<Consts::vec_t*>(reinterpret_cast<uint8_t*>(rdma_x_src_idx) + sizeof(int4));
 //             const auto rdma_x_scales = reinterpret_cast<Consts::rdma_x_scale_t*>(reinterpret_cast<uint8_t*>(rdma_x_vec) + Consts::hidden_bytes);
@@ -342,7 +342,8 @@ dispatch_v2(void* packed_recv_x, void* packed_recv_x_scales,
          int* cumulative_local_expert_recv_stats,
          int64_t* dispatch_wait_recv_cost_stats,
          void* rdma_recv_x, int* rdma_recv_count, void* rdma_x,
-         const void* x, const int64_t* topk_idx,
+         // const void* x, // NOTE removed
+         const int64_t* topk_idx,
          int* atomic_counter_per_expert, int* atomic_finish_counter_per_expert,
          int* next_clean, int num_next_clean_int,
          int num_tokens, int num_max_dispatch_tokens_per_rank,
