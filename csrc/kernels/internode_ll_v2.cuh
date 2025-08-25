@@ -67,10 +67,11 @@ __forceinline__ __device__ int dispatch_send(int local_thread_id, int num_warp_g
     //
     // NOTE: deliberately be (warp_id, sm_id) instead of (sm_id, warp_id)
     //       to allow work be distributed to all SMs when few work
+    // TODO is these ordering suboptimal for nvlink write or gmem read?
     const int num_cooperate_parts = num_sms * num_warps / num_ranks;
     EP_DEVICE_ASSERT(num_sms * num_warps == num_cooperate_parts * num_ranks); // even division
     const int flatten_id = warp_id * num_sm + sm_id;
-    const int cooperate_part_idx = flatten_id / num_ranks;
+    const int flatten_num = num_warps * num_sm;
     const int dst_rank = flatten_id % num_ranks;
     for (int local_expert_idx = 0; local_expert_idx < num_local_experts; ++local_expert_idx) {
         const int dst_expert_idx = dst_rank * num_local_experts + local_expert_idx;
@@ -81,9 +82,9 @@ __forceinline__ __device__ int dispatch_send(int local_thread_id, int num_warp_g
         // NOTE changed, see "before-after" above
         // for (int token_idx = sm_id; token_idx < num_tokens; token_idx += num_sms) {
         for (
-            int pseudo_token_idx = TODO;
-            pseudo_token_idx < TODO;
-            pseudo_token_idx += TODO
+            int pseudo_token_idx = flatten_id;
+            pseudo_token_idx < num_tokens_of_dst_expert;
+            pseudo_token_idx += flatten_num
         ) {
             // TODO may overlap to optimize
             int token_idx = token_ids_of_expert[dst_expert_idx * token_ids_of_expert_stride_0 + pseudo_token_idx];
