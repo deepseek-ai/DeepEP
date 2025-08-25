@@ -291,10 +291,11 @@ __forceinline__ __device__ int dispatch_recv(int local_thread_id, int num_warp_g
 //         cg::this_grid().sync();
 
     // TODO a lot of SM is wasted, optimize it later
+    // TODO at least make dispatch_recv have 16 instead of 8 warps
     //
     // NOTE
     // before: one (sm_id, warp_group_id) = one responsible_expert_idx = handle all tokens for one (src_rank, local_expert_idx)
-    // after: one sm_id = handle all tokens for one (src_rank, const local_expert_idx)
+    // after: one sm_id = one src_rank = handle all tokens for one (src_rank, const local_expert_idx)
 
     // Receiving and packing
     if (responsible_expert_idx < num_experts) {
