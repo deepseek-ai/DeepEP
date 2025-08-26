@@ -675,7 +675,7 @@ combine(void* combined_x,
                                       vaild_signal_idx - shared_vaild_signal_prefix_sum[local_expert_idx-1];
             gemm_comp_signal = comp_signal + num_signal_per_expert * local_expert_idx + local_expert_signal_idx;
         
-            if (sub_warp_id == 0 and lane_id == 0 and packed_recv_count[local_expert_idx] != 0) {
+            if (sub_warp_id == 0 and lane_id == 0 and num_tokens_per_expert != 0) {
                 while (ld_acquire_global(gemm_comp_signal) != threshold);
             }
             __syncthreads();
@@ -794,28 +794,32 @@ combine(void* combined_x,
 
         if (overlap) {
             // Put the finishing flag for overlap mode
-            if (warp_id == 0 and lane_id == 0)
-                atomicAdd(atomic_finish_counter_per_expert + shared_local_expert_idx, 1);
+            bool put_finish_flag = false;
+            if (sub_warp_id == 0) {
+                if (lane_id == 0) {
+                    const auto finish_counter = (num_tokens_per_expert == 0 ? 1 : ceil_div(num_tokens_per_expert, block_m));
+                    if ((atomicAdd(atomic_finish_counter_per_expert + local_expert_idx, 1) + 1) == finish_counter)
+                        put_finish_flag = true;
+                }
+                put_finish_flag = __shfl_sync(0xffffffff, put_finish_flag, 0);
+            }
             __syncthreads();
 
-            if ((local_expert_signal_idx + 1) * block_m >= num_tokens_per_expert) {
-                if (warp_id == 0) {
-                    auto global_expert_idx = rank * num_local_experts + shared_local_expert_idx;
-                    for (int dst_rank = lane_id; dst_rank < num_ranks; dst_rank += 32) {
-                        if (packed_recv_count[shared_local_expert_idx] != 0)
-                            while (ld_acquire_global(atomic_finish_counter_per_expert + shared_local_expert_idx) != ceil_div(num_tokens_per_expert, block_m));
-                        auto dst_ptr = reinterpret_cast<uint64_t>(rdma_recv_flag + global_expert_idx);
-                        auto dst_p2p_ptr = nvshmemi_get_p2p_ptr(dst_ptr, rank, dst_rank);
-                        if (dst_p2p_ptr == 0) {
-                            nvshmemi_ibgda_amo_nonfetch_add(reinterpret_cast<int*>(dst_ptr), 1, dst_rank, shared_local_expert_idx);
-                        } else {
-                            st_release_sys_global(reinterpret_cast<int*>(dst_p2p_ptr), 1);
-                        }
-                        atomic_add_release_global(atomic_clean_flag, -1);
+            if (sub_warp_id == 0 and put_finish_flag) {
+                auto global_expert_idx = rank * num_local_experts + local_expert_idx;
+                for (int dst_rank = lane_id; dst_rank < num_ranks; dst_rank += 32) {
+                    while (ld_acquire_global(atomic_clean_flag) == 0);
+                    auto dst_ptr = reinterpret_cast<uint64_t>(rdma_recv_flag + global_expert_idx);
+                    auto dst_p2p_ptr = nvshmemi_get_p2p_ptr(dst_ptr, rank, dst_rank);
+                    if (dst_p2p_ptr == 0) {
+                        nvshmemi_ibgda_amo_nonfetch_add(reinterpret_cast<int*>(dst_ptr), 1, dst_rank, local_expert_idx);
+                    } else {
+                        st_release_sys_global(reinterpret_cast<int*>(dst_p2p_ptr), 1);
                     }
-                    if (lane_id == 0)
-                        atomic_finish_counter_per_expert[shared_local_expert_idx] = 0;
+                    atomic_add_release_global(atomic_clean_flag, -1);
                 }
+                if (lane_id == 0)
+                    atomic_finish_counter_per_expert[local_expert_idx] = 0;
             }
             __syncthreads();
         }
