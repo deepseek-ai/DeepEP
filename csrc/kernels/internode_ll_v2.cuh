@@ -609,8 +609,8 @@ LAUNCH_KERNEL(&cfg, dispatch_func, \
               num_tokens, num_max_dispatch_tokens_per_rank, \
               num_topk, num_experts, rank, num_ranks, \
               num_send_warp_groups, num_recv_warp_groups, num_warps_per_group, \
-              round_scale, phases,
-              dst_signals,
+              round_scale, phases, \
+              dst_signals, \
               count_per_expert, token_ids_of_expert, token_ids_of_expert_stride_0); } break
 
     SETUP_LAUNCH_CONFIG(num_sms, num_warps * 32, stream);
