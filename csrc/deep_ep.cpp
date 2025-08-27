@@ -1096,6 +1096,7 @@ Buffer::low_latency_dispatch(bool enable_v2, const torch::Tensor& x, const torch
                              bool use_fp8, bool round_scale, bool use_ue8m0,
                              bool async, bool return_recv_hook,
                              const std::optional<torch::Tensor>& zeroed_tensor,
+                             bool use_nvfp4,
                              const std::optional<torch::Tensor>& dst_signals) {
 #ifndef DISABLE_NVSHMEM
     EP_HOST_ASSERT(low_latency_mode);
@@ -1172,6 +1173,7 @@ Buffer::low_latency_dispatch(bool enable_v2, const torch::Tensor& x, const torch
     void* packed_recv_x_scales_ptr = nullptr;
     EP_HOST_ASSERT((num_ranks * num_max_dispatch_tokens_per_rank) % 4 == 0 and "TMA requires the number of tokens to be multiple of 4");
 
+    TODO_use_nvfp4;
     if (use_fp8) {
         // TODO: support unaligned cases
         EP_HOST_ASSERT(hidden % 512 == 0);
@@ -1204,7 +1206,7 @@ Buffer::low_latency_dispatch(bool enable_v2, const torch::Tensor& x, const torch
                                use_fp8, round_scale, use_ue8m0,
                                workspace, num_device_sms,
                                launch_stream, phases,
-                               dst_signals.has_value() ? dst_signals->data_ptr<uint32_t>() : nullptr);
+                               use_nvfp4, dst_signals.has_value() ? dst_signals->data_ptr<uint32_t>() : nullptr);
     };
     launcher(return_recv_hook ? LOW_LATENCY_SEND_PHASE : (LOW_LATENCY_SEND_PHASE | LOW_LATENCY_RECV_PHASE));
 

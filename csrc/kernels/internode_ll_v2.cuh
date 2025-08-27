@@ -482,8 +482,8 @@ void dispatch_v2(void* packed_recv_x, void* packed_recv_x_scales,
               int num_topk, int num_experts, int rank, int num_ranks,
               bool use_fp8, bool round_scale, bool use_ue8m0,
               void* workspace, int num_device_sms,
-              cudaStream_t stream, int phases) {
-    TODO_args(use_nvfp4, dst_signals);
+              cudaStream_t stream, int phases,
+              bool use_nvfp4, uint32_t* dst_signals) {
     constexpr int kNumMaxTopK = 9;
     const int num_warp_groups = ceil_div(num_experts, num_device_sms);
 
@@ -537,7 +537,8 @@ LAUNCH_KERNEL(&cfg, dispatch_func, \
               num_tokens, num_max_dispatch_tokens_per_rank, \
               num_topk, num_experts, rank, num_ranks, \
               num_send_warp_groups, num_recv_warp_groups, num_warps_per_group, \
-              round_scale, phases); } break
+              round_scale, phases,
+              dst_signals); } break
 
     SETUP_LAUNCH_CONFIG(num_sms, num_warps * 32, stream);
     SWITCH_HIDDEN(DISPATCH_LAUNCH_CASE);

@@ -351,7 +351,7 @@ void dispatch(bool enable_v2, void* packed_recv_x, void* packed_recv_x_scales,
               bool use_fp8, bool round_scale, bool use_ue8m0,
               void* workspace, int num_device_sms,
               cudaStream_t stream, int phases,
-              uint32_t* dst_signals) {
+              bool use_nvfp4, uint32_t* dst_signals) {
     if (enable_v2) {
         return dispatch_v2(
             packed_recv_x, packed_recv_x_scales,
@@ -368,7 +368,7 @@ void dispatch(bool enable_v2, void* packed_recv_x, void* packed_recv_x_scales,
             use_fp8, round_scale, use_ue8m0,
             workspace, num_device_sms,
             stream, phases,
-            dst_signals
+            use_nvfp4, dst_signals
         );
     }
 

@@ -151,6 +151,7 @@ public:
                          bool use_fp8, bool round_scale, bool use_ue8m0,
                          bool async, bool return_recv_hook,
                          const std::optional<torch::Tensor>& zeroed_tensor,
+                         bool use_nvfp4,
                          const std::optional<torch::Tensor>& dst_signals);
 
     std::tuple<torch::Tensor, std::optional<EventHandle>, std::optional<std::function<void()>>>
