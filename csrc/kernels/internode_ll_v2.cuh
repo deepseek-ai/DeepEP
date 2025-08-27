@@ -355,8 +355,8 @@ __forceinline__ __device__ int dispatch_recv(
     // if (responsible_expert_idx < num_experts) {
     EP_DEVICE_ASSERT(num_warp_groups == 1); // not consider multi warp_group case below
     const auto src_rank = sm_id;
-    if (src_rank < num_ranks) {
-        for (int local_expert_idx = 0; local_expert_idx < num_local_experts; ++local_expert_idx) {
+    for (int local_expert_idx = 0; local_expert_idx < num_local_experts; ++local_expert_idx) {
+        if (src_rank < num_ranks) {
             // NOTE modified
             // const auto src_rank = responsible_expert_idx / num_local_experts;
             // const auto local_expert_idx = responsible_expert_idx % num_local_experts;
@@ -454,10 +454,10 @@ __forceinline__ __device__ int dispatch_recv(
                     }
                 }
             }
+        }
 
-            if (dst_signals != nullptr) {
-                atomic_add_release_global(dst_signals + local_expert_idx, 1);
-            }
+        if (dst_signals != nullptr) {
+            atomic_add_release_global(dst_signals + local_expert_idx, 1);
         }
     }
 }
