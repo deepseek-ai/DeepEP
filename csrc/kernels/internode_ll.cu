@@ -352,7 +352,7 @@ void dispatch(bool enable_v2, void* packed_recv_x, void* packed_recv_x_scales,
               void* workspace, int num_device_sms,
               cudaStream_t stream, int phases,
               bool use_nvfp4, uint32_t* dst_signals,
-              int* count_per_expert, int* token_ids_of_expert) {
+              int* count_per_expert, int* token_ids_of_expert, int token_ids_of_expert_stride_0) {
     if (enable_v2) {
         return dispatch_v2(
             packed_recv_x, packed_recv_x_scales,
@@ -370,7 +370,7 @@ void dispatch(bool enable_v2, void* packed_recv_x, void* packed_recv_x_scales,
             workspace, num_device_sms,
             stream, phases,
             use_nvfp4, dst_signals,
-            count_per_expert, token_ids_of_expert
+            count_per_expert, token_ids_of_expert, token_ids_of_expert_stride_0
         );
     }
 
@@ -412,8 +412,7 @@ LAUNCH_KERNEL(&cfg, dispatch_func, \
               num_tokens, num_max_dispatch_tokens_per_rank, \
               num_topk, num_experts, rank, num_ranks, \
               num_warp_groups, num_warps_per_group, \
-              round_scale, phases,
-              dst_signals); } break
+              round_scale, phases); } break
 
     SETUP_LAUNCH_CONFIG(num_sms, num_warps * 32, stream);
     SWITCH_HIDDEN(DISPATCH_LAUNCH_CASE);

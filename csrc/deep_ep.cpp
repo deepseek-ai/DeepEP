@@ -1230,7 +1230,8 @@ Buffer::low_latency_dispatch(bool enable_v2, const torch::Tensor& x, const torch
                                launch_stream, phases,
                                use_nvfp4, dst_signals.has_value() ? dst_signals->data_ptr<uint32_t>() : nullptr,
                                count_per_expert.has_value() ? count_per_expert->data_ptr<uint32_t>() : count_per_expert,
-                               token_ids_of_expert.has_value() ? token_ids_of_expert->data_ptr<int>() : token_ids_of_expert);
+                               token_ids_of_expert.has_value() ? token_ids_of_expert->data_ptr<int>() : token_ids_of_expert,
+                               token_ids_of_expert.has_value() ? token_ids_of_expert->stride(0) : 0);
     };
     launcher(return_recv_hook ? LOW_LATENCY_SEND_PHASE : (LOW_LATENCY_SEND_PHASE | LOW_LATENCY_RECV_PHASE));
 
