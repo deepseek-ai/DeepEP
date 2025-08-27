@@ -1125,7 +1125,7 @@ Buffer::low_latency_dispatch(bool enable_v2, const torch::Tensor& x, const torch
     // NOTE `x` is packed now
     // EP_HOST_ASSERT(x.dim() == 2 and x.is_contiguous() and x.scalar_type() == torch::kBFloat16);
     // EP_HOST_ASSERT(x.size(1) % sizeof(int4) == 0 and x.size(1) % 128 == 0);
-    using Consts = DispatchConstsTemplate<false, true, HIDDEN_DIM>;
+    using Consts = internode_ll::DispatchConstsTemplate<false, true, HIDDEN_DIM>;
     EP_HOST_ASSERT(x.dim() == 2 and x.is_contiguous() and x.scalar_type() == torch::kUInt8);
     EP_HOST_ASSERT(x.size(1) == Consts::num_bytes_per_msg);
 
