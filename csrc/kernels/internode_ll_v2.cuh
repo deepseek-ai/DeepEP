@@ -238,7 +238,7 @@ __forceinline__ __device__ int dispatch_send(
                 ld_acquire_global(atomic_finish_counter_per_expert + responsible_expert_idx) !=
                 // NOTE changed
                 // FINISHED_SUM_TAG * 2
-                FINISHED_SUM_TAG + num_tokens_of_responsible_expert
+                FINISHED_SUM_TAG + num_tokens_sent
             );
             auto dst_ptr = reinterpret_cast<uint64_t>(rdma_recv_count + dst_expert_local_idx * num_ranks + rank);
             auto dst_p2p_ptr = nvshmemi_get_p2p_ptr(dst_ptr, rank, dst_rank);
