@@ -1095,8 +1095,8 @@ Buffer::low_latency_dispatch(bool enable_v2, const torch::Tensor& x, const torch
                              int num_max_dispatch_tokens_per_rank, int num_experts,
                              bool use_fp8, bool round_scale, bool use_ue8m0,
                              bool async, bool return_recv_hook,
+                             const std::optional<torch::Tensor>& zeroed_tensor,
                              const std::optional<torch::Tensor>& dst_signals) {
-    TODO_arg(zeroed_tensor);
 #ifndef DISABLE_NVSHMEM
     EP_HOST_ASSERT(low_latency_mode);
 
@@ -1157,8 +1157,10 @@ Buffer::low_latency_dispatch(bool enable_v2, const torch::Tensor& x, const torch
     auto packed_recv_layout_range = torch::empty({num_local_experts, num_ranks}, torch::dtype(torch::kInt64).device(torch::kCUDA));
 
     // NOTE let users do the zeroing
-    // auto packed_recv_count = torch::empty({num_local_experts}, torch::dtype(torch::kInt32).device(torch::kCUDA));
-    auto packed_recv_count = zeroed_tensor;
+    EP_HOST_ASSERT(enable_v2 == zeroed_tensor.has_value());
+    auto packed_recv_count = zeroed_tensor.has_value()
+        ? zeroed_tensor.value()
+        ; torch::empty({num_local_experts}, torch::dtype(torch::kInt32).device(torch::kCUDA));
     EP_HOST_ASSERT(packed_recv_count.dim() == 1);
     EP_HOST_ASSERT(packed_recv_count.size(0) == num_local_experts);
     EP_HOST_ASSERT(packed_recv_count.dtype() == torch::kInt32);
