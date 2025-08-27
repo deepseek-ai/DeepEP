@@ -9,7 +9,28 @@ namespace deep_ep {
 namespace internode_ll {
 
 template <bool kUseFP8, bool kUseUE8M0, bool kUseNVFP4, int kHidden>
-__forceinline__ __device__ int dispatch_send(int local_thread_id, int num_warp_groups) {
+__forceinline__ __device__ int dispatch_send(
+    int local_thread_id, int num_warp_groups,
+
+    // copied args
+    void* packed_recv_x, void* packed_recv_x_scales,
+    int* packed_recv_src_info, int64_t* packed_recv_layout_range,
+    int* packed_recv_count,
+    int* cumulative_local_expert_recv_stats,
+    int64_t* dispatch_wait_recv_cost_stats,
+    void* rdma_recv_x, int* rdma_recv_count,
+    // void* rdma_x, // NOTE removed
+    const void* x, const int64_t* topk_idx,
+    int* atomic_counter_per_expert, int* atomic_finish_counter_per_expert,
+    int* next_clean, int num_next_clean_int,
+    int num_tokens, int num_max_dispatch_tokens_per_rank,
+    int num_topk, int num_experts, int rank, int num_ranks,
+    // int num_send_warp_groups, int num_recv_warp_groups, // NOTE removed
+    int num_warps_per_group,
+    bool round_scale, int phases,
+    uint32_t* dst_signals,
+    int* count_per_expert, int* token_ids_of_expert, int token_ids_of_expert_stride_0
+) {
     using Consts = DispatchConstsTemplate<kUseFP8, kUseNVFP4, kHidden>;
     EP_DEVICE_ASSERT(Consts::num_bytes_per_msg % sizeof(int4) == 0);
 
@@ -275,7 +296,28 @@ __forceinline__ __device__ int dispatch_send(int local_thread_id, int num_warp_g
 }
 
 template <bool kUseFP8, bool kUseUE8M0, bool kUseNVFP4, int kHidden>
-__forceinline__ __device__ int dispatch_recv(int local_thread_id, int num_warp_groups) {
+__forceinline__ __device__ int dispatch_recv(
+    int local_thread_id, int num_warp_groups,
+
+    // copied args
+    void* packed_recv_x, void* packed_recv_x_scales,
+    int* packed_recv_src_info, int64_t* packed_recv_layout_range,
+    int* packed_recv_count,
+    int* cumulative_local_expert_recv_stats,
+    int64_t* dispatch_wait_recv_cost_stats,
+    void* rdma_recv_x, int* rdma_recv_count,
+    // void* rdma_x, // NOTE removed
+    const void* x, const int64_t* topk_idx,
+    int* atomic_counter_per_expert, int* atomic_finish_counter_per_expert,
+    int* next_clean, int num_next_clean_int,
+    int num_tokens, int num_max_dispatch_tokens_per_rank,
+    int num_topk, int num_experts, int rank, int num_ranks,
+    // int num_send_warp_groups, int num_recv_warp_groups, // NOTE removed
+    int num_warps_per_group,
+    bool round_scale, int phases,
+    uint32_t* dst_signals,
+    int* count_per_expert, int* token_ids_of_expert, int token_ids_of_expert_stride_0
+) {
     using Consts = DispatchConstsTemplate<kUseFP8, kUseNVFP4, kHidden>;
 
     // NOTE copied from dispatch body
@@ -446,15 +488,45 @@ dispatch_v2(void* packed_recv_x, void* packed_recv_x_scales,
         const auto send_thread_id = raw_thread_id;
         dispatch_send<kUseFP8, kUseUE8M0, kUseNVFP4, kHidden>(
             send_thread_id, num_send_warp_groups,
-            TODO_args,
-            dst_signals
+
+            // forward args
+            packed_recv_x, packed_recv_x_scales,
+            packed_recv_src_info, packed_recv_layout_range,
+            packed_recv_count,
+            cumulative_local_expert_recv_stats,
+            dispatch_wait_recv_cost_stats,
+            rdma_recv_x, rdma_recv_count,
+            x, topk_idx,
+            atomic_counter_per_expert, atomic_finish_counter_per_expert,
+            next_clean, num_next_clean_int,
+            num_tokens, num_max_dispatch_tokens_per_rank,
+            num_topk, num_experts, rank, num_ranks,
+            num_warps_per_group,
+            round_scale, phases,
+            dst_signals,
+            count_per_expert, token_ids_of_expert, token_ids_of_expert_stride_0
         );
     } else {
         const auto recv_thread_id = raw_thread_id - num_send_threads;
         dispatch_recv<kUseFP8, kUseUE8M0, kUseNVFP4, kHidden>(
             recv_thread_id, num_recv_warp_groups,
-            TODO_args,
-            dst_signals
+
+            // forward args
+            packed_recv_x, packed_recv_x_scales,
+            packed_recv_src_info, packed_recv_layout_range,
+            packed_recv_count,
+            cumulative_local_expert_recv_stats,
+            dispatch_wait_recv_cost_stats,
+            rdma_recv_x, rdma_recv_count,
+            x, topk_idx,
+            atomic_counter_per_expert, atomic_finish_counter_per_expert,
+            next_clean, num_next_clean_int,
+            num_tokens, num_max_dispatch_tokens_per_rank,
+            num_topk, num_experts, rank, num_ranks,
+            num_warps_per_group,
+            round_scale, phases,
+            dst_signals,
+            count_per_expert, token_ids_of_expert, token_ids_of_expert_stride_0
         );
     }
 
