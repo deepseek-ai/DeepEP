@@ -120,7 +120,7 @@ void notify_dispatch(const int* num_tokens_per_rank, int* moe_recv_counter_mappe
         buffer_ptrs, barrier_signal_ptrs, rank); \
     break
 
-    constexpr int kNumThreads = 128;
+    constexpr int kNumThreads = 160;
     EP_HOST_ASSERT(num_experts % num_ranks == 0);
     EP_HOST_ASSERT(num_experts / num_ranks <= kNumThreads and num_ranks <= kNumThreads);
 
