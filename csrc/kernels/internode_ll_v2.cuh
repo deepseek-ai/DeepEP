@@ -845,7 +845,9 @@ combine_v2(void* combined_x,
             auto dst_ptr = reinterpret_cast<uint64_t>(rdma_recv_flag + global_expert_idx);
             auto dst_p2p_ptr = nvshmemi_get_p2p_ptr(dst_ptr, rank, dst_rank);
             if (dst_p2p_ptr == 0) {
-                nvshmemi_ibgda_amo_nonfetch_add(reinterpret_cast<int*>(dst_ptr), 1, dst_rank, local_expert_idx);
+                // will not visit this branch
+                // nvshmemi_ibgda_amo_nonfetch_add(reinterpret_cast<int*>(dst_ptr), 1, dst_rank, local_expert_idx);
+                EP_DEVICE_ASSERT(0);
             } else {
                 st_release_sys_global(reinterpret_cast<int*>(dst_p2p_ptr), 1);
             }
