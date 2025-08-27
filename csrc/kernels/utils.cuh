@@ -101,6 +101,12 @@ __device__ __forceinline__ int atomic_add_release_global(const int* ptr, int val
     return ret;
 }
 
+__device__ __forceinline__ uint32_t atomic_add_release_global(const uint32_t* ptr, uint32_t value) {
+    uint32_t ret;
+    asm volatile("atom.add.release.gpu.global.u32 %0, [%1], %2;" : "=r"(ret) : "l"(ptr), "r"(value));
+    return ret;
+}
+
 __device__ __forceinline__ int ld_acquire_cta(const int *ptr) {
     int ret;
     asm volatile("ld.acquire.cta.s32 %0, [%1];" : "=r"(ret) : "l"(ptr));
