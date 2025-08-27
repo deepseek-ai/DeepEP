@@ -1151,8 +1151,9 @@ Buffer::low_latency_dispatch(bool enable_v2, const torch::Tensor& x, const torch
         stream_wait(launch_stream, compute_stream);
 
     // Allocate packed tensors
-    auto packed_recv_x = torch::empty({num_local_experts, num_ranks * num_max_dispatch_tokens_per_rank, hidden},
-                                      x.options().dtype(use_fp8 ? torch::kFloat8_e4m3fn: torch::kBFloat16));
+    constexpr int NUM_ELEMS_PER_PACK = 8;
+    auto packed_recv_x = torch::empty({num_local_experts, num_ranks * num_max_dispatch_tokens_per_rank, use_nvfp4 ? hidden / NUM_ELEMS_PER_PACK : hidden},
+                                      x.options().dtype(use_nvfp4 ? torch::kInt32 : (use_fp8 ? torch::kFloat8_e4m3fn: torch::kBFloat16)));
     auto packed_recv_src_info = torch::empty({num_local_experts, num_ranks * num_max_dispatch_tokens_per_rank}, torch::dtype(torch::kInt32).device(torch::kCUDA));
     auto packed_recv_layout_range = torch::empty({num_local_experts, num_ranks}, torch::dtype(torch::kInt64).device(torch::kCUDA));
 
@@ -1183,6 +1184,13 @@ Buffer::low_latency_dispatch(bool enable_v2, const torch::Tensor& x, const torch
             packed_recv_x_scales = torch::empty({num_local_experts, hidden / 512, num_ranks * num_max_dispatch_tokens_per_rank},
                                                 torch::dtype(torch::kInt).device(torch::kCUDA));
         }
+        packed_recv_x_scales = torch::transpose(packed_recv_x_scales.value(), 1, 2);
+        packed_recv_x_scales_ptr = packed_recv_x_scales->data_ptr();
+    } else if (use_nvfp4) {
+        constexpr int SF_VEC_SIZE = 16;
+        constexpr int NUM_SF_ELEMS_PER_PACK = 4;
+        packed_recv_x_scales = torch::empty({num_local_experts, hidden / (SF_VEC_SIZE * NUM_SF_ELEMS_PER_PACK), num_ranks * num_max_dispatch_tokens_per_rank},
+                                            torch::dtype(torch::kInt).device(torch::kCUDA));
         packed_recv_x_scales = torch::transpose(packed_recv_x_scales.value(), 1, 2);
         packed_recv_x_scales_ptr = packed_recv_x_scales->data_ptr();
     }
