@@ -352,7 +352,7 @@ void dispatch(bool enable_v2, void* packed_recv_x, void* packed_recv_x_scales,
               void* workspace, int num_device_sms,
               cudaStream_t stream, int phases,
               bool use_nvfp4, uint32_t* dst_signals,
-              int* count_per_expert, int* token_ids_of_expert, int token_ids_of_expert_stride_0) {
+              uint32_t* count_per_expert, int* token_ids_of_expert, int token_ids_of_expert_stride_0) {
     if (enable_v2) {
         return dispatch_v2(
             packed_recv_x, packed_recv_x_scales,
