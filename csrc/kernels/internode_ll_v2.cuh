@@ -11,7 +11,7 @@ namespace internode_ll {
 constexpr int kNumMaxWarpGroups = 32;
 
 template <bool kUseFP8, bool kUseUE8M0, bool kUseNVFP4, int kHidden>
-__forceinline__ __device__ int dispatch_send(
+__forceinline__ __device__ void dispatch_send(
     int local_thread_id, int num_warp_groups,
 
     // copied args
@@ -298,7 +298,7 @@ __forceinline__ __device__ int dispatch_send(
 }
 
 template <bool kUseFP8, bool kUseUE8M0, bool kUseNVFP4, int kHidden>
-__forceinline__ __device__ int dispatch_recv(
+__forceinline__ __device__ void dispatch_recv(
     int local_thread_id, int num_warp_groups,
 
     // copied args
