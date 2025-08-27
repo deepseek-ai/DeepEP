@@ -145,7 +145,7 @@ void dispatch(bool enable_v2, void* packed_recv_x, void* packed_recv_x_scales,
               int* cumulative_local_expert_recv_stats,
               int64_t* dispatch_wait_recv_cost_stats,
               void* rdma_recv_x, int* rdma_recv_count, void* rdma_x,
-              const void* x, const int64_t* topk_idx,
+              void* x, const int64_t* topk_idx, // NOTE rm `const` of x
               int* next_clean, int num_next_clean_int,
               int num_tokens, int hidden, int num_max_dispatch_tokens_per_rank,
               int num_topk, int num_experts, int rank, int num_ranks,
