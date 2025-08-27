@@ -350,7 +350,8 @@ void dispatch(bool enable_v2, void* packed_recv_x, void* packed_recv_x_scales,
               int num_topk, int num_experts, int rank, int num_ranks,
               bool use_fp8, bool round_scale, bool use_ue8m0,
               void* workspace, int num_device_sms,
-              cudaStream_t stream, int phases) {
+              cudaStream_t stream, int phases,
+              uint32_t* dst_signals) {
     if (enable_v2) {
         return dispatch_v2(
             packed_recv_x, packed_recv_x_scales,
@@ -366,7 +367,8 @@ void dispatch(bool enable_v2, void* packed_recv_x, void* packed_recv_x_scales,
             num_topk, num_experts, rank, num_ranks,
             use_fp8, round_scale, use_ue8m0,
             workspace, num_device_sms,
-            stream, phases
+            stream, phases,
+            dst_signals
         );
     }
 
@@ -408,7 +410,8 @@ LAUNCH_KERNEL(&cfg, dispatch_func, \
               num_tokens, num_max_dispatch_tokens_per_rank, \
               num_topk, num_experts, rank, num_ranks, \
               num_warp_groups, num_warps_per_group, \
-              round_scale, phases); } break
+              round_scale, phases,
+              dst_signals); } break
 
     SETUP_LAUNCH_CONFIG(num_sms, num_warps * 32, stream);
     SWITCH_HIDDEN(DISPATCH_LAUNCH_CASE);

@@ -1094,7 +1094,8 @@ Buffer::low_latency_dispatch(bool enable_v2, const torch::Tensor& x, const torch
                              const std::optional<torch::Tensor>& dispatch_wait_recv_cost_stats,
                              int num_max_dispatch_tokens_per_rank, int num_experts,
                              bool use_fp8, bool round_scale, bool use_ue8m0,
-                             bool async, bool return_recv_hook) {
+                             bool async, bool return_recv_hook,
+                             const std::optional<torch::Tensor>& dst_signals) {
     TODO_arg(zeroed_tensor);
 #ifndef DISABLE_NVSHMEM
     EP_HOST_ASSERT(low_latency_mode);
@@ -1201,7 +1202,8 @@ Buffer::low_latency_dispatch(bool enable_v2, const torch::Tensor& x, const torch
                                num_topk, num_experts, rank, num_ranks,
                                use_fp8, round_scale, use_ue8m0,
                                workspace, num_device_sms,
-                               launch_stream, phases);
+                               launch_stream, phases,
+                               dst_signals.has_value() ? dst_signals->data_ptr<uint32_t>() : nullptr);
     };
     launcher(return_recv_hook ? LOW_LATENCY_SEND_PHASE : (LOW_LATENCY_SEND_PHASE | LOW_LATENCY_RECV_PHASE));
 

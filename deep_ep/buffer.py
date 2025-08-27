@@ -530,7 +530,8 @@ class Buffer:
                              dispatch_wait_recv_cost_stats: Optional[torch.Tensor] = None,
                              use_fp8: bool = True, round_scale: bool = False, use_ue8m0: bool = False,
                              async_finish: bool = False, return_recv_hook: bool = False,
-                             enable_v2: bool = False) -> \
+                             enable_v2: bool = False,
+                             dst_signals: Optional[torch.Tensor] = None) -> \
             Tuple[Tuple[torch.Tensor, torch.Tensor], torch.Tensor, Tuple, EventOverlap, Callable]:
         """
         A low-latency implementation for dispatching with IBGDA.
@@ -585,7 +586,8 @@ class Buffer:
                                               dispatch_wait_recv_cost_stats,
                                               num_max_dispatch_tokens_per_rank, num_experts,
                                               use_fp8, round_scale, use_ue8m0,
-                                              async_finish, return_recv_hook)
+                                              async_finish, return_recv_hook,
+                                              dst_signals)
         handle = (packed_recv_src_info, packed_recv_layout_range, num_max_dispatch_tokens_per_rank, x.size(1), num_experts)
         tensors_to_record = (x, topk_idx,
                              packed_recv_x, packed_recv_x_scales, packed_recv_count,

@@ -437,17 +437,26 @@ dispatch_v2(void* packed_recv_x, void* packed_recv_x_scales,
          // NOTE split num_warp_groups
          int num_send_warp_groups, int num_recv_warp_groups,
          int num_warps_per_group,
-         bool round_scale, int phases) {
-    TODO_arg(count_per_expert, token_ids_of_expert, dst_signals);
+         bool round_scale, int phases,
+         uint32_t* dst_signals) {
+    TODO_arg(count_per_expert, token_ids_of_expert);
 
     const auto num_send_threads = num_send_warp_groups * num_warps_per_group * 32;
     const auto raw_thread_id = static_cast<int>(threadIdx.x);
     if (raw_thread_id < num_send_threads) {
         const auto send_thread_id = raw_thread_id;
-        dispatch_send<kUseFP8, kUseUE8M0, kUseNVFP4, kHidden>(send_thread_id, num_send_warp_groups, TODO_args);
+        dispatch_send<kUseFP8, kUseUE8M0, kUseNVFP4, kHidden>(
+            send_thread_id, num_send_warp_groups,
+            TODO_args,
+            dst_signals
+        );
     } else {
         const auto recv_thread_id = raw_thread_id - num_send_threads;
-        dispatch_recv<kUseFP8, kUseUE8M0, kUseNVFP4, kHidden>(recv_thread_id, num_recv_warp_groups, TODO_args);
+        dispatch_recv<kUseFP8, kUseUE8M0, kUseNVFP4, kHidden>(
+            recv_thread_id, num_recv_warp_groups,
+            TODO_args,
+            dst_signals
+        );
     }
 
 // NOTE removed

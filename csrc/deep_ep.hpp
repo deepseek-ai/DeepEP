@@ -149,7 +149,8 @@ public:
                          const std::optional<torch::Tensor>& dispatch_wait_recv_cost_stats,
                          int num_max_dispatch_tokens_per_rank, int num_experts,
                          bool use_fp8, bool round_scale, bool use_ue8m0,
-                         bool async, bool return_recv_hook);
+                         bool async, bool return_recv_hook,
+                         const std::optional<torch::Tensor>& dst_signals);
 
     std::tuple<torch::Tensor, std::optional<EventHandle>, std::optional<std::function<void()>>>
     low_latency_combine(bool enable_v2, const torch::Tensor& x, const torch::Tensor& topk_idx, const torch::Tensor& topk_weights,
