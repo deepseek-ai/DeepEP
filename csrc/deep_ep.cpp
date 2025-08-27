@@ -1097,9 +1097,25 @@ Buffer::low_latency_dispatch(bool enable_v2, const torch::Tensor& x, const torch
                              bool async, bool return_recv_hook,
                              const std::optional<torch::Tensor>& zeroed_tensor,
                              bool use_nvfp4,
-                             const std::optional<torch::Tensor>& dst_signals) {
+                             const std::optional<torch::Tensor>& dst_signals,
+                             const std::optional<torch::Tensor>& count_per_expert, const std::optional<torch::Tensor>& token_ids_of_expert) {
 #ifndef DISABLE_NVSHMEM
     EP_HOST_ASSERT(low_latency_mode);
+
+    // NOTE ADD
+    if (count_per_expert.has_value()) {
+        EP_HOST_ASSERT(count_per_expert->is_contiguous());
+        EP_HOST_ASSERT(count_per_expert->dim() == 1);
+        EP_HOST_ASSERT(count_per_expert->size(0) == num_experts);
+        EP_HOST_ASSERT(count_per_expert->dtype() == torch::kUInt32);
+    }
+    if (token_ids_of_expert.has_value()) {
+        EP_HOST_ASSERT(token_ids_of_expert->is_contiguous());
+        EP_HOST_ASSERT(token_ids_of_expert->dim() == 2);
+        EP_HOST_ASSERT(token_ids_of_expert->size(0) == num_experts);
+        // EP_HOST_ASSERT(token_ids_of_expert->size(1) == ...whatever...);
+        EP_HOST_ASSERT(token_ids_of_expert->dtype() == torch::kInt32);
+    }
 
     constexpr int HIDDEN_DIM = 7168;
 
@@ -1212,7 +1228,9 @@ Buffer::low_latency_dispatch(bool enable_v2, const torch::Tensor& x, const torch
                                use_fp8, round_scale, use_ue8m0,
                                workspace, num_device_sms,
                                launch_stream, phases,
-                               use_nvfp4, dst_signals.has_value() ? dst_signals->data_ptr<uint32_t>() : nullptr);
+                               use_nvfp4, dst_signals.has_value() ? dst_signals->data_ptr<uint32_t>() : nullptr,
+                               count_per_expert.has_value() ? count_per_expert->data_ptr<uint32_t>() : count_per_expert,
+                               token_ids_of_expert.has_value() ? token_ids_of_expert->data_ptr<int>() : token_ids_of_expert);
     };
     launcher(return_recv_hook ? LOW_LATENCY_SEND_PHASE : (LOW_LATENCY_SEND_PHASE | LOW_LATENCY_RECV_PHASE));
 

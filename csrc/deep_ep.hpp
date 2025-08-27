@@ -152,7 +152,8 @@ public:
                          bool async, bool return_recv_hook,
                          const std::optional<torch::Tensor>& zeroed_tensor,
                          bool use_nvfp4,
-                         const std::optional<torch::Tensor>& dst_signals);
+                         const std::optional<torch::Tensor>& dst_signals,
+                         const std::optional<torch::Tensor>& count_per_expert, const std::optional<torch::Tensor>& token_ids_of_expert);
 
     std::tuple<torch::Tensor, std::optional<EventHandle>, std::optional<std::function<void()>>>
     low_latency_combine(bool enable_v2, const torch::Tensor& x, const torch::Tensor& topk_idx, const torch::Tensor& topk_weights,

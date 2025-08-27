@@ -438,9 +438,8 @@ dispatch_v2(void* packed_recv_x, void* packed_recv_x_scales,
          int num_send_warp_groups, int num_recv_warp_groups,
          int num_warps_per_group,
          bool round_scale, int phases,
-         uint32_t* dst_signals) {
-    TODO_arg(count_per_expert, token_ids_of_expert);
-
+         uint32_t* dst_signals,
+         int* count_per_expert, int* token_ids_of_expert) {
     const auto num_send_threads = num_send_warp_groups * num_warps_per_group * 32;
     const auto raw_thread_id = static_cast<int>(threadIdx.x);
     if (raw_thread_id < num_send_threads) {
@@ -483,7 +482,8 @@ void dispatch_v2(void* packed_recv_x, void* packed_recv_x_scales,
               bool use_fp8, bool round_scale, bool use_ue8m0,
               void* workspace, int num_device_sms,
               cudaStream_t stream, int phases,
-              bool use_nvfp4, uint32_t* dst_signals) {
+              bool use_nvfp4, uint32_t* dst_signals,
+              int* count_per_expert, int* token_ids_of_expert) {
     constexpr int kNumMaxTopK = 9;
     const int num_warp_groups = ceil_div(num_experts, num_device_sms);
 
