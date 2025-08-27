@@ -1123,17 +1123,20 @@ Buffer::low_latency_dispatch(bool enable_v2, const torch::Tensor& x, const torch
     // Tensor checks
     // By default using `ptp128c` FP8 cast
 
-    // NOTE `x` is packed now
-    // EP_HOST_ASSERT(x.dim() == 2 and x.is_contiguous() and x.scalar_type() == torch::kBFloat16);
-    // EP_HOST_ASSERT(x.size(1) % sizeof(int4) == 0 and x.size(1) % 128 == 0);
-    using Consts = internode_ll::DispatchConstsTemplate<false, true, HIDDEN_DIM>;
-    EP_HOST_ASSERT(x.dim() == 2 and x.is_contiguous() and x.scalar_type() == torch::kUInt8);
-    EP_HOST_ASSERT(x.size(1) == Consts::num_bytes_per_msg);
+    if (enable_v2) {
+        // NOTE `x` is packed now
+        using Consts = internode_ll::DispatchConstsTemplate<false, true, HIDDEN_DIM>;
+        EP_HOST_ASSERT(x.dim() == 2 and x.is_contiguous() and x.scalar_type() == torch::kUInt8);
+        EP_HOST_ASSERT(x.size(1) == Consts::num_bytes_per_msg);
 
-    EP_HOST_ASSERT(x.size(0) == topk_idx.size(0) and x.size(0) <= num_max_dispatch_tokens_per_rank);
-    EP_HOST_ASSERT(topk_idx.dim() == 2 and topk_idx.is_contiguous());
-    EP_HOST_ASSERT(topk_idx.scalar_type() == torch::kInt64);
-    EP_HOST_ASSERT(num_experts % num_ranks == 0);
+        EP_HOST_ASSERT(x.size(0) == topk_idx.size(0) and x.size(0) <= num_max_dispatch_tokens_per_rank);
+        EP_HOST_ASSERT(topk_idx.dim() == 2 and topk_idx.is_contiguous());
+        EP_HOST_ASSERT(topk_idx.scalar_type() == torch::kInt64);
+        EP_HOST_ASSERT(num_experts % num_ranks == 0);
+    } else {
+        EP_HOST_ASSERT(x.dim() == 2 and x.is_contiguous() and x.scalar_type() == torch::kBFloat16);
+        EP_HOST_ASSERT(x.size(1) % sizeof(int4) == 0 and x.size(1) % 128 == 0);
+    }
 
     // Diagnosis tensors
     if (cumulative_local_expert_recv_stats.has_value()) {
@@ -1148,7 +1151,10 @@ Buffer::low_latency_dispatch(bool enable_v2, const torch::Tensor& x, const torch
     }
 
     // auto num_tokens = static_cast<int>(x.size(0)), hidden = static_cast<int>(x.size(1));
-    auto num_tokens = static_cast<int>(x.size(0)), hidden = HIDDEN_DIM;
+    auto num_tokens = static_cast<int>(x.size(0));
+    auto hidden = enable_v2
+        ? HIDDEN_DIM
+        : static_cast<int>(x.size(1));
 
     auto num_topk = static_cast<int>(topk_idx.size(1));
     auto num_local_experts = num_experts / num_ranks;
