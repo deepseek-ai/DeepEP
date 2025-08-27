@@ -1126,7 +1126,7 @@ Buffer::low_latency_dispatch(bool enable_v2, const torch::Tensor& x, const torch
     // EP_HOST_ASSERT(x.dim() == 2 and x.is_contiguous() and x.scalar_type() == torch::kBFloat16);
     // EP_HOST_ASSERT(x.size(1) % sizeof(int4) == 0 and x.size(1) % 128 == 0);
     using Consts = DispatchConstsTemplate<false, true, HIDDEN_DIM>;
-    EP_HOST_ASSERT(x.dim() == 2 and x.is_contiguous() and x.scalar_type() == torch::Uint8);
+    EP_HOST_ASSERT(x.dim() == 2 and x.is_contiguous() and x.scalar_type() == torch::kUInt8);
     EP_HOST_ASSERT(x.size(1) == Consts::num_bytes_per_msg);
 
     EP_HOST_ASSERT(x.size(0) == topk_idx.size(0) and x.size(0) <= num_max_dispatch_tokens_per_rank);
@@ -1178,11 +1178,12 @@ Buffer::low_latency_dispatch(bool enable_v2, const torch::Tensor& x, const torch
     auto packed_recv_count = zeroed_tensor.has_value()
         ? zeroed_tensor.value()
         : torch::empty({num_local_experts}, torch::dtype(torch::kInt32).device(torch::kCUDA));
+    EP_HOST_ASSERT(packed_recv_count.is_contiguous());
     EP_HOST_ASSERT(packed_recv_count.dim() == 1);
     EP_HOST_ASSERT(packed_recv_count.size(0) == num_local_experts);
     EP_HOST_ASSERT(packed_recv_count.dtype() == torch::kInt32);
     EP_HOST_ASSERT(packed_recv_count.device().is_cuda());
-    EP_HOST_ASSERT(packed_recv_count.stride() == 1);
+    EP_HOST_ASSERT(packed_recv_count.stride(0) == 1);
 
     // Allocate column-majored scales
     auto packed_recv_x_scales = std::optional<torch::Tensor>();

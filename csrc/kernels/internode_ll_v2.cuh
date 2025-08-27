@@ -1092,7 +1092,7 @@ LAUNCH_KERNEL(&cfg, combine_func, \
               num_max_dispatch_tokens_per_rank, \
               num_experts, rank, num_ranks, \
               num_warp_groups, num_warps_per_group, \
-              phases, zero_copy,
+              phases, zero_copy, \
               src_signals, src_signal_expect_value); } break
 
     SETUP_LAUNCH_CONFIG(num_sms, num_warps * 32, stream);

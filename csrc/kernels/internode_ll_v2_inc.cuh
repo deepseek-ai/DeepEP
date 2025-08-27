@@ -24,7 +24,7 @@ struct DispatchConstsTemplate {
     using rdma_x_scale_t = std::conditional_t<kUseNVFP4, uint8_t, float>;
     static constexpr size_t num_bytes_per_msg = sizeof(int4) + ((kUseFP8 || kUseNVFP4) ? (hidden_bytes + num_scales * sizeof(rdma_x_scale_t)) : hidden_bytes);
     static constexpr size_t num_int4_per_msg = num_bytes_per_msg / sizeof(int4);
-}
+};
 
 } // namespace internode_ll
 } // namespace deep_ep
