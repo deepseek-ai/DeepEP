@@ -42,8 +42,9 @@ __forceinline__ __device__ int dispatch_send(
     const auto warp_id = local_thread_id / 32, lane_id = get_lane_id();
     const auto num_warps = num_warp_groups * num_warps_per_group;
     const auto num_local_experts = num_experts / num_ranks;
-    const auto warp_group_id = warp_id / num_warps_per_group;
-    const auto sub_warp_id = warp_id % num_warps_per_group;
+    // unused
+    // const auto warp_group_id = warp_id / num_warps_per_group;
+    // const auto sub_warp_id = warp_id % num_warps_per_group;
 
     // NOTE removed
     // const auto responsible_expert_idx = sm_id * num_warp_groups + warp_group_id;
@@ -78,7 +79,8 @@ __forceinline__ __device__ int dispatch_send(
     // const auto num_threads = (num_warps - 1) * 32;
     const auto num_threads = num_warps * 32;
 
-    const size_t hidden_bf16_int4 = kHidden / kNumElemsPerRead;
+    // unused
+    // const size_t hidden_bf16_int4 = kHidden / kNumElemsPerRead;
 
     // NOTE
     // before: one SM = one token, one warp = one dst rank of that token, only use first 8 warps of the SM (?)
@@ -322,9 +324,9 @@ __forceinline__ __device__ int dispatch_recv(
 
     // NOTE copied from dispatch body
     const auto sm_id = static_cast<int>(blockIdx.x);
-    const auto num_sms = static_cast<int>(gridDim.x);
+    // const auto num_sms = static_cast<int>(gridDim.x); // unused
     const auto warp_id = local_thread_id / 32, lane_id = get_lane_id();
-    const auto num_warps = num_warp_groups * num_warps_per_group;
+    // const auto num_warps = num_warp_groups * num_warps_per_group; // unused
     const auto num_local_experts = num_experts / num_ranks;
     const auto warp_group_id = warp_id / num_warps_per_group;
     const auto sub_warp_id = warp_id % num_warps_per_group;
