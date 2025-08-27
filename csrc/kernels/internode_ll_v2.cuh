@@ -548,7 +548,8 @@ combine_v2(void* combined_x,
         int num_max_dispatch_tokens_per_rank,
         int num_experts, int rank, int num_ranks,
         int num_warp_groups, int num_warps_per_group,
-        int phases, bool zero_copy) {
+        int phases, bool zero_copy,
+        uint32_t* src_signals, uint32_t src_signal_expect_value) {
     const auto sm_id = __shfl_sync(0xffffffff, static_cast<int>(blockIdx.x), 0);
     const auto num_sms = __shfl_sync(0xffffffff, static_cast<int>(gridDim.x), 0);
     const auto thread_id = static_cast<int>(threadIdx.x);
@@ -952,8 +953,8 @@ void combine_v2(void* combined_x,
              int num_topk, int num_experts, int rank, int num_ranks,
              bool use_logfmt,
              void* workspace, int num_device_sms,
-             cudaStream_t stream, int phases, bool zero_copy) {
-    TODO_args(src_signals);
+             cudaStream_t stream, int phases, bool zero_copy,
+             uint32_t* src_signals, uint32_t src_signal_expect_value) {
     // NOTE reduce combine_send num sm
     if ((phases & LOW_LATENCY_RECV_PHASE) == 0) {
         num_device_sms = 32;
@@ -1008,7 +1009,8 @@ LAUNCH_KERNEL(&cfg, combine_func, \
               num_max_dispatch_tokens_per_rank, \
               num_experts, rank, num_ranks, \
               num_warp_groups, num_warps_per_group, \
-              phases, zero_copy); } break
+              phases, zero_copy,
+              src_signals, src_signal_expect_value); } break
 
     SETUP_LAUNCH_CONFIG(num_sms, num_warps * 32, stream);
     SWITCH_HIDDEN(COMBINE_LAUNCH_CASE);

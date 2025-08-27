@@ -791,7 +791,8 @@ void combine(bool enable_v2, void* combined_x,
              int num_topk, int num_experts, int rank, int num_ranks,
              bool use_logfmt,
              void* workspace, int num_device_sms,
-             cudaStream_t stream, int phases, bool zero_copy) {
+             cudaStream_t stream, int phases, bool zero_copy,
+             uint32_t* src_signals, uint32_t src_signal_expect_value) {
     if (enable_v2) {
         return combine_v2(
             combined_x,
@@ -804,7 +805,8 @@ void combine(bool enable_v2, void* combined_x,
             num_topk, num_experts, rank, num_ranks,
             use_logfmt,
             workspace, num_device_sms,
-            stream, phases, zero_copy
+            stream, phases, zero_copy,
+            src_signals, src_signal_expect_value
         );
     }
 
