@@ -45,9 +45,8 @@ __forceinline__ __device__ int dispatch_send(
     const auto warp_group_id = warp_id / num_warps_per_group;
     const auto sub_warp_id = warp_id % num_warps_per_group;
 
-    // NOTE renamed `responsible_expert_idx` -> `count_send_responsible_expert_idx`, and then removed
-    // const auto count_send_responsible_expert_idx = sm_id * num_warp_groups + warp_group_id;
-
+    // NOTE removed
+    // const auto responsible_expert_idx = sm_id * num_warp_groups + warp_group_id;
     // Expert counts
     // __shared__ int shared_num_tokens_sent_per_expert[kNumMaxWarpGroups];
 
@@ -222,21 +221,21 @@ __forceinline__ __device__ int dispatch_send(
         EP_DEBUG_DEVICE_ASSERT(num_sms >= num_ranks);
         const int dst_rank = sm_id;
         // NOTE changed
-        // if (count_send_responsible_expert_idx < num_experts and sub_warp_id == 0 and lane_id == 0) {
+        // if (responsible_expert_idx < num_experts and sub_warp_id == 0 and lane_id == 0) {
         if ((dst_rank < num_ranks) and (local_thread_id == 0)) {
             // NOTE changed
-            // const auto dst_rank = count_send_responsible_expert_idx / num_local_experts;
-            // const auto dst_expert_local_idx = count_send_responsible_expert_idx % num_local_experts;
+            // const auto dst_rank = responsible_expert_idx / num_local_experts;
+            // const auto dst_expert_local_idx = responsible_expert_idx % num_local_experts;
             const auto dst_expert_local_idx = local_expert_idx;
-            const auto count_send_responsible_expert_idx = dst_rank * num_local_experts + dst_expert_local_idx;
+            const auto responsible_expert_idx = dst_rank * num_local_experts + dst_expert_local_idx;
 
             // TODO can hide the gmem read if too slow
-            // const auto num_tokens_sent = shared_num_tokens_sent_per_expert[count_send_responsible_expert_idx - sm_id * num_warp_groups];
-            const int num_tokens_sent = count_per_expert[count_send_responsible_expert_idx];
+            // const auto num_tokens_sent = shared_num_tokens_sent_per_expert[responsible_expert_idx - sm_id * num_warp_groups];
+            const int num_tokens_sent = count_per_expert[responsible_expert_idx];
 
             // Wait local sends issued and send expert counts
             while (
-                ld_acquire_global(atomic_finish_counter_per_expert + count_send_responsible_expert_idx) !=
+                ld_acquire_global(atomic_finish_counter_per_expert + responsible_expert_idx) !=
                 // NOTE changed
                 // FINISHED_SUM_TAG * 2
                 FINISHED_SUM_TAG + num_tokens_of_responsible_expert
@@ -250,8 +249,8 @@ __forceinline__ __device__ int dispatch_send(
             }
 
             // Clean workspace for next use
-            atomic_counter_per_expert[count_send_responsible_expert_idx] = 0;
-            atomic_finish_counter_per_expert[count_send_responsible_expert_idx] = 0;
+            atomic_counter_per_expert[responsible_expert_idx] = 0;
+            atomic_finish_counter_per_expert[responsible_expert_idx] = 0;
 
             // NOTE packed_recv_count zeroing is removed
             // // Clean `packed_recv_count`
