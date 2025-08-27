@@ -8,6 +8,8 @@
 namespace deep_ep {
 namespace internode_ll {
 
+constexpr int kNumMaxWarpGroups = 32;
+
 template <bool kUseFP8, bool kUseUE8M0, bool kUseNVFP4, int kHidden>
 __forceinline__ __device__ int dispatch_send(
     int local_thread_id, int num_warp_groups,
@@ -47,7 +49,6 @@ __forceinline__ __device__ int dispatch_send(
     // const auto count_send_responsible_expert_idx = sm_id * num_warp_groups + warp_group_id;
 
     // Expert counts
-    // constexpr int kNumMaxWarpGroups = 32;
     // __shared__ int shared_num_tokens_sent_per_expert[kNumMaxWarpGroups];
 
     if ((sm_id == 0) and (warp_id == 0)) {
@@ -91,8 +92,8 @@ __forceinline__ __device__ int dispatch_send(
     // TODO is these ordering suboptimal for nvlink write or gmem read?
     const int num_cooperate_parts = num_sms * num_warps / num_ranks;
     EP_DEVICE_ASSERT(num_sms * num_warps == num_cooperate_parts * num_ranks); // even division
-    const int flatten_id = warp_id * num_sm + sm_id;
-    const int flatten_num = num_warps * num_sm;
+    const int flatten_id = warp_id * num_sms + sm_id;
+    const int flatten_num = num_warps * num_sms;
     const int dst_rank = flatten_id % num_ranks;
     for (int local_expert_idx = 0; local_expert_idx < num_local_experts; ++local_expert_idx) {
         const int dst_expert_idx = dst_rank * num_local_experts + local_expert_idx;
