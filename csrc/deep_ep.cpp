@@ -1190,7 +1190,6 @@ Buffer::low_latency_dispatch(bool enable_v2, const torch::Tensor& x, const torch
     // Kernel launch
     auto next_clean_meta = next_buffer.clean_meta();
     auto launcher = [=](int phases) {
-        TODO("expose dispatch_rdma_send_buffer to users as a tensor");
         internode_ll::dispatch(enable_v2, packed_recv_x.data_ptr(), packed_recv_x_scales_ptr,
                                packed_recv_src_info.data_ptr<int>(), packed_recv_layout_range.data_ptr<int64_t>(),
                                packed_recv_count.data_ptr<int>(),
