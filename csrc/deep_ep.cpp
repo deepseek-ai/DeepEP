@@ -1160,7 +1160,7 @@ Buffer::low_latency_dispatch(bool enable_v2, const torch::Tensor& x, const torch
     EP_HOST_ASSERT(enable_v2 == zeroed_tensor.has_value());
     auto packed_recv_count = zeroed_tensor.has_value()
         ? zeroed_tensor.value()
-        ; torch::empty({num_local_experts}, torch::dtype(torch::kInt32).device(torch::kCUDA));
+        : torch::empty({num_local_experts}, torch::dtype(torch::kInt32).device(torch::kCUDA));
     EP_HOST_ASSERT(packed_recv_count.dim() == 1);
     EP_HOST_ASSERT(packed_recv_count.size(0) == num_local_experts);
     EP_HOST_ASSERT(packed_recv_count.dtype() == torch::kInt32);
