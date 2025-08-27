@@ -839,6 +839,7 @@ combine_v2(void* combined_x,
             }
         }
 
+        // TODO maybe move to above?
         // Put the finishing flag
         EP_DEVICE_ASSERT(num_warps_per_group > 1 and num_warp_groups < 16);
         asm volatile("bar.sync %0, %1;" :: "r"(warp_group_id + 1), "r"(num_warps_per_group * 32));
