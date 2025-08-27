@@ -1152,8 +1152,7 @@ Buffer::low_latency_dispatch(bool enable_v2, const torch::Tensor& x, const torch
 
     // Allocate packed tensors
     auto packed_recv_x = torch::empty({num_local_experts, num_ranks * num_max_dispatch_tokens_per_rank, hidden},
-                                      torch::dtype(use_fp8 ? torch::kFloat8_e4m3fn: torch::kBFloat16).device(torch::kCUDA));
-                                      // x.options().dtype(use_fp8 ? torch::kFloat8_e4m3fn: torch::kBFloat16));
+                                      x.options().dtype(use_fp8 ? torch::kFloat8_e4m3fn: torch::kBFloat16));
     auto packed_recv_src_info = torch::empty({num_local_experts, num_ranks * num_max_dispatch_tokens_per_rank}, torch::dtype(torch::kInt32).device(torch::kCUDA));
     auto packed_recv_layout_range = torch::empty({num_local_experts, num_ranks}, torch::dtype(torch::kInt64).device(torch::kCUDA));
 
@@ -1173,7 +1172,6 @@ Buffer::low_latency_dispatch(bool enable_v2, const torch::Tensor& x, const torch
     void* packed_recv_x_scales_ptr = nullptr;
     EP_HOST_ASSERT((num_ranks * num_max_dispatch_tokens_per_rank) % 4 == 0 and "TMA requires the number of tokens to be multiple of 4");
 
-    TODO_use_nvfp4;
     if (use_fp8) {
         // TODO: support unaligned cases
         EP_HOST_ASSERT(hidden % 512 == 0);
