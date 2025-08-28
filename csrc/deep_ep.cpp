@@ -1169,9 +1169,8 @@ Buffer::low_latency_dispatch(const torch::Tensor& x, const torch::Tensor& topk_i
     }else if (use_nvfp4) {
         constexpr int SF_VEC_SIZE = 16;
         constexpr int NUM_SF_ELEMS_PER_PACK = 4;
-        packed_recv_x_scales = torch::empty({num_local_experts, hidden / (SF_VEC_SIZE * NUM_SF_ELEMS_PER_PACK), num_ranks * num_max_dispatch_tokens_per_rank},
+        packed_recv_x_scales = torch::empty({num_local_experts, num_ranks * num_max_dispatch_tokens_per_rank, hidden / (SF_VEC_SIZE * NUM_SF_ELEMS_PER_PACK)},
                                             torch::dtype(torch::kInt).device(torch::kCUDA));
-        packed_recv_x_scales = torch::transpose(packed_recv_x_scales.value(), 1, 2);
         packed_recv_x_scales_ptr = packed_recv_x_scales->data_ptr();
         packed_recv_x_sf_scale = torch::empty({num_local_experts, num_ranks * num_max_dispatch_tokens_per_rank}, torch::dtype(torch::kFloat32).device(torch::kCUDA));
         packed_recv_x_sf_scale_ptr = packed_recv_x_sf_scale->data_ptr();

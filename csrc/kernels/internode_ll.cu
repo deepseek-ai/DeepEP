@@ -299,7 +299,7 @@ dispatch(void* packed_recv_x, void* packed_recv_x_scales, void* packed_recv_x_sf
                 }
             }
 
-            // FP8 cast
+            // FP8 or NVFP4 cast
             EP_STATIC_ASSERT(hidden_bf16_int4 % 32 == 0, "Must use the full warp to reduce");
             #pragma unroll
             for (int i = thread_id; i < hidden_bf16_int4; i += num_threads) {
@@ -341,8 +341,8 @@ dispatch(void* packed_recv_x, void* packed_recv_x_scales, void* packed_recv_x_sf
 
                     // Write scale to send buffer
                     if (lane_id % 2 == 0){
-                        EP_DEVICE_ASSERT((i * kNumElemsPerRead) % 16 == 0);
-                        int rdma_x_scale_idx = i * kNumElemsPerRead / 16;
+                        EP_DEVICE_ASSERT((i * kNumElemsPerRead) % kNumPerChannels == 0);
+                        int rdma_x_scale_idx = i * kNumElemsPerRead / kNumPerChannels;
                         rdma_x_scales[rdma_x_scale_idx] = sf_val;                   
                         }
                     // Cast into send buffer                    
@@ -548,8 +548,8 @@ dispatch(void* packed_recv_x, void* packed_recv_x_scales, void* packed_recv_x_sf
                 const auto src_scales = reinterpret_cast<uint8_t*>(reinterpret_cast<uint8_t*>(src_data) + hidden_bytes);
                 const auto num_elems_per_pack = static_cast<int>(sizeof(packed_t) / sizeof(scale_t));
                 const auto token_idx = recv_token_begin_idx + i;
-                const auto token_stride = num_elems_per_pack;
-                const auto pack_stride = num_ranks * num_max_dispatch_tokens_per_rank * num_elems_per_pack;
+                const auto token_stride = num_scales * sizeof(scale_t);
+                const auto pack_stride = num_elems_per_pack;
                 #pragma unroll
                 for (int j = lane_id; j < num_scales; j += 32) {
                     const auto pack_idx = j / num_elems_per_pack;
