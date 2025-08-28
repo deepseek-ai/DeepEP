@@ -399,11 +399,12 @@ __forceinline__ __device__ void dispatch_recv(
                 shared_recv_token_begin_idx[warp_group_id] = recv_token_begin_idx;
                 recv_range[src_rank] = pack2<int, int64_t>(num_recv_tokens, recv_token_begin_idx);
 
-                // Add stats for diagnosis
-                if (cumulative_local_expert_recv_stats != nullptr)
-                    atomicAdd(cumulative_local_expert_recv_stats + local_expert_idx, num_recv_tokens);
-                if (dispatch_wait_recv_cost_stats != nullptr)
-                    atomicAdd(reinterpret_cast<unsigned long long*>(dispatch_wait_recv_cost_stats + src_rank), wait_recv_cost);
+                // not handled
+//                 // Add stats for diagnosis
+//                 if (cumulative_local_expert_recv_stats != nullptr)
+//                     atomicAdd(cumulative_local_expert_recv_stats + local_expert_idx, num_recv_tokens);
+//                 if (dispatch_wait_recv_cost_stats != nullptr)
+//                     atomicAdd(reinterpret_cast<unsigned long long*>(dispatch_wait_recv_cost_stats + src_rank), wait_recv_cost);
             }
             asm volatile("bar.sync %0, %1;" :: "r"(warp_group_id + 2), "r"(num_warps_per_group * 32));
             num_recv_tokens = shared_num_recv_tokens[warp_group_id];
