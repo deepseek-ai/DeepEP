@@ -97,7 +97,7 @@ __forceinline__ __device__ void dispatch_send(
     const int flatten_num = num_warps * num_sms;
     const int dst_rank = flatten_id % num_ranks;
     for (int local_expert_idx = 0; local_expert_idx < num_local_experts; ++local_expert_idx) {
-        if (subroutine_thread_id % 32 == 0) { printf("[T%d] dispatch_send local_expert_idx=%d START \n", thread_id, local_expert_idx); }
+        if (subroutine_thread_id % 32 == 0) { printf("[T%d] dispatch_send local_expert_idx=%d START \n", subroutine_thread_id, local_expert_idx); }
 
         const int dst_expert_idx = dst_rank * num_local_experts + local_expert_idx;
 
@@ -265,7 +265,7 @@ __forceinline__ __device__ void dispatch_send(
         __syncwarp();
     }
 
-    if (subroutine_thread_id % 32 == 0) { printf("[T%d] dispatch_send END\n", thread_id); }
+    if (subroutine_thread_id % 32 == 0) { printf("[T%d] dispatch_send END\n", subroutine_thread_id); }
 
 //     } else if (warp_id == num_warps - 1) {
 //         EP_DEVICE_ASSERT(num_sms > 1);
@@ -362,7 +362,7 @@ __forceinline__ __device__ void dispatch_recv(
     EP_DEVICE_ASSERT(num_warp_groups == 1); // not consider multi warp_group case below
     const auto src_rank = sm_id;
     for (int local_expert_idx = 0; local_expert_idx < num_local_experts; ++local_expert_idx) {
-        if (subroutine_thread_id % 32 == 0) { printf("[T%d] dispatch_recv local_expert_idx=%d START\n", thread_id, local_expert_idx); }
+        if (subroutine_thread_id % 32 == 0) { printf("[T%d] dispatch_recv local_expert_idx=%d START\n", subroutine_thread_id, local_expert_idx); }
 
         if (src_rank < num_ranks) {
             // NOTE modified
