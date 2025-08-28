@@ -222,23 +222,21 @@ __forceinline__ __device__ void dispatch_send(
         // NOTE
         // before: one (sm_id, warp_group_id) = one responsible_expert_idx = send counter to that (dst rank, dst local expert)
         //         thus use one thread per warp_group
-        // after: one sm_id = one dst_rank = send counter to that (dsk_rank, const local_expert_idx)
+        // after: reuse the (cooperate_idx, dst_rank) assignment and send counter to that (dsk_rank, const local_expert_idx)
         //         thus use one thread per SM
         //
         // Issue count sends
         EP_DEBUG_DEVICE_ASSERT(num_sms >= num_ranks);
         // NOTE changed
         // if (responsible_expert_idx < num_experts and sub_warp_id == 0 and lane_id == 0) {
-        if ((dst_rank < num_ranks) and (subroutine_thread_id == 0)) {
+        if ((cooperate_idx == 0) and (lane_id == 0)) {
             // NOTE changed
             // const auto dst_rank = responsible_expert_idx / num_local_experts;
             // const auto dst_expert_local_idx = responsible_expert_idx % num_local_experts;
-            const auto dst_expert_local_idx = local_expert_idx;
-            const auto responsible_expert_idx = dst_rank * num_local_experts + dst_expert_local_idx;
-
-            // TODO can hide the gmem read if too slow
             // const auto num_tokens_sent = shared_num_tokens_sent_per_expert[responsible_expert_idx - sm_id * num_warp_groups];
-            const int num_tokens_sent = count_per_expert[responsible_expert_idx];
+            const auto dst_expert_local_idx = local_expert_idx;
+            const auto responsible_expert_idx = dst_expert_idx;
+            const int num_tokens_sent = num_tokens_of_dst_expert;
 
             // Wait local sends issued and send expert counts
             while (
