@@ -806,7 +806,6 @@ combine(void* combined_x,
             __syncthreads();
 
             if (sub_warp_id == 0 and put_finish_flag) {
-                auto global_expert_idx = rank * num_local_experts + local_expert_idx;
                 for (int dst_rank = lane_id; dst_rank < num_ranks; dst_rank += 32) {
                     while (ld_acquire_global(atomic_clean_flag) == 0);
                     auto dst_ptr = reinterpret_cast<uint64_t>(rdma_recv_flag + global_expert_idx);
