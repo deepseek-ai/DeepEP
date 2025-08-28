@@ -87,7 +87,7 @@ __forceinline__ __device__ void dispatch_send(
     // NOTE
     // before: one SM = one token, one warp = one dst rank of that token, only use first 8 warps of the SM (?)
     // after: flatten all (warp_id, sm_id),
-    //        then reshape to (num_cooperate_parts, num_ranks) grid,
+    //        then reshape to (num_cooperate_parts, num_ranks) grid and get (cooperate_idx, dst_rank),
     //        then one warp = one pseudo_token_idx (i.e. one dst rank of one token)
     //
     // NOTE: deliberately be (warp_id, sm_id) instead of (sm_id, warp_id)
@@ -97,8 +97,8 @@ __forceinline__ __device__ void dispatch_send(
     EP_DEVICE_ASSERT(num_sms * num_warps == num_cooperate_parts * num_ranks); // even division
     const int flatten_id = warp_id * num_sms + sm_id;
     const int flatten_num = num_warps * num_sms;
-    const int dst_rank = flatten_id % num_ranks;
     const int cooperate_idx = flatten_id / num_ranks;
+    const int dst_rank = flatten_id % num_ranks;
     for (int local_expert_idx = 0; local_expert_idx < num_local_experts; ++local_expert_idx) {
         if (subroutine_thread_id % 32 == 0) { printf("[R%d,S%d,T%d] dispatch_send local_expert_idx=%d START \n", rank, sm_id, subroutine_thread_id, local_expert_idx); }
 
@@ -227,7 +227,6 @@ __forceinline__ __device__ void dispatch_send(
         //
         // Issue count sends
         EP_DEBUG_DEVICE_ASSERT(num_sms >= num_ranks);
-        const int dst_rank = sm_id;
         // NOTE changed
         // if (responsible_expert_idx < num_experts and sub_warp_id == 0 and lane_id == 0) {
         if ((dst_rank < num_ranks) and (subroutine_thread_id == 0)) {
