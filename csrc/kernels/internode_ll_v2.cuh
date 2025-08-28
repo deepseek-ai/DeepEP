@@ -390,9 +390,9 @@ __forceinline__ __device__ void dispatch_recv(
             int num_recv_tokens, recv_token_begin_idx;
             EP_DEVICE_ASSERT(num_warps_per_group > 1 and num_warp_groups < 15);
             if (sub_warp_id == 1 and lane_id == 0) {
-                auto start_time = clock64();
+                // auto start_time = clock64(); // not used
                 while ((num_recv_tokens = ld_acquire_sys_global(rdma_recv_count + local_expert_idx * num_ranks + src_rank)) == 0);
-                auto wait_recv_cost = clock64() - start_time;
+                // auto wait_recv_cost = clock64() - start_time; // not used
                 num_recv_tokens = -num_recv_tokens - 1;
                 recv_token_begin_idx = atomicAdd(packed_recv_count + local_expert_idx, num_recv_tokens);
                 shared_num_recv_tokens[warp_group_id] = num_recv_tokens;
