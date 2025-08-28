@@ -98,6 +98,7 @@ __forceinline__ __device__ void dispatch_send(
     const int flatten_id = warp_id * num_sms + sm_id;
     const int flatten_num = num_warps * num_sms;
     const int dst_rank = flatten_id % num_ranks;
+    const int cooperate_idx = flatten_id / num_ranks;
     for (int local_expert_idx = 0; local_expert_idx < num_local_experts; ++local_expert_idx) {
         if (subroutine_thread_id % 32 == 0) { printf("[R%d,S%d,T%d] dispatch_send local_expert_idx=%d START \n", rank, sm_id, subroutine_thread_id, local_expert_idx); }
 
@@ -109,9 +110,9 @@ __forceinline__ __device__ void dispatch_send(
         // NOTE changed, see "before-after" above
         // for (int token_idx = sm_id; token_idx < num_tokens; token_idx += num_sms) {
         for (
-            int pseudo_token_idx = flatten_id;
+            int pseudo_token_idx = cooperate_idx;
             pseudo_token_idx < num_tokens_of_dst_expert;
-            pseudo_token_idx += flatten_num
+            pseudo_token_idx += num_cooperate_parts
         ) {
             // TODO may overlap to optimize
             int token_idx = token_ids_of_expert[dst_expert_idx * token_ids_of_expert_stride_0 + pseudo_token_idx];
