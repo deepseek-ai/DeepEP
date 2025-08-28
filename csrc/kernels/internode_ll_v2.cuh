@@ -79,7 +79,7 @@ __forceinline__ __device__ void dispatch_send(
 
     // NOTE no need "-1" b/c we do not reserve one warp for counting anymore
     // const auto num_threads = (num_warps - 1) * 32;
-    const auto num_threads = num_warps * 32;
+    // const auto num_threads = num_warps * 32; // not used
 
     // unused
     // const size_t hidden_bf16_int4 = kHidden / kNumElemsPerRead;
