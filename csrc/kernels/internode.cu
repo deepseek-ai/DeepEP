@@ -2,6 +2,7 @@
 #include <optional>
 
 #include "configs.cuh"
+#include "api.cuh"
 #include "buffer.cuh"
 #include "exception.cuh"
 #include "launch.cuh"
@@ -37,20 +38,28 @@ struct SourceMeta {
 
 EP_STATIC_ASSERT(sizeof(SourceMeta) % sizeof(int) == 0, "Invalid size of `SourceMeta`");
 
+int get_source_meta_bytes(bool is_zero_copy) {
+    return is_zero_copy ? internode_zcopy::get_source_meta_bytes() : internode::get_source_meta_bytes();
+}
+
 int get_source_meta_bytes() {
     return sizeof(SourceMeta);
 }
 
+template<int SourceMetaBytes = sizeof(SourceMeta)>
 __host__ __device__ __forceinline__
 int get_num_bytes_per_token(int hidden_int4, int num_scales, int num_topk_idx, int num_topk_weights) {
-    return static_cast<int>(align_up(hidden_int4 * sizeof(int4) + sizeof(SourceMeta) + num_scales * sizeof(float) + num_topk_idx * sizeof(int) + num_topk_weights * sizeof(float), sizeof(int4)));
+    return static_cast<int>(align_up(hidden_int4 * sizeof(int4) + SourceMetaBytes + num_scales * sizeof(float) + num_topk_idx * sizeof(int) + num_topk_weights * sizeof(float), sizeof(int4)));
 }
 
 __host__ __device__ __forceinline__
 std::pair<int, int> get_rdma_clean_meta(int hidden_int4, int num_scales, int num_topk_idx,
                                         int num_topk_weights, int num_rdma_ranks, int num_rdma_recv_buffer_tokens,
-                                        int num_channels) {
+                                        int num_channels, bool zero_copy, bool is_dispatch) {
     // Return `int32_t` offset and count to clean
+    if (zero_copy) {
+        return internode_zcopy::get_rdma_clean_meta(hidden_int4, num_scales, num_topk_idx, num_topk_weights, num_rdma_ranks, num_rdma_recv_buffer_tokens, num_channels, is_dispatch);
+    }
     return {
         (get_num_bytes_per_token(hidden_int4, num_scales, num_topk_idx, num_topk_weights) * num_rdma_recv_buffer_tokens * num_rdma_ranks * 2 * num_channels) / sizeof(int),
         (NUM_MAX_NVL_PEERS * 2 + 4) * num_rdma_ranks * 2 * num_channels
@@ -60,9 +69,23 @@ std::pair<int, int> get_rdma_clean_meta(int hidden_int4, int num_scales, int num
 __host__ __device__ __forceinline__
 std::pair<int, int> get_nvl_clean_meta(int hidden_int4, int num_scales, int num_topk_idx,
                                        int num_topk_weights, int num_rdma_ranks, int num_nvl_ranks,
-                                       int num_nvl_recv_buffer_tokens, int num_channels, bool is_dispatch) {
+                                       int num_nvl_recv_buffer_tokens, int num_channels, bool zero_copy, bool is_dispatch) {
     // Return `int32_t` offset and to clean
     EP_STATIC_ASSERT(sizeof(SourceMeta) % sizeof(int) == 0, "Invalid size of `SourceMeta`");
+
+    if (zero_copy) {
+        if (is_dispatch) {
+            return {
+                // The actual recv data is in the fused buffer
+                ZCOPY_NOTIFY_NVL_METADATA_OFFSET_INTS,
+                num_nvl_ranks * (2 * num_rdma_ranks + 1) * num_channels,
+            };
+        }
+        return {
+            ZCOPY_NOTIFY_NVL_METADATA_OFFSET_INTS,
+            num_nvl_ranks * (2 * num_rdma_ranks + 2) * num_channels,
+        };
+    }
 
     return {
         (num_nvl_recv_buffer_tokens * get_num_bytes_per_token(hidden_int4, num_scales, num_topk_idx, num_topk_weights) * num_nvl_ranks * num_channels) / sizeof(int),
@@ -90,6 +113,7 @@ notify_dispatch(const int* num_tokens_per_rank, int* moe_recv_counter_mapped, in
                 const int nvl_clean_offset, const int nvl_num_int_clean,
                 int* rdma_channel_prefix_matrix, int* recv_rdma_rank_prefix_sum,
                 int* gbl_channel_prefix_matrix, int* recv_gbl_rank_prefix_sum,
+                int* recv_gbl_rank_prefix_sum_fwd,
                 void* rdma_buffer_ptr,
                 void** buffer_ptrs, int** barrier_signal_ptrs, int rank,
                 const nvshmem_team_t rdma_team) {
@@ -177,11 +201,14 @@ notify_dispatch(const int* num_tokens_per_rank, int* moe_recv_counter_mapped, in
         auto nvl_send_num_tokens_per_expert = AsymBuffer<int>(nvl_send_buffer, num_nvl_experts, NUM_MAX_NVL_PEERS);
         auto nvl_recv_num_tokens_per_rank = AsymBuffer<int>(nvl_recv_buffer, kNumRDMARanks, NUM_MAX_NVL_PEERS);
         auto nvl_recv_num_tokens_per_expert = AsymBuffer<int>(nvl_recv_buffer, num_nvl_experts, NUM_MAX_NVL_PEERS);
+        // Only used for the zero-copy case
+        auto nvl_send_num_tokens_per_rank_fwd = AsymBuffer<int>(nvl_send_buffer, kNumRDMARanks * NUM_MAX_NVL_PEERS, NUM_MAX_NVL_PEERS);
+        auto nvl_recv_num_tokens_per_rank_fwd = AsymBuffer<int>(nvl_recv_buffer, kNumRDMARanks * NUM_MAX_NVL_PEERS, NUM_MAX_NVL_PEERS);
 
         // Clean up for later data dispatch
         auto nvl_buffer_ptr_int = static_cast<int*>(buffer_ptrs[nvl_rank]);
         EP_DEVICE_ASSERT(nvl_reduced_num_tokens_per_expert.total_bytes + nvl_send_num_tokens_per_rank.total_bytes +
-                         nvl_send_num_tokens_per_expert.total_bytes <= nvl_clean_offset * sizeof(int));
+                         nvl_send_num_tokens_per_expert.total_bytes + nvl_send_num_tokens_per_rank_fwd.total_bytes <= nvl_clean_offset * sizeof(int));
         #pragma unroll
         for (int i = thread_id; i < nvl_num_int_clean; i += num_threads)
             nvl_buffer_ptr_int[nvl_clean_offset + i] = 0;
@@ -243,6 +270,23 @@ notify_dispatch(const int* num_tokens_per_rank, int* moe_recv_counter_mapped, in
             sum = (sum + expert_alignment - 1) / expert_alignment * expert_alignment;
             while (ld_volatile_global(moe_recv_expert_counter_mapped + thread_id) != -1);
             moe_recv_expert_counter_mapped[thread_id] = sum;
+        }
+
+        if (recv_gbl_rank_prefix_sum_fwd) {
+            if (thread_id < NUM_MAX_NVL_PEERS) {
+                #pragma unroll
+                for (int i = 0; i < num_ranks; i++) {
+                    nvl_send_num_tokens_per_rank_fwd.buffer(nvl_rank)[i] = recv_gbl_rank_prefix_sum[i];
+                }
+            }
+            barrier_block<NUM_MAX_NVL_PEERS>(barrier_signal_ptrs, nvl_rank);
+
+            if (thread_id < NUM_MAX_NVL_PEERS) {
+                #pragma unroll
+                for (int i = 0; i < num_ranks; i++) {
+                    recv_gbl_rank_prefix_sum_fwd[thread_id * num_ranks + i] = nvl_recv_num_tokens_per_rank_fwd.buffer(thread_id)[i];
+                }
+            }
         }
 
         // Finally barrier
@@ -309,9 +353,11 @@ void notify_dispatch(const int* num_tokens_per_rank, int* moe_recv_counter_mappe
                      int hidden_int4, int num_scales, int num_topk, int expert_alignment,
                      int* rdma_channel_prefix_matrix, int* recv_rdma_rank_prefix_sum,
                      int* gbl_channel_prefix_matrix, int* recv_gbl_rank_prefix_sum,
+                     int* recv_gbl_rank_prefix_sum_fwd,
                      void* rdma_buffer_ptr, int num_max_rdma_chunked_recv_tokens,
                      void** buffer_ptrs, int num_max_nvl_chunked_recv_tokens,
                      int** barrier_signal_ptrs, int rank,
+                     bool zero_copy,
                      cudaStream_t stream, int64_t num_rdma_bytes, int64_t num_nvl_bytes,
                      bool low_latency_mode) {
 #define NOTIFY_DISPATCH_LAUNCH_CASE(num_rdma_ranks) { \
@@ -326,6 +372,7 @@ void notify_dispatch(const int* num_tokens_per_rank, int* moe_recv_counter_mappe
                   nvl_clean_meta.first, nvl_clean_meta.second, \
                   rdma_channel_prefix_matrix, recv_rdma_rank_prefix_sum, \
                   gbl_channel_prefix_matrix, recv_gbl_rank_prefix_sum, \
+                  recv_gbl_rank_prefix_sum_fwd, \
                   rdma_buffer_ptr, \
                   buffer_ptrs, barrier_signal_ptrs, rank, \
                   cpu_rdma_team); } break
@@ -334,12 +381,14 @@ void notify_dispatch(const int* num_tokens_per_rank, int* moe_recv_counter_mappe
     const auto num_rdma_ranks = num_ranks / NUM_MAX_NVL_PEERS;
 
     // Get clean meta
-    auto rdma_clean_meta = get_rdma_clean_meta(hidden_int4, num_scales, num_topk, num_topk, num_rdma_ranks, num_max_rdma_chunked_recv_tokens, num_channels);
-    auto nvl_clean_meta = get_nvl_clean_meta(hidden_int4, num_scales, num_topk, num_topk, num_rdma_ranks, NUM_MAX_NVL_PEERS, num_max_nvl_chunked_recv_tokens, num_channels, true);
+    auto rdma_clean_meta = get_rdma_clean_meta(hidden_int4, num_scales, num_topk, num_topk, num_rdma_ranks, num_max_rdma_chunked_recv_tokens, num_channels, zero_copy, true);
+    auto nvl_clean_meta = get_nvl_clean_meta(hidden_int4, num_scales, num_topk, num_topk, num_rdma_ranks, NUM_MAX_NVL_PEERS, num_max_nvl_chunked_recv_tokens, num_channels, zero_copy, true);
     EP_HOST_ASSERT((rdma_clean_meta.first + rdma_clean_meta.second) * sizeof(int) <= num_rdma_bytes);
     EP_HOST_ASSERT((nvl_clean_meta.first + nvl_clean_meta.second) * sizeof(int) <= num_nvl_bytes);
     EP_HOST_ASSERT(num_rdma_bytes < std::numeric_limits<int>::max());
     EP_HOST_ASSERT(num_nvl_bytes < std::numeric_limits<int>::max());
+
+    EP_HOST_ASSERT(not zero_copy or recv_gbl_rank_prefix_sum_fwd);
 
     // Launch kernel
     SETUP_LAUNCH_CONFIG(1 + num_rdma_ranks, kNumThreads, stream);
@@ -997,13 +1046,35 @@ void dispatch(void* recv_x, float* recv_x_scales, topk_idx_t* recv_topk_idx, flo
               int* recv_rdma_channel_prefix_matrix, int* recv_gbl_channel_prefix_matrix,
               const int* rdma_channel_prefix_matrix, const int* recv_rdma_rank_prefix_sum,
               const int* gbl_channel_prefix_matrix, const int* recv_gbl_rank_prefix_sum,
+              const int* recv_gbl_rank_prefix_sum_fwd,
               const bool* is_token_in_rank,
               int num_tokens, int hidden_int4, int num_scales, int num_topk, int num_experts,
               int scale_token_stride, int scale_hidden_stride,
               void* rdma_buffer_ptr, int num_max_rdma_chunked_send_tokens, int num_max_rdma_chunked_recv_tokens,
-              void** buffer_ptrs, int num_max_nvl_chunked_send_tokens, int num_max_nvl_chunked_recv_tokens,
+              void** buffer_fused_ptrs, void** buffer_ptrs, int num_max_nvl_chunked_send_tokens, int num_max_nvl_chunked_recv_tokens,
               int rank, int num_ranks, bool is_cached_dispatch,
+              bool zero_copy,
               cudaStream_t stream, int num_channels, bool low_latency_mode) {
+    if (zero_copy) {
+        // TODO: Zero-copy: Support ue8m0 scenario
+        EP_HOST_ASSERT((scale_token_stride == num_scales and scale_hidden_stride == 1) or (scale_token_stride == 0 and scale_hidden_stride == 0));
+        return internode_zcopy::dispatch(
+            recv_x, recv_x_scales, recv_topk_idx, recv_topk_weights, recv_src_meta,
+            x, x_scales, topk_idx, topk_weights,
+            send_rdma_head, send_nvl_head,
+            recv_rdma_channel_prefix_matrix, recv_gbl_channel_prefix_matrix,
+            rdma_channel_prefix_matrix, recv_rdma_rank_prefix_sum,
+            gbl_channel_prefix_matrix, recv_gbl_rank_prefix_sum,
+            recv_gbl_rank_prefix_sum_fwd,
+            is_token_in_rank,
+            num_tokens, hidden_int4, num_scales, num_topk, num_experts,
+            rdma_buffer_ptr, num_max_rdma_chunked_send_tokens, num_max_rdma_chunked_recv_tokens,
+            buffer_fused_ptrs, buffer_ptrs, num_max_nvl_chunked_send_tokens, num_max_nvl_chunked_recv_tokens,
+            rank, num_ranks, is_cached_dispatch,
+            stream, num_channels, low_latency_mode
+        );
+    }
+
     constexpr int kNumDispatchRDMASenderWarps = 7;
     constexpr int kNumTMABytesPerWarp = 16384;
     constexpr int smem_size = kNumTMABytesPerWarp * NUM_MAX_NVL_PEERS;
@@ -1188,7 +1259,7 @@ void cached_notify(int hidden_int4, int num_scales, int num_topk_idx, int num_to
                    const int* rdma_channel_prefix_matrix, const int* rdma_rank_prefix_sum, int* combined_nvl_head,
                    void* rdma_buffer_ptr, int num_max_rdma_chunked_recv_tokens,
                    void** buffer_ptrs, int num_max_nvl_chunked_recv_tokens,
-                   int** barrier_signal_ptrs, int rank, cudaStream_t stream,
+                   int** barrier_signal_ptrs, int rank, bool zero_copy, cudaStream_t stream,
                    int64_t num_rdma_bytes, int64_t num_nvl_bytes,
                    bool is_cached_dispatch, bool low_latency_mode) {
     const int num_threads = std::max(128, 32 * num_channels);
@@ -1198,8 +1269,8 @@ void cached_notify(int hidden_int4, int num_scales, int num_topk_idx, int num_to
     const int smem_size = kNumTMABytesPerWarp * num_warps;
 
     // Get clean meta
-    auto rdma_clean_meta = get_rdma_clean_meta(hidden_int4, num_scales, num_topk_idx, num_topk_weights, num_rdma_ranks, num_max_rdma_chunked_recv_tokens, num_channels);
-    auto nvl_clean_meta = get_nvl_clean_meta(hidden_int4, num_scales, num_topk_idx, num_topk_weights, num_rdma_ranks, NUM_MAX_NVL_PEERS, num_max_nvl_chunked_recv_tokens, num_channels, is_cached_dispatch);
+    auto rdma_clean_meta = get_rdma_clean_meta(hidden_int4, num_scales, num_topk_idx, num_topk_weights, num_rdma_ranks, num_max_rdma_chunked_recv_tokens, num_channels, zero_copy, is_cached_dispatch);
+    auto nvl_clean_meta = get_nvl_clean_meta(hidden_int4, num_scales, num_topk_idx, num_topk_weights, num_rdma_ranks, NUM_MAX_NVL_PEERS, num_max_nvl_chunked_recv_tokens, num_channels, zero_copy, is_cached_dispatch);
     EP_HOST_ASSERT((rdma_clean_meta.first + rdma_clean_meta.second) * sizeof(int) <= num_rdma_bytes);
     EP_HOST_ASSERT((nvl_clean_meta.first + nvl_clean_meta.second) * sizeof(int) <= num_nvl_bytes);
     EP_HOST_ASSERT(num_rdma_bytes < std::numeric_limits<int>::max());
@@ -1828,10 +1899,27 @@ void combine(cudaDataType_t type,
              const void* bias_0, const void* bias_1,
              const int* combined_rdma_head, const int* combined_nvl_head,
              const void* src_meta, const int* rdma_channel_prefix_matrix, const int* rdma_rank_prefix_sum, const int* gbl_channel_prefix_matrix,
+             const int* recv_gbl_rank_prefix_sum_fwd,
              int num_tokens, int num_combined_tokens, int hidden, int num_topk,
              void* rdma_buffer_ptr, int num_max_rdma_chunked_send_tokens, int num_max_rdma_chunked_recv_tokens,
-             void** buffer_ptrs, int num_max_nvl_chunked_send_tokens, int num_max_nvl_chunked_recv_tokens,
-             int rank, int num_ranks, cudaStream_t stream, int num_channels, bool low_latency_mode) {
+             void** buffer_fused_ptrs, void** buffer_ptrs, int num_max_nvl_chunked_send_tokens, int num_max_nvl_chunked_recv_tokens,
+             int rank, int num_ranks, bool zero_copy, cudaStream_t stream, int num_channels, bool low_latency_mode) {
+    if (zero_copy) {
+        return internode_zcopy::combine(
+            type, combined_x, combined_topk_weights,
+            is_combined_token_in_rank,
+            x, topk_weights,
+            bias_0, bias_1,
+            combined_rdma_head, combined_nvl_head,
+            src_meta, rdma_channel_prefix_matrix, rdma_rank_prefix_sum, gbl_channel_prefix_matrix,
+            recv_gbl_rank_prefix_sum_fwd,
+            num_tokens, num_combined_tokens, hidden, num_topk,
+            rdma_buffer_ptr, num_max_rdma_chunked_send_tokens, num_max_rdma_chunked_recv_tokens,
+            buffer_fused_ptrs, buffer_ptrs, num_max_nvl_chunked_send_tokens, num_max_nvl_chunked_recv_tokens,
+            rank, num_ranks, stream, num_channels, low_latency_mode
+        );
+    }
+
     constexpr int kNumCombineForwarderWarps = 24;
     constexpr int kNumTMABytesPerSenderWarp = 16384;
     constexpr int kNumTMABytesPerForwarderWarp = 9248;

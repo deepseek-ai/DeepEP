@@ -19,6 +19,18 @@ def test_main(args: argparse.Namespace, num_sms: int,
     # Settings
     num_tokens, hidden = args.num_tokens, args.hidden
     num_topk_groups, num_topk, num_experts = args.num_topk_groups, args.num_topk, args.num_experts
+    zero_copy = args.use_zero_copy
+    disable_stride = args.disable_stride
+    disable_bias = args.disable_bias
+    if zero_copy:
+        if not disable_bias:
+            disable_bias = True
+            if local_rank == 0:
+                print("[config] Disabling bias because zero-copy combine doesn't support it yet")
+        if not disable_stride:
+            disable_stride = True
+            if local_rank == 0:
+                print("[config] Disabling stride because zero-copy dispatch doesn't support it yet")
 
     assert num_experts % num_ranks == 0 and num_local_ranks == 8
     if local_rank == 0:
@@ -29,7 +41,8 @@ def test_main(args: argparse.Namespace, num_sms: int,
     x_pure_rand = torch.randn((num_tokens, hidden), dtype=torch.bfloat16, device='cuda')
     x_e4m3 = per_token_cast_to_fp8(x)
     x_pure_rand_e4m3 = per_token_cast_to_fp8(x_pure_rand)
-    x_e4m3 = (x_e4m3[0], x_e4m3[1].T.contiguous().T)
+    if not disable_stride:
+        x_e4m3 = (x_e4m3[0], x_e4m3[1].T.contiguous().T)
     scores = torch.randn((num_tokens, num_experts), dtype=torch.float32, device='cuda').abs() + 1
     group_scores = scores.view(num_tokens, num_nodes, -1).amax(dim=-1)
     group_idx = torch.topk(group_scores, k=num_topk_groups, dim=-1, sorted=False).indices
@@ -93,7 +106,7 @@ def test_main(args: argparse.Namespace, num_sms: int,
 
     # Config
     rdma_buffer_size, nvl_buffer_size = 128, (720 if num_ranks in (24, 48, 96, 144, 160) else 512)
-    config = deep_ep.Config(num_sms, 8, nvl_buffer_size, 16, rdma_buffer_size)
+    config = deep_ep.Config(num_sms, 8, nvl_buffer_size, 10 if zero_copy else 16, rdma_buffer_size)
 
     # Test dispatch
     # noinspection PyShadowingNames
@@ -113,9 +126,21 @@ def test_main(args: argparse.Namespace, num_sms: int,
                     if local_rank == 0:
                         print(f'[testing] Running with {"FP8" if isinstance(current_x, tuple) else "BF16"}, {"with" if with_topk else "without"} top-k (async={async_mode}, previous={previous_mode}) ...', flush=True, end='')
                     dispatch_args = {'x': current_x, 'num_tokens_per_rank': num_tokens_per_rank, 'num_tokens_per_rdma_rank': num_tokens_per_rdma_rank,  'is_token_in_rank': is_token_in_rank,
-                                     'num_tokens_per_expert': num_tokens_per_expert, 'config': config, 'async_finish': async_mode}
+                                     'num_tokens_per_expert': num_tokens_per_expert, 'config': config, 'async_finish': async_mode, 'zero_copy': zero_copy}
                     if with_topk:
                         dispatch_args.update({'topk_idx': topk_idx, 'topk_weights': topk_weights_pure_rand if is_rand else topk_weights})
+                    if zero_copy:
+                        use_fp8 = True if isinstance(current_x, tuple) else False
+                        current_x_hidden, current_x_scales = current_x if isinstance(current_x, tuple) else (current_x, None)
+                        dispatch_buffer_layout = buffer.get_internode_dispatch_buffer(num_tokens, hidden, num_topk, with_topk, use_fp8)
+                        if current_x_scales is not None:
+                            dispatch_buffer_layout[0][:, :] = current_x_hidden
+                            dispatch_buffer_layout[1][:, :] = current_x_scales
+                        else:
+                            dispatch_buffer_layout[0][:, :] = current_x
+                        if with_topk:
+                            dispatch_buffer_layout[2][:, :] = topk_idx
+                            dispatch_buffer_layout[3][:, :] = topk_weights_pure_rand if is_rand else topk_weights
                     if previous_mode:
                         dispatch_args.update({'previous_event': buffer.capture()})
                     recv_x, recv_topk_idx, recv_topk_weights, recv_num_tokens_per_expert_list, handle, event = buffer.dispatch(**dispatch_args)
@@ -130,7 +155,7 @@ def test_main(args: argparse.Namespace, num_sms: int,
                     recv_x = per_token_cast_back(*recv_x) if isinstance(recv_x, tuple) else recv_x
 
                     # Checks
-                    recv_gbl_rank_prefix_sum = handle[-4]
+                    recv_gbl_rank_prefix_sum = handle[-5]
                     assert gbl_num_tokens_per_rank[rank].item() == recv_x.size(0), f'{gbl_num_tokens_per_rank[rank].item()} != {recv_x.size(0)}'
                     assert gbl_num_tokens_per_expert.view(num_ranks, -1)[rank].tolist() == recv_num_tokens_per_expert_list
                     if not is_rand:
@@ -148,7 +173,16 @@ def test_main(args: argparse.Namespace, num_sms: int,
 
                     # Test cached dispatch (must without top-k staffs)
                     if not with_topk:
-                        dispatch_args = {'x': current_x, 'handle': handle, 'config': config, 'async_finish': async_mode}
+                        dispatch_args = {'x': current_x, 'handle': handle, 'config': config, 'async_finish': async_mode, 'zero_copy': zero_copy}
+                        if zero_copy:
+                            use_fp8 = True if isinstance(current_x, tuple) else False
+                            current_x_hidden, current_x_scales = current_x if isinstance(current_x, tuple) else (current_x, None)
+                            dispatch_buffer_layout = buffer.get_internode_dispatch_buffer(num_tokens, hidden, num_topk, with_topk, use_fp8)
+                            if current_x_scales is not None:
+                                dispatch_buffer_layout[0][:, :] = current_x_hidden
+                                dispatch_buffer_layout[1][:, :] = current_x_scales
+                            else:
+                                dispatch_buffer_layout[0][:, :] = current_x
                         if previous_mode:
                             dispatch_args.update({'previous_event': buffer.capture()})
                         recv_x, _, _, _, _, event = buffer.dispatch(**dispatch_args)
@@ -158,16 +192,25 @@ def test_main(args: argparse.Namespace, num_sms: int,
                             check_data(recv_x, recv_gbl_rank_prefix_sum)
 
                     # Test combine
-                    bias_0 = torch.ones((num_tokens, hidden), dtype=torch.bfloat16, device='cuda')
-                    bias_1 = torch.randn((num_tokens, hidden), dtype=torch.bfloat16, device='cuda')
-                    combine_args = {'x': recv_x, 'bias': (bias_0, bias_1), 'handle': handle, 'config': config, 'async_finish': async_mode}
+                    if disable_bias:
+                        bias_0 = bias_1 = None
+                    else:
+                        bias_0 = torch.ones((num_tokens, hidden), dtype=torch.bfloat16, device='cuda')
+                        bias_1 = torch.randn((num_tokens, hidden), dtype=torch.bfloat16, device='cuda')
+                    combine_args = {'x': recv_x, 'bias': (bias_0, bias_1), 'handle': handle, 'config': config, 'async_finish': async_mode, 'zero_copy': zero_copy}
                     if with_topk:
                         combine_args.update({'topk_weights': recv_topk_weights})
+                    if zero_copy:
+                        num_tokens_to_combine = recv_x.size(0)
+                        combine_buffer_layout = buffer.get_internode_combine_buffer(num_tokens_to_combine, hidden, num_topk, with_topk)
+                        if with_topk:
+                            combine_buffer_layout[1][:, :] = recv_topk_weights
+                        combine_buffer_layout[0][:, :] = recv_x
                     if previous_mode:
                         combine_args.update({'previous_event': buffer.capture()})
                     combined_x, combined_topk_weights, event = buffer.combine(**combine_args)
                     event.current_stream_wait() if async_mode else ()
-                    check_x = (combined_x.float() - bias_0.float() - bias_1.float()) / is_token_in_rank.sum(dim=1).unsqueeze(1)
+                    check_x = (combined_x.float() if disable_bias else combined_x.float() - bias_0.float() - bias_1.float()) / is_token_in_rank.sum(dim=1).unsqueeze(1)
                     ref_x = x_pure_rand if is_rand else x
                     assert calc_diff(check_x, ref_x) < 5e-4 if current_x is x_pure_rand_e4m3 else 5e-6 
                     if with_topk:
@@ -199,9 +242,18 @@ def test_main(args: argparse.Namespace, num_sms: int,
         rdma_send_bytes = (dispatch_bf16_rdma_send_bytes * fp8_factor) if isinstance(current_x, tuple) else dispatch_bf16_rdma_send_bytes
         nvl_recv_bytes = (dispatch_bf16_nvl_recv_bytes * fp8_factor) if isinstance(current_x, tuple) else dispatch_bf16_nvl_recv_bytes
         for nvl_chunk_size in range(4, 45, 4):
-            for rdma_chunk_size in range(4, 33, 4):
+            for rdma_chunk_size in range(4, 13, 2) if zero_copy else range(4, 33, 4):
                 config = deep_ep.Config(num_sms, nvl_chunk_size, nvl_buffer_size, rdma_chunk_size, rdma_buffer_size)
-                tune_args = {'x': current_x, 'handle': handle, 'config': config}
+                tune_args = {'x': current_x, 'handle': handle, 'config': config, 'zero_copy': zero_copy}
+                if zero_copy:
+                    use_fp8 = True if isinstance(current_x, tuple) else False
+                    with_topk = False
+                    current_x_hidden, current_x_scales = current_x if isinstance(current_x, tuple) else (current_x, None)
+                    dispatch_buffer_layout = buffer.get_internode_dispatch_buffer(num_tokens, hidden, num_topk, with_topk, use_fp8)
+                    dispatch_buffer_layout[0][:, :] = current_x_hidden
+                    if use_fp8:
+                        dispatch_buffer_layout[1][:, :] = current_x_scales
+                # Tuning use cached dispatch with does not allow supplying TopK
                 t, notify_t = bench_kineto(lambda: buffer.dispatch(**tune_args), ('dispatch', 'notify'), suppress_kineto_output=True)
                 if t < best_time:
                     best_time, best_results = t, (num_sms, nvl_chunk_size, rdma_chunk_size, notify_t)
@@ -225,7 +277,7 @@ def test_main(args: argparse.Namespace, num_sms: int,
 
     dispatch_args = {'x': x, 'num_tokens_per_rank': num_tokens_per_rank, 'num_tokens_per_rdma_rank': num_tokens_per_rdma_rank,
                      'is_token_in_rank': is_token_in_rank, 'num_tokens_per_expert': num_tokens_per_expert,
-                     'config': dispatch_config if dispatch_config is not None else config}
+                     'config': dispatch_config if dispatch_config is not None else config, 'zero_copy': zero_copy}
     recv_x, _, _, _, handle, _ = buffer.dispatch(**dispatch_args)
 
     # Tune combine performance
@@ -233,7 +285,11 @@ def test_main(args: argparse.Namespace, num_sms: int,
     for nvl_chunk_size in range(1, 8, 1):
         for rdma_chunk_size in range(12 if num_nodes == 2 else 8, 33, 4):
             config = deep_ep.Config(num_sms, nvl_chunk_size, nvl_buffer_size, rdma_chunk_size, rdma_buffer_size)
-            tune_args = {'x': recv_x, 'handle': handle, 'config': config}
+            tune_args = {'x': recv_x, 'handle': handle, 'config': config, 'zero_copy': zero_copy}
+            if zero_copy:
+                num_tokens_to_combine = recv_x.size(0)
+                combine_buffer_layout = buffer.get_internode_combine_buffer(num_tokens_to_combine, hidden, 0, False)
+                combine_buffer_layout[0][:, :] = recv_x
             t, notify_t = bench_kineto(lambda: buffer.combine(**tune_args), ('combine', 'notify'), suppress_kineto_output=True)
             if local_rank == 0:
                 print(f'[tuning] SMs {num_sms}, NVL chunk {nvl_chunk_size}, RDMA chunk {rdma_chunk_size}: '
@@ -258,11 +314,20 @@ def test_loop(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
     if args.test_ll_compatibility:
         ll_num_tokens, ll_hidden, ll_num_experts, ll_num_topk = 16, 5120, 256, 9
 
-    num_sms = 24
+    if args.use_zero_copy:
+        assert num_nodes >= 2, "Zero copy is only implemented for >=2 nodes"
+
+    if args.num_sms is None:
+        if args.use_zero_copy:
+            num_sms = 8 if num_nodes > 2 else 12
+        else:
+            num_sms = 24
+    else:
+        num_sms = args.num_sms
     num_qps_per_rank = max(num_sms, ll_num_experts // num_ranks if args.test_ll_compatibility else 0)
 
     buffer = deep_ep.Buffer(group, int(2e9), int(1e9), low_latency_mode=args.test_ll_compatibility,
-                            num_qps_per_rank=num_qps_per_rank, explicitly_destroy=True)
+                            num_qps_per_rank=num_qps_per_rank, explicitly_destroy=True, enable_zcopy=args.use_zero_copy)
     assert num_local_ranks == 8 and num_ranks > 8
 
     for seed in range(int(1e9)):
@@ -319,6 +384,14 @@ if __name__ == '__main__':
                        help='Number of experts (default: 256')
     parser.add_argument('--test-ll-compatibility', action='store_true',
                         help='whether to test compatibility with low-latency kernels')
+    parser.add_argument('--use-zero-copy', action='store_true',
+                        help='whether to test the zero-copy internode kernels')
+    parser.add_argument('--disable-bias', action='store_true',
+                        help='whether to disable combine with bias')
+    parser.add_argument('--disable-stride', action='store_true',
+                        help='whether to disable dispatch with stride')
+    parser.add_argument('--num-sms', type=int, default=None,
+                        help='number of SMs to use')
     args = parser.parse_args()
 
     # Set default `num_topk_groups` if not provided

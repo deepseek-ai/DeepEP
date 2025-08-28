@@ -47,22 +47,24 @@ struct Config {
         EP_HOST_ASSERT(num_max_rdma_chunked_send_tokens <= num_max_rdma_chunked_recv_tokens / 2);
     }
 
-    size_t get_nvl_buffer_size_hint(size_t hidden_bytes, int num_ranks) const {
+    // TODO: Zero-copy: Fix this
+    size_t get_nvl_buffer_size_hint(size_t hidden_bytes, int num_ranks, bool zero_copy) const {
         // Below are some assumptions
         // TODO: add assertions
         constexpr int kNumMaxTopK = 128;
         constexpr int kNumMaxScales = 128;
         EP_HOST_ASSERT(num_ranks < NUM_MAX_NVL_PEERS or num_ranks % NUM_MAX_NVL_PEERS == 0);
-        EP_HOST_ASSERT(num_ranks <= NUM_MAX_NVL_PEERS or num_sms % 2 == 0);
+        EP_HOST_ASSERT(num_ranks <= NUM_MAX_NVL_PEERS or zero_copy or num_sms % 2 == 0);
         const auto num_rdma_ranks = std::max(num_ranks / NUM_MAX_NVL_PEERS, 1);
         const auto num_nvl_ranks = std::min(num_ranks, NUM_MAX_NVL_PEERS);
-        const int num_channels = num_sms / 2;
+        const int sms_per_channel = zero_copy ? 1 : 2;
+        const int num_channels = num_sms / sms_per_channel;
 
         size_t num_bytes = 0;
         num_bytes += num_channels * num_nvl_ranks * (2 * num_rdma_ranks + 3) * sizeof(int);
         num_bytes += num_channels * num_nvl_ranks * num_max_nvl_chunked_recv_tokens * hidden_bytes;
 #ifndef DISABLE_NVSHMEM
-        num_bytes += num_channels * num_nvl_ranks * num_max_nvl_chunked_recv_tokens * internode::get_source_meta_bytes();
+        num_bytes += num_channels * num_nvl_ranks * num_max_nvl_chunked_recv_tokens * internode::get_source_meta_bytes(zero_copy);
 #endif
         num_bytes += num_channels * num_nvl_ranks * num_max_nvl_chunked_recv_tokens * kNumMaxTopK * sizeof(topk_idx_t);
         num_bytes += num_channels * num_nvl_ranks * num_max_nvl_chunked_recv_tokens * kNumMaxTopK * sizeof(float);
@@ -71,7 +73,8 @@ struct Config {
         return num_bytes;
     }
 
-    size_t get_rdma_buffer_size_hint(int64_t hidden_bytes, int num_ranks) const {
+    // TODO: Zero-copy: Fix this
+    size_t get_rdma_buffer_size_hint(int64_t hidden_bytes, int num_ranks, bool zero_copy) const {
 #ifndef DISABLE_NVSHMEM
         // Legacy mode
         if (num_ranks <= NUM_MAX_NVL_PEERS)
@@ -82,14 +85,16 @@ struct Config {
         constexpr int kNumMaxTopK = 128;
         constexpr int kNumMaxScales = 128;
         EP_HOST_ASSERT(num_ranks % NUM_MAX_NVL_PEERS == 0);
-        EP_HOST_ASSERT(num_sms % 2 == 0);
+        EP_HOST_ASSERT(zero_copy or num_sms % 2 == 0);
         const int num_rdma_ranks = num_ranks / NUM_MAX_NVL_PEERS;
-        const int num_channels = num_sms / 2;
+        const int sms_per_channel = zero_copy ? 1 : 2;
+        const int num_channels = num_sms / sms_per_channel;
 
+        const int rdma_buffer_factor = zero_copy ? 1 : 2; // The zero-copy kernels only have recv buffer
         size_t num_bytes = 0;
         num_bytes += num_channels * num_rdma_ranks * (NUM_MAX_NVL_PEERS * 2 + 2) * 2 * sizeof(int);
         num_bytes += num_channels * num_rdma_ranks * num_max_rdma_chunked_recv_tokens * hidden_bytes * 2;
-        num_bytes += num_channels * num_rdma_ranks * num_max_rdma_chunked_recv_tokens * internode::get_source_meta_bytes() * 2;
+        num_bytes += num_channels * num_rdma_ranks * num_max_rdma_chunked_recv_tokens * internode::get_source_meta_bytes(zero_copy) * 2;
         num_bytes += num_channels * num_rdma_ranks * num_max_rdma_chunked_recv_tokens * kNumMaxTopK * sizeof(topk_idx_t) * 2;
         num_bytes += num_channels * num_rdma_ranks * num_max_rdma_chunked_recv_tokens * kNumMaxTopK * sizeof(float) * 2;
         num_bytes += num_channels * num_rdma_ranks * num_max_rdma_chunked_recv_tokens * kNumMaxScales * sizeof(float) * 2;
@@ -191,5 +196,97 @@ size_t get_low_latency_rdma_size_hint(int num_max_dispatch_tokens_per_rank, int 
     auto num_bytes = LowLatencyLayout(nullptr, num_max_dispatch_tokens_per_rank, hidden, num_ranks, num_experts).total_bytes;
     return ((num_bytes + NUM_BUFFER_ALIGNMENT_BYTES) / NUM_BUFFER_ALIGNMENT_BYTES) * NUM_BUFFER_ALIGNMENT_BYTES;
 }
+
+struct InternodeDispatchBuffer {
+    void* x = nullptr;
+    float* x_scales = nullptr;
+    int64_t* topk_idx = nullptr;
+    float* topk_weights = nullptr;
+
+    void* recv_buffer = nullptr;
+};
+
+struct InternodeDispatchLayout {
+    size_t total_bytes = 0;
+    InternodeDispatchBuffer buffer;
+
+    template <typename out_ptr_t = void*, typename count_ptr_t = uint8_t*, typename in_ptr_t = void*>
+    out_ptr_t advance(const in_ptr_t& ptr, size_t count) {
+        return reinterpret_cast<out_ptr_t>(reinterpret_cast<count_ptr_t>(ptr) + count);
+    }
+
+    InternodeDispatchLayout(void* rdma_buffer, int num_tokens, int hidden, int num_topk, int num_ranks, bool with_topk, bool use_fp8) {
+        size_t num_bytes_x = 0;
+        size_t num_bytes_x_scales = 0;
+        size_t num_bytes_topk_idx = 0;
+        size_t num_bytes_topk_weights = 0;
+        size_t num_bytes_source_meta = 0;
+
+        if (use_fp8){
+            num_bytes_x = num_tokens * hidden * sizeof(__nv_fp8_e4m3);
+            total_bytes += num_bytes_x;
+
+            int num_scales = hidden / 128;
+            num_bytes_x_scales = num_tokens * num_scales * sizeof(float);
+            total_bytes += num_bytes_x_scales;
+        } else {
+            num_bytes_x = num_tokens * hidden * sizeof(nv_bfloat16);
+            total_bytes += num_bytes_x;
+        }
+
+        if (with_topk) {
+            num_bytes_topk_idx = num_tokens * num_topk * sizeof(int64_t);
+            total_bytes += num_bytes_topk_idx;
+
+            num_bytes_topk_weights = num_tokens * num_topk * sizeof(float);
+            total_bytes += num_bytes_topk_weights;
+        }
+
+        EP_HOST_ASSERT(total_bytes % sizeof(int4) == 0);
+
+        buffer = {
+            advance(rdma_buffer, 0),
+            use_fp8 ? advance<float*>(rdma_buffer, num_bytes_x) : nullptr,
+            with_topk ? advance<int64_t*>(rdma_buffer, num_bytes_x + num_bytes_x_scales) : nullptr,
+            with_topk ? advance<float*>(rdma_buffer, num_bytes_x + num_bytes_x_scales + num_bytes_topk_idx) : nullptr,
+            advance(rdma_buffer, num_bytes_x + num_bytes_x_scales + num_bytes_topk_idx + num_bytes_topk_weights + num_bytes_source_meta)
+        };
+    }
+};
+
+struct InternodeCombineBuffer {
+    void* x = nullptr;
+    float* topk_weights = nullptr;
+};
+
+struct InternodeCombineLayout {
+    size_t total_bytes = 0;
+    InternodeCombineBuffer buffer;
+
+    template <typename out_ptr_t = void*, typename count_ptr_t = uint8_t*, typename in_ptr_t = void*>
+    out_ptr_t advance(const in_ptr_t& ptr, size_t count) {
+        return reinterpret_cast<out_ptr_t>(reinterpret_cast<count_ptr_t>(ptr) + count);
+    }
+
+    InternodeCombineLayout(void* nvl_buffer, int num_tokens, int hidden, int num_topk, bool with_topk) {
+        size_t num_bytes_x = 0;
+        size_t num_bytes_topk_weights = 0;
+
+        num_bytes_x = num_tokens * hidden * sizeof(nv_bfloat16);
+        total_bytes += num_bytes_x;
+
+        if (with_topk) {
+            num_bytes_topk_weights = num_tokens * num_topk * sizeof(float);
+            total_bytes += num_bytes_topk_weights;
+        }
+
+        EP_HOST_ASSERT(total_bytes % 16 == 0);
+
+        buffer = {
+            advance(nvl_buffer, 0),
+            with_topk ? advance<float*>(nvl_buffer, num_bytes_x) : nullptr
+        };
+    }
+};
 
 } // namespace deep_ep

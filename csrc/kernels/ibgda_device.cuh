@@ -68,6 +68,12 @@ typedef struct {
     uint64_t reserved;
 } __attribute__((__packed__)) ibgda_atomic_32_masked_fa_seg_t;
 
+typedef struct {
+    uint64_t        addr;
+    uint32_t        length;
+    uint32_t        lkey;
+} __attribute__((__packed__)) ibgda_sge_t;
+
 __device__ static __forceinline__
 nvshmemi_ibgda_device_state_t* ibgda_get_state() {
     return &nvshmemi_ibgda_device_state_d;
@@ -251,6 +257,43 @@ ibgda_get_rkey(uint64_t addr, int dst_pe, uint64_t *out_raddr, __be32 *out_rkey,
     *out_rkey = device_key.key;
 }
 
+__device__ static __forceinline__
+uint64_t ibgda_get_my_lkey(uint64_t laddr, __be32 *lkey) {
+    auto state = ibgda_get_state();
+    auto heap_start = reinterpret_cast<uint64_t>(nvshmemi_device_state_d.heap_base);
+    auto log2_cumem_granularity = state->log2_cumem_granularity;
+
+    // Local key
+    uint64_t idx = (laddr - heap_start) >> log2_cumem_granularity;
+    auto device_key = state->constmem.lkeys[idx];
+    auto lchunk_size = device_key.next_addr - laddr;
+    *lkey = device_key.key;
+
+    return lchunk_size;
+}
+
+__device__ static __forceinline__
+uint64_t ibgda_get_my_rkey(uint64_t raddr, int dst_pe, uint64_t *out_raddr, __be32 *out_rkey) {
+    auto state = ibgda_get_state();
+    auto heap_start = reinterpret_cast<uint64_t>(nvshmemi_device_state_d.heap_base);
+    auto log2_cumem_granularity = state->log2_cumem_granularity;
+
+    // Remote key
+    uint64_t roffset = raddr - heap_start;
+    uint64_t idx = ((roffset >> log2_cumem_granularity) * nvshmemi_device_state_d.npes) + dst_pe;
+    nvshmemi_ibgda_device_key_t device_key;
+    if (idx < NVSHMEMI_IBGDA_MAX_CONST_RKEYS) {
+        device_key = state->constmem.rkeys[idx];
+    } else {
+        device_key = state->globalmem.rkeys[idx - NVSHMEMI_IBGDA_MAX_CONST_RKEYS];
+    }
+    *out_raddr = reinterpret_cast<uint64_t>(nvshmemi_device_state_d.peer_heap_base_remote[dst_pe]) + roffset;
+    *out_rkey = device_key.key;
+
+    auto rchunk_size = device_key.next_addr - roffset;
+    return rchunk_size;
+}
+
 __device__ static __forceinline__ uint64_t
 ibgda_reserve_wqe_slots(nvshmemi_ibgda_device_qp_t *qp, uint32_t num_wqes) {
     auto mvars = &qp->mvars;
@@ -321,6 +364,67 @@ ibgda_write_rdma_write_wqe(nvshmemi_ibgda_device_qp_t *qp, uint64_t laddr, __be3
 }
 
 __device__ static __forceinline__ void
+ibgda_write_rdma_write_wqe_warp_multi_sge(nvshmemi_ibgda_device_qp_t *qp, ibgda_sge_t *sge_list, int num_sge,
+                                          uint64_t raddr, __be32 rkey, uint16_t wqe_idx, int lane_id) {
+    void *wqe_ptr = ibgda_get_wqe_ptr(qp, wqe_idx);
+
+    auto *ctrl_seg_ptr = reinterpret_cast<ibgda_ctrl_seg_t*>(wqe_ptr);
+    void *av_seg_ptr = reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(ctrl_seg_ptr) + sizeof(*ctrl_seg_ptr));
+    auto raddr_seg_ptr = reinterpret_cast<mlx5_wqe_raddr_seg*>(reinterpret_cast<uintptr_t>(av_seg_ptr));
+
+    if (lane_id == 0) {
+        // wqe_idx: WQEBB number of the first block of this WQE.
+        // ds: WQE size in octowords (16-byte units).
+        ibgda_ctrl_seg_t ctrl_seg;
+        ctrl_seg = {0};
+        const auto ds = 2 + num_sge;
+        EP_DEVICE_ASSERT(ds < (2<<6));
+        ctrl_seg.qpn_ds = HtoBE32((qp->qpn << 8) | ds);
+        ctrl_seg.fm_ce_se = MLX5_WQE_CTRL_CQ_UPDATE;
+        ctrl_seg.opmod_idx_opcode = HtoBE32((wqe_idx << 8) | MLX5_OPCODE_RDMA_WRITE);
+
+        struct mlx5_wqe_raddr_seg raddr_seg;
+        raddr_seg.raddr = HtoBE64(raddr);
+        raddr_seg.rkey = rkey;
+        raddr_seg.reserved = 0;
+
+        EP_STATIC_ASSERT(sizeof(*ctrl_seg_ptr) == 16, "sizeof(*ctrl_seg_ptr) == 16");
+        EP_STATIC_ASSERT(sizeof(*raddr_seg_ptr) == 16, "sizeof(*raddr_seg_ptr) == 16");
+        st_na_relaxed(reinterpret_cast<int4*>(ctrl_seg_ptr), *reinterpret_cast<const int4*>(&ctrl_seg));
+        st_na_relaxed(reinterpret_cast<int4*>(raddr_seg_ptr), *reinterpret_cast<const int4*>(&raddr_seg));
+    }
+
+    const ptrdiff_t wq_size_bytes = qp->tx_wq.nwqes << MLX5_SEND_WQE_SHIFT;
+    const auto wq_start_addr = reinterpret_cast<uintptr_t>(ibgda_get_wqe_ptr(qp, 0));
+    const ptrdiff_t first_data_seg_offset = reinterpret_cast<uintptr_t>(raddr_seg_ptr) + sizeof(*raddr_seg_ptr) - wq_start_addr;
+
+    for (int i = lane_id; i < num_sge; i += 32) {
+        __be32 sge_lkey = 0;
+        uint64_t sge_laddr = sge_list[i].addr;
+        uint64_t my_chunk_size = ibgda_get_my_lkey(sge_laddr, &sge_lkey);
+        uint32_t sge_bytes = sge_list[i].length;
+        EP_DEVICE_ASSERT(sge_bytes <= my_chunk_size);
+
+        struct mlx5_wqe_data_seg *data_seg_ptr;
+        EP_STATIC_ASSERT(sizeof(*data_seg_ptr) == 16, "sizeof(*data_seg_ptr) == 16");
+
+        ptrdiff_t data_seg_offset = first_data_seg_offset + i * sizeof(*data_seg_ptr);
+        if (data_seg_offset >= wq_size_bytes) {
+            data_seg_offset -= wq_size_bytes;
+        }
+        data_seg_ptr = reinterpret_cast<decltype(data_seg_ptr)>(wq_start_addr + data_seg_offset);
+
+        struct mlx5_wqe_data_seg data_seg = {
+            .byte_count = HtoBE32(sge_bytes),
+            .lkey = sge_lkey,
+            .addr = HtoBE64(sge_laddr)
+        };
+        st_na_relaxed(reinterpret_cast<int4*>(data_seg_ptr), *reinterpret_cast<const int4*>(&data_seg));
+    }
+    __syncwarp();
+}
+
+__device__ static __forceinline__ void
 ibgda_write_empty_recv_wqe(void *out_wqe) {
     auto *data_seg_ptr = reinterpret_cast<struct mlx5_wqe_data_seg*>(out_wqe);
     struct mlx5_wqe_data_seg data_seg;
@@ -386,6 +490,35 @@ nvshmemi_ibgda_put_nbi_warp(uint64_t req_rptr, uint64_t req_lptr, size_t bytes, 
     // Submit
     if (lane_id == 0)
         ibgda_submit_requests<kAlwaysDoPostSend>(qp, base_wqe_idx, num_wqes, message_idx);
+    __syncwarp();
+}
+
+template <bool kAlwaysDoPostSend = false>
+__device__ static __forceinline__ void
+nvshmemi_ibgda_put_nbi_warp_multi_sge_parallel(ibgda_sge_t *sge_list, int num_sge, uint64_t req_rptr, size_t bytes, int dst_pe, int qp_id, int lane_id) {
+    // Get rkey, store them into lanes
+    __be32 my_rkey = 0;
+    uint64_t my_raddr = 0;
+    uint64_t my_chunk_size = 0;
+
+    // Decide how many messages
+    my_chunk_size = ibgda_get_my_rkey(req_rptr, dst_pe, &my_raddr, &my_rkey);
+    EP_DEVICE_ASSERT(bytes <= my_chunk_size);
+
+    // Process WQE
+    uint32_t num_wqebbs = ((num_sge + 2) + 3) / 4;  // +3 for Round up
+    auto qp = ibgda_get_rc(dst_pe, qp_id);
+    uint64_t base_wqe_idx = 0;
+    if (lane_id == 0) {
+        base_wqe_idx = ibgda_reserve_wqe_slots(qp, num_wqebbs);
+    }
+    base_wqe_idx = __shfl_sync(0xffffffff, base_wqe_idx, 0);
+    ibgda_write_rdma_write_wqe_warp_multi_sge(qp, sge_list, num_sge, my_raddr, my_rkey, base_wqe_idx, lane_id);
+    __syncwarp();
+
+    // Submit
+    if (lane_id == 0)
+        ibgda_submit_requests<kAlwaysDoPostSend>(qp, base_wqe_idx, num_wqebbs);
     __syncwarp();
 }
 

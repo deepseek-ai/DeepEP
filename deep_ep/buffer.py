@@ -29,6 +29,8 @@ class Buffer:
 
     num_sms: int = 20
 
+    has_internode_zcopy: bool = True
+
     def __init__(self, group: Optional[dist.ProcessGroup],
                  num_nvl_bytes: int = 0, num_rdma_bytes: int = 0,
                  low_latency_mode: bool = False, num_qps_per_rank: int = 24,
@@ -36,6 +38,7 @@ class Buffer:
                  allow_mnnvl: bool = False,
                  explicitly_destroy: bool = False,
                  enable_shrink: bool = False,
+                 enable_zcopy: bool = False,
                  comm: Optional["mpi4py.MPI.Comm"] = None) -> None:
         """
         Initialize the communication buffer.
@@ -104,7 +107,7 @@ class Buffer:
             os.environ['NVSHMEM_IBGDA_NUM_RC_PER_PE'] = f'{num_qps_per_rank}'
 
             # Make sure QP depth is always larger than the number of on-flight WRs, so that we can skip WQ slot check
-            self.nvshmem_qp_depth = int(os.environ.get('NVSHMEM_QP_DEPTH', '1024'))
+            self.nvshmem_qp_depth = int(os.environ.get('NVSHMEM_QP_DEPTH', '4096' if enable_zcopy else '1024'))
             os.environ['NVSHMEM_QP_DEPTH'] = str(self.nvshmem_qp_depth)
 
             # Reduce gpu memory usage
@@ -113,7 +116,7 @@ class Buffer:
             # Disable NVLink SHArP
             os.environ['NVSHMEM_DISABLE_NVLS'] = '1'
             # NOTES: NVSHMEM initialization requires at least 256 MiB
-            os.environ['NVSHMEM_CUMEM_GRANULARITY'] = f'{2 ** 29}'
+            os.environ['NVSHMEM_CUMEM_GRANULARITY'] = f'{2 ** 31}' if enable_zcopy else f'{2 ** 29}'
 
             if not allow_mnnvl:
                 # Disable multi-node NVLink detection
@@ -318,7 +321,7 @@ class Buffer:
                  expert_alignment: int = 1, num_worst_tokens: int = 0,
                  config: Optional[Config] = None,
                  previous_event: Optional[EventOverlap] = None, async_finish: bool = False,
-                 allocate_on_comm_stream: bool = False) -> \
+                 allocate_on_comm_stream: bool = False, zero_copy: bool = False) -> \
             Tuple[Union[Tuple[torch.Tensor, torch.Tensor], torch.Tensor], Optional[torch.Tensor],
                   Optional[torch.Tensor], List[int], Tuple, EventOverlap]:
         """
@@ -348,6 +351,8 @@ class Buffer:
             previous_event: the event to wait before actually executing the kernel.
             async_finish: the current stream will not wait for the communication kernels to be finished if set.
             allocate_on_comm_stream: control whether all the allocated tensors' ownership to be on the communication stream.
+            zero_copy: use zero-copy internode transfer, which requires the source tensors to be located on special
+                pre-allocated "dispatch buffers".
 
         Returns:
             recv_x: received tokens, the same type and tuple as the input `x`, but the number of tokens equals to the
@@ -367,7 +372,7 @@ class Buffer:
         if self.runtime.get_num_rdma_ranks() > 1:
             assert num_worst_tokens == 0, 'Internode dispatch does not support `num_worst_tokens > 0`'
             return self.internode_dispatch(x, handle, num_tokens_per_rank, num_tokens_per_rdma_rank, is_token_in_rank, num_tokens_per_expert,
-                                           topk_idx, topk_weights, expert_alignment, config, previous_event, async_finish, allocate_on_comm_stream)
+                                           topk_idx, topk_weights, expert_alignment, config, previous_event, async_finish, allocate_on_comm_stream, zero_copy)
 
         # Launch the kernel with cached or non-cached mode
         x, x_scales = x if isinstance(x, tuple) else (x, None)
@@ -397,7 +402,7 @@ class Buffer:
                 bias: Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]] = None,
                 config: Optional[Config] = None,
                 previous_event: Optional[EventOverlap] = None, async_finish: bool = False,
-                allocate_on_comm_stream: bool = False) -> \
+                allocate_on_comm_stream: bool = False, zero_copy: bool = False) -> \
             Tuple[torch.Tensor, Optional[torch.Tensor], EventOverlap]:
         """
         Combine (reduce) tokens (addition **without** weights) from different ranks, both intranode and internode
@@ -415,6 +420,8 @@ class Buffer:
             previous_event: the event to wait before actually executing the kernel.
             async_finish: the current stream will not wait for the communication kernels to be finished if set.
             allocate_on_comm_stream: control whether all the allocated tensors' ownership to be on the communication stream.
+            zero_copy: use zero-copy internode transfer, which requires the source tensors to be located on special
+                pre-allocated "combine buffers".
 
         Returns:
             recv_x: the reduced token from its dispatched ranks.
@@ -426,7 +433,7 @@ class Buffer:
 
         # Internode
         if self.runtime.get_num_rdma_ranks() > 1:
-            return self.internode_combine(x, handle, topk_weights, bias, config, previous_event, async_finish, allocate_on_comm_stream)
+            return self.internode_combine(x, handle, topk_weights, bias, config, previous_event, async_finish, allocate_on_comm_stream, zero_copy)
 
         # NOTES: the second `_` is for the sending side, so we should use the third one
         rank_prefix_matrix, _, channel_prefix_matrix, src_idx, is_recv_token_in_rank, send_head = handle
@@ -447,7 +454,7 @@ class Buffer:
                            topk_idx: Optional[torch.Tensor] = None, topk_weights: Optional[torch.Tensor] = None, expert_alignment: int = 1,
                            config: Optional[Config] = None,
                            previous_event: Optional[EventOverlap] = None, async_finish: bool = False,
-                           allocate_on_comm_stream: bool = False) -> \
+                           allocate_on_comm_stream: bool = False, zero_copy = False) -> \
             Tuple[Union[Tuple[torch.Tensor, torch.Tensor], torch.Tensor], Optional[torch.Tensor],
             Optional[torch.Tensor], List[int], Tuple, EventOverlap]:
         """
@@ -463,15 +470,17 @@ class Buffer:
             is_token_in_rank, \
                 rdma_channel_prefix_matrix, gbl_channel_prefix_matrix, \
                 recv_rdma_channel_prefix_matrix, recv_rdma_rank_prefix_sum, recv_gbl_channel_prefix_matrix, recv_gbl_rank_prefix_sum, \
+                recv_gbl_rank_prefix_sum_fwd, \
                 recv_src_meta, send_rdma_head, send_nvl_head = handle
             num_recv_tokens = recv_src_meta.size(0)
             num_rdma_recv_tokens = send_nvl_head.size(0)
-            recv_x, recv_x_scales, _, _, _, _, _, _, _, _, _, _, _, _, event = self.runtime.internode_dispatch(
+            recv_x, recv_x_scales, _, _, _, _, _, _, _, _, _, _, _, _, _, event = self.runtime.internode_dispatch(
                 x, x_scales, topk_idx, topk_weights,
                 None, None, is_token_in_rank, None,
                 num_recv_tokens, num_rdma_recv_tokens,
                 rdma_channel_prefix_matrix, recv_rdma_rank_prefix_sum, gbl_channel_prefix_matrix, recv_gbl_rank_prefix_sum,
-                expert_alignment, config, getattr(previous_event, 'event', None), async_finish, allocate_on_comm_stream)
+                recv_gbl_rank_prefix_sum_fwd,
+                expert_alignment, config, getattr(previous_event, 'event', None), zero_copy, async_finish, allocate_on_comm_stream)
             return (recv_x, recv_x_scales) if x_scales is not None else recv_x, None, None, None, None, EventOverlap(event)
         else:
             assert num_tokens_per_rank is not None and is_token_in_rank is not None and num_tokens_per_expert is not None
@@ -479,14 +488,16 @@ class Buffer:
                 rdma_channel_prefix_matrix, gbl_channel_prefix_matrix, \
                 recv_rdma_channel_prefix_matrix, recv_rdma_rank_prefix_sum, \
                 recv_gbl_channel_prefix_matrix, recv_gbl_rank_prefix_sum, \
+                recv_gbl_rank_prefix_sum_fwd, \
                 recv_src_meta, send_rdma_head, send_nvl_head, event = self.runtime.internode_dispatch(
                 x, x_scales, topk_idx, topk_weights,
                 num_tokens_per_rank, num_tokens_per_rdma_rank, is_token_in_rank, num_tokens_per_expert,
-                0, 0, None, None, None, None,
-                expert_alignment, config, getattr(previous_event, 'event', None), async_finish, allocate_on_comm_stream)
+                0, 0, None, None, None, None, None,
+                expert_alignment, config, getattr(previous_event, 'event', None), zero_copy, async_finish, allocate_on_comm_stream)
             handle = (is_token_in_rank,
                       rdma_channel_prefix_matrix, gbl_channel_prefix_matrix,
                       recv_rdma_channel_prefix_matrix, recv_rdma_rank_prefix_sum, recv_gbl_channel_prefix_matrix, recv_gbl_rank_prefix_sum,
+                      recv_gbl_rank_prefix_sum_fwd,
                       recv_src_meta, send_rdma_head, send_nvl_head)
             return (recv_x, recv_x_scales) if x_scales is not None else recv_x, recv_topk_idx, recv_topk_weights, num_recv_tokens_per_expert_list, handle, EventOverlap(event)
 
@@ -496,7 +507,7 @@ class Buffer:
                           bias: Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]] = None,
                           config: Optional[Config] = None,
                           previous_event: Optional[EventOverlap] = None, async_finish: bool = False,
-                          allocate_on_comm_stream: bool = False) -> \
+                          allocate_on_comm_stream: bool = False, zero_copy: bool = False) -> \
             Tuple[torch.Tensor, Optional[torch.Tensor], EventOverlap]:
         """
         Internode combine implementation, for more details, please refer to the `combine` docs.
@@ -508,16 +519,21 @@ class Buffer:
         is_combined_token_in_rank, \
             _, _, \
             rdma_channel_prefix_matrix, rdma_rank_prefix_sum, gbl_channel_prefix_matrix, gbl_rank_prefix_sum, \
+            gbl_rank_prefix_sum_fwd, \
             src_meta, send_rdma_head, send_nvl_head = handle
         bias_0, bias_1 = Buffer._unpack_bias(bias)
+
+        if zero_copy:
+            assert bias_0 is None and bias_1 is None, "Zero-copy combine doesn't support bias yet"
 
         # Launch the kernel
         combined_x, combined_topk_weights, event = self.runtime.internode_combine(
             x, topk_weights, bias_0, bias_1,
             src_meta, is_combined_token_in_rank,
             rdma_channel_prefix_matrix, rdma_rank_prefix_sum, gbl_channel_prefix_matrix,
+            gbl_rank_prefix_sum_fwd,
             send_rdma_head, send_nvl_head, config, getattr(previous_event, 'event', None),
-            async_finish, allocate_on_comm_stream)
+            zero_copy, async_finish, allocate_on_comm_stream)
         return combined_x, combined_topk_weights, EventOverlap(event)
 
     def clean_low_latency_buffer(self, num_max_dispatch_tokens_per_rank: int, hidden: int, num_experts: int) -> None:
@@ -696,3 +712,30 @@ class Buffer:
         """
         src_info, layout_range, num_max_dispatch_tokens_per_rank, hidden, num_experts = handle
         return self.runtime.get_next_low_latency_combine_buffer(num_max_dispatch_tokens_per_rank, hidden, num_experts)
+
+    def get_internode_dispatch_buffer(self, num_tokens: int, hidden: int, num_topk: int, with_topk: bool, use_fp8: bool):
+        """
+        Get the raw registered RDMA buffer tensor for internode dispatch, so that the next dispatch kernel can skip the copying.
+
+        Arguments:
+            with_topk: whether the next dispatch kernel is with top-k or not.
+            use_fp8: whether the next dispatch kernel use FP8 or not.
+
+        Returns:
+            buffer: the raw RDMA internode dispatch buffer as a FP8/BF16 PyTorch tensor, a scale tensor(if use_fp8),
+            a topk indices and weights tensor(if with_topk) and a source meta tensor contiguously. You should fill
+            this buffer by yourself.
+        """
+        return self.runtime.get_internode_dispatch_buffer(num_tokens, hidden, num_topk, with_topk, use_fp8)
+
+    def get_internode_combine_buffer(self, num_tokens: int, hidden: int, num_topk: int, with_topk: bool):
+        """
+        Get the raw registered NVLink buffer tensor for internode combine.
+
+        Arguments:
+            with_topk: whether the next combine kernel is with top-k or not.
+
+        Returns:
+            buffer: the raw NVLink internode combine buffer as a BF16 PyTorch tensor. You should fill this buffer by yourself.
+        """
+        return self.runtime.get_internode_combine_buffer(num_tokens, hidden, num_topk, with_topk)

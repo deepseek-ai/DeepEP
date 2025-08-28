@@ -6,3 +6,4 @@ build/
 .cache/
 .vscode/
 */cmake-build-*/
+work_dirs/

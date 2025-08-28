@@ -5,6 +5,14 @@
 #define NUM_WORKSPACE_BYTES (32 * 1024 * 1024)
 #define NUM_MAX_LOCAL_EXPERTS 1024
 #define NUM_BUFFER_ALIGNMENT_BYTES 128
+// TODO: Zero-copy: Make these configurable options
+#define NUM_OUTPUT_BUFFER_BYTES (4096 * 8192 * 2)
+#define NUM_MAX_SGE_PER_WQE 60 // The DS field of WQE is only 6 bits; 2^6 - 1 = 63
+#define NUM_MAX_ZCOPY_DISPATCH_TOKENS 32768
+// In the zero-copy variants of internode kernels, the kernel itself uses very little NVL buffer.
+// So we reserve this (heuristically large-enough) length of memory for the dispatch/combine
+// kernels and use the following space for metadata sync in notify.
+#define ZCOPY_NOTIFY_NVL_METADATA_OFFSET_INTS 65536
 
 #define FINISHED_SUM_TAG 1024
 #define NUM_WAIT_NANOSECONDS 500
