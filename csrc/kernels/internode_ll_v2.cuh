@@ -51,6 +51,8 @@ __forceinline__ __device__ void dispatch_send(
     // Expert counts
     // __shared__ int shared_num_tokens_sent_per_expert[kNumMaxWarpGroups];
 
+    if (subroutine_thread_id % 32 == 0) { printf("[S%d,T%d] dispatch_send START\n", sm_id, subroutine_thread_id); }
+    
     if ((sm_id == 0) and (warp_id == 0)) {
         // The first SM is also responsible for cleaning the next buffer
         #pragma unroll
@@ -97,7 +99,7 @@ __forceinline__ __device__ void dispatch_send(
     const int flatten_num = num_warps * num_sms;
     const int dst_rank = flatten_id % num_ranks;
     for (int local_expert_idx = 0; local_expert_idx < num_local_experts; ++local_expert_idx) {
-        if (subroutine_thread_id % 32 == 0) { printf("[S%dT%d] dispatch_send local_expert_idx=%d START \n", sm_id, subroutine_thread_id, local_expert_idx); }
+        if (subroutine_thread_id % 32 == 0) { printf("[S%d,T%d] dispatch_send local_expert_idx=%d START \n", sm_id, subroutine_thread_id, local_expert_idx); }
 
         const int dst_expert_idx = dst_rank * num_local_experts + local_expert_idx;
 
@@ -265,7 +267,7 @@ __forceinline__ __device__ void dispatch_send(
         __syncwarp();
     }
 
-    if (subroutine_thread_id % 32 == 0) { printf("[S%dT%d] dispatch_send END\n", sm_id, subroutine_thread_id); }
+    if (subroutine_thread_id % 32 == 0) { printf("[S%d,T%d] dispatch_send END\n", sm_id, subroutine_thread_id); }
 
 //     } else if (warp_id == num_warps - 1) {
 //         EP_DEVICE_ASSERT(num_sms > 1);
@@ -344,6 +346,8 @@ __forceinline__ __device__ void dispatch_recv(
     EP_STATIC_ASSERT(sizeof(packed_t) % sizeof(scale_t) == 0, "Invalid vector length");
     EP_STATIC_ASSERT(!(kUseFP8 && kUseNVFP4), "FP8 and NVFP4 cannot be used together");
 
+    if (subroutine_thread_id % 32 == 0) { printf("[S%d,T%d] dispatch_recv START\n", sm_id, subroutine_thread_id); }
+
 // NOTE packed_recv_count zeroing is removed
 //     // For send-and-recv kernels, we need a grid sync for making `packed_recv_count` visible
 //     if (phases & LOW_LATENCY_SEND_PHASE)
@@ -362,7 +366,7 @@ __forceinline__ __device__ void dispatch_recv(
     EP_DEVICE_ASSERT(num_warp_groups == 1); // not consider multi warp_group case below
     const auto src_rank = sm_id;
     for (int local_expert_idx = 0; local_expert_idx < num_local_experts; ++local_expert_idx) {
-        if (subroutine_thread_id % 32 == 0) { printf("[S%dT%d] dispatch_recv local_expert_idx=%d START \n", sm_id, subroutine_thread_id, local_expert_idx); }
+        if (subroutine_thread_id % 32 == 0) { printf("[S%d,T%d] dispatch_recv local_expert_idx=%d START \n", sm_id, subroutine_thread_id, local_expert_idx); }
 
         if (src_rank < num_ranks) {
             // NOTE modified
@@ -469,7 +473,7 @@ __forceinline__ __device__ void dispatch_recv(
         }
     }
 
-    if (subroutine_thread_id % 32 == 0) { printf("[S%dT%d] dispatch_recv END\n", sm_id, subroutine_thread_id); }
+    if (subroutine_thread_id % 32 == 0) { printf("[S%d,T%d] dispatch_recv END\n", sm_id, subroutine_thread_id); }
 }
 
 template <bool kUseFP8, bool kUseUE8M0, bool kUseNVFP4, int kHidden>
