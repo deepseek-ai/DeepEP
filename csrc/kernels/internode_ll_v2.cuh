@@ -129,11 +129,12 @@ __forceinline__ __device__ void dispatch_send(
             // NOTE the parallel strategy is changed
             // auto dst_expert_idx = warp_id < num_topk ? static_cast<int>(__ldg(topk_idx + token_idx * num_topk + warp_id)) : -1;
 
+            // NOTE (0828) require users to set this value
             // NOTE do not use `rdma_x` but use `x`
             // NOTE use lane_id instead of local_thread id
             // NOTE and the new code will write `x_src_idx` *MULTIPLE* times w/ same value, thus wasting but correct
             // subroutine_thread_id == 0 ? (*rdma_x_src_idx = token_idx) : 0;
-            lane_id == 0 ? (*x_src_idx = token_idx) : 0;
+            // lane_id == 0 ? (*x_src_idx = token_idx) : 0;
 
             // NOTE no read or cast in fp4
             // FP8 cast
@@ -179,7 +180,7 @@ __forceinline__ __device__ void dispatch_send(
             // NOTE this cannot be removed even if we do not do casting
             // b/c we need to write to `rdma_x_src_idx`
             // (but we may optimize it later)
-            asm volatile("bar.sync 1, %0;" :: "r"(num_threads));
+            // asm volatile("bar.sync 1, %0;" :: "r"(num_threads));
 
             // Issue IBGDA sends
             if (dst_expert_idx >= 0) {
