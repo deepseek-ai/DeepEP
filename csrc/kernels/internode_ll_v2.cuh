@@ -560,7 +560,10 @@ void dispatch_v2(void* packed_recv_x, void* packed_recv_x_scales,
               bool use_nvfp4, uint32_t* dst_signals,
               uint32_t* count_per_expert, int* token_ids_of_expert, int token_ids_of_expert_stride_0) {
     constexpr int kNumMaxTopK = 9;
-    const int num_warp_groups = ceil_div(num_experts, num_device_sms);
+
+    // NOTE MODIFIED
+    // const int num_warp_groups = ceil_div(num_experts, num_device_sms);
+    const int num_warp_groups = 2;
 
     // NOTE temporarily reduce num warps per group to avoid workload imbalance in dispatch_send
     // TODO may increase it later e.g. for dispatch_recv
