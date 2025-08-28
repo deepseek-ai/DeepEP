@@ -501,49 +501,53 @@ dispatch_v2(void* packed_recv_x, void* packed_recv_x_scales,
     const auto num_send_threads = num_send_warp_groups * num_warps_per_group * 32;
     const auto raw_thread_id = static_cast<int>(threadIdx.x);
     if (raw_thread_id < num_send_threads) {
-        const auto send_thread_id = raw_thread_id;
-        dispatch_send<kUseFP8, kUseUE8M0, kUseNVFP4, kHidden>(
-            send_thread_id, num_send_warp_groups,
+        if (phases & LOW_LATENCY_SEND_PHASE) {
+            const auto send_thread_id = raw_thread_id;
+            dispatch_send<kUseFP8, kUseUE8M0, kUseNVFP4, kHidden>(
+                send_thread_id, num_send_warp_groups,
 
-            // forward args
-            packed_recv_x, packed_recv_x_scales,
-            packed_recv_src_info, packed_recv_layout_range,
-            packed_recv_count,
-            cumulative_local_expert_recv_stats,
-            dispatch_wait_recv_cost_stats,
-            rdma_recv_x, rdma_recv_count,
-            x, topk_idx,
-            atomic_counter_per_expert, atomic_finish_counter_per_expert,
-            next_clean, num_next_clean_int,
-            num_tokens, num_max_dispatch_tokens_per_rank,
-            num_topk, num_experts, rank, num_ranks,
-            num_warps_per_group,
-            round_scale, phases,
-            dst_signals,
-            count_per_expert, token_ids_of_expert, token_ids_of_expert_stride_0
-        );
+                // forward args
+                packed_recv_x, packed_recv_x_scales,
+                packed_recv_src_info, packed_recv_layout_range,
+                packed_recv_count,
+                cumulative_local_expert_recv_stats,
+                dispatch_wait_recv_cost_stats,
+                rdma_recv_x, rdma_recv_count,
+                x, topk_idx,
+                atomic_counter_per_expert, atomic_finish_counter_per_expert,
+                next_clean, num_next_clean_int,
+                num_tokens, num_max_dispatch_tokens_per_rank,
+                num_topk, num_experts, rank, num_ranks,
+                num_warps_per_group,
+                round_scale, phases,
+                dst_signals,
+                count_per_expert, token_ids_of_expert, token_ids_of_expert_stride_0
+            );
+        }
     } else {
-        const auto recv_thread_id = raw_thread_id - num_send_threads;
-        dispatch_recv<kUseFP8, kUseUE8M0, kUseNVFP4, kHidden>(
-            recv_thread_id, num_recv_warp_groups,
+        if (phases & LOW_LATENCY_RECV_PHASE) {
+            const auto recv_thread_id = raw_thread_id - num_send_threads;
+            dispatch_recv<kUseFP8, kUseUE8M0, kUseNVFP4, kHidden>(
+                recv_thread_id, num_recv_warp_groups,
 
-            // forward args
-            packed_recv_x, packed_recv_x_scales,
-            packed_recv_src_info, packed_recv_layout_range,
-            packed_recv_count,
-            cumulative_local_expert_recv_stats,
-            dispatch_wait_recv_cost_stats,
-            rdma_recv_x, rdma_recv_count,
-            x, topk_idx,
-            atomic_counter_per_expert, atomic_finish_counter_per_expert,
-            next_clean, num_next_clean_int,
-            num_tokens, num_max_dispatch_tokens_per_rank,
-            num_topk, num_experts, rank, num_ranks,
-            num_warps_per_group,
-            round_scale, phases,
-            dst_signals,
-            count_per_expert, token_ids_of_expert, token_ids_of_expert_stride_0
-        );
+                // forward args
+                packed_recv_x, packed_recv_x_scales,
+                packed_recv_src_info, packed_recv_layout_range,
+                packed_recv_count,
+                cumulative_local_expert_recv_stats,
+                dispatch_wait_recv_cost_stats,
+                rdma_recv_x, rdma_recv_count,
+                x, topk_idx,
+                atomic_counter_per_expert, atomic_finish_counter_per_expert,
+                next_clean, num_next_clean_int,
+                num_tokens, num_max_dispatch_tokens_per_rank,
+                num_topk, num_experts, rank, num_ranks,
+                num_warps_per_group,
+                round_scale, phases,
+                dst_signals,
+                count_per_expert, token_ids_of_expert, token_ids_of_expert_stride_0
+            );
+        }
     }
 
 // NOTE removed
