@@ -213,7 +213,7 @@ __forceinline__ __device__ void dispatch_send(
         // NOTE mv from do-once to do-per-local-expert
         // TODO what does this do? do we break something, b/c we let multi SM cooperate?
         // (seems it is safe, b/c our next step will check gmem?)
-        __syncthreads();
+        // __syncthreads();
 
         // NOTE mv from do-once to do-per-local-expert
         //
