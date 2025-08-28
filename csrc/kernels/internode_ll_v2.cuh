@@ -12,7 +12,7 @@ constexpr int kNumMaxWarpGroups = 32;
 
 template <bool kUseFP8, bool kUseUE8M0, bool kUseNVFP4, int kHidden>
 __forceinline__ __device__ void dispatch_send(
-    int local_thread_id, int num_warp_groups,
+    int subroutine_thread_id, int num_warp_groups,
 
     // copied args
     void* packed_recv_x, void* packed_recv_x_scales,
@@ -39,7 +39,7 @@ __forceinline__ __device__ void dispatch_send(
     // NOTE copied from dispatch body
     const auto sm_id = static_cast<int>(blockIdx.x);
     const auto num_sms = static_cast<int>(gridDim.x);
-    const auto warp_id = local_thread_id / 32, lane_id = get_lane_id();
+    const auto warp_id = subroutine_thread_id / 32, lane_id = get_lane_id();
     const auto num_warps = num_warp_groups * num_warps_per_group;
     const auto num_local_experts = num_experts / num_ranks;
     // unused
@@ -97,7 +97,7 @@ __forceinline__ __device__ void dispatch_send(
     const int flatten_num = num_warps * num_sms;
     const int dst_rank = flatten_id % num_ranks;
     for (int local_expert_idx = 0; local_expert_idx < num_local_experts; ++local_expert_idx) {
-        if (local_thread_id % 32 == 0) { printf("[T%d] dispatch_send local_expert_idx=%d START \n", thread_id, local_expert_idx); }
+        if (subroutine_thread_id % 32 == 0) { printf("[T%d] dispatch_send local_expert_idx=%d START \n", thread_id, local_expert_idx); }
 
         const int dst_expert_idx = dst_rank * num_local_experts + local_expert_idx;
 
@@ -130,14 +130,14 @@ __forceinline__ __device__ void dispatch_send(
             // NOTE do not use `rdma_x` but use `x`
             // NOTE use lane_id instead of local_thread id
             // NOTE and the new code will write `x_src_idx` *MULTIPLE* times w/ same value, thus wasting but correct
-            // local_thread_id == 0 ? (*rdma_x_src_idx = token_idx) : 0;
+            // subroutine_thread_id == 0 ? (*rdma_x_src_idx = token_idx) : 0;
             lane_id == 0 ? (*x_src_idx = token_idx) : 0;
 
             // NOTE no read or cast in fp4
             // FP8 cast
 //             EP_STATIC_ASSERT(hidden_bf16_int4 % 32 == 0, "Must use the full warp to reduce");
 //             #pragma unroll
-//             for (int i = local_thread_id; i < hidden_bf16_int4; i += num_threads) {
+//             for (int i = subroutine_thread_id; i < hidden_bf16_int4; i += num_threads) {
 //                 // Read
 //                 auto int4_value = __ldg(x_int4 + i);
 //
@@ -226,7 +226,7 @@ __forceinline__ __device__ void dispatch_send(
         const int dst_rank = sm_id;
         // NOTE changed
         // if (responsible_expert_idx < num_experts and sub_warp_id == 0 and lane_id == 0) {
-        if ((dst_rank < num_ranks) and (local_thread_id == 0)) {
+        if ((dst_rank < num_ranks) and (subroutine_thread_id == 0)) {
             // NOTE changed
             // const auto dst_rank = responsible_expert_idx / num_local_experts;
             // const auto dst_expert_local_idx = responsible_expert_idx % num_local_experts;
@@ -265,7 +265,7 @@ __forceinline__ __device__ void dispatch_send(
         __syncwarp();
     }
 
-    if (local_thread_id % 32 == 0) { printf("[T%d] dispatch_send END\n", thread_id); }
+    if (subroutine_thread_id % 32 == 0) { printf("[T%d] dispatch_send END\n", thread_id); }
 
 //     } else if (warp_id == num_warps - 1) {
 //         EP_DEVICE_ASSERT(num_sms > 1);
@@ -303,7 +303,7 @@ __forceinline__ __device__ void dispatch_send(
 
 template <bool kUseFP8, bool kUseUE8M0, bool kUseNVFP4, int kHidden>
 __forceinline__ __device__ void dispatch_recv(
-    int local_thread_id, int num_warp_groups,
+    int subroutine_thread_id, int num_warp_groups,
 
     // copied args
     void* packed_recv_x, void* packed_recv_x_scales,
@@ -329,7 +329,7 @@ __forceinline__ __device__ void dispatch_recv(
     // NOTE copied from dispatch body
     const auto sm_id = static_cast<int>(blockIdx.x);
     // const auto num_sms = static_cast<int>(gridDim.x); // unused
-    const auto warp_id = local_thread_id / 32, lane_id = get_lane_id();
+    const auto warp_id = subroutine_thread_id / 32, lane_id = get_lane_id();
     // const auto num_warps = num_warp_groups * num_warps_per_group; // unused
     const auto num_local_experts = num_experts / num_ranks;
     const auto warp_group_id = warp_id / num_warps_per_group;
@@ -362,7 +362,7 @@ __forceinline__ __device__ void dispatch_recv(
     EP_DEVICE_ASSERT(num_warp_groups == 1); // not consider multi warp_group case below
     const auto src_rank = sm_id;
     for (int local_expert_idx = 0; local_expert_idx < num_local_experts; ++local_expert_idx) {
-        if (local_thread_id % 32 == 0) { printf("[T%d] dispatch_recv local_expert_idx=%d START\n", thread_id, local_expert_idx); }
+        if (subroutine_thread_id % 32 == 0) { printf("[T%d] dispatch_recv local_expert_idx=%d START\n", thread_id, local_expert_idx); }
 
         if (src_rank < num_ranks) {
             // NOTE modified
