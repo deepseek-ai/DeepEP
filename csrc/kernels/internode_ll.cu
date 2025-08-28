@@ -1020,7 +1020,7 @@ void combine(void* combined_x,
         num_warp_groups = 1;
         num_warps_per_group = 32;
         num_recv_per_sm = ceil_div(num_combined_tokens, num_device_sms);
-        EP_HOST_ASSERT(num_warp_groups > 0 and num_warps_per_group > 0 and ((num_combined_tokens == 0) or (num_recv_per_sm > 0)));
+        EP_HOST_ASSERT(num_warp_groups > 0 and num_warps_per_group > 0 and num_recv_per_sm >= 0);
 
         num_warps = num_warp_groups * num_warps_per_group;
     }
@@ -1028,10 +1028,11 @@ void combine(void* combined_x,
         num_warp_groups = ceil_div(num_experts, num_device_sms);
         num_warps_per_group = 32 / num_warp_groups;
         num_recv_per_sm = ceil_div(num_combined_tokens, num_device_sms);
-        EP_HOST_ASSERT(num_warp_groups > 0 and num_warps_per_group > 0 and ((num_combined_tokens == 0) or (num_recv_per_sm > 0)));
+        EP_HOST_ASSERT(num_warp_groups > 0 and num_warps_per_group > 0 and num_recv_per_sm >= 0);
 
         num_warps = num_warp_groups * num_warps_per_group;
-        num_sms = max(ceil_div(num_experts, num_warp_groups), ceil_div(num_combined_tokens, num_recv_per_sm));
+        num_sms = max(ceil_div(num_experts, num_warp_groups),
+                             num_recv_per_sm == 0 ? 1 : ceil_div(num_combined_tokens, num_recv_per_sm));
     }
 
     // Check workspace
