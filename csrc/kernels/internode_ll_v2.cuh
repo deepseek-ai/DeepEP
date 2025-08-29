@@ -102,6 +102,10 @@ __forceinline__ __device__ void dispatch_send(
     ) {
 //         if (subroutine_thread_id % 32 == 0) { printf("[R%d,S%d,T%d] dispatch_send local_expert_idx=%d START \n", rank, sm_id, subroutine_thread_id, local_expert_idx); }
 
+        // TODO can speedup by prefetching, delayed checking, etc
+        int remote_start_offset_of_dst_rank;
+        while ((remote_start_offset_of_dst_rank = TODO(TODO)) == 0);
+
         // TODO do prefetching if needed
         // NOTE ldg is for read-only data cache, if token_idx_and_dst_expert_flat_list is somehow overlapped in the future we should change it
         const auto token_idx_and_dst_expert = __ldg(token_idx_and_dst_expert_flat_list + tefl_idx);
@@ -190,7 +194,7 @@ __forceinline__ __device__ void dispatch_send(
                                  dst_expert_local_idx * num_ranks * num_max_dispatch_tokens_per_rank * Consts::num_bytes_per_msg +
                                  // NOTE modified
                                  // rank * num_max_dispatch_tokens_per_rank * Consts::num_bytes_per_msg +
-                                 TODO * Consts::num_bytes_per_msg +
+                                 remote_start_offset_of_dst_rank * Consts::num_bytes_per_msg +
                                  slot_idx * Consts::num_bytes_per_msg;
             const auto dst_p2p_ptr = nvshmemi_get_p2p_ptr(dst_ptr, rank, dst_rank);
             if (dst_p2p_ptr == 0) {
