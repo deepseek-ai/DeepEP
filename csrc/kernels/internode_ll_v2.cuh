@@ -202,7 +202,9 @@ __forceinline__ __device__ void dispatch_send(
                                  slot_idx * Consts::num_bytes_per_msg;
             const auto dst_p2p_ptr = nvshmemi_get_p2p_ptr(dst_ptr, rank, dst_rank);
             if (dst_p2p_ptr == 0) {
-                nvshmemi_ibgda_put_nbi_warp(dst_ptr, src_ptr, Consts::num_bytes_per_msg, dst_rank, dst_expert_local_idx, lane_id, slot_idx);
+                // NOTE remove to simplify code
+                EP_DEVICE_ASSERT(false);
+                // nvshmemi_ibgda_put_nbi_warp(dst_ptr, src_ptr, Consts::num_bytes_per_msg, dst_rank, dst_expert_local_idx, lane_id, slot_idx);
             } else {
                 // NOTES: only 2 load iterations for 7K hidden with 8 unrolls
                 const auto* src_int4_ptr = reinterpret_cast<const int4*>(src_ptr);
