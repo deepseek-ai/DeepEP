@@ -694,14 +694,14 @@ dispatch_v2(void* packed_recv_x, void* packed_recv_x_scales,
          int num_topk, int num_experts, int rank, int num_ranks,
          // NOTE split num_warp_groups
          int num_send_warp_groups, int num_recv_warp_groups,
-         int num_warps_per_group,
+         int num_send_warps_per_group, int num_recv_warps_per_group,
          bool round_scale, int phases,
          uint32_t* dst_signals,
          uint32_t* count_per_expert, int64_t* token_idx_and_dst_expert_flat_list,
          int* remote_start_offset_buffer,
          int* debug_tensor) {
     const auto sm_id = static_cast<int>(blockIdx.x);
-    const auto num_send_threads = num_send_warp_groups * num_warps_per_group * 32;
+    const auto num_send_threads = num_send_warp_groups * num_send_warps_per_group * 32;
     const auto raw_thread_id = static_cast<int>(threadIdx.x);
 
     // NOTE Please keep in sync: Config.get_nvl_buffer_size_hint, LowLatencyLayout.constructor, internode_ll_v2
@@ -737,7 +737,7 @@ dispatch_v2(void* packed_recv_x, void* packed_recv_x_scales,
                 next_clean, num_next_clean_int,
                 num_tokens, num_max_dispatch_tokens_per_rank,
                 num_topk, num_experts, rank, num_ranks,
-                num_warps_per_group,
+                num_send_warps_per_group,
                 round_scale, phases,
                 dst_signals,
                 count_per_expert, token_idx_and_dst_expert_flat_list,
@@ -763,7 +763,7 @@ dispatch_v2(void* packed_recv_x, void* packed_recv_x_scales,
                 next_clean, num_next_clean_int,
                 num_tokens, num_max_dispatch_tokens_per_rank,
                 num_topk, num_experts, rank, num_ranks,
-                num_warps_per_group,
+                num_recv_warps_per_group,
                 round_scale, phases,
                 dst_signals,
                 count_per_expert, token_idx_and_dst_expert_flat_list,
@@ -813,14 +813,14 @@ void dispatch_v2(void* packed_recv_x, void* packed_recv_x_scales,
 
     // NOTE temporarily reduce num warps per group to avoid workload imbalance in dispatch_send
     // TODO may increase it later e.g. for dispatch_recv
-    const int num_warps_per_group = 32 / num_warp_groups;
-
-    EP_HOST_ASSERT(num_warp_groups > 0 and num_warps_per_group > 0);
+    const int num_send_warps_per_group = 32 / num_warp_groups;
+    const int num_recv_warps_per_group = num_send_warps_per_group;
+    EP_HOST_ASSERT(num_warp_groups > 0 and num_send_warps_per_group > 0 and num_recv_warps_per_group > 0);
 
     // NOTE no longer need one SM to send all topk destinations
     // EP_HOST_ASSERT(kNumMaxTopK + 1 <= num_warp_groups * num_warps_per_group);
 
-    const auto num_warps = num_warp_groups * num_warps_per_group;
+    const auto num_warps = num_warp_groups * (num_send_warps_per_group + num_recv_warps_per_group);
     const auto num_sms = ceil_div(num_experts, num_warp_groups);
     EP_HOST_ASSERT(num_topk <= kNumMaxTopK);
 
@@ -860,7 +860,7 @@ LAUNCH_KERNEL(&cfg, dispatch_func, \
               next_clean, num_next_clean_int, \
               num_tokens, num_max_dispatch_tokens_per_rank, \
               num_topk, num_experts, rank, num_ranks, \
-              num_send_warp_groups, num_recv_warp_groups, num_warps_per_group, \
+              num_send_warp_groups, num_recv_warp_groups, num_send_warps_per_group, num_recv_warps_per_group, \
               round_scale, phases, \
               dst_signals, \
               count_per_expert, token_idx_and_dst_expert_flat_list, remote_start_offset_buffer, \
