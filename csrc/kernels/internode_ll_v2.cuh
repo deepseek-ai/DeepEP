@@ -473,7 +473,7 @@ __forceinline__ __device__ void dispatch_recv(
 //             if (subroutine_thread_id % 32 == 0) { printf("[R%d,S%d,T%d] ld-layout END num_recv_tokens=%d token_start_offset=%d\n", rank, sm_id, subroutine_thread_id, num_recv_tokens, token_start_offset); }
 
             if ((dst_signals != nullptr) and (cooperate_idx == 0)) {
-                atomic_add_release_global(dst_signals + local_expert_idx, DST_SIGNAL_EXPECT_VALUE - num_recv_tokens);
+                atomic_add_release_global(dst_signals + local_expert_idx, ((src_rank == 0) ? DST_SIGNAL_EXPECT_VALUE: 0) - num_recv_tokens);
             }
         }
         num_recv_tokens = __shfl_sync(0xffffffff, num_recv_tokens, 0);
