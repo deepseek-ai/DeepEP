@@ -177,13 +177,13 @@ __forceinline__ __device__ void dispatch_send(
         tefl_idx += flat_worker_num, debug_iter_idx += 1
     ) {
 //         if (subroutine_thread_id % 32 == 0) { printf("[R%d,S%d,T%d] dispatch_send local_expert_idx=%d START \n", rank, sm_id, subroutine_thread_id, local_expert_idx); }
-        write_debug_time(
-            debug_tensor, t_start,
-            /* event_group_id */ 0,
-            /* event_id */ debug_iter_idx,
-            /* mode_id */ 0,
-            sm_id, warp_id
-        );
+//         write_debug_time(
+//             debug_tensor, t_start,
+//             /* event_group_id */ 0,
+//             /* event_id */ debug_iter_idx,
+//             /* mode_id */ 0,
+//             sm_id, warp_id
+//         );
 
         // TODO do prefetching if needed
         // NOTE ldg is for read-only data cache, if token_idx_and_dst_expert_flat_list is somehow overlapped in the future we should change it
@@ -480,7 +480,7 @@ __forceinline__ __device__ void dispatch_recv(
     const int cooperate_idx = flatten_id / num_ranks;
     const int src_rank = flatten_id % num_ranks;
 
-    int debug_ld_token_signal_event_id = 0;
+//     int debug_ld_token_signal_event_id = 0;
 
     // Receiving and packing
     // NOTE if -> for
@@ -488,13 +488,13 @@ __forceinline__ __device__ void dispatch_recv(
     EP_DEVICE_ASSERT(num_warp_groups == 1); // not consider multi warp_group case below
     for (int local_expert_idx = 0; local_expert_idx < num_local_experts; ++local_expert_idx) {
 //         if (subroutine_thread_id % 32 == 0) { printf("[R%d,S%d,T%d] dispatch_recv local_expert_idx=%d START \n", rank, sm_id, subroutine_thread_id, local_expert_idx); }
-        write_debug_time(
-            debug_tensor, t_start,
-            /* event_group_id */ 0,
-            /* event_id */ local_expert_idx,
-            /* mode_id */ 1,
-            sm_id, warp_id
-        );
+//         write_debug_time(
+//             debug_tensor, t_start,
+//             /* event_group_id */ 0,
+//             /* event_id */ local_expert_idx,
+//             /* mode_id */ 1,
+//             sm_id, warp_id
+//         );
 
         // NOTE modified
         // const auto src_rank = responsible_expert_idx / num_local_experts;
@@ -521,13 +521,13 @@ __forceinline__ __device__ void dispatch_recv(
             layout = -layout - 1;
             unpack2(layout, num_recv_tokens, token_start_offset);
 
-            write_debug_time(
-                debug_tensor, t_start,
-                /* event_group_id */ 1,
-                /* event_id */ local_expert_idx,
-                /* mode_id */ 1,
-                sm_id, warp_id
-            );
+//             write_debug_time(
+//                 debug_tensor, t_start,
+//                 /* event_group_id */ 1,
+//                 /* event_id */ local_expert_idx,
+//                 /* mode_id */ 1,
+//                 sm_id, warp_id
+//             );
 
             if (cooperate_idx == 0) {
                 // TODO may not need to do this extra copy - directly use the `layout_range_buffer`
@@ -597,14 +597,14 @@ __forceinline__ __device__ void dispatch_recv(
                 while ((recv_src_idx = ld_acquire_sys_global(src_src_idx)) == 0);
                 recv_src_idx = -recv_src_idx-1;
 
-                write_debug_time(
-                    debug_tensor, t_start,
-                    /* event_group_id */ 2,
-                    /* event_id */ debug_ld_token_signal_event_id,
-                    /* mode_id */ 1,
-                    sm_id, warp_id
-                );
-                debug_ld_token_signal_event_id++;
+//                 write_debug_time(
+//                     debug_tensor, t_start,
+//                     /* event_group_id */ 2,
+//                     /* event_id */ debug_ld_token_signal_event_id,
+//                     /* mode_id */ 1,
+//                     sm_id, warp_id
+//                 );
+//                 debug_ld_token_signal_event_id++;
 
 //                 if (subroutine_thread_id % 32 == 0) { printf("[R%d,S%d,T%d] ld-token-signal END recv_src_idx=%d\n", rank, sm_id, subroutine_thread_id, recv_src_idx); }
 
