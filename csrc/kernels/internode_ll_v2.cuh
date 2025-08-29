@@ -69,6 +69,15 @@ __forceinline__ __device__ void dispatch_send(
 //             atomic_add_release_global(atomic_finish_counter_per_expert + i, FINISHED_SUM_TAG);
     }
 
+    // Reserve remote locations
+    {
+        EP_DEVICE_ASSERT(num_ranks <= num_sms);
+        EP_DEVICE_ASSERT(num_warps * 32 <= num_local_experts);
+        const int dst_rank = sm_id;
+        const int dst_expert_local_idx = subroutine_thread_id;
+        
+    }
+
     // There are 2 kinds of warps in this part:
     // 1. The first-kind warps for FP8 cast and sending top-k tokens
     // 2. The last warp for reading `topk_idx` and count for per-expert information
