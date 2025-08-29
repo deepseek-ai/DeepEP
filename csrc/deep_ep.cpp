@@ -1301,12 +1301,12 @@ Buffer::low_latency_dispatch(bool enable_v2, const torch::Tensor& x, const torch
             buffer.dispatch_rdma_recv_data_buffer,
             // ref: LowLatencyLayout constructor `dispatch_recv_data_buffer_bytes`
             {dim0, dim1, dim2},
-            {dim1 * dim2, dim2, 1},
+            {(int)(dim1 * dim2), dim2, 1},
             torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA)
         ).index({
-            torch::Slice(),
-            torch::Slice(),
-            torch::Slice(sizeof(int4), sizeof(int4) + hidden / 2)
+            torch::indexing::Slice(),
+            torch::indexing::Slice(),
+            torch::indexing::Slice(sizeof(int4), sizeof(int4) + hidden / 2)
         })
         : packed_recv_x;
     if (enable_v2) {
