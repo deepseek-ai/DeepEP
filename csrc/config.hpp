@@ -136,6 +136,9 @@ struct LowLatencyLayout {
     LowLatencyLayout(void* rdma_buffer, int num_max_dispatch_tokens_per_rank, int hidden, int num_ranks, int num_experts) {
         const int num_scales = hidden / 128;
 
+        EP_HOST_ASSERT(num_experts % num_ranks == 0);
+        const int num_local_experts = num_experts / num_ranks;
+
         // Dispatch and combine layout:
         //  - 2 symmetric odd/even send buffer
         //  - 2 symmetric odd/even receive buffers

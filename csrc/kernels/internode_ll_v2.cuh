@@ -626,7 +626,6 @@ dispatch_v2(void* packed_recv_x, void* packed_recv_x_scales,
         // assert alignment
         EP_DEVICE_ASSERT(((int64_t)layout_range_buffer) % 16 == 0);
         EP_DEVICE_ASSERT(((int64_t)negotiate_offset_of_expert_buffer) % 16 == 0);
-        EP_DEVICE_ASSERT(zero);
     }
 
     if (raw_thread_id < num_send_threads) {
