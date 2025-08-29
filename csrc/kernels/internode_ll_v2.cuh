@@ -31,7 +31,7 @@ __forceinline__ __device__ void dispatch_send(
     int num_warps_per_group,
     bool round_scale, int phases,
     uint32_t* dst_signals,
-    uint32_t* count_per_expert, int* token_idx_and_dst_rank_flat_list,
+    uint32_t* count_per_expert, int64_t* token_idx_and_dst_expert_flat_list,
 ) {
     using Consts = DispatchConstsTemplate<kUseFP8, kUseNVFP4, kHidden>;
     EP_DEVICE_ASSERT(Consts::num_bytes_per_msg % sizeof(int4) == 0);
@@ -92,24 +92,24 @@ __forceinline__ __device__ void dispatch_send(
     // NOTE: deliberately be (warp_id, sm_id) instead of (sm_id, warp_id)
     //       to allow work be distributed to all SMs when few work
     // TODO is these ordering suboptimal for nvlink write or gmem read?
-    const int flatten_id = warp_id * num_sms + sm_id;
-    const int flatten_num = num_warps * num_sms;
+    const int flat_worker_id = warp_id * num_sms + sm_id;
+    const int flat_worker_num = num_warps * num_sms;
     for (
-        int pseudo_token_idx = flatten_id;
-        pseudo_token_idx < num_tokens * num_topk;
-        pseudo_token_idx += flatten_num
+        // "tefl" := "token_idx_and_dst_expert_flat_list"
+        int tefl_idx = flat_worker_id
+        tefl_idx < num_tokens * num_topk;
+        tefl_idx += flat_worker_num
     ) {
 //         if (subroutine_thread_id % 32 == 0) { printf("[R%d,S%d,T%d] dispatch_send local_expert_idx=%d START \n", rank, sm_id, subroutine_thread_id, local_expert_idx); }
 
-        const int dst_expert_idx = dst_rank * num_local_experts + local_expert_idx;
-
-        // TODO may hide latency if needed
-        const int num_tokens_of_dst_expert = count_per_expert[dst_expert_idx];
+        // TODO do prefetching if needed
+        // NOTE ldg is for read-only data cache, if token_idx_and_dst_expert_flat_list is somehow overlapped in the future we should change it
+        const auto token_idx_and_dst_expert = __ldg(token_idx_and_dst_expert_flat_list + tefl_idx);
+        int token_idx, dst_expert_idx;
+        unpack2(token_idx_and_dst_rank, token_idx, dst_expert_idx);
 
         // NOTE changed, see "before-after" above
         // for (int token_idx = sm_id; token_idx < num_tokens; token_idx += num_sms) {
-        // TODO may overlap to optimize
-        int token_idx = token_ids_of_expert[dst_expert_idx * token_ids_of_expert_stride_0 + pseudo_token_idx];
 
         // const auto x_int4 = static_cast<const int4*>(x) + token_idx * hidden_bf16_int4;
 
