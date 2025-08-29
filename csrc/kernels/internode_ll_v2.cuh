@@ -93,6 +93,7 @@ __forceinline__ __device__ void dispatch_send(
 
             const int num_tokens_to_send = count_per_expert[dst_global_expert_idx];
 
+            // 1. Compete to get a range of locations to set data to
             // TODO maybe do not need `release` (but yes need `sys`)
             int remote_start_offset_of_dst_rank;
             {
@@ -101,6 +102,7 @@ __forceinline__ __device__ void dispatch_send(
                 remote_start_offset_of_dst_rank = atomic_add_release_sys_global(dst_p2p_ptr + dst_expert_local_idx, num_tokens_to_send);
             }
 
+            // 2. Write metadata to remote
             // TODO is this strong enough
             {
                 const auto dst_ptr = layout_range_buffer;
@@ -108,6 +110,7 @@ __forceinline__ __device__ void dispatch_send(
                 dst_p2p_ptr[dst_expert_local_idx * num_ranks + rank] = pack2<int, int64_t>(num_tokens_to_send, remote_start_offset_of_dst_rank);
             }
 
+            // 2. Write metadata to local
             // TODO is this strong enough
             remote_start_offset_of_dst_rank_buffer[dst_global_expert_idx] = -remote_start_offset_of_dst_rank-1;
         }
