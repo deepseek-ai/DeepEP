@@ -1189,6 +1189,7 @@ Buffer::low_latency_dispatch(bool enable_v2, const torch::Tensor& x, const torch
 
     // Allocate packed tensors
     constexpr int NUM_ELEMS_PER_PACK = 8;
+    // TODO do not allocate this in v2
     auto packed_recv_x = torch::empty({num_local_experts, num_ranks * num_max_dispatch_tokens_per_rank, use_nvfp4 ? hidden / NUM_ELEMS_PER_PACK : hidden},
                                       x.options().dtype(use_nvfp4 ? torch::kInt32 : (use_fp8 ? torch::kFloat8_e4m3fn: torch::kBFloat16)));
     auto packed_recv_src_info = torch::empty({num_local_experts, num_ranks * num_max_dispatch_tokens_per_rank}, torch::dtype(torch::kInt32).device(torch::kCUDA));
@@ -1289,8 +1290,19 @@ Buffer::low_latency_dispatch(bool enable_v2, const torch::Tensor& x, const torch
     if (return_recv_hook)
         recv_hook = [=]() { launcher(LOW_LATENCY_RECV_PHASE); };
 
+    const auto returned_x = enable_v2
+        ? TODO
+        : packed_recv_x;
+    if (enable_v2) {
+        EP_HOST_ASSERT(returned_x.dim() == 3);
+        EP_HOST_ASSERT(returned_x.size(0) == num_local_experts);
+        EP_HOST_ASSERT(returned_x.size(1) == num_ranks * num_max_dispatch_tokens_per_rank);
+        EP_HOST_ASSERT(returned_x.size(2) == num_ranks * hidden / NUM_ELEMS_PER_PACK);
+        EP_HOST_ASSERT(returned_x.dtype() == torch::kInt32);
+    }
+
     // Return values
-    return {packed_recv_x, packed_recv_x_scales, packed_recv_count, packed_recv_src_info, packed_recv_layout_range, event, recv_hook};
+    return {returned_x, packed_recv_x_scales, packed_recv_count, packed_recv_src_info, packed_recv_layout_range, event, recv_hook};
 #else
     EP_HOST_ASSERT(false and "NVSHMEM is disabled during compilation");
     return {};
