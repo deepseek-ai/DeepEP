@@ -1167,9 +1167,16 @@ Buffer::low_latency_dispatch(const torch::Tensor& x, const torch::Tensor& topk_i
         packed_recv_x_scales = torch::transpose(packed_recv_x_scales.value(), 1, 2);
         packed_recv_x_scales_ptr = packed_recv_x_scales->data_ptr();
     }else if (use_nvfp4) {
-        constexpr int SF_VEC_SIZE = 16;
+        constexpr int kNumPerChannels = 16;
         constexpr int NUM_SF_ELEMS_PER_PACK = 4;
-        packed_recv_x_scales = torch::empty({num_local_experts, num_ranks * num_max_dispatch_tokens_per_rank, hidden / (SF_VEC_SIZE * NUM_SF_ELEMS_PER_PACK)},
+        constexpr int mTileSize_dim_0 = 32;
+        constexpr int mTileSize_dim_1 = 4;
+        constexpr int mTileSize = mTileSize_dim_0 * mTileSize_dim_1;
+
+        auto l = num_local_experts;
+        auto m = num_ranks * num_max_dispatch_tokens_per_rank;
+        auto k = hidden / (kNumPerChannels * NUM_SF_ELEMS_PER_PACK);
+        packed_recv_x_scales = torch::empty({l, m, k},
                                             torch::dtype(torch::kInt).device(torch::kCUDA));
         packed_recv_x_scales_ptr = packed_recv_x_scales->data_ptr();
         packed_recv_x_sf_scale = torch::empty({num_local_experts, num_ranks * num_max_dispatch_tokens_per_rank}, torch::dtype(torch::kFloat32).device(torch::kCUDA));
