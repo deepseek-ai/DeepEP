@@ -72,6 +72,9 @@ __forceinline__ __device__ void dispatch_send(
     // (num_local_experts,), all gpus atomic-add on it to get a slice of locations to send data to
     const int* negotiate_offset_of_expert_buffer = TODO;
 
+    // (num_global_experts,), for i-th dst rank, what is the start offset in the remote buffer
+    const int* remote_start_offset_of_dst_rank_buffer = TODO;
+
     // Reserve remote locations
     {
         EP_DEVICE_ASSERT(num_ranks <= num_sms);
@@ -80,9 +83,9 @@ __forceinline__ __device__ void dispatch_send(
         const int dst_expert_local_idx = subroutine_thread_id;
 
         if ((dst_rank < num_ranks) and (dst_expert_local_idx < num_local_experts)) {
-            const auto global_expert_idx = dst_rank * num_local_experts + dst_expert_local_idx;
+            const auto dst_global_expert_idx = dst_rank * num_local_experts + dst_expert_local_idx;
 
-            const int num_tokens_to_send = count_per_expert[global_expert_idx];
+            const int num_tokens_to_send = count_per_expert[dst_global_expert_idx];
 
             // TODO maybe do not need `release` (but yes need `sys`)
             const auto dst_ptr = negotiate_offset_of_expert_buffer;
@@ -91,7 +94,7 @@ __forceinline__ __device__ void dispatch_send(
 
             TODO_store_to_remote_gpu_gmem;
 
-            TODO_store_to_self_gpu_gmem;
+            remote_start_offset_of_dst_rank_buffer[dst_global_expert_idx] = remote_start_offset_of_dst_rank;
         }
     }
 
@@ -132,15 +135,17 @@ __forceinline__ __device__ void dispatch_send(
     ) {
 //         if (subroutine_thread_id % 32 == 0) { printf("[R%d,S%d,T%d] dispatch_send local_expert_idx=%d START \n", rank, sm_id, subroutine_thread_id, local_expert_idx); }
 
-        // TODO can speedup by prefetching, delayed checking, etc
-        int remote_start_offset_of_dst_rank;
-        while ((remote_start_offset_of_dst_rank = TODO(TODO)) == 0);
-
         // TODO do prefetching if needed
         // NOTE ldg is for read-only data cache, if token_idx_and_dst_expert_flat_list is somehow overlapped in the future we should change it
         const auto token_idx_and_dst_expert = __ldg(token_idx_and_dst_expert_flat_list + tefl_idx);
         int token_idx, dst_expert_idx;
         unpack2(token_idx_and_dst_rank, token_idx, dst_expert_idx);
+        const auto dst_rank = dst_expert_idx / num_local_experts;
+
+        // TODO can speedup by prefetching, delayed checking, etc
+        // TODO is this load strong enough?
+        int remote_start_offset_of_dst_rank;
+        while ((remote_start_offset_of_dst_rank = ld_volatile_global(remote_start_offset_of_dst_rank_buffer + dst_rank)) == 0);
 
         // NOTE changed, see "before-after" above
         // for (int token_idx = sm_id; token_idx < num_tokens; token_idx += num_sms) {
