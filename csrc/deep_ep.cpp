@@ -1290,6 +1290,7 @@ Buffer::low_latency_dispatch(bool enable_v2, const torch::Tensor& x, const torch
     if (return_recv_hook)
         recv_hook = [=]() { launcher(LOW_LATENCY_RECV_PHASE); };
 
+    TODO_dim1_wrong;
     const auto dim0 = num_experts;
     const auto dim1 = num_max_dispatch_tokens_per_rank;
     const auto dim2 = num_bytes_per_dispatch_msg;
