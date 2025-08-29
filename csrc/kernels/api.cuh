@@ -153,7 +153,8 @@ void dispatch(bool enable_v2, void* packed_recv_x, void* packed_recv_x_scales,
               void* workspace, int num_device_sms,
               cudaStream_t stream, int phases,
               bool use_nvfp4, uint32_t* dst_signals,
-              uint32_t* count_per_expert, int* token_ids_of_expert, int token_ids_of_expert_stride_0);
+              uint32_t* count_per_expert, int* token_ids_of_expert, int token_ids_of_expert_stride_0,
+              int* remote_start_offset_of_dst_rank_buffer);
 
 void combine(bool enable_v2, void* combined_x,
              void* rdma_recv_x, int* rdma_recv_flag, void* rdma_send_x,
