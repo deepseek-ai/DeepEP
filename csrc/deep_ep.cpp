@@ -1314,7 +1314,7 @@ Buffer::low_latency_dispatch(bool enable_v2, const torch::Tensor& x, const torch
         EP_HOST_ASSERT(returned_x.dim() == 3);
         EP_HOST_ASSERT(returned_x.size(0) == num_local_experts);
         EP_HOST_ASSERT(returned_x.size(1) == num_ranks * num_max_dispatch_tokens_per_rank);
-        EP_HOST_ASSERT(returned_x.size(2) == num_ranks * hidden / 2);
+        EP_HOST_ASSERT(returned_x.size(2) == hidden / 2);
         EP_HOST_ASSERT(returned_x.dtype() == torch::kUInt8);
     }
 
