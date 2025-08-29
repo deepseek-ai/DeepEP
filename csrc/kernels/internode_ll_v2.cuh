@@ -107,7 +107,8 @@ __forceinline__ __device__ void dispatch_send(
             {
                 const auto dst_ptr = layout_range_buffer;
                 const auto dst_p2p_ptr = nvshmemi_get_p2p_ptr(dst_ptr, rank, dst_rank);
-                dst_p2p_ptr[dst_expert_local_idx * num_ranks + rank] = pack2<int, int64_t>(num_tokens_to_send, remote_start_offset_of_dst_rank);
+                const auto val = pack2<int, int64_t>(num_tokens_to_send, remote_start_offset_of_dst_rank);
+                dst_p2p_ptr[dst_expert_local_idx * num_ranks + rank] = -val-1;
             }
 
             // 2. Write metadata to local
@@ -459,6 +460,14 @@ __forceinline__ __device__ void dispatch_recv(
         const auto num_aligned_scales = align<int>(Consts::num_scales, sizeof(float) / sizeof(scale_t));
         const auto recv_x_scales = static_cast<scale_t*>(packed_recv_x_scales) + local_expert_idx * num_ranks * num_max_dispatch_tokens_per_rank * num_aligned_scales;
 
+        int num_recv_tokens, token_start_offset;
+        {
+            int64_t layout;
+            while((layout = TODO(layout_range_buffer + local_expert_idx * num_ranks + src_rank)) == 0);
+            layout = -layout - 1;
+            unpack2(layout, num_recv_tokens, token_start_offset);
+        }
+
         // NOTE no longer have per-expert signals
 //         // Shared between sub-warps in warp groups
 //         __shared__ int shared_num_recv_tokens[kNumMaxWarpGroups], shared_recv_token_begin_idx[kNumMaxWarpGroups];
@@ -491,10 +500,12 @@ __forceinline__ __device__ void dispatch_recv(
         // Copy tokens
         // for (int i = sub_warp_id; i < num_recv_tokens; i += num_warps_per_group) {
         for (
-            int i = cooperate_idx;
-            i < num_recv_tokens;
-            i += num_cooperate_parts
+            int i_raw = cooperate_idx;
+            i_raw < num_recv_tokens;
+            i_raw += num_cooperate_parts
         ) {
+            const int i = i_raw + token_start_offset;
+
             // Copy source info
             const auto src_src_idx = reinterpret_cast<int*>(rdma_recv_x_uint8 + i * Consts::num_bytes_per_msg);
             if (lane_id == 0)
