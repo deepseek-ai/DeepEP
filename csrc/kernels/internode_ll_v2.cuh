@@ -614,14 +614,14 @@ dispatch_v2(void* packed_recv_x, void* packed_recv_x_scales,
     const auto num_send_threads = num_send_warp_groups * num_warps_per_group * 32;
     const auto raw_thread_id = static_cast<int>(threadIdx.x);
 
+    // NOTE Please keep in sync: Config.get_nvl_buffer_size_hint, LowLatencyLayout.constructor, internode_ll_v2
+    //
     // (num_local_experts, num_ranks). written by REMOTE gpus, read by curr gpu.
     // arr[local_expert_idx, src_rank] := the (num_tokens, start_offset) layout information of that src_rank
     // similar to `packed_recv_layout_range`, but written remotely
     int64_t* layout_range_buffer = (int64_t*) rdma_general_signal;
-
     // (num_local_experts,). use by REMOTE gpus. all gpus atomic-add on it to get a slice of locations to send data to
     int* negotiate_offset_of_expert_buffer = (int*) (((uint8_t*)rdma_general_signal) + num_experts * sizeof(int64_t));
-
     if ((sm_id == 0) and (raw_thread_id == 0)) {
         // assert alignment
         EP_DEVICE_ASSERT(((int64_t)layout_range_buffer) % 16 == 0);
