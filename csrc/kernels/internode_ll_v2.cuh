@@ -23,7 +23,8 @@ __forceinline__ __device__ void dispatch_send(
     void* rdma_recv_x, int* rdma_recv_count,
     // void* rdma_x, // NOTE removed
     void* x, const int64_t* topk_idx, // NOTE rm `const` of x
-    int* atomic_counter_per_expert, int* atomic_finish_counter_per_expert,
+    int* atomic_counter_per_expert,
+    // int* atomic_finish_counter_per_expert, // NOTE removed
     int* next_clean, int num_next_clean_int,
     int num_tokens, int num_max_dispatch_tokens_per_rank,
     int num_topk, int num_experts, int rank, int num_ranks,
@@ -59,11 +60,14 @@ __forceinline__ __device__ void dispatch_send(
         for (int i = lane_id; i < num_next_clean_int; i += 32)
             next_clean[i] = 0;
 
-        // Notify before executing `int_p`
-        __syncwarp();
-        #pragma unroll
-        for (int i = lane_id; i < num_experts; i += 32)
-            atomic_add_release_global(atomic_finish_counter_per_expert + i, FINISHED_SUM_TAG);
+        TODO_await_next_clean;
+
+        // not needed in per-token signal approach
+//         // Notify before executing `int_p`
+//         __syncwarp();
+//         #pragma unroll
+//         for (int i = lane_id; i < num_experts; i += 32)
+//             atomic_add_release_global(atomic_finish_counter_per_expert + i, FINISHED_SUM_TAG);
     }
 
     // There are 2 kinds of warps in this part:
@@ -206,9 +210,10 @@ __forceinline__ __device__ void dispatch_send(
                 UNROLLED_WARP_COPY(8, lane_id, Consts::num_int4_per_msg, dst_int4_ptr, src_int4_ptr, ld_nc_global, st_na_global);
             }
 
-            // Increase counter after finishing
-            __syncwarp();
-            lane_id == 0 ? atomic_add_release_global(atomic_finish_counter_per_expert + dst_expert_idx, 1) : 0;
+            // not needed in per-token signal approach
+//             // Increase counter after finishing
+//             __syncwarp();
+//             lane_id == 0 ? atomic_add_release_global(atomic_finish_counter_per_expert + dst_expert_idx, 1) : 0;
         }
 
         // NOTE mv from do-once to do-per-local-expert
@@ -216,53 +221,54 @@ __forceinline__ __device__ void dispatch_send(
         // (seems it is safe, b/c our next step will check gmem?)
         // __syncthreads();
 
-        // NOTE mv from do-once to do-per-local-expert
-        //
-        // NOTE
-        // before: one (sm_id, warp_group_id) = one responsible_expert_idx = send counter to that (dst rank, dst local expert)
-        //         thus use one thread per warp_group
-        // after: reuse the (cooperate_idx, dst_rank) assignment and send counter to that (dsk_rank, const local_expert_idx)
-        //         thus use one thread per SM
-        //
-        // Issue count sends
-        EP_DEBUG_DEVICE_ASSERT(num_sms >= num_ranks);
-        // NOTE changed
-        // if (responsible_expert_idx < num_experts and sub_warp_id == 0 and lane_id == 0) {
-        if ((cooperate_idx == 0) and (lane_id == 0)) {
-            // NOTE changed
-            // const auto dst_rank = responsible_expert_idx / num_local_experts;
-            // const auto dst_expert_local_idx = responsible_expert_idx % num_local_experts;
-            // const auto num_tokens_sent = shared_num_tokens_sent_per_expert[responsible_expert_idx - sm_id * num_warp_groups];
-            const auto dst_expert_local_idx = local_expert_idx;
-            const auto responsible_expert_idx = dst_expert_idx;
-            const int num_tokens_sent = num_tokens_of_dst_expert;
-
-            // Wait local sends issued and send expert counts
-            while (
-                ld_acquire_global(atomic_finish_counter_per_expert + responsible_expert_idx) !=
-                // NOTE changed
-                // FINISHED_SUM_TAG * 2
-                FINISHED_SUM_TAG + num_tokens_sent
-            );
-            auto dst_ptr = reinterpret_cast<uint64_t>(rdma_recv_count + dst_expert_local_idx * num_ranks + rank);
-            auto dst_p2p_ptr = nvshmemi_get_p2p_ptr(dst_ptr, rank, dst_rank);
-            if (dst_p2p_ptr == 0) {
-                nvshmemi_ibgda_amo_nonfetch_add(reinterpret_cast<int*>(dst_ptr), -num_tokens_sent - 1, dst_rank, dst_expert_local_idx);
-            } else {
-                st_release_sys_global(reinterpret_cast<int*>(dst_p2p_ptr), -num_tokens_sent - 1);
-            }
-
-            // Clean workspace for next use
-            atomic_counter_per_expert[responsible_expert_idx] = 0;
-            atomic_finish_counter_per_expert[responsible_expert_idx] = 0;
-
-            // NOTE packed_recv_count zeroing is removed
-            // // Clean `packed_recv_count`
-            // if (dst_rank == 0)
-            //     packed_recv_count[dst_expert_local_idx] = 0;
-        }
-        // TODO what does this do?
-        __syncwarp();
+        // not needed in per-token signal approach
+//         // NOTE mv from do-once to do-per-local-expert
+//         //
+//         // NOTE
+//         // before: one (sm_id, warp_group_id) = one responsible_expert_idx = send counter to that (dst rank, dst local expert)
+//         //         thus use one thread per warp_group
+//         // after: reuse the (cooperate_idx, dst_rank) assignment and send counter to that (dsk_rank, const local_expert_idx)
+//         //         thus use one thread per SM
+//         //
+//         // Issue count sends
+//         EP_DEBUG_DEVICE_ASSERT(num_sms >= num_ranks);
+//         // NOTE changed
+//         // if (responsible_expert_idx < num_experts and sub_warp_id == 0 and lane_id == 0) {
+//         if ((cooperate_idx == 0) and (lane_id == 0)) {
+//             // NOTE changed
+//             // const auto dst_rank = responsible_expert_idx / num_local_experts;
+//             // const auto dst_expert_local_idx = responsible_expert_idx % num_local_experts;
+//             // const auto num_tokens_sent = shared_num_tokens_sent_per_expert[responsible_expert_idx - sm_id * num_warp_groups];
+//             const auto dst_expert_local_idx = local_expert_idx;
+//             const auto responsible_expert_idx = dst_expert_idx;
+//             const int num_tokens_sent = num_tokens_of_dst_expert;
+//
+//             // Wait local sends issued and send expert counts
+//             while (
+//                 ld_acquire_global(atomic_finish_counter_per_expert + responsible_expert_idx) !=
+//                 // NOTE changed
+//                 // FINISHED_SUM_TAG * 2
+//                 FINISHED_SUM_TAG + num_tokens_sent
+//             );
+//             auto dst_ptr = reinterpret_cast<uint64_t>(rdma_recv_count + dst_expert_local_idx * num_ranks + rank);
+//             auto dst_p2p_ptr = nvshmemi_get_p2p_ptr(dst_ptr, rank, dst_rank);
+//             if (dst_p2p_ptr == 0) {
+//                 nvshmemi_ibgda_amo_nonfetch_add(reinterpret_cast<int*>(dst_ptr), -num_tokens_sent - 1, dst_rank, dst_expert_local_idx);
+//             } else {
+//                 st_release_sys_global(reinterpret_cast<int*>(dst_p2p_ptr), -num_tokens_sent - 1);
+//             }
+//
+//             // Clean workspace for next use
+//             atomic_counter_per_expert[responsible_expert_idx] = 0;
+//             atomic_finish_counter_per_expert[responsible_expert_idx] = 0;
+//
+//             // NOTE packed_recv_count zeroing is removed
+//             // // Clean `packed_recv_count`
+//             // if (dst_rank == 0)
+//             //     packed_recv_count[dst_expert_local_idx] = 0;
+//         }
+//         // TODO what does this do?
+//         __syncwarp();
     }
 
 //     if (subroutine_thread_id % 32 == 0) { printf("[R%d,S%d,T%d] dispatch_send END\n", rank, sm_id, subroutine_thread_id); }
