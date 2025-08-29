@@ -208,7 +208,16 @@ __forceinline__ __device__ void dispatch_send(
                 // NOTES: only 2 load iterations for 7K hidden with 8 unrolls
                 const auto* src_int4_ptr = reinterpret_cast<const int4*>(src_ptr);
                 const auto* dst_int4_ptr = reinterpret_cast<int4*>(dst_p2p_ptr);
-                UNROLLED_WARP_COPY(8, lane_id, Consts::num_int4_per_msg, dst_int4_ptr, src_int4_ptr, ld_nc_global, st_na_global);
+
+                // NOTE do *not* send the first int4, which is the signal
+                // UNROLLED_WARP_COPY(8, lane_id, Consts::num_int4_per_msg, dst_int4_ptr, src_int4_ptr, ld_nc_global, st_na_global);
+                UNROLLED_WARP_COPY(
+                    8, lane_id,
+                    Consts::num_int4_per_msg - sizeof(int4),
+                    dst_int4_ptr + 1,
+                    src_int4_ptr + 1,
+                    ld_nc_global, st_na_global
+                );
             }
 
             TODO_send_signal;
