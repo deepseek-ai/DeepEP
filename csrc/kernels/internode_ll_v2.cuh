@@ -76,7 +76,7 @@ __forceinline__ __device__ void dispatch_send(
     // Reserve remote locations
     {
         EP_DEVICE_ASSERT(num_ranks <= num_sms);
-        EP_DEVICE_ASSERT(num_warps * 32 <= num_local_experts);
+        EP_DEVICE_ASSERT(num_local_experts <= num_warps * 32);
         const int dst_rank = sm_id;
         const int dst_expert_local_idx = subroutine_thread_id;
 
