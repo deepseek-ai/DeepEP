@@ -70,21 +70,13 @@ def test_main(num_tokens: int, hidden: int, num_experts: int, num_topk: int,
                                                             x_sf_scale=x_sf_scale,
                                                             async_finish=not return_recv_hook, return_recv_hook=return_recv_hook)
                             hook() if return_recv_hook else event.current_stream_wait()
-                            if dispatch_use_nvfp4:
-                                print(f"rank {rank}, num_times {num_times}, i: {i}, current_x: {current_x}, topk_idx: {topk_idx}, packed_recv_x: {packed_recv_x}")
                         if dispatch_use_fp8:
                             packed_recv_x = (packed_recv_x[0], packed_recv_x[1].contiguous())
                         elif dispatch_use_nvfp4:
-                            recv_x_scale_packed = packed_recv_x[1].clone()
-                            recv_x_scale_view = recv_x_scale_packed.clone()
-                            print(f"rank {rank}, num_times {num_times}, i: {i}, recv_x_scale_packed.shape:{recv_x_scale_packed.shape}, recv_x_scale_packed.dtype: {recv_x_scale_packed.dtype}")
+                            recv_x_scale_view = packed_recv_x[1].clone()
                             recv_x_scale_view = recv_x_scale_view.permute(5, 2, 0, 1, 4, 3)
-                            print(f"rank {rank}, num_times {num_times}, i: {i}, after permute, recv_x_scale_view.shape: {recv_x_scale_view.shape}, recv_x_scale_view.dtype: {recv_x_scale_view.dtype}")
                             recv_x_scale_view = recv_x_scale_view.contiguous().view(torch.int32)
-                            print(f"rank {rank}, num_times {num_times}, i: {i}, after view to change dtype, recv_x_scale_view.shape: {recv_x_scale_view.shape}, recv_x_scale_view.dtype: {recv_x_scale_view.dtype}")
                             recv_x_scale_view = recv_x_scale_view.contiguous().view(num_local_experts, int(num_ranks * num_tokens), hidden // (16 * 4))
-                            print(f"rank {rank}, num_times {num_times}, i: {i}, after view to change shape, recv_x_scale_view.shape: {recv_x_scale_view.shape}, recv_x_scale_view.dtype: {recv_x_scale_view.dtype}")
-                            print(f"rank {rank}, num_times {num_times}, i: {i}, recv_x_scale_packed.shape:{recv_x_scale_packed.shape}, recv_x_scale_packed.dtype: {recv_x_scale_packed.dtype}, recv_x_scale_view.shape: {recv_x_scale_view.shape}, recv_x_scale_view.dtype: {recv_x_scale_view.dtype}, recv_x_scale_view: {recv_x_scale_view}")
                             packed_recv_x = (packed_recv_x[0], recv_x_scale_view, packed_recv_x[2].contiguous())
                         else:
                             packed_recv_x = packed_recv_x
@@ -122,12 +114,9 @@ def test_main(num_tokens: int, hidden: int, num_experts: int, num_topk: int,
                                 recv_x_amin = recv_x[:, :-128].amin(dim=-1)
                                 recv_x_amax = recv_x[:, :-128].amax(dim=-1)
                                 recv_src_info = recv_src_info[:num_valid_tokens]
-                                if dispatch_use_nvfp4:
-                                    print(f"rank {rank}, num_times {num_times}, expert_id: {expert_id}, recv_x: {recv_x}, recv_x_amin:{recv_x_amin}, recv_x_amax:{recv_x_amax}, recv_x[:, -1]: {recv_x[:, -1]}, recv_src_info.view(-1): {recv_src_info.view(-1)}")
                                 assert torch.equal(recv_x_amin, recv_x_amax), f'recv_x_amin: {recv_x_amin}, recv_x_amax: {recv_x_amax}'
                                 diff = calc_diff(recv_x[:, -1], recv_src_info.view(-1))
                                 if dispatch_use_nvfp4:
-                                    print(f"rank {rank}, num_times {num_times}, expert_id: {expert_id}, diff after dispatch: {diff}")
                                     assert diff < 0.007, f"rank {rank}, num_times {num_times}, expert_id: {expert_id}, diff: {diff}"
                                 elif round_scale:
                                     assert diff < 0.007, f"rank {rank}, num_times {num_times}, expert_id: {expert_id}, diff: {diff}"
@@ -156,8 +145,6 @@ def test_main(num_tokens: int, hidden: int, num_experts: int, num_topk: int,
                             hook() if return_recv_hook else event.current_stream_wait()
                             if do_check:
                                 diff = calc_diff(current_x * topk_weights.masked_fill(topk_idx == -1, 0).sum(dim=1).view(-1, 1), combined_x)
-                                if dispatch_use_nvfp4:
-                                    print(f"rank {rank}, num_times {num_times}, diff after combine: {diff}")
                                 assert torch.isnan(combined_x).sum().item() == 0
                                 assert diff < (1 if (dispatch_use_fp8 or dispatch_use_nvfp4) else 1e-5), f'Error: {diff=}, {dispatch_use_fp8=}, {dispatch_use_nvfp4=}, {zero_copy=}'
                                 hash_value ^= hash_tensor(combined_x)
