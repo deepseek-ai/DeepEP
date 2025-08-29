@@ -75,7 +75,11 @@ def test_main(num_tokens: int, hidden: int, num_experts: int, num_topk: int,
                         if dispatch_use_fp8:
                             packed_recv_x = (packed_recv_x[0], packed_recv_x[1].contiguous())
                         elif dispatch_use_nvfp4:
-                            packed_recv_x = (packed_recv_x[0], packed_recv_x[1].contiguous(), packed_recv_x[2].contiguous())
+                            recv_x_scale_packed = packed_recv_x[1].clone().contiguous()
+                            recv_x_scale_view = recv_x_scale_packed.view(torch.int32)
+                            recv_x_scale_view = recv_x_scale_view.reshape(num_local_experts, int(num_ranks * num_tokens), hidden // (16 * 4))
+                            print(f"rank {rank}, num_times {num_times}, i: {i}, recv_x_scale_packed.shape:{recv_x_scale_packed.shape}, recv_x_scale_packed.dtype: {recv_x_scale_packed.dtype}, recv_x_scale_view.shape: {recv_x_scale_view.shape}, recv_x_scale_view.dtype: {recv_x_scale_view.dtype}, recv_x_scale_view: {recv_x_scale_view}")
+                            packed_recv_x = (packed_recv_x[0], recv_x_scale_view, packed_recv_x[2].contiguous())
                         else:
                             packed_recv_x = packed_recv_x
 
@@ -113,7 +117,7 @@ def test_main(num_tokens: int, hidden: int, num_experts: int, num_topk: int,
                                 recv_x_amax = recv_x[:, :-128].amax(dim=-1)
                                 recv_src_info = recv_src_info[:num_valid_tokens]
                                 if dispatch_use_nvfp4:
-                                    print(f"rank {rank}, num_times {num_times}, expert_id: {expert_id}, recv_x: {recv_x}")
+                                    print(f"rank {rank}, num_times {num_times}, expert_id: {expert_id}, recv_x: {recv_x}, recv_x_amin:{recv_x_amin}, recv_x_amax:{recv_x_amax}, recv_x[:, -1]: {recv_x[:, -1]}, recv_src_info.view(-1): {recv_src_info.view(-1)}")
                                 assert torch.equal(recv_x_amin, recv_x_amax), f'recv_x_amin: {recv_x_amin}, recv_x_amax: {recv_x_amax}'
                                 diff = calc_diff(recv_x[:, -1], recv_src_info.view(-1))
                                 if dispatch_use_nvfp4:
