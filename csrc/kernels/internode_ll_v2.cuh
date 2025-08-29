@@ -211,6 +211,8 @@ __forceinline__ __device__ void dispatch_send(
                 const auto* dst_int4_ptr = reinterpret_cast<int4*>(dst_p2p_ptr);
                 UNROLLED_WARP_COPY(8, lane_id, Consts::num_int4_per_msg, dst_int4_ptr, src_int4_ptr, ld_nc_global, st_na_global);
             }
+            
+            TODO_send_signal;
 
             // not needed in per-token signal approach
 //             // Increase counter after finishing
