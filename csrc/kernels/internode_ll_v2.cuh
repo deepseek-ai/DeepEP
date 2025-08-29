@@ -460,14 +460,15 @@ __forceinline__ __device__ void dispatch_recv(
         const auto num_aligned_scales = align<int>(Consts::num_scales, sizeof(float) / sizeof(scale_t));
         const auto recv_x_scales = static_cast<scale_t*>(packed_recv_x_scales) + local_expert_idx * num_ranks * num_max_dispatch_tokens_per_rank * num_aligned_scales;
 
-        TODO_only_run_on_some_threads;
         int num_recv_tokens, token_start_offset;
-        {
+        if (lane_id == 0) {
             int64_t layout;
             while((layout = ld_volatile_global(layout_range_buffer + local_expert_idx * num_ranks + src_rank)) == 0);
             layout = -layout - 1;
             unpack2(layout, num_recv_tokens, token_start_offset);
         }
+        num_recv_tokens = __shfl_sync(0xffffffff, num_recv_tokens, 0);
+        token_start_offset = __shfl_sync(0xffffffff, token_start_offset, 0);
 
         // NOTE no longer have per-expert signals
 //         // Shared between sub-warps in warp groups
