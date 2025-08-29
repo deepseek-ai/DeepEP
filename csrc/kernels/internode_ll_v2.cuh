@@ -382,7 +382,8 @@ __forceinline__ __device__ void dispatch_recv(
     // int* rdma_recv_count, // NOTE removed
     // void* rdma_x, // NOTE removed
     const void* x, const int64_t* topk_idx,
-    int* atomic_counter_per_expert, int* atomic_finish_counter_per_expert,
+    int* atomic_counter_per_expert,
+    // int* atomic_finish_counter_per_expert, // NOTE removed
     int* next_clean, int num_next_clean_int,
     int num_tokens, int num_max_dispatch_tokens_per_rank,
     int num_topk, int num_experts, int rank, int num_ranks,
@@ -598,7 +599,8 @@ dispatch_v2(void* packed_recv_x, void* packed_recv_x_scales,
          int* rdma_general_signal, // NOTE renamed from `rdma_recv_count`
          // void* rdma_x, // NOTE removed
          void* x, const int64_t* topk_idx, // NOTE rm `const` of x
-         int* atomic_counter_per_expert, int* atomic_finish_counter_per_expert,
+         int* atomic_counter_per_expert,
+         // int* atomic_finish_counter_per_expert, // NOTE removed
          int* next_clean, int num_next_clean_int,
          int num_tokens, int num_max_dispatch_tokens_per_rank,
          int num_topk, int num_experts, int rank, int num_ranks,
@@ -642,7 +644,7 @@ dispatch_v2(void* packed_recv_x, void* packed_recv_x_scales,
                 dispatch_wait_recv_cost_stats,
                 rdma_recv_x,
                 x, topk_idx,
-                atomic_counter_per_expert, atomic_finish_counter_per_expert,
+                atomic_counter_per_expert,
                 next_clean, num_next_clean_int,
                 num_tokens, num_max_dispatch_tokens_per_rank,
                 num_topk, num_experts, rank, num_ranks,
@@ -667,7 +669,7 @@ dispatch_v2(void* packed_recv_x, void* packed_recv_x_scales,
                 dispatch_wait_recv_cost_stats,
                 rdma_recv_x,
                 x, topk_idx,
-                atomic_counter_per_expert, atomic_finish_counter_per_expert,
+                atomic_counter_per_expert,
                 next_clean, num_next_clean_int,
                 num_tokens, num_max_dispatch_tokens_per_rank,
                 num_topk, num_experts, rank, num_ranks,
@@ -733,7 +735,7 @@ void dispatch_v2(void* packed_recv_x, void* packed_recv_x_scales,
 
     // Workspace checks
     auto atomic_counter_per_expert = static_cast<int*>(workspace);
-    auto atomic_finish_counter_per_expert = atomic_counter_per_expert + num_experts;
+    // auto atomic_finish_counter_per_expert = atomic_counter_per_expert + num_experts; // NOTE removed
     EP_HOST_ASSERT(num_experts * sizeof(int) * 2 <= NUM_WORKSPACE_BYTES);
 
     // TODO inefficient, may change it
@@ -763,14 +765,14 @@ LAUNCH_KERNEL(&cfg, dispatch_func, \
               rdma_recv_x, \
               rdma_general_signal, \
               x, topk_idx, \
-              atomic_counter_per_expert, atomic_finish_counter_per_expert, \
+              atomic_counter_per_expert, \
               next_clean, num_next_clean_int, \
               num_tokens, num_max_dispatch_tokens_per_rank, \
               num_topk, num_experts, rank, num_ranks, \
               num_send_warp_groups, num_recv_warp_groups, num_warps_per_group, \
               round_scale, phases, \
               dst_signals, \
-              count_per_expert, token_idx_and_dst_expert_flat_list); } break
+              count_per_expert, token_idx_and_dst_expert_flat_list, remote_start_offset_of_dst_rank_buffer); } break
 
     SETUP_LAUNCH_CONFIG(num_sms, num_warps * 32, stream);
     SWITCH_HIDDEN(DISPATCH_LAUNCH_CASE);
