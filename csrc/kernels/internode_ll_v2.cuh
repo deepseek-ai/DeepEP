@@ -60,8 +60,7 @@ __forceinline__ __device__ void dispatch_send(
         for (int i = lane_id; i < num_next_clean_int; i += 32)
             next_clean[i] = 0;
 
-        TODO_await_next_clean;
-
+        // TODO do we really need this? since `next_clean` will be used only in the next round of kernels
         // not needed in per-token signal approach
 //         // Notify before executing `int_p`
 //         __syncwarp();
