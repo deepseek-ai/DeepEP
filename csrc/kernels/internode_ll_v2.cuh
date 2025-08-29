@@ -69,6 +69,9 @@ __forceinline__ __device__ void dispatch_send(
 //             atomic_add_release_global(atomic_finish_counter_per_expert + i, FINISHED_SUM_TAG);
     }
 
+    // (num_local_experts,), all gpus atomic-add on it to get a slice of locations to send data to
+    const int* negotiate_offset_of_expert_buffer = TODO;
+
     // Reserve remote locations
     {
         EP_DEVICE_ASSERT(num_ranks <= num_sms);
