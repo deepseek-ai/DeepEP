@@ -89,6 +89,10 @@ struct Config {
         num_bytes += num_channels * num_rdma_ranks * num_max_rdma_chunked_recv_tokens * kNumMaxTopK * sizeof(float) * 2;
         num_bytes += num_channels * num_rdma_ranks * num_max_rdma_chunked_recv_tokens * kNumMaxScales * sizeof(float) * 2;
         num_bytes += num_channels * num_rdma_ranks * num_max_rdma_chunked_recv_tokens * sizeof(int4) * 2;
+
+        // NOTE add a large number to be safe
+        num_bytes += 1048576;
+
         num_bytes = ((num_bytes + 127) / 128) * 128;
         return num_bytes;
 #else
