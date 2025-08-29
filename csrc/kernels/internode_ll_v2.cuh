@@ -449,8 +449,8 @@ __forceinline__ __device__ void dispatch_recv(
                 local_expert_idx * num_ranks * num_max_dispatch_tokens_per_rank * Consts::num_bytes_per_msg;
                 // this is removed
                 // + src_rank * num_max_dispatch_tokens_per_rank * Consts::num_bytes_per_msg;
-        const auto recv_x_int4 = static_cast<int4*>(packed_recv_x) +
-                local_expert_idx * num_ranks * num_max_dispatch_tokens_per_rank * Consts::hidden_int4;
+//         const auto recv_x_int4 = static_cast<int4*>(packed_recv_x) +
+//                 local_expert_idx * num_ranks * num_max_dispatch_tokens_per_rank * Consts::hidden_int4;
         const auto recv_src_info = packed_recv_src_info + local_expert_idx * num_ranks * num_max_dispatch_tokens_per_rank;
         const auto recv_range = packed_recv_layout_range + local_expert_idx * num_ranks;
         const auto num_aligned_scales = align<int>(Consts::num_scales, sizeof(float) / sizeof(scale_t));
