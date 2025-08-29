@@ -1113,27 +1113,6 @@ Buffer::low_latency_dispatch(bool enable_v2, const torch::Tensor& x, const torch
 #ifndef DISABLE_NVSHMEM
     EP_HOST_ASSERT(low_latency_mode);
 
-    // NOTE ADD
-    if (count_per_expert.has_value()) {
-        EP_HOST_ASSERT(count_per_expert->is_contiguous());
-        EP_HOST_ASSERT(count_per_expert->dim() == 1);
-        EP_HOST_ASSERT(count_per_expert->size(0) == num_experts);
-        EP_HOST_ASSERT(count_per_expert->dtype() == torch::kUInt32);
-    }
-//    if (token_ids_of_expert.has_value()) {
-//        EP_HOST_ASSERT(token_ids_of_expert->is_contiguous());
-//        EP_HOST_ASSERT(token_ids_of_expert->dim() == 2);
-//        EP_HOST_ASSERT(token_ids_of_expert->size(0) == num_experts);
-//        // EP_HOST_ASSERT(token_ids_of_expert->size(1) == ...whatever...);
-//        EP_HOST_ASSERT(token_ids_of_expert->dtype() == torch::kInt32);
-//    }
-    if (token_idx_and_dst_expert_flat_list.has_value()) {
-        EP_HOST_ASSERT(token_idx_and_dst_expert_flat_list->is_contiguous());
-        EP_HOST_ASSERT(token_idx_and_dst_expert_flat_list->dim() == 1);
-        EP_HOST_ASSERT(token_idx_and_dst_expert_flat_list->size(0) == num_tokens * num_topk);
-        EP_HOST_ASSERT(token_idx_and_dst_expert_flat_list->dtype() == torch::kInt64);
-    }
-
     // Tensor checks
     // By default using `ptp128c` FP8 cast
 
@@ -1172,6 +1151,27 @@ Buffer::low_latency_dispatch(bool enable_v2, const torch::Tensor& x, const torch
 
     auto num_topk = static_cast<int>(topk_idx.size(1));
     auto num_local_experts = num_experts / num_ranks;
+
+    // NOTE ADD
+    if (count_per_expert.has_value()) {
+        EP_HOST_ASSERT(count_per_expert->is_contiguous());
+        EP_HOST_ASSERT(count_per_expert->dim() == 1);
+        EP_HOST_ASSERT(count_per_expert->size(0) == num_experts);
+        EP_HOST_ASSERT(count_per_expert->dtype() == torch::kUInt32);
+    }
+//    if (token_ids_of_expert.has_value()) {
+//        EP_HOST_ASSERT(token_ids_of_expert->is_contiguous());
+//        EP_HOST_ASSERT(token_ids_of_expert->dim() == 2);
+//        EP_HOST_ASSERT(token_ids_of_expert->size(0) == num_experts);
+//        // EP_HOST_ASSERT(token_ids_of_expert->size(1) == ...whatever...);
+//        EP_HOST_ASSERT(token_ids_of_expert->dtype() == torch::kInt32);
+//    }
+    if (token_idx_and_dst_expert_flat_list.has_value()) {
+        EP_HOST_ASSERT(token_idx_and_dst_expert_flat_list->is_contiguous());
+        EP_HOST_ASSERT(token_idx_and_dst_expert_flat_list->dim() == 1);
+        EP_HOST_ASSERT(token_idx_and_dst_expert_flat_list->size(0) == num_tokens * num_topk);
+        EP_HOST_ASSERT(token_idx_and_dst_expert_flat_list->dtype() == torch::kInt64);
+    }
 
     // Buffer control
     LowLatencyLayout layout(rdma_buffer_ptr, num_max_dispatch_tokens_per_rank, hidden, num_ranks, num_experts);
@@ -1304,9 +1304,9 @@ Buffer::low_latency_dispatch(bool enable_v2, const torch::Tensor& x, const torch
             {dim1 * dim2, dim2, 1},
             torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA)
         ).index({
-            Slice(),
-            Slice(),
-            Slice(sizeof(int4), sizeof(int4) + hidden / 2)
+            torch::Slice(),
+            torch::Slice(),
+            torch::Slice(sizeof(int4), sizeof(int4) + hidden / 2)
         })
         : packed_recv_x;
     if (enable_v2) {
