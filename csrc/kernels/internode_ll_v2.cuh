@@ -819,11 +819,11 @@ void dispatch_v2(void* packed_recv_x, void* packed_recv_x_scales,
 
     // NOTE temp hack
     if (phases == LOW_LATENCY_SEND_PHASE) {
-        printf("HACK: give all warps to send!\n");
+//         printf("HACK: give all warps to send!\n");
         num_send_warps_per_group = 32;
         num_recv_warps_per_group = 0;
     } else if (phases == LOW_LATENCY_RECV_PHASE) {
-        printf("HACK: give all warps to recv!\n");
+//         printf("HACK: give all warps to recv!\n");
         num_send_warps_per_group = 0;
         num_recv_warps_per_group = 32;
     } else {
