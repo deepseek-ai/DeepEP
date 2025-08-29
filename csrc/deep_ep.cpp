@@ -1224,18 +1224,6 @@ Buffer::low_latency_dispatch(const torch::Tensor& x, const torch::Tensor& topk_i
     std::optional<std::function<void()>> recv_hook = std::nullopt;
     if (return_recv_hook)
         recv_hook = [=]() { launcher(LOW_LATENCY_RECV_PHASE); };
-    // if (not use_fp8 and use_nvfp4) {
-    //     constexpr int kNumPerChannels = 16;
-    //     constexpr int NUM_SF_ELEMS_PER_PACK = 4;
-    //     constexpr int mTileSize_dim_0 = 32;
-    //     constexpr int mTileSize_dim_1 = 4;
-    //     constexpr int mTileSize = mTileSize_dim_0 * mTileSize_dim_1;
-
-    //     auto l = num_local_experts;
-    //     auto m = num_ranks * num_max_dispatch_tokens_per_rank;
-    //     auto rk = hidden / (kNumPerChannels * NUM_SF_ELEMS_PER_PACK);
-    //     packed_recv_x_scales = packed_recv_x_scales.value().contiguous().view(torch::kInt).reshape({l, m, rk});
-    // }
     // Return values
     return {packed_recv_x, packed_recv_x_scales, packed_recv_x_sf_scale, packed_recv_count, packed_recv_src_info, packed_recv_layout_range, event, recv_hook};
 #else

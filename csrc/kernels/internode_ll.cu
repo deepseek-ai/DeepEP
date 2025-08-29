@@ -57,7 +57,7 @@ inline __device__ float reciprocal_approximate_ftz(float a) {
   return b;
 }
 
-// float to e2m1 4bit (sign:1, exp:2, mantissa:1) quantization
+// Convert 1 float value into one e2m1 value (represented as one uint8_t).
 __device__ inline uint8_t float_to_e2m1(float f) {
     // Get sign
     uint8_t sign = (f < 0);
@@ -91,9 +91,9 @@ inline __device__ uint32_t fp32_vec_to_e2m1(float2 (&array)[4]) {
           "f"(array[2].y), "f"(array[3].x), "f"(array[3].y));
     return val;
   #else
-    #if !(defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000))
-        #pragma message("warning: this architecture does not support cvt.rn.satfinite.e2m1x2.f32, use float_to_e2m1 instead.")
-    #endif
+    #pragma message("warning: this architecture does not support " \
+                    "cvt.rn.satfinite.e2m1x2.f32, use user defined " \
+                    "float_to_e2m1 to convert float values to e2m1 values.")
     uint32_t val = 0;
     float* data = reinterpret_cast<float*>(&array[0]);
     for (int i = 0; i < 8; ++i) {
@@ -124,9 +124,9 @@ inline __device__ uint32_t fp32_vec_to_e2m1(float (&array)[8]) {
           "f"(array[6]), "f"(array[7]));
     return val;
   #else
-    #if !(defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000))
-        #pragma message("warning: this architecture does not support cvt.rn.satfinite.e2m1x2.f32, use float_to_e2m1 instead.")
-    #endif
+    #pragma message("warning: this architecture does not support " \
+                    "cvt.rn.satfinite.e2m1x2.f32, use user defined " \
+                    "float_to_e2m1 to convert float values to e2m1 values.")
     uint32_t val = 0;
     float* data = reinterpret_cast<float*>(&array[0]);
     for (int i = 0; i < 8; ++i) {
@@ -542,9 +542,8 @@ dispatch(void* packed_recv_x, void* packed_recv_x_scales, void* packed_recv_x_sf
                     auto scale = extract_required_scale_format<kUseUE8M0>(ld_nc_global(src_scales + lane_id + 32));
                     recv_x_scales[token_idx * token_stride + pack_idx * pack_stride + elem_idx] = scale;
                 }
-            } else if constexpr (kUseNVFP4) {            
-                // Equivalent CuTe layout:
-                //   (num_tokens, (num_packed, num_elems_per_pack)):(num_elems_per_pack, (num_tokens * num_elems_per_pack, 1))
+            } else if constexpr (kUseNVFP4) {  
+                // The physical layout is (l, rm, rk, 32, 4, 4).
                 const auto src_scales = reinterpret_cast<uint8_t*>(reinterpret_cast<uint8_t*>(src_data) + hidden_bytes);
                 const auto num_elems_per_pack = static_cast<int>(sizeof(packed_t) / sizeof(scale_t));
                 const auto token_idx = recv_token_begin_idx + i;
@@ -557,7 +556,6 @@ dispatch(void* packed_recv_x, void* packed_recv_x_scales, void* packed_recv_x_sf
                     const auto pack_idx = j / num_elems_per_pack;
                     const auto elem_idx = j % num_elems_per_pack;
                     auto scale = ld_nc_global(src_scales + j);
-                    // recv_x_scales[token_idx * token_stride + pack_idx * pack_stride + elem_idx] = scale;                   
                     recv_x_scales[rm * token_stride * 128 + pack_idx * pack_stride * 128 + rm_res * pack_stride + elem_idx] = scale;                   
                 }
             }

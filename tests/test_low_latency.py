@@ -73,9 +73,14 @@ def test_main(num_tokens: int, hidden: int, num_experts: int, num_topk: int,
                         if dispatch_use_fp8:
                             packed_recv_x = (packed_recv_x[0], packed_recv_x[1].contiguous())
                         elif dispatch_use_nvfp4:
+                            # For the receved x_scale, its dtype is int8, its physical layout is (l, rm, rk, 32, 4, 4).
+                            # and its logical shape is (32, 4, rm, 4, rk, l).
                             recv_x_scale_view = packed_recv_x[1].clone()
+                            # After permute, the logical shape will be (l, rm, 32, 4, rk, 4).
                             recv_x_scale_view = recv_x_scale_view.permute(5, 2, 0, 1, 4, 3)
+                            # After view, the logical shape will be (l, rm, 32, 4, rk), the dtype is int32.
                             recv_x_scale_view = recv_x_scale_view.contiguous().view(torch.int32)
+                            # After view, the logical shape will be (l, rm * 32 * 4, rk), the dtype is int32.
                             recv_x_scale_view = recv_x_scale_view.contiguous().view(num_local_experts, int(num_ranks * num_tokens), hidden // (16 * 4))
                             packed_recv_x = (packed_recv_x[0], recv_x_scale_view, packed_recv_x[2].contiguous())
                         else:
