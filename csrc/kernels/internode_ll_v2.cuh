@@ -463,7 +463,7 @@ __forceinline__ __device__ void dispatch_recv(
         int num_recv_tokens, token_start_offset;
         {
             int64_t layout;
-            while((layout = TODO(layout_range_buffer + local_expert_idx * num_ranks + src_rank)) == 0);
+            while((layout = ld_volatile_global(layout_range_buffer + local_expert_idx * num_ranks + src_rank)) == 0);
             layout = -layout - 1;
             unpack2(layout, num_recv_tokens, token_start_offset);
         }
