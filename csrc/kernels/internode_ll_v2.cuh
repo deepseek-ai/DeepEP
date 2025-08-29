@@ -221,7 +221,10 @@ __forceinline__ __device__ void dispatch_send(
 
                 // Send per-token signal
                 // NOTE only first 4B of 16B has value, the other 12B is not needed
-                st_release_sys_global(reinterpret_cast<int*>(dst_p2p_ptr), -TODO - 1);
+                __syncwarp();
+                if (lane_id == 0) {
+                    st_release_sys_global(reinterpret_cast<int*>(dst_p2p_ptr), -TODO - 1);
+                }
             }
 
             // not needed in per-token signal approach
