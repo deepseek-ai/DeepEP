@@ -5,6 +5,8 @@
 
 #include "internode_ll_v2_inc.cuh"
 
+constexpr int DST_SIGNAL_EXPECT_VALUE = 1000000;
+
 namespace deep_ep {
 namespace internode_ll {
 
@@ -466,6 +468,10 @@ __forceinline__ __device__ void dispatch_recv(
             while((layout = ld_volatile_global(layout_range_buffer + local_expert_idx * num_ranks + src_rank)) == 0);
             layout = -layout - 1;
             unpack2(layout, num_recv_tokens, token_start_offset);
+
+            if (dst_signals != nullptr) {
+                atomic_add_release_global(dst_signals + local_expert_idx, DST_SIGNAL_EXPECT_VALUE - num_recv_tokens);
+            }
         }
         num_recv_tokens = __shfl_sync(0xffffffff, num_recv_tokens, 0);
         token_start_offset = __shfl_sync(0xffffffff, token_start_offset, 0);
