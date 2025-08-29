@@ -568,12 +568,12 @@ __forceinline__ __device__ void dispatch_recv(
                     recv_x_scales[token_idx * token_stride + pack_idx * pack_stride + elem_idx] = scale;
                 }
             }
-        }
 
-        if (dst_signals != nullptr) {
-            __syncwarp();
-            if (lane_id == 0) {
-                atomic_add_release_global(dst_signals + local_expert_idx, 1);
+            if (dst_signals != nullptr) {
+                __syncwarp();
+                if (lane_id == 0) {
+                    atomic_add_release_global(dst_signals + local_expert_idx, 1);
+                }
             }
         }
     }
