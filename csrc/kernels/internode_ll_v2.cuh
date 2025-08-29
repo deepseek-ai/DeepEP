@@ -617,10 +617,10 @@ dispatch_v2(void* packed_recv_x, void* packed_recv_x_scales,
     // (num_local_experts, num_ranks). written by REMOTE gpus, read by curr gpu.
     // arr[local_expert_idx, src_rank] := the (num_tokens, start_offset) layout information of that src_rank
     // similar to `packed_recv_layout_range`, but written remotely
-    int64_t* layout_range_buffer = TODO;
+    int64_t* layout_range_buffer = (int64_t*) rdma_general_signal;
 
     // (num_local_experts,). use by REMOTE gpus. all gpus atomic-add on it to get a slice of locations to send data to
-    int* negotiate_offset_of_expert_buffer = TODO;
+    int* negotiate_offset_of_expert_buffer = (int*) (((uint8_t*)rdma_general_signal) + TODO);
 
     if ((sm_id == 0) and (raw_thread_id == 0)) {
         // assert alignment
