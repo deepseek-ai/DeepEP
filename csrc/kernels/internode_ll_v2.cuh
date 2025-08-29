@@ -201,7 +201,7 @@ __forceinline__ __device__ void dispatch_send(
                                  slot_idx * Consts::num_bytes_per_msg;
             const auto dst_p2p_ptr = nvshmemi_get_p2p_ptr(dst_ptr, rank, dst_rank);
             if (dst_p2p_ptr == 0) {
-                // NOTE remove to simplify code
+                // NOTE remove to simplify code (and it does not handle signals etc)
                 EP_DEVICE_ASSERT(false);
                 // nvshmemi_ibgda_put_nbi_warp(dst_ptr, src_ptr, Consts::num_bytes_per_msg, dst_rank, dst_expert_local_idx, lane_id, slot_idx);
             } else {
@@ -218,9 +218,11 @@ __forceinline__ __device__ void dispatch_send(
                     src_int4_ptr + 1,
                     ld_nc_global, st_na_global
                 );
-            }
 
-            TODO_send_signal;
+                // Send per-token signal
+                // NOTE only first 4B of 16B has value, the other 12B is not needed
+                st_release_sys_global(reinterpret_cast<int*>(dst_p2p_ptr), -TODO - 1);
+            }
 
             // not needed in per-token signal approach
 //             // Increase counter after finishing
