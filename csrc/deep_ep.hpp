@@ -154,7 +154,7 @@ public:
                          const std::optional<torch::Tensor>& zeroed_tensor_b,
                          bool use_nvfp4,
                          const std::optional<torch::Tensor>& dst_signals,
-                         const std::optional<torch::Tensor>& count_per_expert, const std::optional<torch::Tensor>& token_idx_and_dst_expert_flat_list) {
+                         const std::optional<torch::Tensor>& count_per_expert, const std::optional<torch::Tensor>& token_idx_and_dst_expert_flat_list);
 
     std::tuple<torch::Tensor, std::optional<EventHandle>, std::optional<std::function<void()>>>
     low_latency_combine(bool enable_v2, const torch::Tensor& x, const torch::Tensor& topk_idx, const torch::Tensor& topk_weights,
