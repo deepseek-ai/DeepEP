@@ -550,12 +550,15 @@ dispatch(void* packed_recv_x, void* packed_recv_x_scales, void* packed_recv_x_sf
                 const auto token_idx = recv_token_begin_idx + i;
                 const auto token_stride = num_scales * sizeof(scale_t);
                 const auto pack_stride = num_elems_per_pack;
+                const auto rm = token_idx / 4;
+                const auto rm_res = token_idx % 4;
                 #pragma unroll
                 for (int j = lane_id; j < num_scales; j += 32) {
                     const auto pack_idx = j / num_elems_per_pack;
                     const auto elem_idx = j % num_elems_per_pack;
                     auto scale = ld_nc_global(src_scales + j);
-                    recv_x_scales[token_idx * token_stride + pack_idx * pack_stride + elem_idx] = scale;                   
+                    // recv_x_scales[token_idx * token_stride + pack_idx * pack_stride + elem_idx] = scale;                   
+                    recv_x_scales[rm * token_stride * 4 + pack_idx * pack_stride * 4 + rm_res * pack_stride + elem_idx] = scale;                   
                 }
             }
         }

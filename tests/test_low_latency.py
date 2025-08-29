@@ -76,8 +76,11 @@ def test_main(num_tokens: int, hidden: int, num_experts: int, num_topk: int,
                             packed_recv_x = (packed_recv_x[0], packed_recv_x[1].contiguous())
                         elif dispatch_use_nvfp4:
                             recv_x_scale_packed = packed_recv_x[1].clone().contiguous()
+                            print(f"rank {rank}, num_times {num_times}, i: {i}, recv_x_scale_packed.shape:{recv_x_scale_packed.shape}, recv_x_scale_packed.dtype: {recv_x_scale_packed.dtype}")
                             recv_x_scale_view = recv_x_scale_packed.view(torch.int32)
-                            recv_x_scale_view = recv_x_scale_view.reshape(num_local_experts, int(num_ranks * num_tokens), hidden // (16 * 4))
+                            recv_x_scale_view = recv_x_scale_view.contiguous().view(num_local_experts, int(num_ranks * num_tokens) // 4, hidden // (16 * 4), 4)
+                            recv_x_scale_view = recv_x_scale_view.permute(0, 1, 3, 2)
+                            recv_x_scale_view = recv_x_scale_view.contiguous().view(num_local_experts, int(num_ranks * num_tokens), hidden // (16 * 4))
                             print(f"rank {rank}, num_times {num_times}, i: {i}, recv_x_scale_packed.shape:{recv_x_scale_packed.shape}, recv_x_scale_packed.dtype: {recv_x_scale_packed.dtype}, recv_x_scale_view.shape: {recv_x_scale_view.shape}, recv_x_scale_view.dtype: {recv_x_scale_view.dtype}, recv_x_scale_view: {recv_x_scale_view}")
                             packed_recv_x = (packed_recv_x[0], recv_x_scale_view, packed_recv_x[2].contiguous())
                         else:
