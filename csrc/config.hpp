@@ -164,9 +164,9 @@ struct LowLatencyLayout {
         // NOTE can only increase instead of decrease to be compatible with v1
         // NOTE be careful about alignment
         // size_t dispatch_recv_count_buffer_bytes = num_experts * sizeof(int);
-        size_t dispatch_recv_count_buffer_bytes = num_experts * sizeof(int64_t) + num_local_experts * sizeof(int);
-        size_t combine_recv_flag_buffer_bytes = dispatch_recv_count_buffer_bytes;
-        size_t signaling_buffer_bytes = std::max(dispatch_recv_count_buffer_bytes, combine_recv_flag_buffer_bytes);
+        size_t dispatch_general_signal_buffer_bytes = num_experts * sizeof(int64_t) + num_local_experts * sizeof(int);
+        size_t combine_recv_flag_buffer_bytes = dispatch_general_signal_buffer_bytes;
+        size_t signaling_buffer_bytes = std::max(dispatch_general_signal_buffer_bytes, combine_recv_flag_buffer_bytes);
         size_t signaling_buffer_bytes_aligned = align<size_t>(signaling_buffer_bytes, 128);
         total_bytes += signaling_buffer_bytes_aligned * 2;
 
