@@ -11,6 +11,8 @@
 #include "kernels/configs.cuh"
 #include "kernels/internode_ll_v2_inc.cuh"
 
+constexpr int HIDDEN_DIM = 7168;
+
 namespace deep_ep {
 
 cudaError_t cudaMallocAndZero(void** devPtr, size_t size) {
@@ -1132,8 +1134,6 @@ Buffer::low_latency_dispatch(bool enable_v2, const torch::Tensor& x, const torch
         EP_HOST_ASSERT(token_idx_and_dst_expert_flat_list->dtype() == torch::kInt64);
     }
 
-    constexpr int HIDDEN_DIM = 7168;
-
     // Tensor checks
     // By default using `ptp128c` FP8 cast
 
@@ -1290,9 +1290,10 @@ Buffer::low_latency_dispatch(bool enable_v2, const torch::Tensor& x, const torch
     if (return_recv_hook)
         recv_hook = [=]() { launcher(LOW_LATENCY_RECV_PHASE); };
 
+    using Consts = internode_ll::DispatchConstsTemplate<false, true, HIDDEN_DIM>;
     const auto dim0 = num_local_experts;
     const auto dim1 = num_ranks * num_max_dispatch_tokens_per_rank;
-    const auto dim2 = num_bytes_per_dispatch_msg;
+    const auto dim2 = Consts::num_bytes_per_msg;
     const auto returned_x = enable_v2
         // https://stackoverflow.com/questions/58631466/create-a-torchtensor-from-c-c-array-without-using-from-blob
         // https://docs.pytorch.org/cppdocs/api/function_namespacetorch_1ac009244049812a3efdf4605d19c5e79b.html
