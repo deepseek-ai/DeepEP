@@ -36,7 +36,7 @@ __forceinline__ __device__ void dispatch_send(
     bool round_scale, int phases,
     uint32_t* dst_signals,
     uint32_t* count_per_expert, int64_t* token_idx_and_dst_expert_flat_list,
-    int64_t* layout_range_buffer, int* negotiate_offset_of_expert_buffer, int* remote_start_offset_of_dst_rank_buffer
+    int64_t* layout_range_buffer, int* negotiate_offset_of_expert_buffer, int* remote_start_offset_buffer
 ) {
     using Consts = DispatchConstsTemplate<kUseFP8, kUseNVFP4, kHidden>;
     EP_DEVICE_ASSERT(Consts::num_bytes_per_msg % sizeof(int4) == 0);
@@ -87,11 +87,11 @@ __forceinline__ __device__ void dispatch_send(
 
             // 1. Compete to get a range of locations to set data to
             // TODO maybe do not need `release` (but yes need `sys`)
-            int remote_start_offset_of_dst_rank;
+            int remote_start_offset;
             {
                 const auto dst_ptr = reinterpret_cast<uint64_t>(negotiate_offset_of_expert_buffer);
                 const auto dst_p2p_ptr = reinterpret_cast<int*>(nvshmemi_get_p2p_ptr(dst_ptr, rank, dst_rank));
-                remote_start_offset_of_dst_rank = atomic_add_release_sys_global(dst_p2p_ptr + dst_expert_local_idx, num_tokens_to_send);
+                remote_start_offset = atomic_add_release_sys_global(dst_p2p_ptr + dst_expert_local_idx, num_tokens_to_send);
             }
 
             // 2. Write metadata to remote
@@ -99,13 +99,13 @@ __forceinline__ __device__ void dispatch_send(
             {
                 const auto dst_ptr = reinterpret_cast<uint64_t>(layout_range_buffer);
                 const auto dst_p2p_ptr = reinterpret_cast<int64_t*>(nvshmemi_get_p2p_ptr(dst_ptr, rank, dst_rank));
-                const auto val = pack2<int, int64_t>(num_tokens_to_send, remote_start_offset_of_dst_rank);
+                const auto val = pack2<int, int64_t>(num_tokens_to_send, remote_start_offset);
                 dst_p2p_ptr[dst_expert_local_idx * num_ranks + rank] = -val-1;
             }
 
             // 2. Write metadata to local
             // TODO is this strong enough
-            remote_start_offset_of_dst_rank_buffer[dst_global_expert_idx] = -remote_start_offset_of_dst_rank-1;
+            remote_start_offset_buffer[dst_global_expert_idx] = -remote_start_offset-1;
         }
     }
 
@@ -155,9 +155,9 @@ __forceinline__ __device__ void dispatch_send(
 
         // TODO can speedup by prefetching, delayed checking, etc
         // TODO is this load strong enough?
-        int remote_start_offset_of_dst_rank;
-        while ((remote_start_offset_of_dst_rank = ld_volatile_global(remote_start_offset_of_dst_rank_buffer + dst_expert_local_idx)) == 0);
-        remote_start_offset_of_dst_rank = -remote_start_offset_of_dst_rank - 1;
+        int remote_start_offset;
+        while ((remote_start_offset = ld_volatile_global(remote_start_offset_buffer + dst_expert_local_idx)) == 0);
+        remote_start_offset = -remote_start_offset - 1;
 
         // NOTE changed, see "before-after" above
         // for (int token_idx = sm_id; token_idx < num_tokens; token_idx += num_sms) {
@@ -241,7 +241,7 @@ __forceinline__ __device__ void dispatch_send(
                                  dst_expert_local_idx * num_ranks * num_max_dispatch_tokens_per_rank * Consts::num_bytes_per_msg +
                                  // NOTE modified rm
                                  // rank * num_max_dispatch_tokens_per_rank * Consts::num_bytes_per_msg +
-                                 remote_start_offset_of_dst_rank * Consts::num_bytes_per_msg +
+                                 remote_start_offset * Consts::num_bytes_per_msg +
                                  slot_idx * Consts::num_bytes_per_msg;
             const auto dst_p2p_ptr = nvshmemi_get_p2p_ptr(dst_ptr, rank, dst_rank);
             if (dst_p2p_ptr == 0) {
@@ -396,7 +396,7 @@ __forceinline__ __device__ void dispatch_recv(
     bool round_scale, int phases,
     uint32_t* dst_signals,
     uint32_t* count_per_expert, int64_t* token_idx_and_dst_expert_flat_list,
-    int64_t* layout_range_buffer, int* negotiate_offset_of_expert_buffer, int* remote_start_offset_of_dst_rank_buffer
+    int64_t* layout_range_buffer, int* negotiate_offset_of_expert_buffer, int* remote_start_offset_buffer
 ) {
     using Consts = DispatchConstsTemplate<kUseFP8, kUseNVFP4, kHidden>;
 
@@ -623,7 +623,7 @@ dispatch_v2(void* packed_recv_x, void* packed_recv_x_scales,
          bool round_scale, int phases,
          uint32_t* dst_signals,
          uint32_t* count_per_expert, int64_t* token_idx_and_dst_expert_flat_list,
-         int* remote_start_offset_of_dst_rank_buffer) {
+         int* remote_start_offset_buffer) {
     const auto sm_id = static_cast<int>(blockIdx.x);
     const auto num_send_threads = num_send_warp_groups * num_warps_per_group * 32;
     const auto raw_thread_id = static_cast<int>(threadIdx.x);
@@ -665,7 +665,7 @@ dispatch_v2(void* packed_recv_x, void* packed_recv_x_scales,
                 round_scale, phases,
                 dst_signals,
                 count_per_expert, token_idx_and_dst_expert_flat_list,
-                layout_range_buffer, negotiate_offset_of_expert_buffer, remote_start_offset_of_dst_rank_buffer
+                layout_range_buffer, negotiate_offset_of_expert_buffer, remote_start_offset_buffer
             );
         }
     } else {
@@ -690,7 +690,7 @@ dispatch_v2(void* packed_recv_x, void* packed_recv_x_scales,
                 round_scale, phases,
                 dst_signals,
                 count_per_expert, token_idx_and_dst_expert_flat_list,
-                layout_range_buffer, negotiate_offset_of_expert_buffer, remote_start_offset_of_dst_rank_buffer
+                layout_range_buffer, negotiate_offset_of_expert_buffer, remote_start_offset_buffer
             );
         }
     }
@@ -722,7 +722,7 @@ void dispatch_v2(void* packed_recv_x, void* packed_recv_x_scales,
               cudaStream_t stream, int phases,
               bool use_nvfp4, uint32_t* dst_signals,
               uint32_t* count_per_expert, int64_t* token_idx_and_dst_expert_flat_list,
-              int* remote_start_offset_of_dst_rank_buffer, int* zeroed_buffer_for_atomic_counter_per_expert) {
+              int* remote_start_offset_buffer, int* zeroed_buffer_for_atomic_counter_per_expert) {
     constexpr int kNumMaxTopK = 9;
 
     // NOTE simple renaming
@@ -785,7 +785,7 @@ LAUNCH_KERNEL(&cfg, dispatch_func, \
               num_send_warp_groups, num_recv_warp_groups, num_warps_per_group, \
               round_scale, phases, \
               dst_signals, \
-              count_per_expert, token_idx_and_dst_expert_flat_list, remote_start_offset_of_dst_rank_buffer); } break
+              count_per_expert, token_idx_and_dst_expert_flat_list, remote_start_offset_buffer); } break
 
     SETUP_LAUNCH_CONFIG(num_sms, num_warps * 32, stream);
     SWITCH_HIDDEN(DISPATCH_LAUNCH_CASE);
