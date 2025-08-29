@@ -521,7 +521,7 @@ __forceinline__ __device__ void dispatch_recv(
 
             // Read signal + Copy source info
             if (lane_id == 0) {
-                if (subroutine_thread_id % 32 == 0) { printf("[R%d,S%d,T%d] ld-token-signal START\n", rank, sm_id, subroutine_thread_id); }
+                if (subroutine_thread_id % 32 == 0) { printf("[R%d,S%d,T%d] ld-token-signal START token_idx=%d\n", rank, sm_id, subroutine_thread_id, token_idx); }
 
                 int recv_src_idx;
                 while ((recv_src_idx = ld_acquire_sys_global(src_src_idx)) == 0);
