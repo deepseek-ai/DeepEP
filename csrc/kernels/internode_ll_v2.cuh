@@ -469,7 +469,7 @@ __forceinline__ __device__ void dispatch_recv(
             layout = -layout - 1;
             unpack2(layout, num_recv_tokens, token_start_offset);
 
-            if (dst_signals != nullptr) {
+            if ((dst_signals != nullptr) and TODO) {
                 atomic_add_release_global(dst_signals + local_expert_idx, DST_SIGNAL_EXPECT_VALUE - num_recv_tokens);
             }
         }
