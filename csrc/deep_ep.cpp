@@ -1107,6 +1107,7 @@ Buffer::low_latency_dispatch(bool enable_v2, const torch::Tensor& x, const torch
                              bool async, bool return_recv_hook,
                              const std::optional<torch::Tensor>& zeroed_tensor_a,
                              const std::optional<torch::Tensor>& zeroed_tensor_b,
+                             const std::optional<torch::Tensor>& zeroed_buffer_for_atomic_counter_per_expert,
                              bool use_nvfp4,
                              const std::optional<torch::Tensor>& dst_signals,
                              const std::optional<torch::Tensor>& count_per_expert, const std::optional<torch::Tensor>& token_idx_and_dst_expert_flat_list) {
@@ -1221,6 +1222,16 @@ Buffer::low_latency_dispatch(bool enable_v2, const torch::Tensor& x, const torch
         EP_HOST_ASSERT(((int64_t)remote_start_offset_of_dst_rank_buffer->data_ptr()) % 16 == 0); // alignment
     }
 
+    if (enable_v2) {
+        EP_HOST_ASSERT(zeroed_buffer_for_atomic_counter_per_expert->is_contiguous());
+        EP_HOST_ASSERT(zeroed_buffer_for_atomic_counter_per_expert->dim() == 1);
+        EP_HOST_ASSERT(zeroed_buffer_for_atomic_counter_per_expert->size(0) == num_experts);
+        EP_HOST_ASSERT(zeroed_buffer_for_atomic_counter_per_expert->dtype() == torch::kInt32);
+        EP_HOST_ASSERT(zeroed_buffer_for_atomic_counter_per_expert->device().is_cuda());
+        EP_HOST_ASSERT(zeroed_buffer_for_atomic_counter_per_expert->stride(0) == 1);
+        EP_HOST_ASSERT(((int64_t)zeroed_buffer_for_atomic_counter_per_expert->data_ptr()) % 16 == 0); // alignment
+    }
+
     // Allocate column-majored scales
     auto packed_recv_x_scales = std::optional<torch::Tensor>();
     void* packed_recv_x_scales_ptr = nullptr;
@@ -1271,7 +1282,8 @@ Buffer::low_latency_dispatch(bool enable_v2, const torch::Tensor& x, const torch
                                token_idx_and_dst_expert_flat_list.has_value() ? token_idx_and_dst_expert_flat_list->data_ptr<int64_t>() : nullptr,
 //                               token_ids_of_expert.has_value() ? token_ids_of_expert->data_ptr<int>() : nullptr,
 //                               token_ids_of_expert.has_value() ? token_ids_of_expert->stride(0) : 0,
-                               remote_start_offset_of_dst_rank_buffer.has_value() ? remote_start_offset_of_dst_rank_buffer->data_ptr<int>() : nullptr);
+                               remote_start_offset_of_dst_rank_buffer.has_value() ? remote_start_offset_of_dst_rank_buffer->data_ptr<int>() : nullptr,
+                               zeroed_buffer_for_atomic_counter_per_expert.has_value() ? zeroed_buffer_for_atomic_counter_per_expert->data_ptr<int>() : nullptr);
     };
     launcher(return_recv_hook ? LOW_LATENCY_SEND_PHASE : (LOW_LATENCY_SEND_PHASE | LOW_LATENCY_RECV_PHASE));
 

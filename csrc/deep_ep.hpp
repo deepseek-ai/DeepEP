@@ -152,6 +152,7 @@ public:
                          bool async, bool return_recv_hook,
                          const std::optional<torch::Tensor>& zeroed_tensor_a,
                          const std::optional<torch::Tensor>& zeroed_tensor_b,
+                         const std::optional<torch::Tensor>& zeroed_buffer_for_atomic_counter_per_expert,
                          bool use_nvfp4,
                          const std::optional<torch::Tensor>& dst_signals,
                          const std::optional<torch::Tensor>& count_per_expert, const std::optional<torch::Tensor>& token_idx_and_dst_expert_flat_list);

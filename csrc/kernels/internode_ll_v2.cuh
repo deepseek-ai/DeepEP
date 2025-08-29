@@ -718,7 +718,7 @@ void dispatch_v2(void* packed_recv_x, void* packed_recv_x_scales,
               cudaStream_t stream, int phases,
               bool use_nvfp4, uint32_t* dst_signals,
               uint32_t* count_per_expert, int64_t* token_idx_and_dst_expert_flat_list,
-              int* remote_start_offset_of_dst_rank_buffer) {
+              int* remote_start_offset_of_dst_rank_buffer, int* zeroed_buffer_for_atomic_counter_per_expert) {
     constexpr int kNumMaxTopK = 9;
 
     // NOTE simple renaming
@@ -743,9 +743,9 @@ void dispatch_v2(void* packed_recv_x, void* packed_recv_x_scales,
     EP_HOST_ASSERT(num_topk <= kNumMaxTopK);
 
     // Workspace checks
-    auto atomic_counter_per_expert = static_cast<int*>(workspace);
+    // auto atomic_counter_per_expert = static_cast<int*>(workspace); // NOTE let users pass a zeroed buffer
     // auto atomic_finish_counter_per_expert = atomic_counter_per_expert + num_experts; // NOTE removed
-    EP_HOST_ASSERT(num_experts * sizeof(int) * 2 <= NUM_WORKSPACE_BYTES);
+    // EP_HOST_ASSERT(num_experts * sizeof(int) * 2 <= NUM_WORKSPACE_BYTES);
 
     // TODO inefficient, may change it
     // NOTE add
@@ -774,7 +774,7 @@ LAUNCH_KERNEL(&cfg, dispatch_func, \
               rdma_recv_x, \
               rdma_general_signal, \
               x, topk_idx, \
-              atomic_counter_per_expert, \
+              zeroed_buffer_for_atomic_counter_per_expert, \
               next_clean, num_next_clean_int, \
               num_tokens, num_max_dispatch_tokens_per_rank, \
               num_topk, num_experts, rank, num_ranks, \

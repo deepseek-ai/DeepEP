@@ -531,7 +531,9 @@ class Buffer:
                              use_fp8: bool = True, round_scale: bool = False, use_ue8m0: bool = False,
                              async_finish: bool = False, return_recv_hook: bool = False,
                              enable_v2: bool = False,
-                             zeroed_tensor_a: Optional[torch.Tensor] = None, zeroed_tensor_b: Optional[torch.Tensor] = None,
+                             zeroed_tensor_a: Optional[torch.Tensor] = None,
+                             zeroed_tensor_b: Optional[torch.Tensor] = None,
+                             zeroed_tensor_c: Optional[torch.Tensor] = None,
                              use_nvfp4: bool = False,
                              dst_signals: Optional[torch.Tensor] = None,
                              count_per_expert: Optional[torch.Tensor] = None, token_idx_and_dst_expert_flat_list: Optional[torch.Tensor] = None) -> \
@@ -597,7 +599,7 @@ class Buffer:
                                               num_max_dispatch_tokens_per_rank, num_experts,
                                               use_fp8, round_scale, use_ue8m0,
                                               async_finish, return_recv_hook,
-                                              zeroed_tensor_a, zeroed_tensor_b,
+                                              zeroed_tensor_a, zeroed_tensor_b, zeroed_tensor_c,
                                               use_nvfp4,
                                               dst_signals,
                                               count_per_expert, token_idx_and_dst_expert_flat_list)

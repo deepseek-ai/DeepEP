@@ -353,7 +353,8 @@ void dispatch(bool enable_v2, void* packed_recv_x, void* packed_recv_x_scales,
               cudaStream_t stream, int phases,
               bool use_nvfp4, uint32_t* dst_signals,
               uint32_t* count_per_expert, int64_t* token_idx_and_dst_expert_flat_list,
-              int* remote_start_offset_of_dst_rank_buffer) {
+              int* remote_start_offset_of_dst_rank_buffer,
+              int* zeroed_buffer_for_atomic_counter_per_expert) {
     if (enable_v2) {
         return dispatch_v2(
             packed_recv_x, packed_recv_x_scales,
@@ -372,7 +373,8 @@ void dispatch(bool enable_v2, void* packed_recv_x, void* packed_recv_x_scales,
             stream, phases,
             use_nvfp4, dst_signals,
             count_per_expert, token_idx_and_dst_expert_flat_list,
-            remote_start_offset_of_dst_rank_buffer
+            remote_start_offset_of_dst_rank_buffer,
+            zeroed_buffer_for_atomic_counter_per_expert
         );
     }
 
