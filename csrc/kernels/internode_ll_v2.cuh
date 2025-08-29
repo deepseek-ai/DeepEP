@@ -457,7 +457,7 @@ __forceinline__ __device__ void dispatch_recv(
 //         const auto recv_x_int4 = static_cast<int4*>(packed_recv_x) +
 //                 local_expert_idx * num_ranks * num_max_dispatch_tokens_per_rank * Consts::hidden_int4;
         const auto recv_src_info = packed_recv_src_info + local_expert_idx * num_ranks * num_max_dispatch_tokens_per_rank;
-        // const auto recv_range = packed_recv_layout_range + local_expert_idx * num_ranks;
+        const auto recv_range = packed_recv_layout_range + local_expert_idx * num_ranks;
         const auto num_aligned_scales = align<int>(Consts::num_scales, sizeof(float) / sizeof(scale_t));
         const auto recv_x_scales = static_cast<scale_t*>(packed_recv_x_scales) + local_expert_idx * num_ranks * num_max_dispatch_tokens_per_rank * num_aligned_scales;
 
@@ -469,6 +469,11 @@ __forceinline__ __device__ void dispatch_recv(
             while((layout = ld_volatile_global(layout_range_buffer + local_expert_idx * num_ranks + src_rank)) == 0);
             layout = -layout - 1;
             unpack2(layout, num_recv_tokens, token_start_offset);
+
+            // TODO may not need to do this extra copy
+            if (cooperate_idx == 0) {
+                recv_range[src_rank] = layout;
+            }
 
 //             if (subroutine_thread_id % 32 == 0) { printf("[R%d,S%d,T%d] ld-layout END num_recv_tokens=%d token_start_offset=%d\n", rank, sm_id, subroutine_thread_id, num_recv_tokens, token_start_offset); }
 
