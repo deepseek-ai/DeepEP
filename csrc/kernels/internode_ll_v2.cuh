@@ -36,6 +36,7 @@ __forceinline__ __device__ void dispatch_send(
     bool round_scale, int phases,
     uint32_t* dst_signals,
     uint32_t* count_per_expert, int64_t* token_idx_and_dst_expert_flat_list,
+    int64_t* layout_range_buffer, int* negotiate_offset_of_expert_buffer
 ) {
     using Consts = DispatchConstsTemplate<kUseFP8, kUseNVFP4, kHidden>;
     EP_DEVICE_ASSERT(Consts::num_bytes_per_msg % sizeof(int4) == 0);
@@ -71,14 +72,6 @@ __forceinline__ __device__ void dispatch_send(
 //         for (int i = lane_id; i < num_experts; i += 32)
 //             atomic_add_release_global(atomic_finish_counter_per_expert + i, FINISHED_SUM_TAG);
     }
-
-    // (num_local_experts, num_ranks). written by REMOTE gpus, read by curr gpu.
-    // arr[local_expert_idx, src_rank] := the (num_tokens, start_offset) layout information of that src_rank
-    // similar to `packed_recv_layout_range`, but written remotely
-    const int64_t* layout_range_buffer = TODO;
-
-    // (num_local_experts,). use by REMOTE gpus. all gpus atomic-add on it to get a slice of locations to send data to
-    const int* negotiate_offset_of_expert_buffer = TODO;
 
     // (num_experts,). used in curr gpu. for i-th dst rank, what is the start offset in the remote buffer
     TODO_need_zeroing;
@@ -401,7 +394,8 @@ __forceinline__ __device__ void dispatch_recv(
     int num_warps_per_group,
     bool round_scale, int phases,
     uint32_t* dst_signals,
-    uint32_t* count_per_expert, int* token_ids_of_expert, int token_ids_of_expert_stride_0
+    uint32_t* count_per_expert, int* token_ids_of_expert, int token_ids_of_expert_stride_0,
+    int64_t* layout_range_buffer, int* negotiate_offset_of_expert_buffer
 ) {
     using Consts = DispatchConstsTemplate<kUseFP8, kUseNVFP4, kHidden>;
 
@@ -603,7 +597,7 @@ dispatch_v2(void* packed_recv_x, void* packed_recv_x_scales,
          int* cumulative_local_expert_recv_stats,
          int64_t* dispatch_wait_recv_cost_stats,
          void* rdma_recv_x,
-         // int* rdma_recv_count, // NOTE removed
+         int* rdma_general_signal, // NOTE renamed from `rdma_recv_count`
          // void* rdma_x, // NOTE removed
          void* x, const int64_t* topk_idx, // NOTE rm `const` of x
          int* atomic_counter_per_expert, int* atomic_finish_counter_per_expert,
@@ -618,6 +612,15 @@ dispatch_v2(void* packed_recv_x, void* packed_recv_x_scales,
          uint32_t* count_per_expert, int* token_ids_of_expert, int token_ids_of_expert_stride_0) {
     const auto num_send_threads = num_send_warp_groups * num_warps_per_group * 32;
     const auto raw_thread_id = static_cast<int>(threadIdx.x);
+
+    // (num_local_experts, num_ranks). written by REMOTE gpus, read by curr gpu.
+    // arr[local_expert_idx, src_rank] := the (num_tokens, start_offset) layout information of that src_rank
+    // similar to `packed_recv_layout_range`, but written remotely
+    int64_t* layout_range_buffer = TODO;
+
+    // (num_local_experts,). use by REMOTE gpus. all gpus atomic-add on it to get a slice of locations to send data to
+    int* negotiate_offset_of_expert_buffer = TODO;
+
     if (raw_thread_id < num_send_threads) {
         if (phases & LOW_LATENCY_SEND_PHASE) {
             const auto send_thread_id = raw_thread_id;
@@ -639,7 +642,8 @@ dispatch_v2(void* packed_recv_x, void* packed_recv_x_scales,
                 num_warps_per_group,
                 round_scale, phases,
                 dst_signals,
-                count_per_expert, token_ids_of_expert, token_ids_of_expert_stride_0
+                count_per_expert, token_ids_of_expert, token_ids_of_expert_stride_0,
+                layout_range_buffer, negotiate_offset_of_expert_buffer
             );
         }
     } else {
@@ -663,7 +667,8 @@ dispatch_v2(void* packed_recv_x, void* packed_recv_x_scales,
                 num_warps_per_group,
                 round_scale, phases,
                 dst_signals,
-                count_per_expert, token_ids_of_expert, token_ids_of_expert_stride_0
+                count_per_expert, token_ids_of_expert, token_ids_of_expert_stride_0,
+                layout_range_buffer, negotiate_offset_of_expert_buffer
             );
         }
     }
