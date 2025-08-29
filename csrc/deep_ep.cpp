@@ -1234,7 +1234,7 @@ Buffer::low_latency_dispatch(bool enable_v2, const torch::Tensor& x, const torch
                                packed_recv_count.data_ptr<int>(),
                                cumulative_local_expert_recv_stats.has_value() ? cumulative_local_expert_recv_stats->data_ptr<int>() : nullptr,
                                dispatch_wait_recv_cost_stats.has_value() ? dispatch_wait_recv_cost_stats->data_ptr<int64_t>() : nullptr,
-                               buffer.dispatch_rdma_recv_data_buffer, buffer.dispatch_rdma_recv_count_buffer,
+                               buffer.dispatch_rdma_recv_data_buffer, buffer.dispatch_rdma_general_signal_buffer,
                                buffer.dispatch_rdma_send_buffer,
                                x.data_ptr(), topk_idx.data_ptr<int64_t>(),
                                next_clean_meta.first, next_clean_meta.second,
