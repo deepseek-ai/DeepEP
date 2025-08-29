@@ -151,12 +151,12 @@ __forceinline__ __device__ void dispatch_send(
         const auto token_idx_and_dst_expert = __ldg(token_idx_and_dst_expert_flat_list + tefl_idx);
         int token_idx, dst_expert_idx;
         unpack2(token_idx_and_dst_expert, token_idx, dst_expert_idx);
-        const auto dst_rank = dst_expert_idx / num_local_experts;
+        // const auto dst_rank = dst_expert_idx / num_local_experts;
 
         // TODO can speedup by prefetching, delayed checking, etc
         // TODO is this load strong enough?
         int remote_start_offset_of_dst_rank;
-        while ((remote_start_offset_of_dst_rank = ld_volatile_global(remote_start_offset_of_dst_rank_buffer + dst_rank)) == 0);
+        while ((remote_start_offset_of_dst_rank = ld_volatile_global(remote_start_offset_of_dst_rank_buffer + dst_expert_local_idx)) == 0);
         remote_start_offset_of_dst_rank = -remote_start_offset_of_dst_rank - 1;
 
         // NOTE changed, see "before-after" above
