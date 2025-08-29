@@ -1291,7 +1291,7 @@ Buffer::low_latency_dispatch(bool enable_v2, const torch::Tensor& x, const torch
         recv_hook = [=]() { launcher(LOW_LATENCY_RECV_PHASE); };
 
     const auto returned_x = enable_v2
-        ? TODO
+        ? TODO(buffer.dispatch_rdma_recv_data_buffer)
         : packed_recv_x;
     if (enable_v2) {
         EP_HOST_ASSERT(returned_x.dim() == 3);
