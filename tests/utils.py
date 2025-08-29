@@ -50,8 +50,8 @@ def per_token_cast_to_fp8(x: torch.Tensor):
     x_amax = x_view.abs().float().amax(dim=2).view(m, -1).clamp(1e-4)
     return (x_view * (448.0 / x_amax.unsqueeze(2))).to(torch.float8_e4m3fn).view(m, n), (x_amax / 448.0).view(m, -1)
 
-
-def per_token_cast_back(x_fp8: torch.Tensor, x_scales: torch.Tensor):
+    
+def cast_fp8_to_fp32(x_fp8: torch.Tensor, x_scales: torch.Tensor):
     if x_fp8.numel() == 0:
         return x_fp8.to(torch.bfloat16)
     if x_scales.dtype == torch.int:
@@ -60,6 +60,64 @@ def per_token_cast_back(x_fp8: torch.Tensor, x_scales: torch.Tensor):
     x_fp32 = x_fp8.to(torch.float32).view(x_fp8.size(0), -1, 128)
     x_scales = x_scales.view(x_fp8.size(0), -1, 1)
     return (x_fp32 * x_scales).view(x_fp8.shape).to(torch.bfloat16)
+
+
+def int32_to_8floats_lookup(tensor: torch.Tensor, table: torch.Tensor) -> torch.Tensor:
+    """
+    Decomposes each int32 in the input tensor into 8 4-bit values,
+    and converts them into float values using a lookup table.
+
+    Args:
+        tensor: (int32 Tensor) Tensor of any shape, e.g., [B, N]
+        table: (float Tensor) A 1D lookup table of length 16 that maps all 4-bit values to floats
+
+    Returns:
+        float32 Tensor: Merges the last two dimensions, so shape is [..., n*M], where n is the number of int32 and 8 per int32.
+    """
+    assert tensor.dtype == torch.int32, "Input must be of int32 type"
+    assert table.numel() == 16 and table.ndim == 1, "Lookup table must be 1D with length 16"
+
+    result = []
+    for i in range(8):
+        shift = (7 - i) * 4
+        idx = ((tensor >> shift) & 0xF).long()  # Extract 4-bit index [0, 15]
+        val = table[idx].unsqueeze(-1)  # Lookup and preserve dimensions
+        result.append(val)
+
+    out = torch.cat(result, dim=-1)  # Output shape: [..., 8]
+    # Merge the last two dimensions if shape is [..., M, 8]
+    out = out.reshape(*out.shape[:-2], -1) if out.ndim > 2 else out
+    return out
+
+
+def cast_nvfp4_to_fp32(x_nvfp4: torch.Tensor, x_scales: torch.Tensor, x_sf_scale: float, use_ue8m0_for_nvfp4_sf: bool = False):
+    NVFP4_TABLE = torch.tensor([0, 0.5, 1, 1.5, 2, 3, 4, 6, 0, -0.5, -1.0, -1.5, -2, -3, -4, -6], dtype=torch.float32, device='cuda')    
+    if use_ue8m0_for_nvfp4_sf:
+        x_scales = x_scales.view(dtype=torch.int8).to(torch.int) << 23
+        x_scales = x_scales.view(dtype=torch.float)
+    else:
+        x_scales = x_scales.view(dtype=torch.float8_e4m3fn).to(torch.float32)
+    x_sf_scale = x_sf_scale.view(*x_sf_scale.shape, 1)
+    x_scales = x_scales * (1 / x_sf_scale)
+    
+    x_int32 = x_nvfp4.view(dtype=torch.int32)
+    x_fp32 = int32_to_8floats_lookup(x_int32, NVFP4_TABLE) 
+    
+    x_fp32 = x_fp32.view(*x_fp32.shape[:-1], -1, 16)
+    x_scales = x_scales.view(*x_scales.shape[:-1], -1, 1)
+    x_fp32 = x_fp32 * x_scales
+    x_fp32 = x_fp32.view(*x_nvfp4.shape[:-1], -1).to(torch.bfloat16)
+
+    return x_fp32
+
+
+def per_token_cast_back(x: torch.Tensor, x_scales: torch.Tensor, x_sf_scale: torch.Tensor = None, src_data_format: str = 'fp8', use_ue8m0_for_nvfp4_sf: bool = False):
+    if src_data_format == 'fp8':
+        return cast_fp8_to_fp32(x, x_scales)
+    elif src_data_format == 'nvfp4':
+        return cast_nvfp4_to_fp32(x, x_scales, x_sf_scale, use_ue8m0_for_nvfp4_sf)
+    else:
+        raise ValueError(f"Unsupported src_data_format: {src_data_format}")
 
 
 def inplace_unique(x: torch.Tensor, num_slots: int):
