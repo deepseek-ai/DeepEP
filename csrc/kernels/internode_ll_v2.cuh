@@ -84,6 +84,8 @@ __forceinline__ __device__ void dispatch_send(
             // TODO maybe do not need `release` (but yes need `sys`)
             const int remote_start_offset_of_dst_rank = atomic_add_release_sys_global(TODO + dst_expert_local_idx, num_tokens_to_send);
 
+            TODO_store_to_remote_gpu_gmem;
+
             TODO_store_to_self_gpu_gmem;
         }
     }
