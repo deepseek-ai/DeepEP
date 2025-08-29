@@ -73,7 +73,7 @@ __forceinline__ __device__ void dispatch_send(
     const int* negotiate_offset_of_expert_buffer = TODO;
 
     // (num_local_experts, num_ranks). written by REMOTE gpus, read by curr gpu.
-    // the (start_offset, num_tokens) layout information of that src
+    // arr[local_expert_idx, src_rank] := the (num_tokens, start_offset) layout information of that src_rank
     // similar to `packed_recv_layout_range`, but written remotely
     const int64_t* layout_range_buffer = TODO;
 
@@ -94,11 +94,19 @@ __forceinline__ __device__ void dispatch_send(
             const int num_tokens_to_send = count_per_expert[dst_global_expert_idx];
 
             // TODO maybe do not need `release` (but yes need `sys`)
-            const auto dst_ptr = negotiate_offset_of_expert_buffer;
-            const auto dst_p2p_ptr = nvshmemi_get_p2p_ptr(dst_ptr, rank, dst_rank);
-            const int remote_start_offset_of_dst_rank = atomic_add_release_sys_global(dst_p2p_ptr + dst_expert_local_idx, num_tokens_to_send);
+            int remote_start_offset_of_dst_rank;
+            {
+                const auto dst_ptr = negotiate_offset_of_expert_buffer;
+                const auto dst_p2p_ptr = nvshmemi_get_p2p_ptr(dst_ptr, rank, dst_rank);
+                remote_start_offset_of_dst_rank = atomic_add_release_sys_global(dst_p2p_ptr + dst_expert_local_idx, num_tokens_to_send);
+            }
 
-            TODO_store_to_remote_gpu_gmem;
+            // TODO is this strong enough
+            {
+                const auto dst_ptr = layout_range_buffer;
+                const auto dst_p2p_ptr = nvshmemi_get_p2p_ptr(dst_ptr, rank, dst_rank);
+                dst_p2p_ptr[dst_expert_local_idx * num_ranks + rank] = pack2<int, int64_t>(num_tokens_to_send, remote_start_offset_of_dst_rank);
+            }
 
             // TODO is this strong enough
             remote_start_offset_of_dst_rank_buffer[dst_global_expert_idx] = -remote_start_offset_of_dst_rank-1;
