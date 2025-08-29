@@ -488,7 +488,12 @@ __forceinline__ __device__ void dispatch_recv(
         recv_token_begin_idx = shared_recv_token_begin_idx[warp_group_id];
 
         // Copy tokens
-        for (int i = sub_warp_id; i < num_recv_tokens; i += num_warps_per_group) {
+        // for (int i = sub_warp_id; i < num_recv_tokens; i += num_warps_per_group) {
+        for (
+            int i = cooperate_idx;
+            i < num_recv_tokens;
+            i += num_cooperate_parts
+        ) {
             // Copy source info
             const auto src_src_idx = reinterpret_cast<int*>(rdma_recv_x_uint8 + i * Consts::num_bytes_per_msg);
             if (lane_id == 0)
