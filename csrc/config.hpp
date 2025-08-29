@@ -162,6 +162,7 @@ struct LowLatencyLayout {
 
         // Symmetric signaling buffers
         // NOTE can only increase instead of decrease to be compatible with v1
+        // NOTE be careful about alignment
         // size_t dispatch_recv_count_buffer_bytes = num_experts * sizeof(int);
         size_t dispatch_recv_count_buffer_bytes = num_experts * sizeof(int64_t) + num_local_experts * sizeof(int);
         size_t combine_recv_flag_buffer_bytes = dispatch_recv_count_buffer_bytes;
