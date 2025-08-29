@@ -520,11 +520,12 @@ __forceinline__ __device__ void dispatch_recv(
                 recv_src_info[recv_token_begin_idx + i] = ld_nc_global(src_src_idx);
             __syncwarp();
 
-            // Copy data
-            // NOTES: only 2 load iterations for 7K hidden with 7 unrolls
-            const auto src_data = reinterpret_cast<int4*>(reinterpret_cast<uint8_t*>(src_src_idx) + sizeof(int4));
-            const auto dst_data = recv_x_int4 + (recv_token_begin_idx + i) * Consts::hidden_int4;
-            UNROLLED_WARP_COPY(7, lane_id, Consts::hidden_int4, dst_data, src_data, ld_nc_global, st_na_global);
+            // do not need to copy real data now
+//             // Copy data
+//             // NOTES: only 2 load iterations for 7K hidden with 7 unrolls
+//             const auto src_data = reinterpret_cast<int4*>(reinterpret_cast<uint8_t*>(src_src_idx) + sizeof(int4));
+//             const auto dst_data = recv_x_int4 + (recv_token_begin_idx + i) * Consts::hidden_int4;
+//             UNROLLED_WARP_COPY(7, lane_id, Consts::hidden_int4, dst_data, src_data, ld_nc_global, st_na_global);
 
             // Copy scales
             if constexpr (kUseFP8) {
