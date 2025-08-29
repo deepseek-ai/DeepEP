@@ -741,8 +741,7 @@ void dispatch_v2(void* packed_recv_x, void* packed_recv_x_scales,
 
     // NOTE temporarily reduce num warps per group to avoid workload imbalance in dispatch_send
     // TODO may increase it later e.g. for dispatch_recv
-    const int num_warps_per_group = 8;
-    // const int num_warps_per_group = 32 / num_warp_groups;
+    const int num_warps_per_group = 32 / num_warp_groups;
 
     EP_HOST_ASSERT(num_warp_groups > 0 and num_warps_per_group > 0);
 
