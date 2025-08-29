@@ -161,7 +161,9 @@ struct LowLatencyLayout {
         total_bytes += recv_buffer_bytes * 2;
 
         // Symmetric signaling buffers
-        size_t dispatch_recv_count_buffer_bytes = num_experts * sizeof(int);
+        // NOTE can only increase instead of decrease to be compatible with v1
+        // size_t dispatch_recv_count_buffer_bytes = num_experts * sizeof(int);
+        size_t dispatch_recv_count_buffer_bytes = num_experts * sizeof(int64_t) + num_local_experts * sizeof(int);
         size_t combine_recv_flag_buffer_bytes = dispatch_recv_count_buffer_bytes;
         size_t signaling_buffer_bytes = std::max(dispatch_recv_count_buffer_bytes, combine_recv_flag_buffer_bytes);
         size_t signaling_buffer_bytes_aligned = align<size_t>(signaling_buffer_bytes, 128);
