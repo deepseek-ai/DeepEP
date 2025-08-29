@@ -390,7 +390,7 @@ __forceinline__ __device__ void dispatch_recv(
     int num_warps_per_group,
     bool round_scale, int phases,
     uint32_t* dst_signals,
-    uint32_t* count_per_expert, int* token_ids_of_expert, int token_ids_of_expert_stride_0,
+    uint32_t* count_per_expert, int64_t* token_idx_and_dst_expert_flat_list,
     int64_t* layout_range_buffer, int* negotiate_offset_of_expert_buffer, int* remote_start_offset_of_dst_rank_buffer
 ) {
     using Consts = DispatchConstsTemplate<kUseFP8, kUseNVFP4, kHidden>;
@@ -605,7 +605,7 @@ dispatch_v2(void* packed_recv_x, void* packed_recv_x_scales,
          int num_warps_per_group,
          bool round_scale, int phases,
          uint32_t* dst_signals,
-         uint32_t* count_per_expert, int* token_ids_of_expert, int token_ids_of_expert_stride_0,
+         uint32_t* count_per_expert, int64_t* token_idx_and_dst_expert_flat_list,
          int* remote_start_offset_of_dst_rank_buffer) {
     const auto sm_id = static_cast<int>(blockIdx.x);
     const auto num_send_threads = num_send_warp_groups * num_warps_per_group * 32;
@@ -648,7 +648,7 @@ dispatch_v2(void* packed_recv_x, void* packed_recv_x_scales,
                 num_warps_per_group,
                 round_scale, phases,
                 dst_signals,
-                count_per_expert, token_ids_of_expert, token_ids_of_expert_stride_0,
+                count_per_expert, token_idx_and_dst_expert_flat_list,
                 layout_range_buffer, negotiate_offset_of_expert_buffer, remote_start_offset_of_dst_rank_buffer
             );
         }
@@ -673,7 +673,7 @@ dispatch_v2(void* packed_recv_x, void* packed_recv_x_scales,
                 num_warps_per_group,
                 round_scale, phases,
                 dst_signals,
-                count_per_expert, token_ids_of_expert, token_ids_of_expert_stride_0,
+                count_per_expert, token_idx_and_dst_expert_flat_list,
                 layout_range_buffer, negotiate_offset_of_expert_buffer, remote_start_offset_of_dst_rank_buffer
             );
         }
@@ -705,8 +705,8 @@ void dispatch_v2(void* packed_recv_x, void* packed_recv_x_scales,
               void* workspace, int num_device_sms,
               cudaStream_t stream, int phases,
               bool use_nvfp4, uint32_t* dst_signals,
-              uint32_t* count_per_expert, int* token_ids_of_expert, int token_ids_of_expert_stride_0) {
-    TOOD_args_rm(token_ids_of_expert, token_ids_of_expert_stride_0);
+              uint32_t* count_per_expert, int64_t* token_idx_and_dst_expert_flat_list,
+              int* remote_start_offset_of_dst_rank_buffer) {
     constexpr int kNumMaxTopK = 9;
 
     // NOTE simple renaming
@@ -768,7 +768,7 @@ LAUNCH_KERNEL(&cfg, dispatch_func, \
               num_send_warp_groups, num_recv_warp_groups, num_warps_per_group, \
               round_scale, phases, \
               dst_signals, \
-              count_per_expert, token_ids_of_expert, token_ids_of_expert_stride_0); } break
+              count_per_expert, token_idx_and_dst_expert_flat_list); } break
 
     SETUP_LAUNCH_CONFIG(num_sms, num_warps * 32, stream);
     SWITCH_HIDDEN(DISPATCH_LAUNCH_CASE);

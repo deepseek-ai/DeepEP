@@ -534,7 +534,7 @@ class Buffer:
                              zeroed_tensor_a: Optional[torch.Tensor] = None, zeroed_tensor_b: Optional[torch.Tensor] = None,
                              use_nvfp4: bool = False,
                              dst_signals: Optional[torch.Tensor] = None,
-                             count_per_expert: Optional[torch.Tensor] = None, token_ids_of_expert: Optional[torch.Tensor] = None) -> \
+                             count_per_expert: Optional[torch.Tensor] = None, token_idx_and_dst_expert_flat_list: Optional[torch.Tensor] = None) -> \
             Tuple[Tuple[torch.Tensor, torch.Tensor], torch.Tensor, Tuple, EventOverlap, Callable]:
         """
         A low-latency implementation for dispatching with IBGDA.
@@ -566,9 +566,10 @@ class Buffer:
 
     		count_per_expert: (num_global_experts,)
                 * how many tokens a expert has
-    		token_ids_of_expert: (num_global_experts, max_num_tokens)
-    			* for expert_id-th item, only first `count_per_expert[expert_id]` elements are valid
-    			* means which token ids should be sent in this expert
+    		# token_ids_of_expert: (num_global_experts, max_num_tokens)
+    		# 	* for expert_id-th item, only first `count_per_expert[expert_id]` elements are valid
+    		# 	* means which token ids should be sent in this expert
+    		token_idx_and_dst_expert_flat_list: TODO
 
         Returns:
             recv_x: a tensor or tuple with received tokens for each expert.
@@ -599,7 +600,7 @@ class Buffer:
                                               zeroed_tensor_a, zeroed_tensor_b,
                                               use_nvfp4,
                                               dst_signals,
-                                              count_per_expert, token_ids_of_expert)
+                                              count_per_expert, token_idx_and_dst_expert_flat_list)
         handle = (packed_recv_src_info, packed_recv_layout_range, num_max_dispatch_tokens_per_rank, x.size(1), num_experts)
         tensors_to_record = (x, topk_idx,
                              packed_recv_x, packed_recv_x_scales, packed_recv_count,
