@@ -95,6 +95,7 @@ __forceinline__ __device__ void dispatch_send(
     // NOTE: deliberately be (warp_id, sm_id) instead of (sm_id, warp_id)
     //       to allow work be distributed to all SMs when few work
     // TODO is these ordering suboptimal for nvlink write or gmem read?
+    // TODO may use multi warp to send one token
     const int flat_worker_id = warp_id * num_sms + sm_id;
     const int flat_worker_num = num_warps * num_sms;
     for (
