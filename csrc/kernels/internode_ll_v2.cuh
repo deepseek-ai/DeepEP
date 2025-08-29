@@ -761,6 +761,7 @@ LAUNCH_KERNEL(&cfg, dispatch_func, \
               cumulative_local_expert_recv_stats, \
               dispatch_wait_recv_cost_stats, \
               rdma_recv_x, \
+              rdma_general_signal, \
               x, topk_idx, \
               atomic_counter_per_expert, atomic_finish_counter_per_expert, \
               next_clean, num_next_clean_int, \
