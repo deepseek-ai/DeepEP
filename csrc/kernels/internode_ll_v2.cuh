@@ -459,10 +459,14 @@ __forceinline__ __device__ void dispatch_recv(
 
         int num_recv_tokens, token_start_offset;
         if (lane_id == 0) {
+            if (subroutine_thread_id % 32 == 0) { printf("[R%d,S%d,T%d] ld-layout START\n", rank, sm_id, subroutine_thread_id); }
+
             int64_t layout;
             while((layout = ld_volatile_global(layout_range_buffer + local_expert_idx * num_ranks + src_rank)) == 0);
             layout = -layout - 1;
             unpack2(layout, num_recv_tokens, token_start_offset);
+
+            if (subroutine_thread_id % 32 == 0) { printf("[R%d,S%d,T%d] ld-layout END num_recv_tokens=%d token_start_offset=%d\n", rank, sm_id, subroutine_thread_id, num_recv_tokens, token_start_offset); }
 
             if ((dst_signals != nullptr) and (cooperate_idx == 0)) {
                 atomic_add_release_global(dst_signals + local_expert_idx, DST_SIGNAL_EXPECT_VALUE - num_recv_tokens);
