@@ -82,7 +82,9 @@ __forceinline__ __device__ void dispatch_send(
             const int num_tokens_to_send = count_per_expert[global_expert_idx];
 
             // TODO maybe do not need `release` (but yes need `sys`)
-            const int remote_start_offset_of_dst_rank = atomic_add_release_sys_global(TODO + dst_expert_local_idx, num_tokens_to_send);
+            const auto dst_ptr = TODO;
+            const auto dst_p2p_ptr = nvshmemi_get_p2p_ptr(dst_ptr, rank, dst_rank);
+            const int remote_start_offset_of_dst_rank = atomic_add_release_sys_global(dst_p2p_ptr + dst_expert_local_idx, num_tokens_to_send);
 
             TODO_store_to_remote_gpu_gmem;
 
