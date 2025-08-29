@@ -75,18 +75,15 @@ def test_main(num_tokens: int, hidden: int, num_experts: int, num_topk: int,
                         if dispatch_use_fp8:
                             packed_recv_x = (packed_recv_x[0], packed_recv_x[1].contiguous())
                         elif dispatch_use_nvfp4:
-                            recv_x_scale_packed = packed_recv_x[1].clone().contiguous()
+                            recv_x_scale_packed = packed_recv_x[1].clone()
                             recv_x_scale_view = recv_x_scale_packed.clone()
                             print(f"rank {rank}, num_times {num_times}, i: {i}, recv_x_scale_packed.shape:{recv_x_scale_packed.shape}, recv_x_scale_packed.dtype: {recv_x_scale_packed.dtype}")
-                            recv_x_scale_view = recv_x_scale_view.contiguous().view(num_local_experts, int(num_ranks * num_tokens) // 128, hidden // (16 * 4), 32, 4, 4)
-                            recv_x_scale_view = recv_x_scale_view.permute(3, 4, 1, 5, 2, 0)
-                            print(f"rank {rank}, num_times {num_times}, i: {i}, after first permute, recv_x_scale_view.shape: {recv_x_scale_view.shape}, recv_x_scale_view.dtype: {recv_x_scale_view.dtype}")
                             recv_x_scale_view = recv_x_scale_view.permute(5, 2, 0, 1, 4, 3)
-                            print(f"rank {rank}, num_times {num_times}, i: {i}, after second permute, recv_x_scale_view.shape: {recv_x_scale_view.shape}, recv_x_scale_view.dtype: {recv_x_scale_view.dtype}")
-                            recv_x_scale_view = recv_x_scale_view.view(torch.int32)
-                            print(f"rank {rank}, num_times {num_times}, i: {i}, after view change dtype, recv_x_scale_view.shape: {recv_x_scale_view.shape}, recv_x_scale_view.dtype: {recv_x_scale_view.dtype}")
+                            print(f"rank {rank}, num_times {num_times}, i: {i}, after permute, recv_x_scale_view.shape: {recv_x_scale_view.shape}, recv_x_scale_view.dtype: {recv_x_scale_view.dtype}")
+                            recv_x_scale_view = recv_x_scale_view.contiguous().view(torch.int32)
+                            print(f"rank {rank}, num_times {num_times}, i: {i}, after view to change dtype, recv_x_scale_view.shape: {recv_x_scale_view.shape}, recv_x_scale_view.dtype: {recv_x_scale_view.dtype}")
                             recv_x_scale_view = recv_x_scale_view.contiguous().view(num_local_experts, int(num_ranks * num_tokens), hidden // (16 * 4))
-                            print(f"rank {rank}, num_times {num_times}, i: {i}, after view change shape, recv_x_scale_view.shape: {recv_x_scale_view.shape}, recv_x_scale_view.dtype: {recv_x_scale_view.dtype}")
+                            print(f"rank {rank}, num_times {num_times}, i: {i}, after view to change shape, recv_x_scale_view.shape: {recv_x_scale_view.shape}, recv_x_scale_view.dtype: {recv_x_scale_view.dtype}")
                             print(f"rank {rank}, num_times {num_times}, i: {i}, recv_x_scale_packed.shape:{recv_x_scale_packed.shape}, recv_x_scale_packed.dtype: {recv_x_scale_packed.dtype}, recv_x_scale_view.shape: {recv_x_scale_view.shape}, recv_x_scale_view.dtype: {recv_x_scale_view.dtype}, recv_x_scale_view: {recv_x_scale_view}")
                             packed_recv_x = (packed_recv_x[0], recv_x_scale_view, packed_recv_x[2].contiguous())
                         else:
