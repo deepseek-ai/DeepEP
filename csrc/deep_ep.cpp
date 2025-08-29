@@ -1268,7 +1268,7 @@ Buffer::low_latency_dispatch(bool enable_v2, const torch::Tensor& x, const torch
                                use_nvfp4,
                                dst_signals.has_value() ? dst_signals->data_ptr<uint32_t>() : nullptr,
                                count_per_expert.has_value() ? count_per_expert->data_ptr<uint32_t>() : nullptr,
-                               token_idx_and_dst_expert_flat_list.has_value() ? token_idx_and_dst_expert_flat_list->data_ptr() : nullptr,
+                               token_idx_and_dst_expert_flat_list.has_value() ? token_idx_and_dst_expert_flat_list->data_ptr<int64_t>() : nullptr,
 //                               token_ids_of_expert.has_value() ? token_ids_of_expert->data_ptr<int>() : nullptr,
 //                               token_ids_of_expert.has_value() ? token_ids_of_expert->stride(0) : 0,
                                remote_start_offset_of_dst_rank_buffer.has_value() ? remote_start_offset_of_dst_rank_buffer->data_ptr<int>() : nullptr);
