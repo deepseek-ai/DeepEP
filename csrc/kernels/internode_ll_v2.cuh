@@ -72,7 +72,12 @@ __forceinline__ __device__ void dispatch_send(
     // (num_local_experts,). use by REMOTE gpus. all gpus atomic-add on it to get a slice of locations to send data to
     const int* negotiate_offset_of_expert_buffer = TODO;
 
-    // (num_global_experts,). used in curr gpu. for i-th dst rank, what is the start offset in the remote buffer
+    // (num_local_experts, num_ranks). written by REMOTE gpus, read by curr gpu.
+    // the (start_offset, num_tokens) layout information of that src
+    // similar to `packed_recv_layout_range`, but written remotely
+    const int64_t* layout_range_buffer = TODO;
+
+    // (num_experts,). used in curr gpu. for i-th dst rank, what is the start offset in the remote buffer
     TODO_need_zeroing;
     const int* remote_start_offset_of_dst_rank_buffer = TODO;
 
