@@ -100,6 +100,7 @@ __forceinline__ __device__ void dispatch_send(
 
             TODO_store_to_remote_gpu_gmem;
 
+            // TODO is this strong enough
             remote_start_offset_of_dst_rank_buffer[dst_global_expert_idx] = -remote_start_offset_of_dst_rank-1;
         }
     }
