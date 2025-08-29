@@ -470,9 +470,11 @@ __forceinline__ __device__ void dispatch_recv(
             layout = -layout - 1;
             unpack2(layout, num_recv_tokens, token_start_offset);
 
-            // TODO may not need to do this extra copy
             if (cooperate_idx == 0) {
+                // TODO may not need to do this extra copy - directly use the `layout_range_buffer`
                 recv_range[src_rank] = layout;
+                // TODO may also not need to do this extra copy - directly use the `negotiate_offset_of_expert_buffer`
+                atomicAdd(packed_recv_count + local_expert_idx, num_recv_tokens);
             }
 
 //             if (subroutine_thread_id % 32 == 0) { printf("[R%d,S%d,T%d] ld-layout END num_recv_tokens=%d token_start_offset=%d\n", rank, sm_id, subroutine_thread_id, num_recv_tokens, token_start_offset); }
