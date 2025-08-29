@@ -73,6 +73,7 @@ __forceinline__ __device__ void dispatch_send(
     const int* negotiate_offset_of_expert_buffer = TODO;
 
     // (num_global_experts,). used in curr gpu. for i-th dst rank, what is the start offset in the remote buffer
+    TODO_need_zeroing;
     const int* remote_start_offset_of_dst_rank_buffer = TODO;
 
     // Reserve remote locations
