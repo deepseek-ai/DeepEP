@@ -506,10 +506,10 @@ __forceinline__ __device__ void dispatch_recv(
             i_raw < num_recv_tokens;
             i_raw += num_cooperate_parts
         ) {
-            const int i = i_raw + token_start_offset;
+            const int token_idx = i_raw + token_start_offset;
 
 //             // Copy source info
-            const auto src_src_idx = reinterpret_cast<int*>(rdma_recv_x_uint8 + i * Consts::num_bytes_per_msg);
+            const auto src_src_idx = reinterpret_cast<int*>(rdma_recv_x_uint8 + token_idx * Consts::num_bytes_per_msg);
 //             if (lane_id == 0)
 //                 recv_src_info[recv_token_begin_idx + i] = ld_nc_global(src_src_idx);
 
@@ -522,7 +522,7 @@ __forceinline__ __device__ void dispatch_recv(
                 // cleanup (will be used in the next round)
                 *src_src_idx = 0;
 
-                recv_src_info[recv_token_begin_idx + i] = recv_src_idx;
+                recv_src_info[token_idx] = recv_src_idx;
             }
             __syncwarp();
 
@@ -563,7 +563,7 @@ __forceinline__ __device__ void dispatch_recv(
                 //   (num_tokens, (num_packed, num_elems_per_pack)):(num_elems_per_pack, (num_tokens * num_elems_per_pack, 1))
                 const auto src_scales = reinterpret_cast<uint8_t*>(reinterpret_cast<uint8_t*>(src_data) + Consts::hidden_bytes);
                 const auto num_elems_per_pack = static_cast<int>(sizeof(packed_t) / sizeof(scale_t));
-                const auto token_idx = recv_token_begin_idx + i;
+                // const auto token_idx = recv_token_begin_idx + i;
                 const auto token_stride = num_elems_per_pack;
                 const auto pack_stride = num_ranks * num_max_dispatch_tokens_per_rank * num_elems_per_pack;
                 #pragma unroll
