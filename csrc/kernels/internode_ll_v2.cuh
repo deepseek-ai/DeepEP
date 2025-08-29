@@ -142,7 +142,6 @@ __forceinline__ __device__ void dispatch_send(
         unpack2(token_idx_and_dst_rank, token_idx, dst_expert_idx);
         const auto dst_rank = dst_expert_idx / num_local_experts;
 
-        TODO_this_read_is_inefficient;
         // TODO can speedup by prefetching, delayed checking, etc
         // TODO is this load strong enough?
         int remote_start_offset_of_dst_rank;
