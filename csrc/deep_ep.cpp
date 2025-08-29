@@ -1198,6 +1198,7 @@ Buffer::low_latency_dispatch(bool enable_v2, const torch::Tensor& x, const torch
     EP_HOST_ASSERT(packed_recv_count.dtype() == torch::kInt32);
     EP_HOST_ASSERT(packed_recv_count.device().is_cuda());
     EP_HOST_ASSERT(packed_recv_count.stride(0) == 1);
+    EP_HOST_ASSERT(((int64_t)packed_recv_count.data_ptr()) % 16 == 0); // alignment
 
     // Allocate column-majored scales
     auto packed_recv_x_scales = std::optional<torch::Tensor>();
