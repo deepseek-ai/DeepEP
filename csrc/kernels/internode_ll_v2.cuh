@@ -75,9 +75,14 @@ __forceinline__ __device__ void dispatch_send(
         EP_DEVICE_ASSERT(num_warps * 32 <= num_local_experts);
         const int dst_rank = sm_id;
         const int dst_expert_local_idx = subroutine_thread_id;
+        const auto global_expert_idx = dst_rank * num_local_experts + dst_expert_local_idx;
+
+        const int num_tokens_to_send = count_per_expert[global_expert_idx];
 
         // TODO maybe do not need `release` (but yes need `sys`)
-        atomic_add_release_sys_global(TODO, TODO);
+        const int remote_start_offset_of_dst_rank = atomic_add_release_sys_global(TODO + dst_expert_local_idx, num_tokens_to_send);
+
+        TODO_store_to_self_gpu_gmem;
     }
 
     // There are 2 kinds of warps in this part:
