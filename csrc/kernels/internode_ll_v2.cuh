@@ -813,9 +813,20 @@ void dispatch_v2(void* packed_recv_x, void* packed_recv_x_scales,
 
     // NOTE temporarily reduce num warps per group to avoid workload imbalance in dispatch_send
     // TODO may increase it later e.g. for dispatch_recv
-    const int num_send_warps_per_group = 32 / num_warp_groups;
-    const int num_recv_warps_per_group = num_send_warps_per_group;
+    int num_send_warps_per_group = 32 / num_warp_groups;
+    int num_recv_warps_per_group = num_send_warps_per_group;
     EP_HOST_ASSERT(num_warp_groups > 0 and num_send_warps_per_group > 0 and num_recv_warps_per_group > 0);
+
+    // NOTE temp hack
+    if (phases == LOW_LATENCY_SEND_PHASE) {
+        printf("HACK: give all warps to send!\n");
+        num_send_warps_per_group = 32;
+        num_recv_warps_per_group = 0;
+    } else if (phases == LOW_LATENCY_RECV_PHASE) {
+        printf("HACK: give all warps to recv!\n");
+        num_send_warps_per_group = 0;
+        num_recv_warps_per_group = 32;
+    }
 
     // NOTE no longer need one SM to send all topk destinations
     // EP_HOST_ASSERT(kNumMaxTopK + 1 <= num_warp_groups * num_warps_per_group);
