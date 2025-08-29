@@ -22,7 +22,8 @@ __forceinline__ __device__ void dispatch_send(
     int* packed_recv_count,
     int* cumulative_local_expert_recv_stats,
     int64_t* dispatch_wait_recv_cost_stats,
-    void* rdma_recv_x, int* rdma_recv_count,
+    void* rdma_recv_x,
+    // int* rdma_recv_count, // NOTE removed
     // void* rdma_x, // NOTE removed
     void* x, const int64_t* topk_idx, // NOTE rm `const` of x
     int* atomic_counter_per_expert,
@@ -388,7 +389,8 @@ __forceinline__ __device__ void dispatch_recv(
     int* packed_recv_count,
     int* cumulative_local_expert_recv_stats,
     int64_t* dispatch_wait_recv_cost_stats,
-    void* rdma_recv_x, int* rdma_recv_count,
+    void* rdma_recv_x,
+    // int* rdma_recv_count, // NOTE removed
     // void* rdma_x, // NOTE removed
     const void* x, const int64_t* topk_idx,
     int* atomic_counter_per_expert, int* atomic_finish_counter_per_expert,
@@ -695,6 +697,9 @@ void dispatch_v2(void* packed_recv_x, void* packed_recv_x_scales,
     TOOD_args_rm(token_ids_of_expert, token_ids_of_expert_stride_0);
     constexpr int kNumMaxTopK = 9;
 
+    // NOTE renamed
+    int* rdma_general_signal;
+
     // NOTE MODIFIED
     // const int num_warp_groups = ceil_div(num_experts, num_device_sms);
     const int num_warp_groups = 2;
@@ -742,7 +747,7 @@ LAUNCH_KERNEL(&cfg, dispatch_func, \
               packed_recv_count, \
               cumulative_local_expert_recv_stats, \
               dispatch_wait_recv_cost_stats, \
-              rdma_recv_x, rdma_recv_count, \
+              rdma_recv_x, \
               x, topk_idx, \
               atomic_counter_per_expert, atomic_finish_counter_per_expert, \
               next_clean, num_next_clean_int, \
