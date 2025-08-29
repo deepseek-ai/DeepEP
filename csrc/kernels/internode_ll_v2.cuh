@@ -69,10 +69,10 @@ __forceinline__ __device__ void dispatch_send(
 //             atomic_add_release_global(atomic_finish_counter_per_expert + i, FINISHED_SUM_TAG);
     }
 
-    // (num_local_experts,), all gpus atomic-add on it to get a slice of locations to send data to
+    // (num_local_experts,). use by REMOTE gpus. all gpus atomic-add on it to get a slice of locations to send data to
     const int* negotiate_offset_of_expert_buffer = TODO;
 
-    // (num_global_experts,), for i-th dst rank, what is the start offset in the remote buffer
+    // (num_global_experts,). used in curr gpu. for i-th dst rank, what is the start offset in the remote buffer
     const int* remote_start_offset_of_dst_rank_buffer = TODO;
 
     // Reserve remote locations
