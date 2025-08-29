@@ -31,7 +31,7 @@ __forceinline__ __device__ void dispatch_send(
     int num_warps_per_group,
     bool round_scale, int phases,
     uint32_t* dst_signals,
-    uint32_t* count_per_expert, int* token_ids_of_expert, int token_ids_of_expert_stride_0
+    uint32_t* count_per_expert, int* token_idx_and_dst_rank_flat_list,
 ) {
     using Consts = DispatchConstsTemplate<kUseFP8, kUseNVFP4, kHidden>;
     EP_DEVICE_ASSERT(Consts::num_bytes_per_msg % sizeof(int4) == 0);
@@ -87,19 +87,18 @@ __forceinline__ __device__ void dispatch_send(
     // NOTE
     // before: one SM = one token, one warp = one dst rank of that token, only use first 8 warps of the SM (?)
     // after: flatten all (warp_id, sm_id),
-    //        then reshape to (num_cooperate_parts, num_ranks) grid and get (cooperate_idx, dst_rank),
     //        then one warp = one pseudo_token_idx (i.e. one dst rank of one token)
     //
     // NOTE: deliberately be (warp_id, sm_id) instead of (sm_id, warp_id)
     //       to allow work be distributed to all SMs when few work
     // TODO is these ordering suboptimal for nvlink write or gmem read?
-    const int num_cooperate_parts = num_sms * num_warps / num_ranks;
-    EP_DEVICE_ASSERT(num_sms * num_warps == num_cooperate_parts * num_ranks); // even division
     const int flatten_id = warp_id * num_sms + sm_id;
     const int flatten_num = num_warps * num_sms;
-    const int cooperate_idx = flatten_id / num_ranks;
-    const int dst_rank = flatten_id % num_ranks;
-    for (int local_expert_idx = 0; local_expert_idx < num_local_experts; ++local_expert_idx) {
+    for (
+        int pseudo_token_idx = flatten_id;
+        pseudo_token_idx < num_tokens * num_topk;
+        pseudo_token_idx += flatten_num
+    ) {
 //         if (subroutine_thread_id % 32 == 0) { printf("[R%d,S%d,T%d] dispatch_send local_expert_idx=%d START \n", rank, sm_id, subroutine_thread_id, local_expert_idx); }
 
         const int dst_expert_idx = dst_rank * num_local_experts + local_expert_idx;
@@ -109,36 +108,31 @@ __forceinline__ __device__ void dispatch_send(
 
         // NOTE changed, see "before-after" above
         // for (int token_idx = sm_id; token_idx < num_tokens; token_idx += num_sms) {
-        for (
-            int pseudo_token_idx = cooperate_idx;
-            pseudo_token_idx < num_tokens_of_dst_expert;
-            pseudo_token_idx += num_cooperate_parts
-        ) {
-            // TODO may overlap to optimize
-            int token_idx = token_ids_of_expert[dst_expert_idx * token_ids_of_expert_stride_0 + pseudo_token_idx];
+        // TODO may overlap to optimize
+        int token_idx = token_ids_of_expert[dst_expert_idx * token_ids_of_expert_stride_0 + pseudo_token_idx];
 
-            // const auto x_int4 = static_cast<const int4*>(x) + token_idx * hidden_bf16_int4;
+        // const auto x_int4 = static_cast<const int4*>(x) + token_idx * hidden_bf16_int4;
 
-            // NOTE do not use `rdma_x` but use `x`
-            // const auto rdma_x_src_idx = reinterpret_cast<int*>(static_cast<uint8_t*>(rdma_x) + token_idx * Consts::num_bytes_per_msg);
-            const auto x_src_idx = reinterpret_cast<int*>(reinterpret_cast<uint8_t*>(x) + token_idx * Consts::num_bytes_per_msg);
+        // NOTE do not use `rdma_x` but use `x`
+        // const auto rdma_x_src_idx = reinterpret_cast<int*>(static_cast<uint8_t*>(rdma_x) + token_idx * Consts::num_bytes_per_msg);
+        const auto x_src_idx = reinterpret_cast<int*>(reinterpret_cast<uint8_t*>(x) + token_idx * Consts::num_bytes_per_msg);
 
-            // const auto rdma_x_vec = reinterpret_cast<Consts::vec_t*>(reinterpret_cast<uint8_t*>(rdma_x_src_idx) + sizeof(int4));
-            // const auto rdma_x_scales = reinterpret_cast<Consts::rdma_x_scale_t*>(reinterpret_cast<uint8_t*>(rdma_x_vec) + Consts::hidden_bytes);
+        // const auto rdma_x_vec = reinterpret_cast<Consts::vec_t*>(reinterpret_cast<uint8_t*>(rdma_x_src_idx) + sizeof(int4));
+        // const auto rdma_x_scales = reinterpret_cast<Consts::rdma_x_scale_t*>(reinterpret_cast<uint8_t*>(rdma_x_vec) + Consts::hidden_bytes);
 
-            // Overlap top-k index read and source token index writes
-            // NOTE the parallel strategy is changed
-            // auto dst_expert_idx = warp_id < num_topk ? static_cast<int>(__ldg(topk_idx + token_idx * num_topk + warp_id)) : -1;
+        // Overlap top-k index read and source token index writes
+        // NOTE the parallel strategy is changed
+        // auto dst_expert_idx = warp_id < num_topk ? static_cast<int>(__ldg(topk_idx + token_idx * num_topk + warp_id)) : -1;
 
-            // NOTE (0828) require users to set this value
-            // NOTE do not use `rdma_x` but use `x`
-            // NOTE use lane_id instead of local_thread id
-            // NOTE and the new code will write `x_src_idx` *MULTIPLE* times w/ same value, thus wasting but correct
-            // subroutine_thread_id == 0 ? (*rdma_x_src_idx = token_idx) : 0;
-            // lane_id == 0 ? (*x_src_idx = token_idx) : 0;
+        // NOTE (0828) require users to set this value
+        // NOTE do not use `rdma_x` but use `x`
+        // NOTE use lane_id instead of local_thread id
+        // NOTE and the new code will write `x_src_idx` *MULTIPLE* times w/ same value, thus wasting but correct
+        // subroutine_thread_id == 0 ? (*rdma_x_src_idx = token_idx) : 0;
+        // lane_id == 0 ? (*x_src_idx = token_idx) : 0;
 
-            // NOTE no read or cast in fp4
-            // FP8 cast
+        // NOTE no read or cast in fp4
+        // FP8 cast
 //             EP_STATIC_ASSERT(hidden_bf16_int4 % 32 == 0, "Must use the full warp to reduce");
 //             #pragma unroll
 //             for (int i = subroutine_thread_id; i < hidden_bf16_int4; i += num_threads) {
@@ -178,38 +172,37 @@ __forceinline__ __device__ void dispatch_send(
 //                 }
 //             }
 
-            // NOTE this cannot be removed even if we do not do casting
-            // b/c we need to write to `rdma_x_src_idx`
-            // (but we may optimize it later)
-            // asm volatile("bar.sync 1, %0;" :: "r"(num_threads));
+        // NOTE this cannot be removed even if we do not do casting
+        // b/c we need to write to `rdma_x_src_idx`
+        // (but we may optimize it later)
+        // asm volatile("bar.sync 1, %0;" :: "r"(num_threads));
 
-            // Issue IBGDA sends
-            if (dst_expert_idx >= 0) {
-                int slot_idx = lane_id == 0 ? atomicAdd(atomic_counter_per_expert + dst_expert_idx, 1) : 0;
-                slot_idx = __shfl_sync(0xffffffff, slot_idx, 0);
-                const auto dst_rank = dst_expert_idx / num_local_experts;
-                const auto dst_expert_local_idx = dst_expert_idx % num_local_experts;
-                // NOTE do not use `rdma_x` but use `x`
-                // const auto src_ptr = reinterpret_cast<uint64_t>(rdma_x_src_idx);
-                const auto src_ptr = reinterpret_cast<uint64_t>(x_src_idx);
-                const auto dst_ptr = reinterpret_cast<uint64_t>(rdma_recv_x) +
-                                     dst_expert_local_idx * num_ranks * num_max_dispatch_tokens_per_rank * Consts::num_bytes_per_msg +
-                                     rank * num_max_dispatch_tokens_per_rank * Consts::num_bytes_per_msg +
-                                     slot_idx * Consts::num_bytes_per_msg;
-                const auto dst_p2p_ptr = nvshmemi_get_p2p_ptr(dst_ptr, rank, dst_rank);
-                if (dst_p2p_ptr == 0) {
-                    nvshmemi_ibgda_put_nbi_warp(dst_ptr, src_ptr, Consts::num_bytes_per_msg, dst_rank, dst_expert_local_idx, lane_id, slot_idx);
-                } else {
-                    // NOTES: only 2 load iterations for 7K hidden with 8 unrolls
-                    const auto* src_int4_ptr = reinterpret_cast<const int4*>(src_ptr);
-                    const auto* dst_int4_ptr = reinterpret_cast<int4*>(dst_p2p_ptr);
-                    UNROLLED_WARP_COPY(8, lane_id, Consts::num_int4_per_msg, dst_int4_ptr, src_int4_ptr, ld_nc_global, st_na_global);
-                }
-
-                // Increase counter after finishing
-                __syncwarp();
-                lane_id == 0 ? atomic_add_release_global(atomic_finish_counter_per_expert + dst_expert_idx, 1) : 0;
+        // Issue IBGDA sends
+        if (dst_expert_idx >= 0) {
+            int slot_idx = lane_id == 0 ? atomicAdd(atomic_counter_per_expert + dst_expert_idx, 1) : 0;
+            slot_idx = __shfl_sync(0xffffffff, slot_idx, 0);
+            const auto dst_rank = dst_expert_idx / num_local_experts;
+            const auto dst_expert_local_idx = dst_expert_idx % num_local_experts;
+            // NOTE do not use `rdma_x` but use `x`
+            // const auto src_ptr = reinterpret_cast<uint64_t>(rdma_x_src_idx);
+            const auto src_ptr = reinterpret_cast<uint64_t>(x_src_idx);
+            const auto dst_ptr = reinterpret_cast<uint64_t>(rdma_recv_x) +
+                                 dst_expert_local_idx * num_ranks * num_max_dispatch_tokens_per_rank * Consts::num_bytes_per_msg +
+                                 rank * num_max_dispatch_tokens_per_rank * Consts::num_bytes_per_msg +
+                                 slot_idx * Consts::num_bytes_per_msg;
+            const auto dst_p2p_ptr = nvshmemi_get_p2p_ptr(dst_ptr, rank, dst_rank);
+            if (dst_p2p_ptr == 0) {
+                nvshmemi_ibgda_put_nbi_warp(dst_ptr, src_ptr, Consts::num_bytes_per_msg, dst_rank, dst_expert_local_idx, lane_id, slot_idx);
+            } else {
+                // NOTES: only 2 load iterations for 7K hidden with 8 unrolls
+                const auto* src_int4_ptr = reinterpret_cast<const int4*>(src_ptr);
+                const auto* dst_int4_ptr = reinterpret_cast<int4*>(dst_p2p_ptr);
+                UNROLLED_WARP_COPY(8, lane_id, Consts::num_int4_per_msg, dst_int4_ptr, src_int4_ptr, ld_nc_global, st_na_global);
             }
+
+            // Increase counter after finishing
+            __syncwarp();
+            lane_id == 0 ? atomic_add_release_global(atomic_finish_counter_per_expert + dst_expert_idx, 1) : 0;
         }
 
         // NOTE mv from do-once to do-per-local-expert
@@ -578,6 +571,7 @@ void dispatch_v2(void* packed_recv_x, void* packed_recv_x_scales,
               cudaStream_t stream, int phases,
               bool use_nvfp4, uint32_t* dst_signals,
               uint32_t* count_per_expert, int* token_ids_of_expert, int token_ids_of_expert_stride_0) {
+    TOOD_args_rm(token_ids_of_expert, token_ids_of_expert_stride_0);
     constexpr int kNumMaxTopK = 9;
 
     // NOTE MODIFIED
