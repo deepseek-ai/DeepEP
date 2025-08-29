@@ -188,7 +188,9 @@ __forceinline__ __device__ void dispatch_send(
             const auto src_ptr = reinterpret_cast<uint64_t>(x_src_idx);
             const auto dst_ptr = reinterpret_cast<uint64_t>(rdma_recv_x) +
                                  dst_expert_local_idx * num_ranks * num_max_dispatch_tokens_per_rank * Consts::num_bytes_per_msg +
-                                 rank * num_max_dispatch_tokens_per_rank * Consts::num_bytes_per_msg +
+                                 // NOTE modified
+                                 // rank * num_max_dispatch_tokens_per_rank * Consts::num_bytes_per_msg +
+                                 TODO * Consts::num_bytes_per_msg +
                                  slot_idx * Consts::num_bytes_per_msg;
             const auto dst_p2p_ptr = nvshmemi_get_p2p_ptr(dst_ptr, rank, dst_rank);
             if (dst_p2p_ptr == 0) {
