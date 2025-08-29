@@ -267,9 +267,9 @@ __forceinline__ __device__ void dispatch_send(
                 // NOTE only first 4B of 16B has value, the other 12B is not needed
                 __syncwarp();
                 if (lane_id == 0) {
-                    if (subroutine_thread_id % 32 == 0) { printf("[R%d,S%d,T%d] st-token-signal START dst_rank=%d addr=%p delta_addr=%d token_idx=%d\n",
-                        rank, sm_id, subroutine_thread_id,
-                        dst_rank, (int*)dst_ptr, (int)((int64_t)dst_ptr - (int64_t)rdma_recv_x), token_idx); }
+//                     if (subroutine_thread_id % 32 == 0) { printf("[R%d,S%d,T%d] st-token-signal START dst_rank=%d addr=%p delta_addr=%d token_idx=%d\n",
+//                         rank, sm_id, subroutine_thread_id,
+//                         dst_rank, (int*)dst_ptr, (int)((int64_t)dst_ptr - (int64_t)rdma_recv_x), token_idx); }
 
                     st_release_sys_global(reinterpret_cast<int*>(dst_p2p_ptr), -token_idx - 1);
                 }
@@ -443,7 +443,7 @@ __forceinline__ __device__ void dispatch_recv(
     // if (responsible_expert_idx < num_experts) {
     EP_DEVICE_ASSERT(num_warp_groups == 1); // not consider multi warp_group case below
     for (int local_expert_idx = 0; local_expert_idx < num_local_experts; ++local_expert_idx) {
-        if (subroutine_thread_id % 32 == 0) { printf("[R%d,S%d,T%d] dispatch_recv local_expert_idx=%d START \n", rank, sm_id, subroutine_thread_id, local_expert_idx); }
+//         if (subroutine_thread_id % 32 == 0) { printf("[R%d,S%d,T%d] dispatch_recv local_expert_idx=%d START \n", rank, sm_id, subroutine_thread_id, local_expert_idx); }
 
         // NOTE modified
         // const auto src_rank = responsible_expert_idx / num_local_experts;
@@ -463,14 +463,14 @@ __forceinline__ __device__ void dispatch_recv(
 
         int num_recv_tokens, token_start_offset;
         if (lane_id == 0) {
-            if (subroutine_thread_id % 32 == 0) { printf("[R%d,S%d,T%d] ld-layout START\n", rank, sm_id, subroutine_thread_id); }
+//             if (subroutine_thread_id % 32 == 0) { printf("[R%d,S%d,T%d] ld-layout START\n", rank, sm_id, subroutine_thread_id); }
 
             int64_t layout;
             while((layout = ld_volatile_global(layout_range_buffer + local_expert_idx * num_ranks + src_rank)) == 0);
             layout = -layout - 1;
             unpack2(layout, num_recv_tokens, token_start_offset);
 
-            if (subroutine_thread_id % 32 == 0) { printf("[R%d,S%d,T%d] ld-layout END num_recv_tokens=%d token_start_offset=%d\n", rank, sm_id, subroutine_thread_id, num_recv_tokens, token_start_offset); }
+//             if (subroutine_thread_id % 32 == 0) { printf("[R%d,S%d,T%d] ld-layout END num_recv_tokens=%d token_start_offset=%d\n", rank, sm_id, subroutine_thread_id, num_recv_tokens, token_start_offset); }
 
             if ((dst_signals != nullptr) and (cooperate_idx == 0)) {
                 atomic_add_release_global(dst_signals + local_expert_idx, DST_SIGNAL_EXPECT_VALUE - num_recv_tokens);
@@ -524,14 +524,14 @@ __forceinline__ __device__ void dispatch_recv(
 
             // Read signal + Copy source info
             if (lane_id == 0) {
-                if (subroutine_thread_id % 32 == 0) { printf("[R%d,S%d,T%d] ld-token-signal START addr=%p delta_addr=%d token_idx=%d\n",
-                    rank, sm_id, subroutine_thread_id, src_src_idx, (int)((int64_t)src_src_idx - (int64_t)rdma_recv_x), token_idx); }
+//                 if (subroutine_thread_id % 32 == 0) { printf("[R%d,S%d,T%d] ld-token-signal START addr=%p delta_addr=%d token_idx=%d\n",
+//                     rank, sm_id, subroutine_thread_id, src_src_idx, (int)((int64_t)src_src_idx - (int64_t)rdma_recv_x), token_idx); }
 
                 int recv_src_idx;
                 while ((recv_src_idx = ld_acquire_sys_global(src_src_idx)) == 0);
                 recv_src_idx = -recv_src_idx-1;
 
-                if (subroutine_thread_id % 32 == 0) { printf("[R%d,S%d,T%d] ld-token-signal END recv_src_idx=%d\n", rank, sm_id, subroutine_thread_id, recv_src_idx); }
+//                 if (subroutine_thread_id % 32 == 0) { printf("[R%d,S%d,T%d] ld-token-signal END recv_src_idx=%d\n", rank, sm_id, subroutine_thread_id, recv_src_idx); }
 
                 // cleanup (will be used in the next round)
                 *src_src_idx = 0;
@@ -598,7 +598,7 @@ __forceinline__ __device__ void dispatch_recv(
         }
     }
 
-    if (subroutine_thread_id % 32 == 0) { printf("[R%d,S%d,T%d] dispatch_recv END\n", rank, sm_id, subroutine_thread_id); }
+//     if (subroutine_thread_id % 32 == 0) { printf("[R%d,S%d,T%d] dispatch_recv END\n", rank, sm_id, subroutine_thread_id); }
 }
 
 template <bool kUseFP8, bool kUseUE8M0, bool kUseNVFP4, int kHidden>
