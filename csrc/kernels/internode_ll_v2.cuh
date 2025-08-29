@@ -36,7 +36,7 @@ __forceinline__ __device__ void dispatch_send(
     bool round_scale, int phases,
     uint32_t* dst_signals,
     uint32_t* count_per_expert, int64_t* token_idx_and_dst_expert_flat_list,
-    int64_t* layout_range_buffer, int* negotiate_offset_of_expert_buffer
+    int64_t* layout_range_buffer, int* negotiate_offset_of_expert_buffer, int* remote_start_offset_of_dst_rank_buffer
 ) {
     using Consts = DispatchConstsTemplate<kUseFP8, kUseNVFP4, kHidden>;
     EP_DEVICE_ASSERT(Consts::num_bytes_per_msg % sizeof(int4) == 0);
@@ -72,10 +72,6 @@ __forceinline__ __device__ void dispatch_send(
 //         for (int i = lane_id; i < num_experts; i += 32)
 //             atomic_add_release_global(atomic_finish_counter_per_expert + i, FINISHED_SUM_TAG);
     }
-
-    // (num_experts,). used in curr gpu. for i-th dst rank, what is the start offset in the remote buffer
-    TODO_need_zeroing;
-    const int* remote_start_offset_of_dst_rank_buffer = TODO;
 
     // Reserve remote locations
     {
@@ -395,7 +391,7 @@ __forceinline__ __device__ void dispatch_recv(
     bool round_scale, int phases,
     uint32_t* dst_signals,
     uint32_t* count_per_expert, int* token_ids_of_expert, int token_ids_of_expert_stride_0,
-    int64_t* layout_range_buffer, int* negotiate_offset_of_expert_buffer
+    int64_t* layout_range_buffer, int* negotiate_offset_of_expert_buffer, int* remote_start_offset_of_dst_rank_buffer
 ) {
     using Consts = DispatchConstsTemplate<kUseFP8, kUseNVFP4, kHidden>;
 
@@ -609,7 +605,8 @@ dispatch_v2(void* packed_recv_x, void* packed_recv_x_scales,
          int num_warps_per_group,
          bool round_scale, int phases,
          uint32_t* dst_signals,
-         uint32_t* count_per_expert, int* token_ids_of_expert, int token_ids_of_expert_stride_0) {
+         uint32_t* count_per_expert, int* token_ids_of_expert, int token_ids_of_expert_stride_0,
+         int* remote_start_offset_of_dst_rank_buffer) {
     const auto sm_id = static_cast<int>(blockIdx.x);
     const auto num_send_threads = num_send_warp_groups * num_warps_per_group * 32;
     const auto raw_thread_id = static_cast<int>(threadIdx.x);
@@ -652,7 +649,7 @@ dispatch_v2(void* packed_recv_x, void* packed_recv_x_scales,
                 round_scale, phases,
                 dst_signals,
                 count_per_expert, token_ids_of_expert, token_ids_of_expert_stride_0,
-                layout_range_buffer, negotiate_offset_of_expert_buffer
+                layout_range_buffer, negotiate_offset_of_expert_buffer, remote_start_offset_of_dst_rank_buffer
             );
         }
     } else {
@@ -677,7 +674,7 @@ dispatch_v2(void* packed_recv_x, void* packed_recv_x_scales,
                 round_scale, phases,
                 dst_signals,
                 count_per_expert, token_ids_of_expert, token_ids_of_expert_stride_0,
-                layout_range_buffer, negotiate_offset_of_expert_buffer
+                layout_range_buffer, negotiate_offset_of_expert_buffer, remote_start_offset_of_dst_rank_buffer
             );
         }
     }
