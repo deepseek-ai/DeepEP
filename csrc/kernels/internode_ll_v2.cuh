@@ -36,7 +36,8 @@ __forceinline__ __device__ void dispatch_send(
     bool round_scale, int phases,
     uint32_t* dst_signals,
     uint32_t* count_per_expert, int64_t* token_idx_and_dst_expert_flat_list,
-    int64_t* layout_range_buffer, int* negotiate_offset_of_expert_buffer, int* remote_start_offset_buffer
+    int64_t* layout_range_buffer, int* negotiate_offset_of_expert_buffer, int* remote_start_offset_buffer,
+    int* debug_tensor
 ) {
     using Consts = DispatchConstsTemplate<kUseFP8, kUseNVFP4, kHidden>;
     EP_DEVICE_ASSERT(Consts::num_bytes_per_msg % sizeof(int4) == 0);
@@ -396,7 +397,8 @@ __forceinline__ __device__ void dispatch_recv(
     bool round_scale, int phases,
     uint32_t* dst_signals,
     uint32_t* count_per_expert, int64_t* token_idx_and_dst_expert_flat_list,
-    int64_t* layout_range_buffer, int* negotiate_offset_of_expert_buffer, int* remote_start_offset_buffer
+    int64_t* layout_range_buffer, int* negotiate_offset_of_expert_buffer, int* remote_start_offset_buffer,
+    int* debug_tensor
 ) {
     using Consts = DispatchConstsTemplate<kUseFP8, kUseNVFP4, kHidden>;
 
@@ -630,7 +632,8 @@ dispatch_v2(void* packed_recv_x, void* packed_recv_x_scales,
          bool round_scale, int phases,
          uint32_t* dst_signals,
          uint32_t* count_per_expert, int64_t* token_idx_and_dst_expert_flat_list,
-         int* remote_start_offset_buffer) {
+         int* remote_start_offset_buffer,
+         int* debug_tensor) {
     const auto sm_id = static_cast<int>(blockIdx.x);
     const auto num_send_threads = num_send_warp_groups * num_warps_per_group * 32;
     const auto raw_thread_id = static_cast<int>(threadIdx.x);
@@ -672,7 +675,8 @@ dispatch_v2(void* packed_recv_x, void* packed_recv_x_scales,
                 round_scale, phases,
                 dst_signals,
                 count_per_expert, token_idx_and_dst_expert_flat_list,
-                layout_range_buffer, negotiate_offset_of_expert_buffer, remote_start_offset_buffer
+                layout_range_buffer, negotiate_offset_of_expert_buffer, remote_start_offset_buffer,
+                debug_tensor
             );
         }
     } else {
@@ -697,7 +701,8 @@ dispatch_v2(void* packed_recv_x, void* packed_recv_x_scales,
                 round_scale, phases,
                 dst_signals,
                 count_per_expert, token_idx_and_dst_expert_flat_list,
-                layout_range_buffer, negotiate_offset_of_expert_buffer, remote_start_offset_buffer
+                layout_range_buffer, negotiate_offset_of_expert_buffer, remote_start_offset_buffer,
+                debug_tensor
             );
         }
     }
@@ -729,7 +734,8 @@ void dispatch_v2(void* packed_recv_x, void* packed_recv_x_scales,
               cudaStream_t stream, int phases,
               bool use_nvfp4, uint32_t* dst_signals,
               uint32_t* count_per_expert, int64_t* token_idx_and_dst_expert_flat_list,
-              int* remote_start_offset_buffer, int* zeroed_buffer_for_atomic_counter_per_expert) {
+              int* remote_start_offset_buffer, int* zeroed_buffer_for_atomic_counter_per_expert,
+              int* debug_tensor) {
     constexpr int kNumMaxTopK = 9;
 
     // NOTE simple renaming
@@ -791,7 +797,8 @@ LAUNCH_KERNEL(&cfg, dispatch_func, \
               num_send_warp_groups, num_recv_warp_groups, num_warps_per_group, \
               round_scale, phases, \
               dst_signals, \
-              count_per_expert, token_idx_and_dst_expert_flat_list, remote_start_offset_buffer); } break
+              count_per_expert, token_idx_and_dst_expert_flat_list, remote_start_offset_buffer, \
+              debug_tensor); } break
 
     SETUP_LAUNCH_CONFIG(num_sms, num_warps * 32, stream);
     SWITCH_HIDDEN(DISPATCH_LAUNCH_CASE);

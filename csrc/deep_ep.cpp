@@ -1110,7 +1110,8 @@ Buffer::low_latency_dispatch(bool enable_v2, const torch::Tensor& x, const torch
                              const std::optional<torch::Tensor>& zeroed_buffer_for_atomic_counter_per_expert,
                              bool use_nvfp4,
                              const std::optional<torch::Tensor>& dst_signals,
-                             const std::optional<torch::Tensor>& count_per_expert, const std::optional<torch::Tensor>& token_idx_and_dst_expert_flat_list) {
+                             const std::optional<torch::Tensor>& count_per_expert, const std::optional<torch::Tensor>& token_idx_and_dst_expert_flat_list,
+                             const std::optional<torch::Tensor>& debug_tensor) {
 #ifndef DISABLE_NVSHMEM
     EP_HOST_ASSERT(low_latency_mode);
 
@@ -1283,7 +1284,8 @@ Buffer::low_latency_dispatch(bool enable_v2, const torch::Tensor& x, const torch
 //                               token_ids_of_expert.has_value() ? token_ids_of_expert->data_ptr<int>() : nullptr,
 //                               token_ids_of_expert.has_value() ? token_ids_of_expert->stride(0) : 0,
                                remote_start_offset_buffer.has_value() ? remote_start_offset_buffer->data_ptr<int>() : nullptr,
-                               zeroed_buffer_for_atomic_counter_per_expert.has_value() ? zeroed_buffer_for_atomic_counter_per_expert->data_ptr<int>() : nullptr);
+                               zeroed_buffer_for_atomic_counter_per_expert.has_value() ? zeroed_buffer_for_atomic_counter_per_expert->data_ptr<int>() : nullptr,
+                               debug_tensor.has_value() ? debug_tensor->data_ptr<int>() : nullptr);
     };
     launcher(return_recv_hook ? LOW_LATENCY_SEND_PHASE : (LOW_LATENCY_SEND_PHASE | LOW_LATENCY_RECV_PHASE));
 

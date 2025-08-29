@@ -354,7 +354,8 @@ void dispatch(bool enable_v2, void* packed_recv_x, void* packed_recv_x_scales,
               bool use_nvfp4, uint32_t* dst_signals,
               uint32_t* count_per_expert, int64_t* token_idx_and_dst_expert_flat_list,
               int* remote_start_offset_buffer,
-              int* zeroed_buffer_for_atomic_counter_per_expert) {
+              int* zeroed_buffer_for_atomic_counter_per_expert,
+              int* debug_tensor) {
     if (enable_v2) {
         return dispatch_v2(
             packed_recv_x, packed_recv_x_scales,
@@ -374,7 +375,8 @@ void dispatch(bool enable_v2, void* packed_recv_x, void* packed_recv_x_scales,
             use_nvfp4, dst_signals,
             count_per_expert, token_idx_and_dst_expert_flat_list,
             remote_start_offset_buffer,
-            zeroed_buffer_for_atomic_counter_per_expert
+            zeroed_buffer_for_atomic_counter_per_expert,
+            debug_tensor
         );
     }
 
