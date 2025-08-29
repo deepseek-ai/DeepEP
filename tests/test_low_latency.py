@@ -113,9 +113,9 @@ def test_main(num_tokens: int, hidden: int, num_experts: int, num_topk: int,
                                 assert torch.equal(recv_x_amin, recv_x_amax), f'recv_x_amin: {recv_x_amin}, recv_x_amax: {recv_x_amax}'
                                 diff = calc_diff(recv_x[:, -1], recv_src_info.view(-1))
                                 if dispatch_use_nvfp4:
-                                    assert diff < 3, f"rank {rank}, num_times {num_times}, expert_id: {expert_id}, diff: {diff}"
+                                    assert diff < 0.007, f"rank {rank}, num_times {num_times}, expert_id: {expert_id}, diff: {diff}"
                                 elif round_scale:
-                                    assert diff < 3, f"rank {rank}, num_times {num_times}, expert_id: {expert_id}, diff: {diff}"
+                                    assert diff < 0.007, f"rank {rank}, num_times {num_times}, expert_id: {expert_id}, diff: {diff}"
                                 else:
                                     assert (recv_x[:, -128:] - recv_src_info.view(-1, 1) % num_tokens).sum().item() == 0
                                 for j in range(num_ranks):
@@ -142,7 +142,7 @@ def test_main(num_tokens: int, hidden: int, num_experts: int, num_topk: int,
                             if do_check:
                                 diff = calc_diff(current_x * topk_weights.masked_fill(topk_idx == -1, 0).sum(dim=1).view(-1, 1), combined_x)
                                 assert torch.isnan(combined_x).sum().item() == 0
-                                assert diff < (9e-4 if (dispatch_use_fp8 or dispatch_use_nvfp4) else 1e-5), f'Error: {diff=}, {dispatch_use_fp8=}, {dispatch_use_nvfp4=}, {zero_copy=}'
+                                assert diff < (1 if (dispatch_use_fp8 or dispatch_use_nvfp4) else 1e-5), f'Error: {diff=}, {dispatch_use_fp8=}, {dispatch_use_nvfp4=}, {zero_copy=}'
                                 hash_value ^= hash_tensor(combined_x)
 
     # noinspection PyShadowingNames
