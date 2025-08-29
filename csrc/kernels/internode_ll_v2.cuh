@@ -7,6 +7,36 @@
 
 constexpr int DST_SIGNAL_EXPECT_VALUE = 1000000;
 
+constexpr int DT_MAX_NUM_EVENT_GROUPS = 10;
+constexpr int DT_MAX_NUM_EVENTS_PER_GROUP = 100;
+constexpr int DT_MAX_NUM_MODES = 2;
+constexpr int DT_MAX_NUM_SMS = 200;
+constexpr int DT_MAX_NUM_WARPS_PER_SM = 100;
+
+__forceinline__ __device__ void write_debug_time(
+    int* debug_tensor,
+    uint32_t t_start,
+    int event_group_id,
+    int event_id,
+    int mode_id,
+    int sm_id,
+    int warp_id
+) {
+    if (get_lane_id() == 0) {
+        uint32_t t_delta = ((uint32_t)clock()) - t_start;
+
+        int idx = (
+            event_group_id * (DT_MAX_NUM_EVENTS_PER_GROUP * DT_MAX_NUM_MODES * DT_MAX_NUM_SMS * DT_MAX_NUM_WARPS_PER_SM) +
+            event_id * (DT_MAX_NUM_MODES * DT_MAX_NUM_SMS * DT_MAX_NUM_WARPS_PER_SM) +
+            mode_id * (DT_MAX_NUM_SMS * DT_MAX_NUM_WARPS_PER_SM) +
+            sm_id * (DT_MAX_NUM_WARPS_PER_SM) +
+            warp_id
+        );
+
+        debug_tensor[idx] = t_delta;
+    }
+}
+
 namespace deep_ep {
 namespace internode_ll {
 
@@ -39,6 +69,8 @@ __forceinline__ __device__ void dispatch_send(
     int64_t* layout_range_buffer, int* negotiate_offset_of_expert_buffer, int* remote_start_offset_buffer,
     int* debug_tensor
 ) {
+    uint32_t t_start = clock();
+
     using Consts = DispatchConstsTemplate<kUseFP8, kUseNVFP4, kHidden>;
     EP_DEVICE_ASSERT(Consts::num_bytes_per_msg % sizeof(int4) == 0);
 
@@ -141,11 +173,18 @@ __forceinline__ __device__ void dispatch_send(
     const int flat_worker_num = num_warps * num_sms;
     for (
         // "tefl" := "token_idx_and_dst_expert_flat_list"
-        int tefl_idx = flat_worker_id;
+        int tefl_idx = flat_worker_id, debug_iter_idx = 0;
         tefl_idx < num_tokens * num_topk;
-        tefl_idx += flat_worker_num
+        tefl_idx += flat_worker_num, debug_iter_idx += 1
     ) {
 //         if (subroutine_thread_id % 32 == 0) { printf("[R%d,S%d,T%d] dispatch_send local_expert_idx=%d START \n", rank, sm_id, subroutine_thread_id, local_expert_idx); }
+        write_debug_time(
+            debug_tensor, t_start,
+            /* event_group_id */ 0,
+            /* event_id */ debug_iter_idx,
+            /* mode_id */ 0,
+            sm_id, warp_id
+        );
 
         // TODO do prefetching if needed
         // NOTE ldg is for read-only data cache, if token_idx_and_dst_expert_flat_list is somehow overlapped in the future we should change it
@@ -400,6 +439,8 @@ __forceinline__ __device__ void dispatch_recv(
     int64_t* layout_range_buffer, int* negotiate_offset_of_expert_buffer, int* remote_start_offset_buffer,
     int* debug_tensor
 ) {
+    uint32_t t_start = clock();
+
     using Consts = DispatchConstsTemplate<kUseFP8, kUseNVFP4, kHidden>;
 
     // NOTE copied from dispatch body
@@ -440,12 +481,21 @@ __forceinline__ __device__ void dispatch_recv(
     const int cooperate_idx = flatten_id / num_ranks;
     const int src_rank = flatten_id % num_ranks;
 
+    int debug_ld_token_signal_event_id = 0;
+
     // Receiving and packing
     // NOTE if -> for
     // if (responsible_expert_idx < num_experts) {
     EP_DEVICE_ASSERT(num_warp_groups == 1); // not consider multi warp_group case below
     for (int local_expert_idx = 0; local_expert_idx < num_local_experts; ++local_expert_idx) {
 //         if (subroutine_thread_id % 32 == 0) { printf("[R%d,S%d,T%d] dispatch_recv local_expert_idx=%d START \n", rank, sm_id, subroutine_thread_id, local_expert_idx); }
+        write_debug_time(
+            debug_tensor, t_start,
+            /* event_group_id */ 0,
+            /* event_id */ local_expert_idx,
+            /* mode_id */ 1,
+            sm_id, warp_id
+        );
 
         // NOTE modified
         // const auto src_rank = responsible_expert_idx / num_local_experts;
@@ -471,6 +521,14 @@ __forceinline__ __device__ void dispatch_recv(
             while((layout = ld_volatile_global(layout_range_buffer + local_expert_idx * num_ranks + src_rank)) == 0);
             layout = -layout - 1;
             unpack2(layout, num_recv_tokens, token_start_offset);
+
+            write_debug_time(
+                debug_tensor, t_start,
+                /* event_group_id */ 1,
+                /* event_id */ local_expert_idx,
+                /* mode_id */ 1,
+                sm_id, warp_id
+            );
 
             if (cooperate_idx == 0) {
                 // TODO may not need to do this extra copy - directly use the `layout_range_buffer`
@@ -539,6 +597,15 @@ __forceinline__ __device__ void dispatch_recv(
                 int recv_src_idx;
                 while ((recv_src_idx = ld_acquire_sys_global(src_src_idx)) == 0);
                 recv_src_idx = -recv_src_idx-1;
+
+                write_debug_time(
+                    debug_tensor, t_start,
+                    /* event_group_id */ 2,
+                    /* event_id */ debug_ld_token_signal_event_id,
+                    /* mode_id */ 1,
+                    sm_id, warp_id
+                );
+                debug_ld_token_signal_event_id++;
 
 //                 if (subroutine_thread_id % 32 == 0) { printf("[R%d,S%d,T%d] ld-token-signal END recv_src_idx=%d\n", rank, sm_id, subroutine_thread_id, recv_src_idx); }
 
