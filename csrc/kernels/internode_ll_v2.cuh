@@ -75,7 +75,9 @@ __forceinline__ __device__ void dispatch_send(
         EP_DEVICE_ASSERT(num_warps * 32 <= num_local_experts);
         const int dst_rank = sm_id;
         const int dst_expert_local_idx = subroutine_thread_id;
-        
+
+        // TODO maybe do not need `release` (but yes need `sys`)
+        atomic_add_release_sys_global(TODO, TODO);
     }
 
     // There are 2 kinds of warps in this part:
