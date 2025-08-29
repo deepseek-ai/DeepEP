@@ -826,6 +826,8 @@ void dispatch_v2(void* packed_recv_x, void* packed_recv_x_scales,
         printf("HACK: give all warps to recv!\n");
         num_send_warps_per_group = 0;
         num_recv_warps_per_group = 32;
+    } else {
+        EP_HOST_ASSERT(false);
     }
 
     // NOTE no longer need one SM to send all topk destinations
