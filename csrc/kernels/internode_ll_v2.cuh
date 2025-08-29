@@ -514,10 +514,19 @@ __forceinline__ __device__ void dispatch_recv(
         ) {
             const int i = i_raw + token_start_offset;
 
-            // Copy source info
-            const auto src_src_idx = reinterpret_cast<int*>(rdma_recv_x_uint8 + i * Consts::num_bytes_per_msg);
-            if (lane_id == 0)
-                recv_src_info[recv_token_begin_idx + i] = ld_nc_global(src_src_idx);
+//             // Copy source info
+//             const auto src_src_idx = reinterpret_cast<int*>(rdma_recv_x_uint8 + i * Consts::num_bytes_per_msg);
+//             if (lane_id == 0)
+//                 recv_src_info[recv_token_begin_idx + i] = ld_nc_global(src_src_idx);
+
+            // Read signal + Copy source info
+            if (lane_id == 0) {
+                int recv_src_idx;
+                while ((recv_src_idx = ld_acquire_sys_global(TODO)) == 0);
+                recv_src_idx = -recv_src_idx-1;
+
+                recv_src_info[recv_token_begin_idx + i] = recv_src_idx;
+            }
             __syncwarp();
 
             // do not need to copy real data now
