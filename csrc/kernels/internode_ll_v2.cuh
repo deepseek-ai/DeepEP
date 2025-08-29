@@ -698,8 +698,8 @@ void dispatch_v2(void* packed_recv_x, void* packed_recv_x_scales,
     TOOD_args_rm(token_ids_of_expert, token_ids_of_expert_stride_0);
     constexpr int kNumMaxTopK = 9;
 
-    // NOTE renamed
-    int* rdma_general_signal;
+    // NOTE simple renaming
+    int* rdma_general_signal = rdma_recv_count;
 
     // NOTE MODIFIED
     // const int num_warp_groups = ceil_div(num_experts, num_device_sms);
