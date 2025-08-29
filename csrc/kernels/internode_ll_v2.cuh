@@ -444,9 +444,11 @@ __forceinline__ __device__ void dispatch_recv(
         // const auto src_rank = responsible_expert_idx / num_local_experts;
         // const auto local_expert_idx = responsible_expert_idx % num_local_experts;
 
+        // NOTE MODIFIED
         const auto rdma_recv_x_uint8 = static_cast<uint8_t*>(rdma_recv_x) +
-                local_expert_idx * num_ranks * num_max_dispatch_tokens_per_rank * Consts::num_bytes_per_msg +
-                src_rank * num_max_dispatch_tokens_per_rank * Consts::num_bytes_per_msg;
+                local_expert_idx * num_ranks * num_max_dispatch_tokens_per_rank * Consts::num_bytes_per_msg;
+                // this is removed
+                // + src_rank * num_max_dispatch_tokens_per_rank * Consts::num_bytes_per_msg;
         const auto recv_x_int4 = static_cast<int4*>(packed_recv_x) +
                 local_expert_idx * num_ranks * num_max_dispatch_tokens_per_rank * Consts::hidden_int4;
         const auto recv_src_info = packed_recv_src_info + local_expert_idx * num_ranks * num_max_dispatch_tokens_per_rank;
