@@ -7,12 +7,16 @@
 
 constexpr int DST_SIGNAL_EXPECT_VALUE = 1000000;
 
+namespace deep_ep {
+namespace internode_ll {
+
+constexpr int kNumMaxWarpGroups = 32;
+
 constexpr int DT_MAX_NUM_EVENT_GROUPS = 10;
 constexpr int DT_MAX_NUM_EVENTS_PER_GROUP = 100;
 constexpr int DT_MAX_NUM_MODES = 2;
 constexpr int DT_MAX_NUM_SMS = 200;
 constexpr int DT_MAX_NUM_WARPS_PER_SM = 100;
-
 __forceinline__ __device__ void write_debug_time(
     int* debug_tensor,
     uint32_t t_start,
@@ -36,11 +40,6 @@ __forceinline__ __device__ void write_debug_time(
         debug_tensor[idx] = t_delta;
     }
 }
-
-namespace deep_ep {
-namespace internode_ll {
-
-constexpr int kNumMaxWarpGroups = 32;
 
 template <bool kUseFP8, bool kUseUE8M0, bool kUseNVFP4, int kHidden>
 __forceinline__ __device__ void dispatch_send(
