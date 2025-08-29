@@ -459,33 +459,34 @@ __forceinline__ __device__ void dispatch_recv(
         const auto num_aligned_scales = align<int>(Consts::num_scales, sizeof(float) / sizeof(scale_t));
         const auto recv_x_scales = static_cast<scale_t*>(packed_recv_x_scales) + local_expert_idx * num_ranks * num_max_dispatch_tokens_per_rank * num_aligned_scales;
 
-        // Shared between sub-warps in warp groups
-        __shared__ int shared_num_recv_tokens[kNumMaxWarpGroups], shared_recv_token_begin_idx[kNumMaxWarpGroups];
-
-        // Wait tokens to arrive
-        // NOTES: using sub-warp 1 to overlap with sub-warp 0
-        int num_recv_tokens, recv_token_begin_idx;
-        EP_DEVICE_ASSERT(num_warps_per_group > 1 and num_warp_groups < 15);
-        if (sub_warp_id == 1 and lane_id == 0) {
-            // auto start_time = clock64(); // not used
-            while ((num_recv_tokens = ld_acquire_sys_global(rdma_recv_count + local_expert_idx * num_ranks + src_rank)) == 0);
-            // auto wait_recv_cost = clock64() - start_time; // not used
-            num_recv_tokens = -num_recv_tokens - 1;
-            recv_token_begin_idx = atomicAdd(packed_recv_count + local_expert_idx, num_recv_tokens);
-            shared_num_recv_tokens[warp_group_id] = num_recv_tokens;
-            shared_recv_token_begin_idx[warp_group_id] = recv_token_begin_idx;
-            recv_range[src_rank] = pack2<int, int64_t>(num_recv_tokens, recv_token_begin_idx);
-
-            // not handled
-//                 // Add stats for diagnosis
-//                 if (cumulative_local_expert_recv_stats != nullptr)
-//                     atomicAdd(cumulative_local_expert_recv_stats + local_expert_idx, num_recv_tokens);
-//                 if (dispatch_wait_recv_cost_stats != nullptr)
-//                     atomicAdd(reinterpret_cast<unsigned long long*>(dispatch_wait_recv_cost_stats + src_rank), wait_recv_cost);
-        }
-        asm volatile("bar.sync %0, %1;" :: "r"(warp_group_id + 2), "r"(num_warps_per_group * 32));
-        num_recv_tokens = shared_num_recv_tokens[warp_group_id];
-        recv_token_begin_idx = shared_recv_token_begin_idx[warp_group_id];
+        // NOTE no longer have per-expert signals
+//         // Shared between sub-warps in warp groups
+//         __shared__ int shared_num_recv_tokens[kNumMaxWarpGroups], shared_recv_token_begin_idx[kNumMaxWarpGroups];
+//
+//         // Wait tokens to arrive
+//         // NOTES: using sub-warp 1 to overlap with sub-warp 0
+//         int num_recv_tokens, recv_token_begin_idx;
+//         EP_DEVICE_ASSERT(num_warps_per_group > 1 and num_warp_groups < 15);
+//         if (sub_warp_id == 1 and lane_id == 0) {
+//             // auto start_time = clock64(); // not used
+//             while ((num_recv_tokens = ld_acquire_sys_global(rdma_recv_count + local_expert_idx * num_ranks + src_rank)) == 0);
+//             // auto wait_recv_cost = clock64() - start_time; // not used
+//             num_recv_tokens = -num_recv_tokens - 1;
+//             recv_token_begin_idx = atomicAdd(packed_recv_count + local_expert_idx, num_recv_tokens);
+//             shared_num_recv_tokens[warp_group_id] = num_recv_tokens;
+//             shared_recv_token_begin_idx[warp_group_id] = recv_token_begin_idx;
+//             recv_range[src_rank] = pack2<int, int64_t>(num_recv_tokens, recv_token_begin_idx);
+//
+//             // not handled
+// //                 // Add stats for diagnosis
+// //                 if (cumulative_local_expert_recv_stats != nullptr)
+// //                     atomicAdd(cumulative_local_expert_recv_stats + local_expert_idx, num_recv_tokens);
+// //                 if (dispatch_wait_recv_cost_stats != nullptr)
+// //                     atomicAdd(reinterpret_cast<unsigned long long*>(dispatch_wait_recv_cost_stats + src_rank), wait_recv_cost);
+//         }
+//         asm volatile("bar.sync %0, %1;" :: "r"(warp_group_id + 2), "r"(num_warps_per_group * 32));
+//         num_recv_tokens = shared_num_recv_tokens[warp_group_id];
+//         recv_token_begin_idx = shared_recv_token_begin_idx[warp_group_id];
 
         // Copy tokens
         // for (int i = sub_warp_id; i < num_recv_tokens; i += num_warps_per_group) {
