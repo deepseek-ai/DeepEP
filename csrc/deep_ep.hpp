@@ -31,12 +31,12 @@ private:
     bool low_latency_mode = false;
 
     // NVLink Buffer
-    int64_t num_nvl_bytes;
+    uint64_t num_nvl_bytes;
     void* buffer_ptrs[NUM_MAX_NVL_PEERS] = {nullptr};
     void** buffer_ptrs_gpu = nullptr;
 
     // NVSHMEM Buffer
-    int64_t num_rdma_bytes;
+    uint64_t num_rdma_bytes;
     void* rdma_buffer_ptr = nullptr;
 
     // Device info and communication
@@ -77,7 +77,7 @@ private:
     int* moe_recv_rdma_counter_mapped = nullptr;
 
 public:
-    Buffer(int rank, int num_ranks, int64_t num_nvl_bytes, int64_t num_rdma_bytes, bool low_latency_mode, bool explicitly_destroy);
+    Buffer(int rank, int num_ranks, uint64_t num_nvl_bytes, uint64_t num_rdma_bytes, bool low_latency_mode, bool explicitly_destroy);
 
     ~Buffer() noexcept(false);
 
@@ -123,7 +123,7 @@ public:
                       const torch::Tensor& src_idx, const torch::Tensor& rank_prefix_matrix, const torch::Tensor& channel_prefix_matrix,
                       const torch::Tensor& send_head, const Config& config, std::optional<EventHandle>& previous_event, bool async, bool allocate_on_comm_stream);
 
-    std::tuple<torch::Tensor, std::optional<torch::Tensor>, std::optional<torch::Tensor>, std::optional<torch::Tensor>, std::vector<int>, torch::Tensor, torch::Tensor, std::optional<torch::Tensor>, torch::Tensor, std::optional<torch::Tensor>, torch::Tensor, std::optional<torch::Tensor>, std::optional<torch::Tensor>, std::optional<torch::Tensor>, std::optional<EventHandle>>
+    std::tuple<torch::Tensor, std::optional<torch::Tensor>, std::optional<torch::Tensor>, std::optional<torch::Tensor>, std::vector<int>, torch::Tensor, torch::Tensor, std::optional<torch::Tensor>, torch::Tensor, std::optional<torch::Tensor>, torch::Tensor, std::optional<torch::Tensor>, std::optional<torch::Tensor>, std::optional<torch::Tensor>, int, std::optional<EventHandle>, std::optional<std::function<void()>>>
     internode_dispatch(const torch::Tensor& x, const std::optional<torch::Tensor>& x_scales,
                        const std::optional<torch::Tensor>& topk_idx, const std::optional<torch::Tensor>& topk_weights,
                        const std::optional<torch::Tensor>& num_tokens_per_rank, const std::optional<torch::Tensor>& num_tokens_per_rdma_rank,
@@ -131,15 +131,15 @@ public:
                        int cached_num_recv_tokens, int cached_num_rdma_recv_tokens,
                        const std::optional<torch::Tensor>& cached_rdma_channel_prefix_matrix, const std::optional<torch::Tensor>& cached_recv_rdma_rank_prefix_sum,
                        const std::optional<torch::Tensor>& cached_gbl_channel_prefix_matrix, const std::optional<torch::Tensor>& cached_recv_gbl_rank_prefix_sum,
-                       int expert_alignment, const Config& config, std::optional<EventHandle>& previous_event, bool async, bool allocate_on_comm_stream);
+                       int expert_alignment, const Config& config, std::optional<EventHandle>& previous_event, bool async, bool allocate_on_comm_stream, bool decoupled_mode, bool return_recv_hook, int num_max_dispatch_tokens_per_rank);
 
-    std::tuple<torch::Tensor, std::optional<torch::Tensor>, std::optional<EventHandle>>
+    std::tuple<torch::Tensor, std::optional<torch::Tensor>, std::optional<EventHandle>, std::optional<std::function<void()>>>
     internode_combine(const torch::Tensor& x, const std::optional<torch::Tensor>& topk_weights,
                       const std::optional<torch::Tensor>& bias_0, const std::optional<torch::Tensor>& bias_1,
                       const torch::Tensor& src_meta, const torch::Tensor& is_combined_token_in_rank,
                       const torch::Tensor& rdma_channel_prefix_matrix, const torch::Tensor& rdma_rank_prefix_sum, const torch::Tensor& gbl_channel_prefix_matrix,
                       const torch::Tensor& combined_rdma_head, const torch::Tensor& combined_nvl_head,
-                      const Config& config, std::optional<EventHandle>& previous_event, bool async, bool allocate_on_comm_stream);
+                      const Config& config, std::optional<EventHandle>& previous_event, bool async, bool allocate_on_comm_stream, bool decoupled_mode, bool return_recv_hook, int num_max_dispatch_tokens_per_rank);
 
     void clean_low_latency_buffer(int num_max_dispatch_tokens_per_rank, int hidden, int num_experts);
 
