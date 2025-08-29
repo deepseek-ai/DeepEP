@@ -403,7 +403,7 @@ __forceinline__ __device__ void dispatch_recv(
     const auto num_warps = num_warp_groups * num_warps_per_group; // unused
     const auto num_local_experts = num_experts / num_ranks;
     const auto warp_group_id = warp_id / num_warps_per_group;
-    const auto sub_warp_id = warp_id % num_warps_per_group;
+    // const auto sub_warp_id = warp_id % num_warps_per_group;
 
     // NOTE rm
     // const auto responsible_expert_idx = sm_id * num_warp_groups + warp_group_id;
@@ -453,7 +453,7 @@ __forceinline__ __device__ void dispatch_recv(
 //         const auto recv_x_int4 = static_cast<int4*>(packed_recv_x) +
 //                 local_expert_idx * num_ranks * num_max_dispatch_tokens_per_rank * Consts::hidden_int4;
         const auto recv_src_info = packed_recv_src_info + local_expert_idx * num_ranks * num_max_dispatch_tokens_per_rank;
-        const auto recv_range = packed_recv_layout_range + local_expert_idx * num_ranks;
+        // const auto recv_range = packed_recv_layout_range + local_expert_idx * num_ranks;
         const auto num_aligned_scales = align<int>(Consts::num_scales, sizeof(float) / sizeof(scale_t));
         const auto recv_x_scales = static_cast<scale_t*>(packed_recv_x_scales) + local_expert_idx * num_ranks * num_max_dispatch_tokens_per_rank * num_aligned_scales;
 
