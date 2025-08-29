@@ -94,7 +94,7 @@ __forceinline__ __device__ void dispatch_send(
 
             TODO_store_to_remote_gpu_gmem;
 
-            remote_start_offset_of_dst_rank_buffer[dst_global_expert_idx] = remote_start_offset_of_dst_rank;
+            remote_start_offset_of_dst_rank_buffer[dst_global_expert_idx] = -remote_start_offset_of_dst_rank-1;
         }
     }
 
@@ -146,6 +146,7 @@ __forceinline__ __device__ void dispatch_send(
         // TODO is this load strong enough?
         int remote_start_offset_of_dst_rank;
         while ((remote_start_offset_of_dst_rank = ld_volatile_global(remote_start_offset_of_dst_rank_buffer + dst_rank)) == 0);
+        remote_start_offset_of_dst_rank = -remote_start_offset_of_dst_rank - 1;
 
         // NOTE changed, see "before-after" above
         // for (int token_idx = sm_id; token_idx < num_tokens; token_idx += num_sms) {
