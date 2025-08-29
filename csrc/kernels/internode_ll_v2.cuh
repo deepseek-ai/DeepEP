@@ -239,7 +239,7 @@ __forceinline__ __device__ void dispatch_send(
             const auto src_ptr = reinterpret_cast<uint64_t>(x_src_idx);
             const auto dst_ptr = reinterpret_cast<uint64_t>(rdma_recv_x) +
                                  dst_expert_local_idx * num_ranks * num_max_dispatch_tokens_per_rank * Consts::num_bytes_per_msg +
-                                 // NOTE modified
+                                 // NOTE modified rm
                                  // rank * num_max_dispatch_tokens_per_rank * Consts::num_bytes_per_msg +
                                  remote_start_offset_of_dst_rank * Consts::num_bytes_per_msg +
                                  slot_idx * Consts::num_bytes_per_msg;
