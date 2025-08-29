@@ -402,7 +402,7 @@ __forceinline__ __device__ void dispatch_recv(
     const auto warp_id = subroutine_thread_id / 32, lane_id = get_lane_id();
     const auto num_warps = num_warp_groups * num_warps_per_group; // unused
     const auto num_local_experts = num_experts / num_ranks;
-    const auto warp_group_id = warp_id / num_warps_per_group;
+    // const auto warp_group_id = warp_id / num_warps_per_group;
     // const auto sub_warp_id = warp_id % num_warps_per_group;
 
     // NOTE rm
