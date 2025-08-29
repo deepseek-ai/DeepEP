@@ -1177,7 +1177,7 @@ Buffer::low_latency_dispatch(const torch::Tensor& x, const torch::Tensor& topk_i
         auto m = num_ranks * num_max_dispatch_tokens_per_rank;
         auto rm = (m + 127) / 128;
         auto rk = hidden / (kNumPerChannels * NUM_SF_ELEMS_PER_PACK);
-        packed_recv_x_scales = torch::empty({l, rm, rk, 128, 4},
+        packed_recv_x_scales = torch::empty({l, rm, rk, 32, 4, 4},
                                             torch::dtype(torch::kInt8).device(torch::kCUDA));
         packed_recv_x_scales_ptr = packed_recv_x_scales->data_ptr();
         packed_recv_x_sf_scale = torch::empty({num_local_experts, num_ranks * num_max_dispatch_tokens_per_rank}, torch::dtype(torch::kFloat32).device(torch::kCUDA));
