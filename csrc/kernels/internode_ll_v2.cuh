@@ -460,6 +460,7 @@ __forceinline__ __device__ void dispatch_recv(
         const auto num_aligned_scales = align<int>(Consts::num_scales, sizeof(float) / sizeof(scale_t));
         const auto recv_x_scales = static_cast<scale_t*>(packed_recv_x_scales) + local_expert_idx * num_ranks * num_max_dispatch_tokens_per_rank * num_aligned_scales;
 
+        TODO_only_run_on_some_threads;
         int num_recv_tokens, token_start_offset;
         {
             int64_t layout;
