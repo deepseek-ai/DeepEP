@@ -57,6 +57,19 @@ inline __device__ float reciprocal_approximate_ftz(float a) {
   return b;
 }
 
+// float to e2m1 4bit (sign:1, exp:2, mantissa:1) quantization
+__device__ inline uint8_t float_to_e2m1(float f) {
+    // Get sign
+    uint8_t sign = (f < 0);
+    float abs_f = fabsf(f);
+    float abs_f_log2 = log2f(abs_f);
+    // map float to 2-bit exponent
+    int exp = static_cast<int>(floorf(abs_f_log2 + 1));
+    // Take one bit for mantissa
+    uint8_t mant = (abs_f_log2 + 1 - exp > 0.5f) ? 1 : 0;
+    return (sign << 3) | (exp << 1) | mant;
+}
+
 // Convert 4 float2 values into 8 e2m1 values (represented as one uint32_t).
 inline __device__ uint32_t fp32_vec_to_e2m1(float2 (&array)[4]) {
   #if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
@@ -78,8 +91,15 @@ inline __device__ uint32_t fp32_vec_to_e2m1(float2 (&array)[4]) {
           "f"(array[2].y), "f"(array[3].x), "f"(array[3].y));
     return val;
   #else
-    // static_assert(false, "not supported.");
-    return 0;
+    #if !(defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000))
+        #pragma message("warning: this architecture does not support cvt.rn.satfinite.e2m1x2.f32, use float_to_e2m1 instead.")
+    #endif
+    uint32_t val = 0;
+    float* data = reinterpret_cast<float*>(&array[0]);
+    for (int i = 0; i < 8; ++i) {
+        val |= (float_to_e2m1(data[i]) & 0xF) << (4 * i);
+    }
+    return val;
   #endif
 }
 
@@ -104,8 +124,15 @@ inline __device__ uint32_t fp32_vec_to_e2m1(float (&array)[8]) {
           "f"(array[6]), "f"(array[7]));
     return val;
   #else
-    // static_assert(false, "not supported.");
-    return 0;
+    #if !(defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000))
+        #pragma message("warning: this architecture does not support cvt.rn.satfinite.e2m1x2.f32, use float_to_e2m1 instead.")
+    #endif
+    uint32_t val = 0;
+    float* data = reinterpret_cast<float*>(&array[0]);
+    for (int i = 0; i < 8; ++i) {
+        val |= (float_to_e2m1(data[i]) & 0xF) << (4 * i);
+    }
+    return val;
   #endif
 }
 
