@@ -610,6 +610,7 @@ dispatch_v2(void* packed_recv_x, void* packed_recv_x_scales,
          bool round_scale, int phases,
          uint32_t* dst_signals,
          uint32_t* count_per_expert, int* token_ids_of_expert, int token_ids_of_expert_stride_0) {
+    const auto sm_id = static_cast<int>(blockIdx.x);
     const auto num_send_threads = num_send_warp_groups * num_warps_per_group * 32;
     const auto raw_thread_id = static_cast<int>(threadIdx.x);
 
@@ -620,6 +621,12 @@ dispatch_v2(void* packed_recv_x, void* packed_recv_x_scales,
 
     // (num_local_experts,). use by REMOTE gpus. all gpus atomic-add on it to get a slice of locations to send data to
     int* negotiate_offset_of_expert_buffer = TODO;
+
+    if ((sm_id == 0) and (raw_thread_id == 0)) {
+        // assert alignment
+        EP_DEVICE_ASSERT(((int64_t)layout_range_buffer) % 16 == 0);
+        EP_DEVICE_ASSERT(((int64_t)negotiate_offset_of_expert_buffer) % 16 == 0);
+    }
 
     if (raw_thread_id < num_send_threads) {
         if (phases & LOW_LATENCY_SEND_PHASE) {
