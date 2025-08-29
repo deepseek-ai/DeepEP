@@ -1103,7 +1103,8 @@ Buffer::low_latency_dispatch(bool enable_v2, const torch::Tensor& x, const torch
                              int num_max_dispatch_tokens_per_rank, int num_experts,
                              bool use_fp8, bool round_scale, bool use_ue8m0,
                              bool async, bool return_recv_hook,
-                             const std::optional<torch::Tensor>& zeroed_tensor,
+                             const std::optional<torch::Tensor>& zeroed_tensor_a,
+                             const std::optional<torch::Tensor>& zeroed_tensor_b,
                              bool use_nvfp4,
                              const std::optional<torch::Tensor>& dst_signals,
                              const std::optional<torch::Tensor>& count_per_expert, const std::optional<torch::Tensor>& token_ids_of_expert) {
@@ -1188,9 +1189,9 @@ Buffer::low_latency_dispatch(bool enable_v2, const torch::Tensor& x, const torch
     auto packed_recv_layout_range = torch::empty({num_local_experts, num_ranks}, torch::dtype(torch::kInt64).device(torch::kCUDA));
 
     // NOTE let users do the zeroing
-    EP_HOST_ASSERT(enable_v2 == zeroed_tensor.has_value());
-    auto packed_recv_count = zeroed_tensor.has_value()
-        ? zeroed_tensor.value()
+    EP_HOST_ASSERT(enable_v2 == zeroed_tensor_a.has_value());
+    auto packed_recv_count = zeroed_tensor_a.has_value()
+        ? zeroed_tensor_a.value()
         : torch::empty({num_local_experts}, torch::dtype(torch::kInt32).device(torch::kCUDA));
     EP_HOST_ASSERT(packed_recv_count.is_contiguous());
     EP_HOST_ASSERT(packed_recv_count.dim() == 1);
@@ -1199,6 +1200,19 @@ Buffer::low_latency_dispatch(bool enable_v2, const torch::Tensor& x, const torch
     EP_HOST_ASSERT(packed_recv_count.device().is_cuda());
     EP_HOST_ASSERT(packed_recv_count.stride(0) == 1);
     EP_HOST_ASSERT(((int64_t)packed_recv_count.data_ptr()) % 16 == 0); // alignment
+
+    // (num_experts,). used in curr gpu. for i-th dst rank, what is the start offset in the remote buffer
+    const std::optional<torch::Tensor>& remote_start_offset_of_dst_rank_buffer = zeroed_tensor_b;
+    EP_HOST_ASSERT(enable_v2 == remote_start_offset_of_dst_rank_buffer.has_value());
+    if (enable_v2) {
+        EP_HOST_ASSERT(remote_start_offset_of_dst_rank_buffer->is_contiguous());
+        EP_HOST_ASSERT(remote_start_offset_of_dst_rank_buffer->dim() == 1);
+        EP_HOST_ASSERT(remote_start_offset_of_dst_rank_buffer->size(0) == num_experts);
+        EP_HOST_ASSERT(remote_start_offset_of_dst_rank_buffer->dtype() == torch::kInt32);
+        EP_HOST_ASSERT(remote_start_offset_of_dst_rank_buffer->device().is_cuda());
+        EP_HOST_ASSERT(remote_start_offset_of_dst_rank_buffer->stride(0) == 1);
+        EP_HOST_ASSERT(((int64_t)remote_start_offset_of_dst_rank_buffer->data_ptr()) % 16 == 0); // alignment
+    }
 
     // Allocate column-majored scales
     auto packed_recv_x_scales = std::optional<torch::Tensor>();
@@ -1248,7 +1262,8 @@ Buffer::low_latency_dispatch(bool enable_v2, const torch::Tensor& x, const torch
                                dst_signals.has_value() ? dst_signals->data_ptr<uint32_t>() : nullptr,
                                count_per_expert.has_value() ? count_per_expert->data_ptr<uint32_t>() : nullptr,
                                token_ids_of_expert.has_value() ? token_ids_of_expert->data_ptr<int>() : nullptr,
-                               token_ids_of_expert.has_value() ? token_ids_of_expert->stride(0) : 0);
+                               token_ids_of_expert.has_value() ? token_ids_of_expert->stride(0) : 0,
+                               remote_start_offset_of_dst_rank_buffer.has_value() ? remote_start_offset_of_dst_rank_buffer->data_ptr<int>() : nullptr);
     };
     launcher(return_recv_hook ? LOW_LATENCY_SEND_PHASE : (LOW_LATENCY_SEND_PHASE | LOW_LATENCY_RECV_PHASE));
 
