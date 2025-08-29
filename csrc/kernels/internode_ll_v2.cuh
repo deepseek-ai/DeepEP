@@ -430,13 +430,18 @@ __forceinline__ __device__ void dispatch_recv(
     //
     // NOTE
     // before: one (sm_id, warp_group_id) = one responsible_expert_idx = handle all tokens for one (src_rank, local_expert_idx)
-    // after: one sm_id = one src_rank = handle all tokens for one (src_rank, const local_expert_idx)
+    // after: reshape (warp_id, sm_id) into (cooperate_idx, src_rank)
+    //        then all num_cooperate warps handle tokens from one src_rank
+    const int num_cooperate_parts = num_sms * num_warps / num_ranks;
+    EP_DEVICE_ASSERT(num_sms * num_warps == num_cooperate_parts * num_ranks); // even division
+    const int flatten_id = warp_id * num_sms + sm_id;
+    const int cooperate_idx = flatten_id / num_ranks;
+    const int src_rank = flatten_id % num_ranks;
 
     // Receiving and packing
     // NOTE if -> for
     // if (responsible_expert_idx < num_experts) {
     EP_DEVICE_ASSERT(num_warp_groups == 1); // not consider multi warp_group case below
-    const auto src_rank = sm_id;
     for (int local_expert_idx = 0; local_expert_idx < num_local_experts; ++local_expert_idx) {
 //         if (subroutine_thread_id % 32 == 0) { printf("[R%d,S%d,T%d] dispatch_recv local_expert_idx=%d START \n", rank, sm_id, subroutine_thread_id, local_expert_idx); }
 
