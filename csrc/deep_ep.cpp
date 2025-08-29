@@ -1290,14 +1290,17 @@ Buffer::low_latency_dispatch(bool enable_v2, const torch::Tensor& x, const torch
     if (return_recv_hook)
         recv_hook = [=]() { launcher(LOW_LATENCY_RECV_PHASE); };
 
+    const auto dim0 = num_experts;
+    const auto dim1 = num_max_dispatch_tokens_per_rank;
+    const auto dim2 = num_bytes_per_dispatch_msg;
     const auto returned_x = enable_v2
         // https://stackoverflow.com/questions/58631466/create-a-torchtensor-from-c-c-array-without-using-from-blob
         // https://docs.pytorch.org/cppdocs/api/function_namespacetorch_1ac009244049812a3efdf4605d19c5e79b.html
         ? torch::from_blob(
             buffer.dispatch_rdma_recv_data_buffer,
             // ref: LowLatencyLayout constructor `dispatch_recv_data_buffer_bytes`
-            {num_experts, num_max_dispatch_tokens_per_rank, num_bytes_per_dispatch_msg},
-            {num_max_dispatch_tokens_per_rank * num_bytes_per_dispatch_msg, num_bytes_per_dispatch_msg, 1},
+            {dim0, dim1, dim2},
+            {dim1 * dim2, dim2, 1},
             torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA)
         ).index({
             Slice(),
@@ -1306,6 +1309,7 @@ Buffer::low_latency_dispatch(bool enable_v2, const torch::Tensor& x, const torch
         })
         : packed_recv_x;
     if (enable_v2) {
+        // ref: packed_recv_x's shape etc
         EP_HOST_ASSERT(returned_x.dim() == 3);
         EP_HOST_ASSERT(returned_x.size(0) == num_local_experts);
         EP_HOST_ASSERT(returned_x.size(1) == num_ranks * num_max_dispatch_tokens_per_rank);
