@@ -268,7 +268,7 @@ __forceinline__ __device__ void dispatch_send(
                 __syncwarp();
                 if (lane_id == 0) {
                     if (subroutine_thread_id % 32 == 0) { printf("[R%d,S%d,T%d] st-token-signal START addr=%p delta_addr=%d token_idx=%d\n",
-                        rank, sm_id, subroutine_thread_id, src_src_idx, (int)((int64_t)dst_ptr - (int64_t)rdma_recv_x), token_idx); }
+                        rank, sm_id, subroutine_thread_id, (int*)dst_ptr, (int)((int64_t)dst_ptr - (int64_t)rdma_recv_x), token_idx); }
 
                     st_release_sys_global(reinterpret_cast<int*>(dst_p2p_ptr), -token_idx - 1);
                 }
