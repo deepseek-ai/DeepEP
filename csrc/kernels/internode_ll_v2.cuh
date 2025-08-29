@@ -438,22 +438,9 @@ __forceinline__ __device__ void dispatch_recv(
     const int cooperate_idx = flatten_id / num_ranks;
     const int src_rank = flatten_id % num_ranks;
 
-    // Receiving and packing
-    // NOTE if -> for
-    // if (responsible_expert_idx < num_experts) {
-    EP_DEVICE_ASSERT(num_warp_groups == 1); // not consider multi warp_group case below
-    for (
-        int token_idx = TODO;
-        token_idx < TODO;
-        token_idx += TODO
-    ) {
-//         if (subroutine_thread_id % 32 == 0) { printf("[R%d,S%d,T%d] dispatch_recv local_expert_idx=%d START \n", rank, sm_id, subroutine_thread_id, local_expert_idx); }
-
-        // NOTE modified
-        // const auto src_rank = responsible_expert_idx / num_local_experts;
-        // const auto local_expert_idx = responsible_expert_idx % num_local_experts;
-        
-        TODO_this_init_code_should_not_be_in_loop;
+    // Initialize
+    {
+        TODO_not_handled_yet;
 
         const auto rdma_recv_x_uint8 = static_cast<uint8_t*>(rdma_recv_x) +
                 local_expert_idx * num_ranks * num_max_dispatch_tokens_per_rank * Consts::num_bytes_per_msg +
@@ -492,6 +479,22 @@ __forceinline__ __device__ void dispatch_recv(
         asm volatile("bar.sync %0, %1;" :: "r"(warp_group_id + 2), "r"(num_warps_per_group * 32));
         num_recv_tokens = shared_num_recv_tokens[warp_group_id];
         recv_token_begin_idx = shared_recv_token_begin_idx[warp_group_id];
+    }
+
+    // Receiving and packing
+    // NOTE if -> for
+    // if (responsible_expert_idx < num_experts) {
+    EP_DEVICE_ASSERT(num_warp_groups == 1); // not consider multi warp_group case below
+    for (
+        int token_idx = TODO;
+        token_idx < TODO;
+        token_idx += TODO
+    ) {
+//         if (subroutine_thread_id % 32 == 0) { printf("[R%d,S%d,T%d] dispatch_recv local_expert_idx=%d START \n", rank, sm_id, subroutine_thread_id, local_expert_idx); }
+
+        // NOTE modified
+        // const auto src_rank = responsible_expert_idx / num_local_experts;
+        // const auto local_expert_idx = responsible_expert_idx % num_local_experts;
 
         // Copy tokens
         for (int i = sub_warp_id; i < num_recv_tokens; i += num_warps_per_group) {
