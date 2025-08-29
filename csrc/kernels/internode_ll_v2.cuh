@@ -833,10 +833,6 @@ void dispatch_v2(void* packed_recv_x, void* packed_recv_x_scales,
     // NOTE no longer need one SM to send all topk destinations
     // EP_HOST_ASSERT(kNumMaxTopK + 1 <= num_warp_groups * num_warps_per_group);
 
-    const auto num_warps = num_warp_groups * (num_send_warps_per_group + num_recv_warps_per_group);
-    const auto num_sms = ceil_div(num_experts, num_warp_groups);
-    EP_HOST_ASSERT(num_topk <= kNumMaxTopK);
-
     // Workspace checks
     // auto atomic_counter_per_expert = static_cast<int*>(workspace); // NOTE let users pass a zeroed buffer
     // auto atomic_finish_counter_per_expert = atomic_counter_per_expert + num_experts; // NOTE removed
@@ -847,6 +843,10 @@ void dispatch_v2(void* packed_recv_x, void* packed_recv_x_scales,
     EP_HOST_ASSERT(num_warp_groups >= 2);
     const int num_send_warp_groups = num_warp_groups - 1;
     const int num_recv_warp_groups = 1;
+
+    const auto num_warps = num_send_warp_groups * num_send_warps_per_group + num_recv_warp_groups * num_recv_warps_per_group;
+    const auto num_sms = ceil_div(num_experts, num_warp_groups);
+    EP_HOST_ASSERT(num_topk <= kNumMaxTopK);
 
     // FP8 checks
     if (use_ue8m0)
