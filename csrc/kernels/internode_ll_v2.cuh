@@ -442,106 +442,108 @@ __forceinline__ __device__ void dispatch_recv(
     // NOTE if -> for
     // if (responsible_expert_idx < num_experts) {
     EP_DEVICE_ASSERT(num_warp_groups == 1); // not consider multi warp_group case below
-    for (int local_expert_idx = 0; local_expert_idx < num_local_experts; ++local_expert_idx) {
+    for (
+        int token_idx = TODO;
+        token_idx < TODO;
+        token_idx += TODO
+    ) {
 //         if (subroutine_thread_id % 32 == 0) { printf("[R%d,S%d,T%d] dispatch_recv local_expert_idx=%d START \n", rank, sm_id, subroutine_thread_id, local_expert_idx); }
 
-        if (src_rank < num_ranks) {
-            // NOTE modified
-            // const auto src_rank = responsible_expert_idx / num_local_experts;
-            // const auto local_expert_idx = responsible_expert_idx % num_local_experts;
+        // NOTE modified
+        // const auto src_rank = responsible_expert_idx / num_local_experts;
+        // const auto local_expert_idx = responsible_expert_idx % num_local_experts;
 
-            const auto rdma_recv_x_uint8 = static_cast<uint8_t*>(rdma_recv_x) +
-                    local_expert_idx * num_ranks * num_max_dispatch_tokens_per_rank * Consts::num_bytes_per_msg +
-                    src_rank * num_max_dispatch_tokens_per_rank * Consts::num_bytes_per_msg;
-            const auto recv_x_int4 = static_cast<int4*>(packed_recv_x) +
-                    local_expert_idx * num_ranks * num_max_dispatch_tokens_per_rank * Consts::hidden_int4;
-            const auto recv_src_info = packed_recv_src_info + local_expert_idx * num_ranks * num_max_dispatch_tokens_per_rank;
-            const auto recv_range = packed_recv_layout_range + local_expert_idx * num_ranks;
-            const auto num_aligned_scales = align<int>(Consts::num_scales, sizeof(float) / sizeof(scale_t));
-            const auto recv_x_scales = static_cast<scale_t*>(packed_recv_x_scales) + local_expert_idx * num_ranks * num_max_dispatch_tokens_per_rank * num_aligned_scales;
+        const auto rdma_recv_x_uint8 = static_cast<uint8_t*>(rdma_recv_x) +
+                local_expert_idx * num_ranks * num_max_dispatch_tokens_per_rank * Consts::num_bytes_per_msg +
+                src_rank * num_max_dispatch_tokens_per_rank * Consts::num_bytes_per_msg;
+        const auto recv_x_int4 = static_cast<int4*>(packed_recv_x) +
+                local_expert_idx * num_ranks * num_max_dispatch_tokens_per_rank * Consts::hidden_int4;
+        const auto recv_src_info = packed_recv_src_info + local_expert_idx * num_ranks * num_max_dispatch_tokens_per_rank;
+        const auto recv_range = packed_recv_layout_range + local_expert_idx * num_ranks;
+        const auto num_aligned_scales = align<int>(Consts::num_scales, sizeof(float) / sizeof(scale_t));
+        const auto recv_x_scales = static_cast<scale_t*>(packed_recv_x_scales) + local_expert_idx * num_ranks * num_max_dispatch_tokens_per_rank * num_aligned_scales;
 
-            // Shared between sub-warps in warp groups
-            __shared__ int shared_num_recv_tokens[kNumMaxWarpGroups], shared_recv_token_begin_idx[kNumMaxWarpGroups];
+        // Shared between sub-warps in warp groups
+        __shared__ int shared_num_recv_tokens[kNumMaxWarpGroups], shared_recv_token_begin_idx[kNumMaxWarpGroups];
 
-            // Wait tokens to arrive
-            // NOTES: using sub-warp 1 to overlap with sub-warp 0
-            int num_recv_tokens, recv_token_begin_idx;
-            EP_DEVICE_ASSERT(num_warps_per_group > 1 and num_warp_groups < 15);
-            if (sub_warp_id == 1 and lane_id == 0) {
-                // auto start_time = clock64(); // not used
-                while ((num_recv_tokens = ld_acquire_sys_global(rdma_recv_count + local_expert_idx * num_ranks + src_rank)) == 0);
-                // auto wait_recv_cost = clock64() - start_time; // not used
-                num_recv_tokens = -num_recv_tokens - 1;
-                recv_token_begin_idx = atomicAdd(packed_recv_count + local_expert_idx, num_recv_tokens);
-                shared_num_recv_tokens[warp_group_id] = num_recv_tokens;
-                shared_recv_token_begin_idx[warp_group_id] = recv_token_begin_idx;
-                recv_range[src_rank] = pack2<int, int64_t>(num_recv_tokens, recv_token_begin_idx);
+        // Wait tokens to arrive
+        // NOTES: using sub-warp 1 to overlap with sub-warp 0
+        int num_recv_tokens, recv_token_begin_idx;
+        EP_DEVICE_ASSERT(num_warps_per_group > 1 and num_warp_groups < 15);
+        if (sub_warp_id == 1 and lane_id == 0) {
+            // auto start_time = clock64(); // not used
+            while ((num_recv_tokens = ld_acquire_sys_global(rdma_recv_count + local_expert_idx * num_ranks + src_rank)) == 0);
+            // auto wait_recv_cost = clock64() - start_time; // not used
+            num_recv_tokens = -num_recv_tokens - 1;
+            recv_token_begin_idx = atomicAdd(packed_recv_count + local_expert_idx, num_recv_tokens);
+            shared_num_recv_tokens[warp_group_id] = num_recv_tokens;
+            shared_recv_token_begin_idx[warp_group_id] = recv_token_begin_idx;
+            recv_range[src_rank] = pack2<int, int64_t>(num_recv_tokens, recv_token_begin_idx);
 
-                // not handled
+            // not handled
 //                 // Add stats for diagnosis
 //                 if (cumulative_local_expert_recv_stats != nullptr)
 //                     atomicAdd(cumulative_local_expert_recv_stats + local_expert_idx, num_recv_tokens);
 //                 if (dispatch_wait_recv_cost_stats != nullptr)
 //                     atomicAdd(reinterpret_cast<unsigned long long*>(dispatch_wait_recv_cost_stats + src_rank), wait_recv_cost);
-            }
-            asm volatile("bar.sync %0, %1;" :: "r"(warp_group_id + 2), "r"(num_warps_per_group * 32));
-            num_recv_tokens = shared_num_recv_tokens[warp_group_id];
-            recv_token_begin_idx = shared_recv_token_begin_idx[warp_group_id];
+        }
+        asm volatile("bar.sync %0, %1;" :: "r"(warp_group_id + 2), "r"(num_warps_per_group * 32));
+        num_recv_tokens = shared_num_recv_tokens[warp_group_id];
+        recv_token_begin_idx = shared_recv_token_begin_idx[warp_group_id];
 
-            // Copy tokens
-            for (int i = sub_warp_id; i < num_recv_tokens; i += num_warps_per_group) {
-                // Copy source info
-                const auto src_src_idx = reinterpret_cast<int*>(rdma_recv_x_uint8 + i * Consts::num_bytes_per_msg);
-                if (lane_id == 0)
-                    recv_src_info[recv_token_begin_idx + i] = ld_nc_global(src_src_idx);
-                __syncwarp();
+        // Copy tokens
+        for (int i = sub_warp_id; i < num_recv_tokens; i += num_warps_per_group) {
+            // Copy source info
+            const auto src_src_idx = reinterpret_cast<int*>(rdma_recv_x_uint8 + i * Consts::num_bytes_per_msg);
+            if (lane_id == 0)
+                recv_src_info[recv_token_begin_idx + i] = ld_nc_global(src_src_idx);
+            __syncwarp();
 
-                // Copy data
-                // NOTES: only 2 load iterations for 7K hidden with 7 unrolls
-                const auto src_data = reinterpret_cast<int4*>(reinterpret_cast<uint8_t*>(src_src_idx) + sizeof(int4));
-                const auto dst_data = recv_x_int4 + (recv_token_begin_idx + i) * Consts::hidden_int4;
-                UNROLLED_WARP_COPY(7, lane_id, Consts::hidden_int4, dst_data, src_data, ld_nc_global, st_na_global);
+            // Copy data
+            // NOTES: only 2 load iterations for 7K hidden with 7 unrolls
+            const auto src_data = reinterpret_cast<int4*>(reinterpret_cast<uint8_t*>(src_src_idx) + sizeof(int4));
+            const auto dst_data = recv_x_int4 + (recv_token_begin_idx + i) * Consts::hidden_int4;
+            UNROLLED_WARP_COPY(7, lane_id, Consts::hidden_int4, dst_data, src_data, ld_nc_global, st_na_global);
 
-                // Copy scales
-                if constexpr (kUseFP8) {
-                    // NOTE simply remove to simplify code
-                    EP_DEVICE_ASSERT(false);
-    //                 EP_DEVICE_ASSERT(Consts::num_scales <= 64);
-    //                 // Equivalent CuTe layout:
-    //                 //   (num_tokens, (num_packed, num_elems_per_pack)):(num_elems_per_pack, (num_tokens * num_elems_per_pack, 1))
-    //                 const auto src_scales = reinterpret_cast<float*>(reinterpret_cast<uint8_t*>(src_data) + Consts::hidden_bytes);
-    //                 const auto num_elems_per_pack = static_cast<int>(sizeof(packed_t) / sizeof(scale_t));
-    //                 const auto token_idx = recv_token_begin_idx + i;
-    //                 const auto token_stride = num_elems_per_pack;
-    //                 const auto pack_stride = num_ranks * num_max_dispatch_tokens_per_rank * num_elems_per_pack;
-    //                 if (lane_id < Consts::num_scales) {
-    //                     const auto pack_idx = lane_id / num_elems_per_pack;
-    //                     const auto elem_idx = lane_id % num_elems_per_pack;
-    //                     auto scale = extract_required_scale_format<kUseUE8M0>(ld_nc_global(src_scales + lane_id));
-    //                     recv_x_scales[token_idx * token_stride + pack_idx * pack_stride + elem_idx] = scale;
-    //                 }
-    //                 if (lane_id + 32 < Consts::num_scales) {
-    //                     const auto pack_idx = (lane_id + 32) / num_elems_per_pack;
-    //                     const auto elem_idx = (lane_id + 32) % num_elems_per_pack;
-    //                     auto scale = extract_required_scale_format<kUseUE8M0>(ld_nc_global(src_scales + lane_id + 32));
-    //                     recv_x_scales[token_idx * token_stride + pack_idx * pack_stride + elem_idx] = scale;
-    //                 }
-                } else if constexpr (kUseNVFP4) {
-                    // TODO wait for new swizzle layout
-                    // Equivalent CuTe layout:
-                    //   (num_tokens, (num_packed, num_elems_per_pack)):(num_elems_per_pack, (num_tokens * num_elems_per_pack, 1))
-                    const auto src_scales = reinterpret_cast<uint8_t*>(reinterpret_cast<uint8_t*>(src_data) + Consts::hidden_bytes);
-                    const auto num_elems_per_pack = static_cast<int>(sizeof(packed_t) / sizeof(scale_t));
-                    const auto token_idx = recv_token_begin_idx + i;
-                    const auto token_stride = num_elems_per_pack;
-                    const auto pack_stride = num_ranks * num_max_dispatch_tokens_per_rank * num_elems_per_pack;
-                    #pragma unroll
-                    for (int j = lane_id; j < Consts::num_scales; j += 32) {
-                        const auto pack_idx = j / num_elems_per_pack;
-                        const auto elem_idx = j % num_elems_per_pack;
-                        auto scale = ld_nc_global(src_scales + j);
-                        recv_x_scales[token_idx * token_stride + pack_idx * pack_stride + elem_idx] = scale;
-                    }
+            // Copy scales
+            if constexpr (kUseFP8) {
+                // NOTE simply remove to simplify code
+                EP_DEVICE_ASSERT(false);
+//                 EP_DEVICE_ASSERT(Consts::num_scales <= 64);
+//                 // Equivalent CuTe layout:
+//                 //   (num_tokens, (num_packed, num_elems_per_pack)):(num_elems_per_pack, (num_tokens * num_elems_per_pack, 1))
+//                 const auto src_scales = reinterpret_cast<float*>(reinterpret_cast<uint8_t*>(src_data) + Consts::hidden_bytes);
+//                 const auto num_elems_per_pack = static_cast<int>(sizeof(packed_t) / sizeof(scale_t));
+//                 const auto token_idx = recv_token_begin_idx + i;
+//                 const auto token_stride = num_elems_per_pack;
+//                 const auto pack_stride = num_ranks * num_max_dispatch_tokens_per_rank * num_elems_per_pack;
+//                 if (lane_id < Consts::num_scales) {
+//                     const auto pack_idx = lane_id / num_elems_per_pack;
+//                     const auto elem_idx = lane_id % num_elems_per_pack;
+//                     auto scale = extract_required_scale_format<kUseUE8M0>(ld_nc_global(src_scales + lane_id));
+//                     recv_x_scales[token_idx * token_stride + pack_idx * pack_stride + elem_idx] = scale;
+//                 }
+//                 if (lane_id + 32 < Consts::num_scales) {
+//                     const auto pack_idx = (lane_id + 32) / num_elems_per_pack;
+//                     const auto elem_idx = (lane_id + 32) % num_elems_per_pack;
+//                     auto scale = extract_required_scale_format<kUseUE8M0>(ld_nc_global(src_scales + lane_id + 32));
+//                     recv_x_scales[token_idx * token_stride + pack_idx * pack_stride + elem_idx] = scale;
+//                 }
+            } else if constexpr (kUseNVFP4) {
+                // TODO wait for new swizzle layout
+                // Equivalent CuTe layout:
+                //   (num_tokens, (num_packed, num_elems_per_pack)):(num_elems_per_pack, (num_tokens * num_elems_per_pack, 1))
+                const auto src_scales = reinterpret_cast<uint8_t*>(reinterpret_cast<uint8_t*>(src_data) + Consts::hidden_bytes);
+                const auto num_elems_per_pack = static_cast<int>(sizeof(packed_t) / sizeof(scale_t));
+                const auto token_idx = recv_token_begin_idx + i;
+                const auto token_stride = num_elems_per_pack;
+                const auto pack_stride = num_ranks * num_max_dispatch_tokens_per_rank * num_elems_per_pack;
+                #pragma unroll
+                for (int j = lane_id; j < Consts::num_scales; j += 32) {
+                    const auto pack_idx = j / num_elems_per_pack;
+                    const auto elem_idx = j % num_elems_per_pack;
+                    auto scale = ld_nc_global(src_scales + j);
+                    recv_x_scales[token_idx * token_stride + pack_idx * pack_stride + elem_idx] = scale;
                 }
             }
         }
