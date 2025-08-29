@@ -89,16 +89,16 @@ __forceinline__ __device__ void dispatch_send(
             // TODO maybe do not need `release` (but yes need `sys`)
             int remote_start_offset_of_dst_rank;
             {
-                const auto dst_ptr = negotiate_offset_of_expert_buffer;
-                const auto dst_p2p_ptr = nvshmemi_get_p2p_ptr(dst_ptr, rank, dst_rank);
+                const auto dst_ptr = reinterpret_cast<uint64_t>(negotiate_offset_of_expert_buffer);
+                const auto dst_p2p_ptr = reinterpret_cast<int*>(nvshmemi_get_p2p_ptr(dst_ptr, rank, dst_rank));
                 remote_start_offset_of_dst_rank = atomic_add_release_sys_global(dst_p2p_ptr + dst_expert_local_idx, num_tokens_to_send);
             }
 
             // 2. Write metadata to remote
             // TODO is this strong enough
             {
-                const auto dst_ptr = layout_range_buffer;
-                const auto dst_p2p_ptr = nvshmemi_get_p2p_ptr(dst_ptr, rank, dst_rank);
+                const auto dst_ptr = reinterpret_cast<uint64_t>(layout_range_buffer);
+                const auto dst_p2p_ptr = reinterpret_cast<int64_t*>(nvshmemi_get_p2p_ptr(dst_ptr, rank, dst_rank));
                 const auto val = pack2<int, int64_t>(num_tokens_to_send, remote_start_offset_of_dst_rank);
                 dst_p2p_ptr[dst_expert_local_idx * num_ranks + rank] = -val-1;
             }
@@ -140,7 +140,7 @@ __forceinline__ __device__ void dispatch_send(
     const int flat_worker_num = num_warps * num_sms;
     for (
         // "tefl" := "token_idx_and_dst_expert_flat_list"
-        int tefl_idx = flat_worker_id
+        int tefl_idx = flat_worker_id;
         tefl_idx < num_tokens * num_topk;
         tefl_idx += flat_worker_num
     ) {
@@ -150,7 +150,7 @@ __forceinline__ __device__ void dispatch_send(
         // NOTE ldg is for read-only data cache, if token_idx_and_dst_expert_flat_list is somehow overlapped in the future we should change it
         const auto token_idx_and_dst_expert = __ldg(token_idx_and_dst_expert_flat_list + tefl_idx);
         int token_idx, dst_expert_idx;
-        unpack2(token_idx_and_dst_rank, token_idx, dst_expert_idx);
+        unpack2(token_idx_and_dst_expert, token_idx, dst_expert_idx);
         const auto dst_rank = dst_expert_idx / num_local_experts;
 
         // TODO can speedup by prefetching, delayed checking, etc
@@ -397,9 +397,9 @@ __forceinline__ __device__ void dispatch_recv(
 
     // NOTE copied from dispatch body
     const auto sm_id = static_cast<int>(blockIdx.x);
-    // const auto num_sms = static_cast<int>(gridDim.x); // unused
+    const auto num_sms = static_cast<int>(gridDim.x); // unused
     const auto warp_id = subroutine_thread_id / 32, lane_id = get_lane_id();
-    // const auto num_warps = num_warp_groups * num_warps_per_group; // unused
+    const auto num_warps = num_warp_groups * num_warps_per_group; // unused
     const auto num_local_experts = num_experts / num_ranks;
     const auto warp_group_id = warp_id / num_warps_per_group;
     const auto sub_warp_id = warp_id % num_warps_per_group;
