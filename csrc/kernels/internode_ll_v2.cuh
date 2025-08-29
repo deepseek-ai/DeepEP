@@ -209,7 +209,7 @@ __forceinline__ __device__ void dispatch_send(
                 const auto* src_int4_ptr = reinterpret_cast<const int4*>(src_ptr);
                 const auto* dst_int4_ptr = reinterpret_cast<int4*>(dst_p2p_ptr);
 
-                // NOTE do *not* send the first int4, which is the signal
+                // NOTE do *not* send the first int4, which is handled via the signal
                 // UNROLLED_WARP_COPY(8, lane_id, Consts::num_int4_per_msg, dst_int4_ptr, src_int4_ptr, ld_nc_global, st_na_global);
                 UNROLLED_WARP_COPY(
                     8, lane_id,
