@@ -525,6 +525,9 @@ __forceinline__ __device__ void dispatch_recv(
                 while ((recv_src_idx = ld_acquire_sys_global(src_src_idx)) == 0);
                 recv_src_idx = -recv_src_idx-1;
 
+                // cleanup (will be used in the next round)
+                *src_src_idx = 0;
+
                 recv_src_info[recv_token_begin_idx + i] = recv_src_idx;
             }
             __syncwarp();
