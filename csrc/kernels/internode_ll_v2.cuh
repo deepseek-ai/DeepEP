@@ -192,9 +192,9 @@ __forceinline__ __device__ void dispatch_send(
 
         // TODO do prefetching if needed
         // NOTE ldg is for read-only data cache, if token_idx_and_dst_expert_and_dst_slot_idx_flat_list is somehow overlapped in the future we should change it
-        const auto token_idx_and_dst_expert = __ldg(token_idx_and_dst_expert_and_dst_slot_idx_flat_list + tesfl_idx);
-        int token_idx, dst_expert_idx;
-        unpack2(token_idx_and_dst_expert, token_idx, dst_expert_idx);
+        const auto token_idx_and_dst_expert_and_slot_idx = __ldg(token_idx_and_dst_expert_and_dst_slot_idx_flat_list + tesfl_idx);
+        const auto ptr = (int16_t*) &token_idx_and_dst_expert_and_slot_idx;
+        const int token_idx = ptr[0], dst_expert_idx = ptr[1], slot_idx = ptr[2];
         // const auto dst_rank = dst_expert_idx / num_local_experts;
 
         // TODO can speedup by prefetching, delayed checking, etc
@@ -275,8 +275,10 @@ __forceinline__ __device__ void dispatch_send(
         // Issue IBGDA sends
 //         if (dst_expert_idx >= 0) {
 
-        int slot_idx = lane_id == 0 ? atomicAdd(atomic_counter_per_expert + dst_expert_idx, 1) : 0;
-        slot_idx = __shfl_sync(0xffffffff, slot_idx, 0);
+        // NOTE: let external give this
+        // int slot_idx = lane_id == 0 ? atomicAdd(atomic_counter_per_expert + dst_expert_idx, 1) : 0;
+        // slot_idx = __shfl_sync(0xffffffff, slot_idx, 0);
+
         const auto dst_rank = dst_expert_idx / num_local_experts;
         const auto dst_expert_local_idx = dst_expert_idx % num_local_experts;
         // NOTE do not use `rdma_x` but use `x`
