@@ -691,7 +691,13 @@ __forceinline__ __device__ void dispatch_recv(
 }
 
 template <bool kUseFP8, bool kUseUE8M0, bool kUseNVFP4, int kHidden>
-__global__ __launch_bounds__(1024, 1) void
+__global__
+// TODO
+// TODO temp hack
+// TODO
+// __launch_bounds__(1024, 1)
+__maxnreg__(32)
+void
 dispatch_v2(void* packed_recv_x, void* packed_recv_x_scales,
          int* packed_recv_src_info, int64_t* packed_recv_layout_range,
          int* packed_recv_count,
@@ -899,7 +905,13 @@ LAUNCH_KERNEL(&cfg, dispatch_func, \
 }
 
 template <bool kUseLogFMT, int kHidden, int kNumMaxTopk, int kNumMaxUnrolls>
-__global__ __launch_bounds__(1024, 1) void
+__global__
+// TODO
+// TODO temp hack
+// TODO
+// __launch_bounds__(1024, 1)
+__maxnreg__(32)
+void
 combine_v2(void* combined_x,
         void* rdma_recv_x, int* rdma_recv_flag, void* rdma_send_x,
         const void* x, const int64_t* topk_idx, const float* topk_weights,
