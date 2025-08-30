@@ -288,36 +288,36 @@ __forceinline__ __device__ void dispatch_send(
                                  remote_start_offset * Consts::num_bytes_per_msg +
                                  slot_idx * Consts::num_bytes_per_msg;
             const auto dst_p2p_ptr = nvshmemi_get_p2p_ptr(dst_ptr, rank, dst_rank);
-            if (dst_p2p_ptr == 0) {
-                // NOTE remove to simplify code (and it does not handle signals etc)
-                EP_DEVICE_ASSERT(false);
-                // nvshmemi_ibgda_put_nbi_warp(dst_ptr, src_ptr, Consts::num_bytes_per_msg, dst_rank, dst_expert_local_idx, lane_id, slot_idx);
-            } else {
-                // NOTES: only 2 load iterations for 7K hidden with 8 unrolls
-                const auto* src_int4_ptr = reinterpret_cast<const int4*>(src_ptr);
-                const auto* dst_int4_ptr = reinterpret_cast<int4*>(dst_p2p_ptr);
 
-                // NOTE do *not* send the first int4, which is handled via the signal
-                // UNROLLED_WARP_COPY(8, lane_id, Consts::num_int4_per_msg, dst_int4_ptr, src_int4_ptr, ld_nc_global, st_na_global);
-                UNROLLED_WARP_COPY(
-                    8, lane_id,
-                    Consts::num_int4_per_msg - 1,
-                    dst_int4_ptr + 1,
-                    src_int4_ptr + 1,
-                    ld_nc_global, st_na_global
-                );
+//             if (dst_p2p_ptr == 0) {
+//                 nvshmemi_ibgda_put_nbi_warp(dst_ptr, src_ptr, Consts::num_bytes_per_msg, dst_rank, dst_expert_local_idx, lane_id, slot_idx);
+//             } else {
 
-                // Send per-token signal
-                // NOTE only first 4B of 16B has value, the other 12B is not needed
-                __syncwarp();
-                if (lane_id == 0) {
-//                     if (subroutine_thread_id % 32 == 0) { printf("[R%d,S%d,T%d] st-token-signal START dst_rank=%d addr=%p delta_addr=%d token_idx=%d\n",
-//                         rank, sm_id, subroutine_thread_id,
-//                         dst_rank, (int*)dst_ptr, (int)((int64_t)dst_ptr - (int64_t)rdma_recv_x), token_idx); }
+            // NOTES: only 2 load iterations for 7K hidden with 8 unrolls
+            const auto* src_int4_ptr = reinterpret_cast<const int4*>(src_ptr);
+            const auto* dst_int4_ptr = reinterpret_cast<int4*>(dst_p2p_ptr);
 
-                    st_release_sys_global(reinterpret_cast<int*>(dst_p2p_ptr), -token_idx - 1);
-                }
+            // NOTE do *not* send the first int4, which is handled via the signal
+            // UNROLLED_WARP_COPY(8, lane_id, Consts::num_int4_per_msg, dst_int4_ptr, src_int4_ptr, ld_nc_global, st_na_global);
+            UNROLLED_WARP_COPY(
+                8, lane_id,
+                Consts::num_int4_per_msg - 1,
+                dst_int4_ptr + 1,
+                src_int4_ptr + 1,
+                ld_nc_global, st_na_global
+            );
+
+            // Send per-token signal
+            // NOTE only first 4B of 16B has value, the other 12B is not needed
+            __syncwarp();
+            if (lane_id == 0) {
+//                 if (subroutine_thread_id % 32 == 0) { printf("[R%d,S%d,T%d] st-token-signal START dst_rank=%d addr=%p delta_addr=%d token_idx=%d\n",
+//                     rank, sm_id, subroutine_thread_id,
+//                     dst_rank, (int*)dst_ptr, (int)((int64_t)dst_ptr - (int64_t)rdma_recv_x), token_idx); }
+
+                st_release_sys_global(reinterpret_cast<int*>(dst_p2p_ptr), -token_idx - 1);
             }
+//             }
 
             // not needed in per-token signal approach
 //             // Increase counter after finishing
