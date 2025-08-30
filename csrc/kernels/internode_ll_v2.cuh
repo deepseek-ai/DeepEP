@@ -132,7 +132,7 @@ __forceinline__ __device__ void dispatch_send(
                 const auto dst_ptr = reinterpret_cast<uint64_t>(layout_range_buffer);
                 const auto dst_p2p_ptr = reinterpret_cast<int64_t*>(nvshmemi_get_p2p_ptr(dst_ptr, rank, dst_rank));
                 const auto val = pack2<int, int64_t>(num_tokens_to_send, remote_start_offset);
-                dst_p2p_ptr[dst_expert_local_idx * num_ranks + rank] = -val-1;
+                st_volatile_global(dst_p2p_ptr + dst_expert_local_idx * num_ranks + rank, -val-1);
             }
 
             // 2. Write metadata to local

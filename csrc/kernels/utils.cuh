@@ -169,6 +169,11 @@ __device__ __forceinline__ uint64_t ld_na_relaxed(const uint64_t *ptr) {
     return ret;
 }
 
+// NOTE ADD
+__device__ __forceinline__ void st_volatile_global(int64_t *ptr, int64_t val) {
+    asm volatile("st.volatile.global.s64 [%0], %1;" : : "l"(ptr), "l"(val));
+}
+
 __device__  __forceinline__ int ld_volatile_global(const int *ptr) {
     int ret;
     asm volatile("ld.volatile.global.s32 %0, [%1];" : "=r"(ret) : "l"(ptr));
