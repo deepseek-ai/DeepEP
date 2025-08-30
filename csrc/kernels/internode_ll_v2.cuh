@@ -1156,7 +1156,7 @@ combine_v2(void* combined_x,
             }
         }
     }
-    if (subroutine_thread_id % 32 == 0) { printf("[R%d,S%d,T%d] combine phase=send END\n", rank, sm_id, thread_id); }
+    if (thread_id % 32 == 0) { printf("[R%d,S%d,T%d] combine phase=send END\n", rank, sm_id, thread_id); }
 
     // Receiving phase
     LOW_LATENCY_COMBINE_RECV:
@@ -1314,7 +1314,7 @@ combine_v2(void* combined_x,
         tma_store_wait<0>();
     }
 
-    if (subroutine_thread_id % 32 == 0) { printf("[R%d,S%d,T%d] combine phase=recv END\n", rank, sm_id, thread_id); }
+    if (thread_id % 32 == 0) { printf("[R%d,S%d,T%d] combine phase=recv END\n", rank, sm_id, thread_id); }
 }
 
 void combine_v2(void* combined_x,
