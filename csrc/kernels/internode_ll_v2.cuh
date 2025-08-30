@@ -296,7 +296,7 @@ __forceinline__ __device__ void dispatch_send(
                 // UNROLLED_WARP_COPY(8, lane_id, Consts::num_int4_per_msg, dst_int4_ptr, src_int4_ptr, ld_nc_global, st_na_global);
                 UNROLLED_WARP_COPY(
                     8, lane_id,
-                    Consts::num_int4_per_msg - sizeof(int4),
+                    Consts::num_int4_per_msg - 1,
                     dst_int4_ptr + 1,
                     src_int4_ptr + 1,
                     ld_nc_global, st_na_global
