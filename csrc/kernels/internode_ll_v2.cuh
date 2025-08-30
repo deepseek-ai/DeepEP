@@ -178,7 +178,7 @@ __forceinline__ __device__ void dispatch_send(
         tefl_idx < num_tokens * num_topk;
         tefl_idx += flat_worker_num, debug_iter_idx += 1
     ) {
-//         if (subroutine_thread_id % 32 == 0) { printf("[R%d,S%d,T%d] dispatch_send local_expert_idx=%d START \n", rank, sm_id, subroutine_thread_id, local_expert_idx); }
+//         if (subroutine_thread_id % 32 == 0) { printf("[R%d,S%d,T%d] dispatch_send tefl_idx=%d START \n", rank, sm_id, subroutine_thread_id, tefl_idx); }
 //         write_debug_time(
 //             debug_tensor, t_start,
 //             /* event_group_id */ 0,
@@ -377,7 +377,7 @@ __forceinline__ __device__ void dispatch_send(
 //         __syncwarp();
     }
 
-//     if (subroutine_thread_id % 32 == 0) { printf("[R%d,S%d,T%d] dispatch_send END\n", rank, sm_id, subroutine_thread_id); }
+    if (subroutine_thread_id % 32 == 0) { printf("[R%d,S%d,T%d] dispatch_send END\n", rank, sm_id, subroutine_thread_id); }
 
 //     } else if (warp_id == num_warps - 1) {
 //         EP_DEVICE_ASSERT(num_sms > 1);
@@ -687,7 +687,7 @@ __forceinline__ __device__ void dispatch_recv(
         }
     }
 
-//     if (subroutine_thread_id % 32 == 0) { printf("[R%d,S%d,T%d] dispatch_recv END\n", rank, sm_id, subroutine_thread_id); }
+    if (subroutine_thread_id % 32 == 0) { printf("[R%d,S%d,T%d] dispatch_recv END\n", rank, sm_id, subroutine_thread_id); }
 }
 
 template <bool kUseFP8, bool kUseUE8M0, bool kUseNVFP4, int kHidden>
