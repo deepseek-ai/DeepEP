@@ -685,20 +685,20 @@ __forceinline__ __device__ void dispatch_recv(
 //                     recv_x_scales[token_idx * token_stride + pack_idx * pack_stride + elem_idx] = scale;
 //                 }
             } else if constexpr (kUseNVFP4) {
-                // TODO wait for new swizzle layout
-                // Equivalent CuTe layout:
-                //   (num_tokens, (num_packed, num_elems_per_pack)):(num_elems_per_pack, (num_tokens * num_elems_per_pack, 1))
+                // The physical layout is (l, rm, rk, 32, 4, 4).
                 const auto src_scales = reinterpret_cast<uint8_t*>(reinterpret_cast<uint8_t*>(src_data) + Consts::hidden_bytes);
                 const auto num_elems_per_pack = static_cast<int>(sizeof(packed_t) / sizeof(scale_t));
-                // const auto token_idx = recv_token_begin_idx + i;
-                const auto token_stride = num_elems_per_pack;
-                const auto pack_stride = num_ranks * num_max_dispatch_tokens_per_rank * num_elems_per_pack;
+                // const auto token_idx = recv_token_begin_idx + i; // NOTE changed
+                const auto token_stride = Consts::num_scales * sizeof(scale_t);
+                const auto pack_stride = num_elems_per_pack;
+                const auto rm = token_idx / 128;
+                const auto rm_res = token_idx % 128;
                 #pragma unroll
                 for (int j = lane_id; j < Consts::num_scales; j += 32) {
                     const auto pack_idx = j / num_elems_per_pack;
                     const auto elem_idx = j % num_elems_per_pack;
                     auto scale = ld_nc_global(src_scales + j);
-                    recv_x_scales[token_idx * token_stride + pack_idx * pack_stride + elem_idx] = scale;
+                    recv_x_scales[rm * token_stride * 128 + pack_idx * pack_stride * 128 + rm_res * pack_stride + elem_idx] = scale;
                 }
             }
 
