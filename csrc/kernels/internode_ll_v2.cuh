@@ -308,19 +308,20 @@ __forceinline__ __device__ void dispatch_send(
         // UNROLLED_WARP_COPY(8, lane_id, Consts::num_int4_per_msg, dst_int4_ptr, src_int4_ptr, ld_nc_global, st_na_global);
         // UNROLLED_WARP_COPY(8, lane_id, body_num_int4_per_msg, body_dst_int4_ptr, body_src_int4_ptr, ld_nc_global, st_na_global);
 
-        constexpr int loop_num = ceil_div(body_num_int4_per_msg, 32);
+        constexpr int num_threads_for_copy = 32;
+        constexpr int loop_num = ceil_div(body_num_int4_per_msg, num_threads_for_copy);
         EP_STATIC_ASSERT(loop_num == 8, "unexpected loop_num");
         int4 body_buf[loop_num];
         #pragma unroll
         for (int i = 0; i < loop_num; ++i) {
-            int offset = lane_id + i * 32;
+            int offset = lane_id + i * num_threads_for_copy;
             if (offset < body_num_int4_per_msg) {
                 body_buf[i] = ld_nc_global(body_src_int4_ptr + offset);
             }
         }
         #pragma unroll
         for (int i = 0; i < loop_num; ++i) {
-            int offset = lane_id + i * 32;
+            int offset = lane_id + i * num_threads_for_copy;
             if (offset < body_num_int4_per_msg) {
                 st_na_global(body_dst_int4_ptr + offset, body_buf[i]);
             }
