@@ -133,8 +133,9 @@ __forceinline__ __device__ void dispatch_send(
                 const auto dst_p2p_ptr = reinterpret_cast<int64_t*>(nvshmemi_get_p2p_ptr(dst_ptr, rank, dst_rank));
                 const auto raw_val = pack2<int, int64_t>(num_tokens_to_send, remote_start_offset);
                 st_volatile_global(dst_p2p_ptr, -raw_val-1);
-                printf("[R%d,S%d,T%d] st-layout dst_ptr=%lld delta_addr=%d raw_val=%lld\n",
-                    rank, sm_id, subroutine_thread_id, dst_ptr, (int) (((uint64_t)dst_ptr) - ((uint64_t)layout_range_buffer)), raw_val);
+
+//                 printf("[R%d,S%d,T%d] st-layout dst_ptr=%lld delta_addr=%d raw_val=%lld\n",
+//                     rank, sm_id, subroutine_thread_id, dst_ptr, (int) (((uint64_t)dst_ptr) - ((uint64_t)layout_range_buffer)), raw_val);
             }
 
             // 2. Write metadata to local
@@ -687,7 +688,7 @@ __forceinline__ __device__ void dispatch_recv(
         }
     }
 
-    if (subroutine_thread_id % 32 == 0) { printf("[R%d,S%d,T%d] dispatch_recv END\n", rank, sm_id, subroutine_thread_id); }
+//     if (subroutine_thread_id % 32 == 0) { printf("[R%d,S%d,T%d] dispatch_recv END\n", rank, sm_id, subroutine_thread_id); }
 }
 
 template <bool kUseFP8, bool kUseUE8M0, bool kUseNVFP4, int kHidden>
