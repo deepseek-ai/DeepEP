@@ -44,8 +44,7 @@ def test_main(num_tokens: int, hidden: int, num_experts: int, num_topk: int,
         topk_idx[random.randint(0, num_tokens - 1), random.randint(0, num_topk - 1)] = -1
 
     # Check dispatch correctness
-    import os
-    do_check = bool(int(os.environ.get("DEEPEP_HACK_DO_CHECK", "1")))
+    do_check = True
     hash_value, num_times = 0, 0
     for current_x in x_list:
         for return_recv_hook in (False, True):
