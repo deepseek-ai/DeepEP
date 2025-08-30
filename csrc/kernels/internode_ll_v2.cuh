@@ -134,7 +134,7 @@ __forceinline__ __device__ void dispatch_send(
                 const auto raw_val = pack2<int, int64_t>(num_tokens_to_send, remote_start_offset);
                 // TODO use which?
                 // st_volatile_global(dst_p2p_ptr, -raw_val-1);
-                dst_p2p_ptr[dst_expert_local_idx * num_ranks + rank] = -raw_val-1;
+                *dst_p2p_ptr = -raw_val-1;
 
 //                 printf("[R%d,S%d,T%d] st-layout dst_ptr=%lld delta_addr=%d raw_val=%lld\n",
 //                     rank, sm_id, subroutine_thread_id, dst_ptr, (int) (((uint64_t)dst_ptr) - ((uint64_t)layout_range_buffer)), raw_val);
