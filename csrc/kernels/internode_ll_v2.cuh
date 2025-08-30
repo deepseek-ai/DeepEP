@@ -173,7 +173,14 @@ __forceinline__ __device__ void dispatch_send(
     //       to allow work be distributed to all SMs when few work
     // TODO is these ordering suboptimal for nvlink write or gmem read?
     // TODO may use multi warp to send one token
-    const int flat_worker_id = warp_id * num_sms + sm_id;
+
+    constexpr int num_warps_per_warp_pair = 2; // can use "warp group", but the name is already used and we want to minimize code change
+    const int warp_pair_id = warp_id / num_warps_per_warp_pair;
+    const int warp_id_inside_pair = warp_id % num_warps_per_warp_pair;
+    const int num_warp_pairs = num_warps / num_warps_per_warp_pair;
+    EP_DEVICE_ASSERT(num_warp_pairs * num_warps_per_warp_pair == num_warps);
+
+    const int flat_worker_id = warp_pair_id * num_sms + sm_id;
     const int flat_worker_num = num_warps * num_sms;
     for (
         // "tesfl" := "token_idx_and_dst_expert_and_dst_slot_idx_flat_list"
@@ -310,9 +317,9 @@ __forceinline__ __device__ void dispatch_send(
         // UNROLLED_WARP_COPY(8, lane_id, Consts::num_int4_per_msg, dst_int4_ptr, src_int4_ptr, ld_nc_global, st_na_global);
         // UNROLLED_WARP_COPY(8, lane_id, body_num_int4_per_msg, body_dst_int4_ptr, body_src_int4_ptr, ld_nc_global, st_na_global);
 
-        constexpr int num_threads_for_copy = 32;
+        constexpr int num_threads_for_copy = 32 * num_warps_per_warp_pair;
         constexpr int loop_num = ceil_div(body_num_int4_per_msg, num_threads_for_copy);
-        EP_STATIC_ASSERT(loop_num == 8, "unexpected loop_num");
+        EP_STATIC_ASSERT(loop_num == 4, "unexpected loop_num");
         int4 body_buf[loop_num];
         #pragma unroll
         for (int i = 0; i < loop_num; ++i) {
@@ -331,8 +338,10 @@ __forceinline__ __device__ void dispatch_send(
 
         // Send per-token signal
         // NOTE only first 4B of 16B has value, the other 12B is not needed
-        __syncwarp();
-        if (lane_id == 0) {
+        // __syncwarp();
+        // NOTE `barrier` not `bar`, since the latter requires `.aligned` and we have other threads that do NOT satisfy this
+        asm volatile("barrier.sync %0, %1;" :: "r"(warp_pair_id), "r"(num_warps_per_warp_pair * 32));
+        if ((warp_id_inside_pair == 0) and (lane_id == 0)) {
 //             if (subroutine_thread_id % 32 == 0) { printf("[R%d,S%d,T%d] st-token-signal START dst_rank=%d addr=%p delta_addr=%d token_idx=%d\n",
 //                 rank, sm_id, subroutine_thread_id,
 //                 dst_rank, (int*)dst_ptr, (int)((int64_t)dst_ptr - (int64_t)rdma_recv_x), token_idx); }
