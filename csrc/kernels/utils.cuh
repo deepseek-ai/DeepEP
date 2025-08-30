@@ -16,8 +16,21 @@
         for (int __j = 0; __j < (UNROLL_FACTOR); ++ __j) \
             ST_FUNC(__dst + __i + __j * 32, unrolled_values[__j]); \
     } \
-    for (int __i = ((N) / kLoopStride) * kLoopStride + (LANE_ID); __i < (N); __i += 32) \
-        ST_FUNC(__dst + __i, LD_FUNC(__src + __i)); \
+    { \
+        int __i = ((N) / kLoopStride) * kLoopStride + (LANE_ID); \
+        _Pragma("unroll") \
+        for (int __j = 0; __j < (UNROLL_FACTOR); ++ __j) { \
+            if (__i + __j * 32 < (N)) { \
+                unrolled_values[__j] = LD_FUNC(__src + __i + __j * 32); \
+            } \
+        } \
+        _Pragma("unroll") \
+        for (int __j = 0; __j < (UNROLL_FACTOR); ++ __j) { \
+            if (__i + __j * 32 < (N)) { \
+                ST_FUNC(__dst + __i + __j * 32, unrolled_values[__j]); \
+            } \
+        } \
+    } \
 }
 
 namespace deep_ep {
