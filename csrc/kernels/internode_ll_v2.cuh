@@ -299,17 +299,11 @@ __forceinline__ __device__ void dispatch_send(
         const auto* dst_int4_ptr = reinterpret_cast<int4*>(dst_p2p_ptr);
 
         // NOTE do *not* send the first int4, which is handled via the signal
-        // UNROLLED_WARP_COPY(8, lane_id, Consts::num_int4_per_msg, dst_int4_ptr, src_int4_ptr, ld_nc_global, st_na_global);
         const int4* body_src_int4_ptr = src_int4_ptr + 1;
         const int4* body_dst_int4_ptr = dst_int4_ptr + 1;
         const int body_num_int4_per_msg = Consts::num_int4_per_msg - 1;
-        UNROLLED_WARP_COPY(
-            8, lane_id,
-            body_num_int4_per_msg,
-            body_dst_int4_ptr,
-            body_src_int4_ptr,
-            ld_nc_global, st_na_global
-        );
+        // UNROLLED_WARP_COPY(8, lane_id, Consts::num_int4_per_msg, dst_int4_ptr, src_int4_ptr, ld_nc_global, st_na_global);
+        UNROLLED_WARP_COPY(8, lane_id, body_num_int4_per_msg, body_dst_int4_ptr, body_src_int4_ptr, ld_nc_global, st_na_global);
 
         // Send per-token signal
         // NOTE only first 4B of 16B has value, the other 12B is not needed
