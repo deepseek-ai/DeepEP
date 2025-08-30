@@ -197,12 +197,6 @@ __forceinline__ __device__ void dispatch_send(
         unpack2(token_idx_and_dst_expert, token_idx, dst_expert_idx);
         // const auto dst_rank = dst_expert_idx / num_local_experts;
 
-        // TODO can speedup by prefetching, delayed checking, etc
-        // TODO is this load strong enough?
-        int remote_start_offset;
-        while ((remote_start_offset = ld_volatile_global(remote_start_offset_buffer + dst_expert_idx)) == 0);
-        remote_start_offset = -remote_start_offset - 1;
-
         // NOTE changed, see "before-after" above
         // for (int token_idx = sm_id; token_idx < num_tokens; token_idx += num_sms) {
 
@@ -307,6 +301,13 @@ __forceinline__ __device__ void dispatch_send(
                 body_buf[i] = ld_nc_global(body_src_int4_ptr + offset);
             }
         }
+
+        // NOTE this is delayed to here
+        // TODO can speedup by prefetching, delayed checking, etc
+        // TODO is this load strong enough?
+        int remote_start_offset;
+        while ((remote_start_offset = ld_volatile_global(remote_start_offset_buffer + dst_expert_idx)) == 0);
+        remote_start_offset = -remote_start_offset - 1;
 
         const auto dst_ptr = reinterpret_cast<uint64_t>(rdma_recv_x) +
                              dst_expert_local_idx * num_ranks * num_max_dispatch_tokens_per_rank * Consts::num_bytes_per_msg +
