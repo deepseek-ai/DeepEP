@@ -65,7 +65,7 @@ __forceinline__ __device__ void dispatch_send(
     bool round_scale, int phases,
     uint32_t* dst_signals,
     uint32_t* count_per_expert, int64_t* token_idx_and_dst_expert_flat_list,
-    int64_t* layout_range_buffer, int* negotiate_offset_of_expert_buffer, int* remote_start_offset_buffer,
+    int64_t* layout_range_buffer, int* negotiate_offset_of_expert_buffer, int* remote_start_offset_buffer
 //     int* debug_tensor
 ) {
 //     uint32_t t_start = clock();
@@ -440,7 +440,7 @@ __forceinline__ __device__ void dispatch_recv(
     bool round_scale, int phases,
     uint32_t* dst_signals,
     uint32_t* count_per_expert, int64_t* token_idx_and_dst_expert_flat_list,
-    int64_t* layout_range_buffer, int* negotiate_offset_of_expert_buffer, int* remote_start_offset_buffer,
+    int64_t* layout_range_buffer, int* negotiate_offset_of_expert_buffer, int* remote_start_offset_buffer
 //     int* debug_tensor
 ) {
 //     uint32_t t_start = clock();
@@ -718,7 +718,7 @@ dispatch_v2(void* packed_recv_x, void* packed_recv_x_scales,
          bool round_scale, int phases,
          uint32_t* dst_signals,
          uint32_t* count_per_expert, int64_t* token_idx_and_dst_expert_flat_list,
-         int* remote_start_offset_buffer,
+         int* remote_start_offset_buffer
 //          int* debug_tensor
          ) {
     const auto sm_id = static_cast<int>(blockIdx.x);
