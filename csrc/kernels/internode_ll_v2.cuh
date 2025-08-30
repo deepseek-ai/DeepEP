@@ -88,7 +88,7 @@ __forceinline__ __device__ void dispatch_send(
     // Expert counts
     // __shared__ int shared_num_tokens_sent_per_expert[kNumMaxWarpGroups];
 
-    if (subroutine_thread_id % 32 == 0) { printf("[R%d,S%d,T%d] dispatch_send START\n", rank, sm_id, subroutine_thread_id); }
+//     if (subroutine_thread_id % 32 == 0) { printf("[R%d,S%d,T%d] dispatch_send START\n", rank, sm_id, subroutine_thread_id); }
 
     if ((sm_id == 0) and (warp_id == 0)) {
         // The first SM is also responsible for cleaning the next buffer
@@ -462,7 +462,7 @@ __forceinline__ __device__ void dispatch_recv(
     EP_STATIC_ASSERT(sizeof(packed_t) % sizeof(scale_t) == 0, "Invalid vector length");
     EP_STATIC_ASSERT(!(kUseFP8 && kUseNVFP4), "FP8 and NVFP4 cannot be used together");
 
-    if (subroutine_thread_id % 32 == 0) { printf("[R%d,S%d,T%d] dispatch_recv START\n", rank, sm_id, subroutine_thread_id); }
+//     if (subroutine_thread_id % 32 == 0) { printf("[R%d,S%d,T%d] dispatch_recv START\n", rank, sm_id, subroutine_thread_id); }
 
 // NOTE packed_recv_count zeroing is removed
 //     // For send-and-recv kernels, we need a grid sync for making `packed_recv_count` visible
@@ -1168,7 +1168,7 @@ combine_v2(void* combined_x,
             }
         }
     }
-    if (thread_id % 32 == 0) { printf("[R%d,S%d,T%d] combine phase=send END\n", rank, sm_id, thread_id); }
+//     if (thread_id % 32 == 0) { printf("[R%d,S%d,T%d] combine phase=send END\n", rank, sm_id, thread_id); }
 
     // Receiving phase
     LOW_LATENCY_COMBINE_RECV:
@@ -1326,7 +1326,7 @@ combine_v2(void* combined_x,
         tma_store_wait<0>();
     }
 
-    if (thread_id % 32 == 0) { printf("[R%d,S%d,T%d] combine phase=recv END\n", rank, sm_id, thread_id); }
+//     if (thread_id % 32 == 0) { printf("[R%d,S%d,T%d] combine phase=recv END\n", rank, sm_id, thread_id); }
 }
 
 void combine_v2(void* combined_x,
