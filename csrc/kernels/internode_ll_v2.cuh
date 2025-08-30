@@ -194,7 +194,7 @@ __forceinline__ __device__ void dispatch_send(
         // NOTE ldg is for read-only data cache, if token_idx_and_dst_expert_and_dst_slot_idx_flat_list is somehow overlapped in the future we should change it
         const auto token_idx_and_dst_expert_and_slot_idx = __ldg(token_idx_and_dst_expert_and_dst_slot_idx_flat_list + tesfl_idx);
         const auto ptr = (int16_t*) &token_idx_and_dst_expert_and_slot_idx;
-        const int token_idx = ptr[0], dst_expert_idx = ptr[1]; //, slot_idx = ptr[2];
+        const int token_idx = ptr[0], dst_expert_idx = ptr[1], slot_idx = ptr[2];
         // if (subroutine_thread_id % 32 == 0) { printf("[R%d,S%d,T%d] dispatch_send tesfl_idx=%d token_idx=%d dst_expert_idx=%d slot_idx=%d \n",
         //     rank, sm_id, subroutine_thread_id, tesfl_idx, token_idx, dst_expert_idx, slot_idx); }
         // const auto dst_rank = dst_expert_idx / num_local_experts;
@@ -278,8 +278,8 @@ __forceinline__ __device__ void dispatch_send(
 //         if (dst_expert_idx >= 0) {
 
         // NOTE: let external give this
-        int slot_idx = lane_id == 0 ? atomicAdd(atomic_counter_per_expert + dst_expert_idx, 1) : 0;
-        slot_idx = __shfl_sync(0xffffffff, slot_idx, 0);
+        // int slot_idx = lane_id == 0 ? atomicAdd(atomic_counter_per_expert + dst_expert_idx, 1) : 0;
+        // slot_idx = __shfl_sync(0xffffffff, slot_idx, 0);
 
         const auto dst_rank = dst_expert_idx / num_local_experts;
         const auto dst_expert_local_idx = dst_expert_idx % num_local_experts;
