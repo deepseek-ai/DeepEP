@@ -181,7 +181,7 @@ __forceinline__ __device__ void dispatch_send(
     EP_DEVICE_ASSERT(num_warp_pairs * num_warps_per_warp_pair == num_warps);
 
     const int flat_worker_id = warp_pair_id * num_sms + sm_id;
-    const int flat_worker_num = num_warps * num_sms;
+    const int flat_worker_num = num_warp_pairs * num_sms;
     for (
         // "tesfl" := "token_idx_and_dst_expert_and_dst_slot_idx_flat_list"
         int tesfl_idx = flat_worker_id, debug_iter_idx = 0;
