@@ -306,15 +306,21 @@ __forceinline__ __device__ void dispatch_send(
         // UNROLLED_WARP_COPY(8, lane_id, Consts::num_int4_per_msg, dst_int4_ptr, src_int4_ptr, ld_nc_global, st_na_global);
         // UNROLLED_WARP_COPY(8, lane_id, body_num_int4_per_msg, body_dst_int4_ptr, body_src_int4_ptr, ld_nc_global, st_na_global);
 
-        int4 body_buf[body_num_int4_per_msg];
         constexpr int loop_num = ceil_div(body_num_int4_per_msg, 32);
+        int4 body_buf[loop_num];
         #pragma unroll
         for (int i = 0; i < loop_num; ++i) {
-            body_buf[i] = ld_nc_global(body_src_int4_ptr + lane_id + i * 32);
+            int offset = lane_id + i * 32;
+            if (offset < body_num_int4_per_msg) {
+                body_buf[i] = ld_nc_global(body_src_int4_ptr + offset);
+            }
         }
         #pragma unroll
         for (int i = 0; i < loop_num; ++i) {
-            st_na_global(body_dst_int4_ptr + lane_id + i * 32, body_buf[i]);
+            int offset = lane_id + i * 32;
+            if (offset < body_num_int4_per_msg) {
+                st_na_global(body_dst_int4_ptr + offset, body_buf[i]);
+            }
         }
 
         // Send per-token signal
