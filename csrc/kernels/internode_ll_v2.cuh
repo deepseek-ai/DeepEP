@@ -733,6 +733,9 @@ __forceinline__ __device__ void dispatch_recv(
                     atomic_add_release_global(dst_signals + local_expert_idx, 1);
                 }
             }
+
+            // NOTE HACK
+            cg::this_grid().sync();
         }
     }
 
