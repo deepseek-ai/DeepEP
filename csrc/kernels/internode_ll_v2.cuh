@@ -516,8 +516,11 @@ __forceinline__ __device__ void dispatch_recv(
         if (lane_id == 0) {
 //             if (subroutine_thread_id % 32 == 0) { printf("[R%d,S%d,T%d] ld-layout START\n", rank, sm_id, subroutine_thread_id); }
 
+            auto loop_start_time = clock64();
             int64_t layout;
-            while((layout = ld_volatile_global(layout_range_buffer + local_expert_idx * num_ranks + src_rank)) == 0);
+            while((layout = ld_volatile_global(layout_range_buffer + local_expert_idx * num_ranks + src_rank)) == 0) {
+                if ((clock64() - loop_start_time) >= 1000000000ULL) { printf("[R%d,S%d,T%d] ld-layout STUCK\n", rank, sm_id, subroutine_thread_id); }
+            }
             layout = -layout - 1;
             unpack2(layout, num_recv_tokens, token_start_offset);
 
@@ -593,8 +596,11 @@ __forceinline__ __device__ void dispatch_recv(
 //                 if (subroutine_thread_id % 32 == 0) { printf("[R%d,S%d,T%d] ld-token-signal START addr=%p delta_addr=%d token_idx=%d\n",
 //                     rank, sm_id, subroutine_thread_id, src_src_idx, (int)((int64_t)src_src_idx - (int64_t)rdma_recv_x), token_idx); }
 
+                auto loop_start_time = clock64();
                 int recv_src_idx;
-                while ((recv_src_idx = ld_acquire_sys_global(src_src_idx)) == 0);
+                while ((recv_src_idx = ld_acquire_sys_global(src_src_idx)) == 0) {
+                    if ((clock64() - loop_start_time) >= 1000000000ULL) { printf("[R%d,S%d,T%d] ld-token-signal STUCK\n", rank, sm_id, subroutine_thread_id); }
+                }
                 recv_src_idx = -recv_src_idx-1;
 
 //                 write_debug_time(
