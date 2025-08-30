@@ -307,12 +307,13 @@ __forceinline__ __device__ void dispatch_send(
         // UNROLLED_WARP_COPY(8, lane_id, body_num_int4_per_msg, body_dst_int4_ptr, body_src_int4_ptr, ld_nc_global, st_na_global);
 
         int4 body_buf[body_num_int4_per_msg];
+        constexpr int loop_num = ceil_div(body_num_int4_per_msg, 32);
         #pragma unroll
-        for (int i = 0; i < TODO; ++i) {
+        for (int i = 0; i < loop_num; ++i) {
             body_buf[i] = ld_nc_global(body_src_int4_ptr + lane_id + i * 32);
         }
         #pragma unroll
-        for (int i = 0; i < TODO; ++i) {
+        for (int i = 0; i < loop_num; ++i) {
             st_na_global(body_dst_int4_ptr + lane_id + i * 32, body_buf[i]);
         }
 

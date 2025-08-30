@@ -6,7 +6,7 @@
 namespace deep_ep {
 
 template <typename dtype_t>
-dtype_t ceil_div(dtype_t a, dtype_t b) {
+constexpr dtype_t ceil_div(dtype_t a, dtype_t b) {
     return (a + b - 1) / b;
 }
 
