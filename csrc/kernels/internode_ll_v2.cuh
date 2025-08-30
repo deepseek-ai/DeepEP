@@ -129,10 +129,11 @@ __forceinline__ __device__ void dispatch_send(
             // 2. Write metadata to remote
             // TODO is this strong enough
             {
-                const auto dst_ptr = reinterpret_cast<uint64_t>(layout_range_buffer);
+                const auto dst_ptr = reinterpret_cast<uint64_t>(layout_range_buffer + dst_expert_local_idx * num_ranks + rank);
                 const auto dst_p2p_ptr = reinterpret_cast<int64_t*>(nvshmemi_get_p2p_ptr(dst_ptr, rank, dst_rank));
                 const auto val = pack2<int, int64_t>(num_tokens_to_send, remote_start_offset);
-                st_volatile_global(dst_p2p_ptr + dst_expert_local_idx * num_ranks + rank, -val-1);
+                st_volatile_global(dst_p2p_ptr, -val-1);
+                printf("[R%d,S%d,T%d] st-layout dst_ptr=%lld delta=%d\n", rank, sm_id, subroutine_thread_id, dst_ptr, dst_ptr - layout_range_buffer);
             }
 
             // 2. Write metadata to local
