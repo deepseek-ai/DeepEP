@@ -302,8 +302,19 @@ __forceinline__ __device__ void dispatch_send(
         const int4* body_src_int4_ptr = src_int4_ptr + 1;
         const int4* body_dst_int4_ptr = dst_int4_ptr + 1;
         constexpr int body_num_int4_per_msg = Consts::num_int4_per_msg - 1;
+
         // UNROLLED_WARP_COPY(8, lane_id, Consts::num_int4_per_msg, dst_int4_ptr, src_int4_ptr, ld_nc_global, st_na_global);
-        UNROLLED_WARP_COPY(8, lane_id, body_num_int4_per_msg, body_dst_int4_ptr, body_src_int4_ptr, ld_nc_global, st_na_global);
+        // UNROLLED_WARP_COPY(8, lane_id, body_num_int4_per_msg, body_dst_int4_ptr, body_src_int4_ptr, ld_nc_global, st_na_global);
+
+        int4 body_buf[body_num_int4_per_msg];
+        #pragma unroll
+        for (int i = 0; i < TODO; ++i) {
+            body_buf[i] = ld_nc_global(body_src_int4_ptr + i * 32);
+        }
+        #pragma unroll
+        for (int i = 0; i < TODO; ++i) {
+            st_na_global(body_dst_int4_ptr + i * 32, body_buf[i]);
+        }
 
         // Send per-token signal
         // NOTE only first 4B of 16B has value, the other 12B is not needed
