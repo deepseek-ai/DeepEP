@@ -307,6 +307,7 @@ __forceinline__ __device__ void dispatch_send(
         // UNROLLED_WARP_COPY(8, lane_id, body_num_int4_per_msg, body_dst_int4_ptr, body_src_int4_ptr, ld_nc_global, st_na_global);
 
         constexpr int loop_num = ceil_div(body_num_int4_per_msg, 32);
+        EP_STATIC_ASSERT(loop_num == 8, "unexpected loop_num");
         int4 body_buf[loop_num];
         #pragma unroll
         for (int i = 0; i < loop_num; ++i) {
