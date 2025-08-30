@@ -68,7 +68,7 @@ __forceinline__ __device__ void dispatch_send(
     int64_t* layout_range_buffer, int* negotiate_offset_of_expert_buffer, int* remote_start_offset_buffer,
     int* debug_tensor
 ) {
-    uint32_t t_start = clock();
+//     uint32_t t_start = clock();
 
     using Consts = DispatchConstsTemplate<kUseFP8, kUseNVFP4, kHidden>;
     EP_DEVICE_ASSERT(Consts::num_bytes_per_msg % sizeof(int4) == 0);
@@ -441,7 +441,7 @@ __forceinline__ __device__ void dispatch_recv(
     int64_t* layout_range_buffer, int* negotiate_offset_of_expert_buffer, int* remote_start_offset_buffer,
     int* debug_tensor
 ) {
-    uint32_t t_start = clock();
+//     uint32_t t_start = clock();
 
     using Consts = DispatchConstsTemplate<kUseFP8, kUseNVFP4, kHidden>;
 
