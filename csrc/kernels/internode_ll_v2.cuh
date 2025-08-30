@@ -309,11 +309,11 @@ __forceinline__ __device__ void dispatch_send(
         int4 body_buf[body_num_int4_per_msg];
         #pragma unroll
         for (int i = 0; i < TODO; ++i) {
-            body_buf[i] = ld_nc_global(body_src_int4_ptr + i * 32);
+            body_buf[i] = ld_nc_global(body_src_int4_ptr + lane_id + i * 32);
         }
         #pragma unroll
         for (int i = 0; i < TODO; ++i) {
-            st_na_global(body_dst_int4_ptr + i * 32, body_buf[i]);
+            st_na_global(body_dst_int4_ptr + lane_id + i * 32, body_buf[i]);
         }
 
         // Send per-token signal
