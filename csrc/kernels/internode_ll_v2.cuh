@@ -92,9 +92,9 @@ __forceinline__ __device__ void dispatch_send(
 
     if ((sm_id == 0) and (warp_id == 0)) {
         // The first SM is also responsible for cleaning the next buffer
-        #pragma unroll
-        for (int i = lane_id; i < num_next_clean_int; i += 32)
-            next_clean[i] = 0;
+//         #pragma unroll
+//         for (int i = lane_id; i < num_next_clean_int; i += 32)
+//             next_clean[i] = 0;
 
         // TODO do we really need this? since `next_clean` will be used only in the next round of kernels
         // not needed in per-token signal approach
@@ -951,9 +951,9 @@ combine_v2(void* combined_x,
 
     // Clean up next buffer
     if (sm_id == 0 and warp_group_id == 0 and sub_warp_id == 0) {
-        #pragma unroll
-        for (int i = lane_id; i < num_next_clean_int; i += 32)
-            next_clean[i] = 0;
+//         #pragma unroll
+//         for (int i = lane_id; i < num_next_clean_int; i += 32)
+//             next_clean[i] = 0;
 
         // Notify before executing `int_p`
         __syncwarp();
