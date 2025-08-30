@@ -709,7 +709,7 @@ __forceinline__ __device__ void dispatch_recv(
                     const int j = lane_id + loop_idx * 32;
                     const auto pack_idx = j / num_elems_per_pack;
                     const auto elem_idx = j % num_elems_per_pack;
-                    recv_x_scales[rm * token_stride * 128 + pack_idx * pack_stride * 128 + rm_res * pack_stride + elem_idx] = scale;
+                    recv_x_scales[rm * token_stride * 128 + pack_idx * pack_stride * 128 + rm_res * pack_stride + elem_idx] = buf[loop_idx];
                 }
             }
 
