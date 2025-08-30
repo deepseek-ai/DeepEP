@@ -520,7 +520,7 @@ __forceinline__ __device__ void dispatch_recv(
             auto loop_start_time = clock64();
             int64_t layout;
             while((layout = ld_volatile_global(layout_range_buffer + local_expert_idx * num_ranks + src_rank)) == 0) {
-                if ((clock64() - loop_start_time) >= 50000000000ULL) {
+                if ((clock64() - loop_start_time) >= 20000000000ULL) {
                     printf("[R%d,S%d,T%d] ld-layout STUCK\n", rank, sm_id, subroutine_thread_id);
                     loop_start_time = clock64(); // reset warning
                 }
@@ -603,7 +603,7 @@ __forceinline__ __device__ void dispatch_recv(
                 auto loop_start_time = clock64();
                 int recv_src_idx;
                 while ((recv_src_idx = ld_acquire_sys_global(src_src_idx)) == 0) {
-                    if ((clock64() - loop_start_time) >= 50000000000ULL) {
+                    if ((clock64() - loop_start_time) >= 20000000000ULL) {
                         printf("[R%d,S%d,T%d] ld-token-signal STUCK\n", rank, sm_id, subroutine_thread_id);
                         loop_start_time = clock64(); // reset warning
                     }
