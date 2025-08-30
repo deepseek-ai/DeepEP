@@ -195,11 +195,8 @@ __forceinline__ __device__ void dispatch_send(
         // TODO can speedup by prefetching, delayed checking, etc
         // TODO is this load strong enough?
         int remote_start_offset;
-        if (lane_id == 0) {
-            while ((remote_start_offset = ld_volatile_global(remote_start_offset_buffer + dst_expert_idx)) == 0);
-            remote_start_offset = -remote_start_offset - 1;
-        }
-        remote_start_offset = __shfl_sync(0xffffffff, remote_start_offset, 0);
+        while ((remote_start_offset = ld_volatile_global(remote_start_offset_buffer + dst_expert_idx)) == 0);
+        remote_start_offset = -remote_start_offset - 1;
 
         // NOTE changed, see "before-after" above
         // for (int token_idx = sm_id; token_idx < num_tokens; token_idx += num_sms) {
