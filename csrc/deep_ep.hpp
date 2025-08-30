@@ -155,7 +155,7 @@ public:
                          const std::optional<torch::Tensor>& zeroed_buffer_for_atomic_counter_per_expert,
                          bool use_nvfp4,
                          const std::optional<torch::Tensor>& dst_signals,
-                         const std::optional<torch::Tensor>& count_per_expert, const std::optional<torch::Tensor>& token_idx_and_dst_expert_flat_list,
+                         const std::optional<torch::Tensor>& count_per_expert, const std::optional<torch::Tensor>& token_idx_and_dst_expert_and_dst_slot_idx_flat_list,
                          const std::optional<torch::Tensor>& debug_tensor);
 
     std::tuple<torch::Tensor, std::optional<EventHandle>, std::optional<std::function<void()>>>

@@ -64,7 +64,7 @@ __forceinline__ __device__ void dispatch_send(
     int num_warps_per_group,
     bool round_scale, int phases,
     uint32_t* dst_signals,
-    uint32_t* count_per_expert, int64_t* token_idx_and_dst_expert_flat_list,
+    uint32_t* count_per_expert, int64_t* token_idx_and_dst_expert_and_dst_slot_idx_flat_list,
     int64_t* layout_range_buffer, int* negotiate_offset_of_expert_buffer, int* remote_start_offset_buffer
 //     int* debug_tensor
 ) {
@@ -176,12 +176,12 @@ __forceinline__ __device__ void dispatch_send(
     const int flat_worker_id = warp_id * num_sms + sm_id;
     const int flat_worker_num = num_warps * num_sms;
     for (
-        // "tefl" := "token_idx_and_dst_expert_flat_list"
-        int tefl_idx = flat_worker_id, debug_iter_idx = 0;
-        tefl_idx < num_tokens * num_topk;
-        tefl_idx += flat_worker_num, debug_iter_idx += 1
+        // "tesfl" := "token_idx_and_dst_expert_and_dst_slot_idx_flat_list"
+        int tesfl_idx = flat_worker_id, debug_iter_idx = 0;
+        tesfl_idx < num_tokens * num_topk;
+        tesfl_idx += flat_worker_num, debug_iter_idx += 1
     ) {
-//         if (subroutine_thread_id % 32 == 0) { printf("[R%d,S%d,T%d] dispatch_send tefl_idx=%d START \n", rank, sm_id, subroutine_thread_id, tefl_idx); }
+//         if (subroutine_thread_id % 32 == 0) { printf("[R%d,S%d,T%d] dispatch_send tesfl_idx=%d START \n", rank, sm_id, subroutine_thread_id, tesfl_idx); }
 //         write_debug_time(
 //             debug_tensor, t_start,
 //             /* event_group_id */ 0,
@@ -191,8 +191,8 @@ __forceinline__ __device__ void dispatch_send(
 //         );
 
         // TODO do prefetching if needed
-        // NOTE ldg is for read-only data cache, if token_idx_and_dst_expert_flat_list is somehow overlapped in the future we should change it
-        const auto token_idx_and_dst_expert = __ldg(token_idx_and_dst_expert_flat_list + tefl_idx);
+        // NOTE ldg is for read-only data cache, if token_idx_and_dst_expert_and_dst_slot_idx_flat_list is somehow overlapped in the future we should change it
+        const auto token_idx_and_dst_expert = __ldg(token_idx_and_dst_expert_and_dst_slot_idx_flat_list + tesfl_idx);
         int token_idx, dst_expert_idx;
         unpack2(token_idx_and_dst_expert, token_idx, dst_expert_idx);
         // const auto dst_rank = dst_expert_idx / num_local_experts;
@@ -460,7 +460,7 @@ __forceinline__ __device__ void dispatch_recv(
     int num_warps_per_group,
     bool round_scale, int phases,
     uint32_t* dst_signals,
-    uint32_t* count_per_expert, int64_t* token_idx_and_dst_expert_flat_list,
+    uint32_t* count_per_expert, int64_t* token_idx_and_dst_expert_and_dst_slot_idx_flat_list,
     int64_t* layout_range_buffer, int* negotiate_offset_of_expert_buffer, int* remote_start_offset_buffer
 //     int* debug_tensor
 ) {
@@ -749,7 +749,7 @@ dispatch_v2(void* packed_recv_x, void* packed_recv_x_scales,
          int num_send_warps_per_group, int num_recv_warps_per_group,
          bool round_scale, int phases,
          uint32_t* dst_signals,
-         uint32_t* count_per_expert, int64_t* token_idx_and_dst_expert_flat_list,
+         uint32_t* count_per_expert, int64_t* token_idx_and_dst_expert_and_dst_slot_idx_flat_list,
          int* remote_start_offset_buffer
 //          int* debug_tensor
          ) {
@@ -793,7 +793,7 @@ dispatch_v2(void* packed_recv_x, void* packed_recv_x_scales,
                 num_send_warps_per_group,
                 round_scale, phases,
                 dst_signals,
-                count_per_expert, token_idx_and_dst_expert_flat_list,
+                count_per_expert, token_idx_and_dst_expert_and_dst_slot_idx_flat_list,
                 layout_range_buffer, negotiate_offset_of_expert_buffer, remote_start_offset_buffer
 //                 debug_tensor
             );
@@ -819,7 +819,7 @@ dispatch_v2(void* packed_recv_x, void* packed_recv_x_scales,
                 num_recv_warps_per_group,
                 round_scale, phases,
                 dst_signals,
-                count_per_expert, token_idx_and_dst_expert_flat_list,
+                count_per_expert, token_idx_and_dst_expert_and_dst_slot_idx_flat_list,
                 layout_range_buffer, negotiate_offset_of_expert_buffer, remote_start_offset_buffer
 //                 debug_tensor
             );
@@ -852,7 +852,7 @@ void dispatch_v2(void* packed_recv_x, void* packed_recv_x_scales,
               void* workspace, int num_device_sms,
               cudaStream_t stream, int phases,
               bool use_nvfp4, uint32_t* dst_signals,
-              uint32_t* count_per_expert, int64_t* token_idx_and_dst_expert_flat_list,
+              uint32_t* count_per_expert, int64_t* token_idx_and_dst_expert_and_dst_slot_idx_flat_list,
               int* remote_start_offset_buffer, int* zeroed_buffer_for_atomic_counter_per_expert,
               int* debug_tensor) {
     constexpr int kNumMaxTopK = 9;
@@ -932,7 +932,7 @@ LAUNCH_KERNEL(&cfg, dispatch_func, \
               num_send_warp_groups, num_recv_warp_groups, num_send_warps_per_group, num_recv_warps_per_group, \
               round_scale, phases, \
               dst_signals, \
-              count_per_expert, token_idx_and_dst_expert_flat_list, remote_start_offset_buffer \
+              count_per_expert, token_idx_and_dst_expert_and_dst_slot_idx_flat_list, remote_start_offset_buffer \
               /* debug_tensor */); } break
 
     SETUP_LAUNCH_CONFIG(num_sms, num_warps * 32, stream);

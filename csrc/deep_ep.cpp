@@ -1110,7 +1110,7 @@ Buffer::low_latency_dispatch(bool enable_v2, const torch::Tensor& x, const torch
                              const std::optional<torch::Tensor>& zeroed_buffer_for_atomic_counter_per_expert,
                              bool use_nvfp4,
                              const std::optional<torch::Tensor>& dst_signals,
-                             const std::optional<torch::Tensor>& count_per_expert, const std::optional<torch::Tensor>& token_idx_and_dst_expert_flat_list,
+                             const std::optional<torch::Tensor>& count_per_expert, const std::optional<torch::Tensor>& token_idx_and_dst_expert_and_dst_slot_idx_flat_list,
                              const std::optional<torch::Tensor>& debug_tensor) {
 #ifndef DISABLE_NVSHMEM
     EP_HOST_ASSERT(low_latency_mode);
@@ -1168,11 +1168,11 @@ Buffer::low_latency_dispatch(bool enable_v2, const torch::Tensor& x, const torch
 //        // EP_HOST_ASSERT(token_ids_of_expert->size(1) == ...whatever...);
 //        EP_HOST_ASSERT(token_ids_of_expert->dtype() == torch::kInt32);
 //    }
-    if (token_idx_and_dst_expert_flat_list.has_value()) {
-        EP_HOST_ASSERT(token_idx_and_dst_expert_flat_list->is_contiguous());
-        EP_HOST_ASSERT(token_idx_and_dst_expert_flat_list->dim() == 1);
-        EP_HOST_ASSERT(token_idx_and_dst_expert_flat_list->size(0) == num_tokens * num_topk);
-        EP_HOST_ASSERT(token_idx_and_dst_expert_flat_list->dtype() == torch::kInt64);
+    if (token_idx_and_dst_expert_and_dst_slot_idx_flat_list.has_value()) {
+        EP_HOST_ASSERT(token_idx_and_dst_expert_and_dst_slot_idx_flat_list->is_contiguous());
+        EP_HOST_ASSERT(token_idx_and_dst_expert_and_dst_slot_idx_flat_list->dim() == 1);
+        EP_HOST_ASSERT(token_idx_and_dst_expert_and_dst_slot_idx_flat_list->size(0) == num_tokens * num_topk);
+        EP_HOST_ASSERT(token_idx_and_dst_expert_and_dst_slot_idx_flat_list->dtype() == torch::kInt64);
     }
 
     // Buffer control
@@ -1293,7 +1293,7 @@ Buffer::low_latency_dispatch(bool enable_v2, const torch::Tensor& x, const torch
                                use_nvfp4,
                                dst_signals.has_value() ? dst_signals->data_ptr<uint32_t>() : nullptr,
                                count_per_expert.has_value() ? count_per_expert->data_ptr<uint32_t>() : nullptr,
-                               token_idx_and_dst_expert_flat_list.has_value() ? token_idx_and_dst_expert_flat_list->data_ptr<int64_t>() : nullptr,
+                               token_idx_and_dst_expert_and_dst_slot_idx_flat_list.has_value() ? token_idx_and_dst_expert_and_dst_slot_idx_flat_list->data_ptr<int64_t>() : nullptr,
 //                               token_ids_of_expert.has_value() ? token_ids_of_expert->data_ptr<int>() : nullptr,
 //                               token_ids_of_expert.has_value() ? token_ids_of_expert->stride(0) : 0,
                                remote_start_offset_buffer.has_value() ? remote_start_offset_buffer->data_ptr<int>() : nullptr,
