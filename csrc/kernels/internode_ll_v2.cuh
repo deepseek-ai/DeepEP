@@ -698,7 +698,7 @@ __forceinline__ __device__ void dispatch_recv(
                 constexpr int loop_num = ceil_div(Consts::num_scales, 32);
                 EP_STATIC_ASSERT(loop_num == 14, "unexpected loop_num");
                 EP_STATIC_ASSERT(loop_num * 32 == Consts::num_scales, "expect even division");
-                int4 buf[loop_num];
+                uint8_t buf[loop_num];
                 #pragma unroll
                 for (int loop_idx = 0; loop_idx < loop_num; ++loop_idx) {
                     const int j = lane_id + loop_idx * 32;
