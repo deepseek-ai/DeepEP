@@ -377,7 +377,7 @@ __forceinline__ __device__ void dispatch_send(
 //         __syncwarp();
     }
 
-    if (subroutine_thread_id % 32 == 0) { printf("[R%d,S%d,T%d] dispatch_send END\n", rank, sm_id, subroutine_thread_id); }
+//     if (subroutine_thread_id % 32 == 0) { printf("[R%d,S%d,T%d] dispatch_send END\n", rank, sm_id, subroutine_thread_id); }
 
 //     } else if (warp_id == num_warps - 1) {
 //         EP_DEVICE_ASSERT(num_sms > 1);
