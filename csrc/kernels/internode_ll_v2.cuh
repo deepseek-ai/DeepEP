@@ -195,6 +195,8 @@ __forceinline__ __device__ void dispatch_send(
         const auto token_idx_and_dst_expert_and_slot_idx = __ldg(token_idx_and_dst_expert_and_dst_slot_idx_flat_list + tesfl_idx);
         const auto ptr = (int16_t*) &token_idx_and_dst_expert_and_slot_idx;
         const int token_idx = ptr[0], dst_expert_idx = ptr[1], slot_idx = ptr[2];
+        // if (subroutine_thread_id % 32 == 0) { printf("[R%d,S%d,T%d] dispatch_send tesfl_idx=%d token_idx=%d dst_expert_idx=%d slot_idx=%d \n",
+        //     rank, sm_id, subroutine_thread_id, tesfl_idx, token_idx, dst_expert_idx, slot_idx); }
         // const auto dst_rank = dst_expert_idx / num_local_experts;
 
         // TODO can speedup by prefetching, delayed checking, etc
