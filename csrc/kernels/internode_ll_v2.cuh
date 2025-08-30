@@ -12,6 +12,9 @@ namespace internode_ll {
 
 constexpr int kNumMaxWarpGroups = 32;
 
+#define ENABLE_DEBUG_TIMING_TENSOR
+
+#ifdef ENABLE_DEBUG_TIMING_TENSOR
 constexpr int DT_MAX_NUM_EVENT_GROUPS = 10;
 constexpr int DT_MAX_NUM_EVENTS_PER_GROUP = 100;
 constexpr int DT_MAX_NUM_MODES = 2;
@@ -40,6 +43,7 @@ __forceinline__ __device__ void write_debug_time(
         debug_tensor[idx] = t_delta;
     }
 }
+#endif
 
 template <bool kUseFP8, bool kUseUE8M0, bool kUseNVFP4, int kHidden>
 __forceinline__ __device__ void dispatch_send(
@@ -65,10 +69,10 @@ __forceinline__ __device__ void dispatch_send(
     bool round_scale, int phases,
     uint32_t* dst_signals,
     uint32_t* count_per_expert, int64_t* token_idx_and_dst_expert_and_dst_slot_idx_flat_list,
-    int64_t* layout_range_buffer, int* negotiate_offset_of_expert_buffer, int* remote_start_offset_buffer
-//     int* debug_tensor
+    int64_t* layout_range_buffer, int* negotiate_offset_of_expert_buffer, int* remote_start_offset_buffer,
+    int* debug_tensor
 ) {
-//     uint32_t t_start = clock();
+    uint32_t t_start = clock();
 
     using Consts = DispatchConstsTemplate<kUseFP8, kUseNVFP4, kHidden>;
     EP_DEVICE_ASSERT(Consts::num_bytes_per_msg % sizeof(int4) == 0);
@@ -182,13 +186,15 @@ __forceinline__ __device__ void dispatch_send(
         tesfl_idx += flat_worker_num, debug_iter_idx += 1
     ) {
 //         if (subroutine_thread_id % 32 == 0) { printf("[R%d,S%d,T%d] dispatch_send tesfl_idx=%d START \n", rank, sm_id, subroutine_thread_id, tesfl_idx); }
-//         write_debug_time(
-//             debug_tensor, t_start,
-//             /* event_group_id */ 0,
-//             /* event_id */ debug_iter_idx,
-//             /* mode_id */ 0,
-//             sm_id, warp_id
-//         );
+#ifdef ENABLE_DEBUG_TIMING_TENSOR
+        write_debug_time(
+            debug_tensor, t_start,
+            /* event_group_id */ 0,
+            /* event_id */ debug_iter_idx,
+            /* mode_id */ 0,
+            sm_id, warp_id
+        );
+#endif
 
         // TODO do prefetching if needed
         // NOTE ldg is for read-only data cache, if token_idx_and_dst_expert_and_dst_slot_idx_flat_list is somehow overlapped in the future we should change it
@@ -341,6 +347,16 @@ __forceinline__ __device__ void dispatch_send(
         }
 //             }
 
+#ifdef ENABLE_DEBUG_TIMING_TENSOR
+        write_debug_time(
+            debug_tensor, t_start,
+            /* event_group_id */ 1,
+            /* event_id */ debug_iter_idx,
+            /* mode_id */ 0,
+            sm_id, warp_id
+        );
+#endif
+
         // not needed in per-token signal approach
 //             // Increase counter after finishing
 //             __syncwarp();
@@ -466,10 +482,10 @@ __forceinline__ __device__ void dispatch_recv(
     bool round_scale, int phases,
     uint32_t* dst_signals,
     uint32_t* count_per_expert, int64_t* token_idx_and_dst_expert_and_dst_slot_idx_flat_list,
-    int64_t* layout_range_buffer, int* negotiate_offset_of_expert_buffer, int* remote_start_offset_buffer
-//     int* debug_tensor
+    int64_t* layout_range_buffer, int* negotiate_offset_of_expert_buffer, int* remote_start_offset_buffer,
+    int* debug_tensor
 ) {
-//     uint32_t t_start = clock();
+    uint32_t t_start = clock();
 
     using Consts = DispatchConstsTemplate<kUseFP8, kUseNVFP4, kHidden>;
 
@@ -511,7 +527,9 @@ __forceinline__ __device__ void dispatch_recv(
     const int cooperate_idx = flatten_id / num_ranks;
     const int src_rank = flatten_id % num_ranks;
 
-//     int debug_ld_token_signal_event_id = 0;
+#ifdef ENABLE_DEBUG_TIMING_TENSOR
+    int debug_ld_token_signal_event_id = 0;
+#endif
 
     // Receiving and packing
     // NOTE if -> for
@@ -519,13 +537,15 @@ __forceinline__ __device__ void dispatch_recv(
     EP_DEVICE_ASSERT(num_warp_groups == 1); // not consider multi warp_group case below
     for (int local_expert_idx = 0; local_expert_idx < num_local_experts; ++local_expert_idx) {
 //         if (subroutine_thread_id % 32 == 0) { printf("[R%d,S%d,T%d] dispatch_recv local_expert_idx=%d START \n", rank, sm_id, subroutine_thread_id, local_expert_idx); }
-//         write_debug_time(
-//             debug_tensor, t_start,
-//             /* event_group_id */ 0,
-//             /* event_id */ local_expert_idx,
-//             /* mode_id */ 1,
-//             sm_id, warp_id
-//         );
+#ifdef ENABLE_DEBUG_TIMING_TENSOR
+        write_debug_time(
+            debug_tensor, t_start,
+            /* event_group_id */ 0,
+            /* event_id */ local_expert_idx,
+            /* mode_id */ 1,
+            sm_id, warp_id
+        );
+#endif
 
         // NOTE modified
         // const auto src_rank = responsible_expert_idx / num_local_experts;
@@ -558,13 +578,15 @@ __forceinline__ __device__ void dispatch_recv(
             layout = -layout - 1;
             unpack2(layout, num_recv_tokens, token_start_offset);
 
-//             write_debug_time(
-//                 debug_tensor, t_start,
-//                 /* event_group_id */ 1,
-//                 /* event_id */ local_expert_idx,
-//                 /* mode_id */ 1,
-//                 sm_id, warp_id
-//             );
+#ifdef ENABLE_DEBUG_TIMING_TENSOR
+            write_debug_time(
+                debug_tensor, t_start,
+                /* event_group_id */ 1,
+                /* event_id */ local_expert_idx,
+                /* mode_id */ 1,
+                sm_id, warp_id
+            );
+#endif
 
             if (cooperate_idx == 0) {
                 // TODO may not need to do this extra copy - directly use the `layout_range_buffer`
@@ -640,14 +662,16 @@ __forceinline__ __device__ void dispatch_recv(
                 }
                 recv_src_idx = -recv_src_idx-1;
 
-//                 write_debug_time(
-//                     debug_tensor, t_start,
-//                     /* event_group_id */ 2,
-//                     /* event_id */ debug_ld_token_signal_event_id,
-//                     /* mode_id */ 1,
-//                     sm_id, warp_id
-//                 );
-//                 debug_ld_token_signal_event_id++;
+#ifdef ENABLE_DEBUG_TIMING_TENSOR
+                write_debug_time(
+                    debug_tensor, t_start,
+                    /* event_group_id */ 2,
+                    /* event_id */ debug_ld_token_signal_event_id,
+                    /* mode_id */ 1,
+                    sm_id, warp_id
+                );
+                debug_ld_token_signal_event_id++;
+#endif
 
 //                 if (subroutine_thread_id % 32 == 0) { printf("[R%d,S%d,T%d] ld-token-signal END recv_src_idx=%d\n", rank, sm_id, subroutine_thread_id, recv_src_idx); }
 
@@ -755,8 +779,8 @@ dispatch_v2(void* packed_recv_x, void* packed_recv_x_scales,
          bool round_scale, int phases,
          uint32_t* dst_signals,
          uint32_t* count_per_expert, int64_t* token_idx_and_dst_expert_and_dst_slot_idx_flat_list,
-         int* remote_start_offset_buffer
-//          int* debug_tensor
+         int* remote_start_offset_buffer,
+         int* debug_tensor
          ) {
     const auto sm_id = static_cast<int>(blockIdx.x);
     const auto num_send_threads = num_send_warp_groups * num_send_warps_per_group * 32;
@@ -799,8 +823,8 @@ dispatch_v2(void* packed_recv_x, void* packed_recv_x_scales,
                 round_scale, phases,
                 dst_signals,
                 count_per_expert, token_idx_and_dst_expert_and_dst_slot_idx_flat_list,
-                layout_range_buffer, negotiate_offset_of_expert_buffer, remote_start_offset_buffer
-//                 debug_tensor
+                layout_range_buffer, negotiate_offset_of_expert_buffer, remote_start_offset_buffer,
+                debug_tensor
             );
         }
     } else {
@@ -825,8 +849,8 @@ dispatch_v2(void* packed_recv_x, void* packed_recv_x_scales,
                 round_scale, phases,
                 dst_signals,
                 count_per_expert, token_idx_and_dst_expert_and_dst_slot_idx_flat_list,
-                layout_range_buffer, negotiate_offset_of_expert_buffer, remote_start_offset_buffer
-//                 debug_tensor
+                layout_range_buffer, negotiate_offset_of_expert_buffer, remote_start_offset_buffer,
+                debug_tensor
             );
         }
     }
@@ -937,8 +961,8 @@ LAUNCH_KERNEL(&cfg, dispatch_func, \
               num_send_warp_groups, num_recv_warp_groups, num_send_warps_per_group, num_recv_warps_per_group, \
               round_scale, phases, \
               dst_signals, \
-              count_per_expert, token_idx_and_dst_expert_and_dst_slot_idx_flat_list, remote_start_offset_buffer \
-              /* debug_tensor */); } break
+              count_per_expert, token_idx_and_dst_expert_and_dst_slot_idx_flat_list, remote_start_offset_buffer, \
+              debug_tensor); } break
 
     SETUP_LAUNCH_CONFIG(num_sms, num_warps * 32, stream);
     SWITCH_HIDDEN(DISPATCH_LAUNCH_CASE);
