@@ -894,14 +894,17 @@ void dispatch_v2(void* packed_recv_x, void* packed_recv_x_scales,
     if (use_ue8m0)
         EP_HOST_ASSERT(round_scale and "UE8M0 SF requires `round_scale=True`");
 
+    EP_HOST_ASSERT(use_nvfp4 and (not use_fp8) and (not use_ue8m0));
+// auto dispatch_func = dispatch_v2<false, false, false, hidden>; \
+// if (use_fp8 and not use_ue8m0) \
+//     dispatch_func = dispatch_v2<true, false, false, hidden>; \
+// if (use_fp8 and use_ue8m0) \
+//     dispatch_func = dispatch_v2<true, true, false, hidden>; \
+// if (use_nvfp4) \
+//     dispatch_func = dispatch_v2<false, false, true, hidden>;
+
 #define DISPATCH_LAUNCH_CASE(hidden) { \
-auto dispatch_func = dispatch_v2<false, false, false, hidden>; \
-if (use_fp8 and not use_ue8m0) \
-    dispatch_func = dispatch_v2<true, false, false, hidden>; \
-if (use_fp8 and use_ue8m0) \
-    dispatch_func = dispatch_v2<true, true, false, hidden>; \
-if (use_nvfp4) \
-    dispatch_func = dispatch_v2<false, false, true, hidden>; \
+auto dispatch_func = dispatch_v2<false, false, true, hidden>; \
 LAUNCH_KERNEL(&cfg, dispatch_func, \
               packed_recv_x, packed_recv_x_scales, \
               packed_recv_src_info, packed_recv_layout_range, \
