@@ -282,13 +282,6 @@ __forceinline__ __device__ void dispatch_send(
         // NOTE do not use `rdma_x` but use `x`
         // const auto src_ptr = reinterpret_cast<uint64_t>(rdma_x_src_idx);
         const auto src_ptr = reinterpret_cast<uint64_t>(x_src_idx);
-        const auto dst_ptr = reinterpret_cast<uint64_t>(rdma_recv_x) +
-                             dst_expert_local_idx * num_ranks * num_max_dispatch_tokens_per_rank * Consts::num_bytes_per_msg +
-                             // NOTE modified rm
-                             // rank * num_max_dispatch_tokens_per_rank * Consts::num_bytes_per_msg +
-                             remote_start_offset * Consts::num_bytes_per_msg +
-                             slot_idx * Consts::num_bytes_per_msg;
-        const auto dst_p2p_ptr = nvshmemi_get_p2p_ptr(dst_ptr, rank, dst_rank);
 
 //             if (dst_p2p_ptr == 0) {
 //                 nvshmemi_ibgda_put_nbi_warp(dst_ptr, src_ptr, Consts::num_bytes_per_msg, dst_rank, dst_expert_local_idx, lane_id, slot_idx);
@@ -296,11 +289,9 @@ __forceinline__ __device__ void dispatch_send(
 
         // NOTES: only 2 load iterations for 7K hidden with 8 unrolls
         const auto* src_int4_ptr = reinterpret_cast<const int4*>(src_ptr);
-        const auto* dst_int4_ptr = reinterpret_cast<int4*>(dst_p2p_ptr);
 
         // NOTE do *not* send the first int4, which is handled via the signal
         const int4* body_src_int4_ptr = src_int4_ptr + 1;
-        const int4* body_dst_int4_ptr = dst_int4_ptr + 1;
         constexpr int body_num_int4_per_msg = Consts::num_int4_per_msg - 1;
 
         // UNROLLED_WARP_COPY(8, lane_id, Consts::num_int4_per_msg, dst_int4_ptr, src_int4_ptr, ld_nc_global, st_na_global);
@@ -316,6 +307,17 @@ __forceinline__ __device__ void dispatch_send(
                 body_buf[i] = ld_nc_global(body_src_int4_ptr + offset);
             }
         }
+
+        const auto dst_ptr = reinterpret_cast<uint64_t>(rdma_recv_x) +
+                             dst_expert_local_idx * num_ranks * num_max_dispatch_tokens_per_rank * Consts::num_bytes_per_msg +
+                             // NOTE modified rm
+                             // rank * num_max_dispatch_tokens_per_rank * Consts::num_bytes_per_msg +
+                             remote_start_offset * Consts::num_bytes_per_msg +
+                             slot_idx * Consts::num_bytes_per_msg;
+        const auto dst_p2p_ptr = nvshmemi_get_p2p_ptr(dst_ptr, rank, dst_rank);
+        const auto* dst_int4_ptr = reinterpret_cast<int4*>(dst_p2p_ptr);
+        const int4* body_dst_int4_ptr = dst_int4_ptr + 1;
+
         #pragma unroll
         for (int i = 0; i < loop_num; ++i) {
             int offset = lane_id + i * 32;
