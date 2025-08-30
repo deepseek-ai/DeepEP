@@ -827,7 +827,7 @@ void dispatch_v2(void* packed_recv_x, void* packed_recv_x_scales,
         num_send_warps_per_group = 0;
         num_recv_warps_per_group = 32;
     } else {
-        EP_HOST_ASSERT(false);
+        // do nothing
     }
 
     // NOTE no longer need one SM to send all topk destinations
