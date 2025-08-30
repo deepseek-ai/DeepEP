@@ -693,11 +693,22 @@ __forceinline__ __device__ void dispatch_recv(
                 const auto pack_stride = num_elems_per_pack;
                 const auto rm = token_idx / 128;
                 const auto rm_res = token_idx % 128;
+
+                // TODO use int4 read
+                constexpr int loop_num = ceil_div(Consts::num_scales, 32);
+                EP_STATIC_ASSERT(loop_num == 14, "unexpected loop_num");
+                EP_STATIC_ASSERT(loop_num * 32 == Consts::num_scales, "expect even division");
+                int4 buf[loop_num];
                 #pragma unroll
-                for (int j = lane_id; j < Consts::num_scales; j += 32) {
+                for (int loop_idx = 0; loop_idx < loop_num; ++loop_idx) {
+                    const int j = lane_id + loop_idx * 32;
+                    buf[loop_idx] = ld_nc_global(src_scales + j);
+                }
+                #pragma unroll
+                for (int loop_idx = 0; loop_idx < loop_num; ++loop_idx) {
+                    const int j = lane_id + loop_idx * 32;
                     const auto pack_idx = j / num_elems_per_pack;
                     const auto elem_idx = j % num_elems_per_pack;
-                    auto scale = ld_nc_global(src_scales + j);
                     recv_x_scales[rm * token_stride * 128 + pack_idx * pack_stride * 128 + rm_res * pack_stride + elem_idx] = scale;
                 }
             }
