@@ -12,7 +12,7 @@ namespace internode_ll {
 
 constexpr int kNumMaxWarpGroups = 32;
 
-#define ENABLE_DEBUG_TIMING_TENSOR 0
+#define ENABLE_DEBUG_TIMING_TENSOR 1
 
 #if ENABLE_DEBUG_TIMING_TENSOR
 constexpr int DT_MAX_NUM_EVENT_GROUPS = 10;
@@ -527,10 +527,6 @@ __forceinline__ __device__ void dispatch_recv(
     const int cooperate_idx = flatten_id / num_ranks;
     const int src_rank = flatten_id % num_ranks;
 
-#if ENABLE_DEBUG_TIMING_TENSOR
-    int debug_ld_token_signal_event_id = 0;
-#endif
-
     // Receiving and packing
     // NOTE if -> for
     // if (responsible_expert_idx < num_experts) {
@@ -636,9 +632,9 @@ __forceinline__ __device__ void dispatch_recv(
         // Copy tokens
         // for (int i = sub_warp_id; i < num_recv_tokens; i += num_warps_per_group) {
         for (
-            int i_raw = cooperate_idx;
+            int i_raw = cooperate_idx, debug_inner_idx = 0;
             i_raw < num_recv_tokens;
-            i_raw += num_cooperate_parts
+            i_raw += num_cooperate_parts, debug_inner_idx++
         ) {
             const int token_idx = i_raw + token_start_offset;
 
@@ -666,11 +662,10 @@ __forceinline__ __device__ void dispatch_recv(
                 write_debug_time(
                     debug_tensor, t_start,
                     /* event_group_id */ 2,
-                    /* event_id */ debug_ld_token_signal_event_id,
+                    /* event_id */ local_expert_idx * 10 + debug_inner_idx,
                     /* mode_id */ 1,
                     sm_id, warp_id
                 );
-                debug_ld_token_signal_event_id++;
 #endif
 
 //                 if (subroutine_thread_id % 32 == 0) { printf("[R%d,S%d,T%d] ld-token-signal END recv_src_idx=%d\n", rank, sm_id, subroutine_thread_id, recv_src_idx); }
