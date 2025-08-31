@@ -714,32 +714,32 @@ __forceinline__ __device__ void dispatch_recv(
 //                     recv_x_scales[token_idx * token_stride + pack_idx * pack_stride + elem_idx] = scale;
 //                 }
             } else if constexpr (kUseNVFP4) {
-                // The physical layout is (l, rm, rk, 32, 4, 4).
-                const auto src_scales = reinterpret_cast<uint8_t*>(reinterpret_cast<uint8_t*>(src_data) + Consts::hidden_bytes);
-                const auto num_elems_per_pack = static_cast<int>(sizeof(packed_t) / sizeof(scale_t));
-                // const auto token_idx = recv_token_begin_idx + i; // NOTE changed
-                const auto token_stride = Consts::num_scales * sizeof(scale_t);
-                const auto pack_stride = num_elems_per_pack;
-                const auto rm = token_idx / 128;
-                const auto rm_res = token_idx % 128;
-
-                // TODO use int4 read
-                constexpr int loop_num = ceil_div(Consts::num_scales, 32);
-                EP_STATIC_ASSERT(loop_num == 14, "unexpected loop_num");
-                EP_STATIC_ASSERT(loop_num * 32 == Consts::num_scales, "expect even division");
-                uint8_t buf[loop_num];
-                #pragma unroll
-                for (int loop_idx = 0; loop_idx < loop_num; ++loop_idx) {
-                    const int j = lane_id + loop_idx * 32;
-                    buf[loop_idx] = ld_nc_global(src_scales + j);
-                }
-                #pragma unroll
-                for (int loop_idx = 0; loop_idx < loop_num; ++loop_idx) {
-                    const int j = lane_id + loop_idx * 32;
-                    const auto pack_idx = j / num_elems_per_pack;
-                    const auto elem_idx = j % num_elems_per_pack;
-                    recv_x_scales[rm * token_stride * 128 + pack_idx * pack_stride * 128 + rm_res * pack_stride + elem_idx] = buf[loop_idx];
-                }
+//                 // The physical layout is (l, rm, rk, 32, 4, 4).
+//                 const auto src_scales = reinterpret_cast<uint8_t*>(reinterpret_cast<uint8_t*>(src_data) + Consts::hidden_bytes);
+//                 const auto num_elems_per_pack = static_cast<int>(sizeof(packed_t) / sizeof(scale_t));
+//                 // const auto token_idx = recv_token_begin_idx + i; // NOTE changed
+//                 const auto token_stride = Consts::num_scales * sizeof(scale_t);
+//                 const auto pack_stride = num_elems_per_pack;
+//                 const auto rm = token_idx / 128;
+//                 const auto rm_res = token_idx % 128;
+//
+//                 // TODO use int4 read
+//                 constexpr int loop_num = ceil_div(Consts::num_scales, 32);
+//                 EP_STATIC_ASSERT(loop_num == 14, "unexpected loop_num");
+//                 EP_STATIC_ASSERT(loop_num * 32 == Consts::num_scales, "expect even division");
+//                 uint8_t buf[loop_num];
+//                 #pragma unroll
+//                 for (int loop_idx = 0; loop_idx < loop_num; ++loop_idx) {
+//                     const int j = lane_id + loop_idx * 32;
+//                     buf[loop_idx] = ld_nc_global(src_scales + j);
+//                 }
+//                 #pragma unroll
+//                 for (int loop_idx = 0; loop_idx < loop_num; ++loop_idx) {
+//                     const int j = lane_id + loop_idx * 32;
+//                     const auto pack_idx = j / num_elems_per_pack;
+//                     const auto elem_idx = j % num_elems_per_pack;
+//                     recv_x_scales[rm * token_stride * 128 + pack_idx * pack_stride * 128 + rm_res * pack_stride + elem_idx] = buf[loop_idx];
+//                 }
             }
 
             if (dst_signals != nullptr) {
