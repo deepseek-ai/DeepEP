@@ -211,6 +211,16 @@ __forceinline__ __device__ void dispatch_send(
         while ((remote_start_offset = ld_volatile_global(remote_start_offset_buffer + dst_expert_idx)) == 0);
         remote_start_offset = -remote_start_offset - 1;
 
+#if ENABLE_DEBUG_TIMING_TENSOR
+        write_debug_time(
+            debug_tensor, t_start,
+            /* event_group_id */ 1,
+            /* event_id */ debug_iter_idx,
+            /* mode_id */ 0,
+            sm_id, warp_id
+        );
+#endif
+
         // NOTE changed, see "before-after" above
         // for (int token_idx = sm_id; token_idx < num_tokens; token_idx += num_sms) {
 
@@ -350,7 +360,7 @@ __forceinline__ __device__ void dispatch_send(
 #if ENABLE_DEBUG_TIMING_TENSOR
         write_debug_time(
             debug_tensor, t_start,
-            /* event_group_id */ 1,
+            /* event_group_id */ 2,
             /* event_id */ debug_iter_idx,
             /* mode_id */ 0,
             sm_id, warp_id
