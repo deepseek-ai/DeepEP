@@ -12,20 +12,12 @@
 
 namespace deep_ep {
 
-<<<<<<< HEAD
-Buffer::Buffer(int rank, int num_ranks, int64_t num_nvl_bytes, int64_t num_rdma_bytes, bool low_latency_mode, bool explicitly_destroy,bool pcie_mode):
+Buffer::Buffer(int rank, int num_ranks, int64_t num_nvl_bytes, int64_t num_rdma_bytes, bool low_latency_mode, bool explicitly_destroy,bool disable_nvlink_for_normal_mode):
         rank(rank), num_ranks(num_ranks),
         num_nvl_bytes(num_nvl_bytes), num_rdma_bytes(num_rdma_bytes),
         low_latency_mode(low_latency_mode),
         explicitly_destroy(explicitly_destroy),
-        pcie_mode(pcie_mode),
-=======
-Buffer::Buffer(int rank, int num_ranks, int64_t num_nvl_bytes, int64_t num_rdma_bytes, bool low_latency_mode,bool disable_nvlink_for_normal_mode):
-        rank(rank), num_ranks(num_ranks),
-        num_nvl_bytes(num_nvl_bytes), num_rdma_bytes(num_rdma_bytes),
-        low_latency_mode(low_latency_mode),
         disable_nvlink_for_normal_mode(disable_nvlink_for_normal_mode),
->>>>>>> 1234180 (rename and nvl check added)
         comm_stream(at::cuda::getStreamFromPool(true)) {
     // Metadata memory
     int64_t barrier_signal_bytes = NUM_MAX_NVL_PEERS * sizeof(int);
@@ -236,7 +228,7 @@ void Buffer::sync(const std::vector<int> &device_ids,
         // Allocate
         rdma_buffer_ptr = internode::alloc(num_rdma_bytes, NUM_BUFFER_ALIGNMENT_BYTES);
 
-        // Clean buffer (mainly for low-latency mode&normal mode w/o nvl)
+        // Clean buffer (mainly for low-latency mode&pcie mode)
         CUDA_CHECK(cudaMemset(rdma_buffer_ptr, 0, num_rdma_bytes));
 
         // Barrier
@@ -278,7 +270,7 @@ Buffer::get_dispatch_layout(const torch::Tensor& topk_idx, int num_experts,
     auto is_token_in_rank = torch::empty({num_tokens, num_ranks}, dtype(torch::kBool).device(torch::kCUDA));
     if (is_internode_available())
         num_tokens_per_rdma_rank = torch::empty({num_rdma_ranks}, dtype(torch::kInt32).device(torch::kCUDA));
-
+    
     layout::get_dispatch_layout(topk_idx.data_ptr<int64_t>(),
                                 num_tokens_per_rank.data_ptr<int>(),
                                 num_tokens_per_rdma_rank.has_value() ? num_tokens_per_rdma_rank.value().data_ptr<int>() : nullptr,
@@ -678,7 +670,7 @@ Buffer::internode_dispatch(const torch::Tensor& x, const std::optional<torch::Te
     const int num_channels = config.num_sms / 2;
     EP_HOST_ASSERT(config.num_sms % 2 == 0);
     EP_HOST_ASSERT(0 < get_num_rdma_ranks() and get_num_rdma_ranks() <= NUM_MAX_RDMA_PEERS);
-
+    
     bool cached_mode = cached_rdma_channel_prefix_matrix.has_value();
     if (cached_mode) {
         EP_HOST_ASSERT(cached_rdma_channel_prefix_matrix.has_value());
@@ -898,6 +890,7 @@ Buffer::internode_dispatch(const torch::Tensor& x, const std::optional<torch::Te
                         buffer_ptrs_gpu, config.num_max_nvl_chunked_send_tokens, config.num_max_nvl_chunked_recv_tokens,
                         rank, num_ranks, cached_mode,
                         comm_stream, num_channels, low_latency_mode);
+    
 
     // Wait streams
     std::optional<EventHandle> event;
@@ -927,7 +920,7 @@ Buffer::internode_dispatch(const torch::Tensor& x, const std::optional<torch::Te
     // Switch back compute stream
     if (allocate_on_comm_stream)
         at::cuda::setCurrentCUDAStream(compute_stream);
-
+    
     // Return values
     return {recv_x, recv_x_scales, recv_topk_idx, recv_topk_weights, num_recv_tokens_per_expert_list,
             rdma_channel_prefix_matrix, gbl_channel_prefix_matrix,
