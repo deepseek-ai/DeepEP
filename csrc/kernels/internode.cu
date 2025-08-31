@@ -57,18 +57,6 @@ std::pair<int, int> get_rdma_clean_meta(int hidden_int4, int num_scales, int num
     };
 }
 
-int get_num_bytes_per_pcie_token(int hidden_int4, int num_scales, int num_topk_idx, int num_topk_weights) {
-    return static_cast<int>(align(hidden_int4 * sizeof(int4) + num_scales * sizeof(float) + num_topk_idx * sizeof(int) + num_topk_weights * sizeof(float), sizeof(int4)));
-}
-
-__host__ __device__ __forceinline__
-std::pair<int, int> get_pcie_clean_meta(int hidden_int4, int num_scales, int num_topk_idx, int num_topk_weights, int num_ranks, int num_rdma_recv_buffer_tokens, int num_sms) {
-    return {
-        (get_num_bytes_per_pcie_token(hidden_int4, num_scales, num_topk_idx, num_topk_weights) * num_rdma_recv_buffer_tokens * num_ranks * 2 * num_sms) / sizeof(int),
-        4 * num_ranks * 2 * num_sms
-    };
-}
-
 __host__ __device__ __forceinline__
 std::pair<int, int> get_nvl_clean_meta(int hidden_int4, int num_scales, int num_topk_idx, int num_topk_weights, int num_rdma_ranks, int num_nvl_ranks, int num_nvl_recv_buffer_tokens, int num_channels, bool is_dispatch) {
     // Return `int32_t` offset and to clean
@@ -1229,84 +1217,6 @@ void cached_notify(int hidden_int4, int num_scales, int num_topk_idx, int num_to
                   rdma_buffer_ptr,
                   buffer_ptrs, barrier_signal_ptrs, rank, num_ranks,
                   is_cached_dispatch, cpu_rdma_team);
-}
-template <bool kCachedMode>
-__global__ void cached_notify_pcie(const int rdma_clean_offset, const int rdma_num_int_clean,
-                              int* combined_rdma_head, int num_combined_tokens, int num_channels,
-                              void* rdma_buffer_ptr,
-                              int rank, int num_ranks) {
-    auto sm_id = static_cast<int>(blockIdx.x);
-    auto thread_id = static_cast<int>(threadIdx.x);
-    auto num_threads = static_cast<int>(blockDim.x);
-    auto num_warps = num_threads / 32;
-    auto warp_id = thread_id / 32;
-    auto lane_id = get_lane_id();
-
-    if (sm_id == 0) {
-        // Barrier for RDMA
-        if (thread_id == 0)
-            nvshmem_sync_all();
-        __syncthreads();
-
-        // Clean
-        auto rdma_buffer_ptr_int = static_cast<int*>(rdma_buffer_ptr);
-        #pragma unroll
-        for (int i = thread_id; i < rdma_num_int_clean; i += num_threads)
-            rdma_buffer_ptr_int[rdma_clean_offset + i] = 0;
-        __syncthreads();
-
-        // Barrier again
-        if (thread_id == 0)
-            nvshmem_sync_all();
-    } else if (sm_id == 1) {
-        if (kCachedMode)
-            return;
-
-        // TODO: for now, we only support 32 ranks, and only use lane_id to iterate ranks
-        EP_DEVICE_ASSERT(num_warps >= num_channels);
-        EP_DEVICE_ASSERT(num_ranks <= 32);
-
-        // Iterate in reverse order
-        if (lane_id < num_ranks and warp_id < num_channels) {
-            int token_start_idx, token_end_idx;
-            get_channel_task_range(num_combined_tokens, num_channels, warp_id, token_start_idx, token_end_idx);
-
-            // NOTES: `1 << 25` is a heuristic large number
-            int last_head = 1 << 25;
-            for (int token_idx = token_end_idx - 1; token_idx >= token_start_idx; -- token_idx) {
-                auto current_head = __ldg(combined_rdma_head + token_idx * num_ranks + lane_id);
-                if (current_head < 0) {
-                    combined_rdma_head[token_idx * num_ranks + lane_id] = -last_head - 1;
-                } else {
-                    last_head = current_head;
-                }
-            }
-        }
-    }
-}
-
-void cached_notify_pcie(int hidden_int4, int num_scales, int num_topk_idx, int num_topk_weights,
-                   int num_ranks, int num_channels, int num_combined_tokens, int* combined_rdma_head,
-                   void* rdma_buffer_ptr, int num_max_rdma_chunked_recv_tokens,
-                   int rank, cudaStream_t stream,
-                   int64_t num_rdma_bytes,
-                   bool is_cached_dispatch) {
-    const int num_threads = std::max(128, 32 * num_channels);
-
-    // Get clean meta
-    auto pcie_clean_meta = get_pcie_clean_meta(hidden_int4, num_scales, num_topk_idx, num_topk_weights, num_ranks, num_max_rdma_chunked_recv_tokens, num_channels);
-    EP_HOST_ASSERT((pcie_clean_meta.first + pcie_clean_meta.second) * sizeof(int) <= num_rdma_bytes);
-    EP_HOST_ASSERT(num_rdma_bytes < std::numeric_limits<int>::max());
-    EP_HOST_ASSERT(num_channels * 2 > 3);
-
-    // Launch kernel
-    auto cached_notify_pcie_func = is_cached_dispatch ? cached_notify_pcie<true> : cached_notify_pcie<false>;
-    SETUP_LAUNCH_CONFIG(2, num_threads, stream);
-    LAUNCH_KERNEL(&cfg, cached_notify_pcie_func,
-                  pcie_clean_meta.first, pcie_clean_meta.second,
-                  combined_rdma_head, num_combined_tokens, num_channels,
-                  rdma_buffer_ptr,
-                  rank, num_ranks);
 }
 
 template <int kNumRanks, bool kMaybeWithBias, typename dtype_t, int kMaxNumRanks, bool kUseTMA, int kNumStages, int kNumTMALoadBytes = 0, typename GetAddrFn, typename ReceiveTWFn>
