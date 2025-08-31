@@ -12,7 +12,8 @@ namespace internode_ll {
 
 constexpr int kNumMaxWarpGroups = 32;
 
-#define ENABLE_DEBUG_TIMING_TENSOR 0
+// to enable it, change: internode_ll_v2::define & test.py::flag
+#define ENABLE_DEBUG_TIMING_TENSOR 1
 
 #if ENABLE_DEBUG_TIMING_TENSOR
 constexpr int DT_MAX_NUM_EVENT_GROUPS = 10;
