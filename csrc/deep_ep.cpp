@@ -12,12 +12,12 @@
 
 namespace deep_ep {
 
-Buffer::Buffer(int rank, int num_ranks, int64_t num_nvl_bytes, int64_t num_rdma_bytes, bool low_latency_mode, bool explicitly_destroy,bool disable_nvlink_for_normal_mode):
+Buffer::Buffer(int rank, int num_ranks, int64_t num_nvl_bytes, int64_t num_rdma_bytes, bool low_latency_mode,bool disable_nvlink_for_normal_mode, bool explicitly_destroy):
         rank(rank), num_ranks(num_ranks),
         num_nvl_bytes(num_nvl_bytes), num_rdma_bytes(num_rdma_bytes),
         low_latency_mode(low_latency_mode),
-        explicitly_destroy(explicitly_destroy),
         disable_nvlink_for_normal_mode(disable_nvlink_for_normal_mode),
+        explicitly_destroy(explicitly_destroy),
         comm_stream(at::cuda::getStreamFromPool(true)) {
     // Metadata memory
     int64_t barrier_signal_bytes = NUM_MAX_NVL_PEERS * sizeof(int);

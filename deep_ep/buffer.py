@@ -83,7 +83,7 @@ class Buffer:
         self.low_latency_mode = low_latency_mode
         self.disable_nvlink_for_normal_mode = not allow_nvlink_for_normal_mode
         self.explicitly_destroy = explicitly_destroy
-        self.runtime = deep_ep_cpp.Buffer(self.rank, self.group_size, num_nvl_bytes, num_rdma_bytes, low_latency_mode, explicitly_destroy, self.disable_nvlink_for_normal_mode)
+        self.runtime = deep_ep_cpp.Buffer(self.rank, self.group_size, num_nvl_bytes, num_rdma_bytes, low_latency_mode, self.disable_nvlink_for_normal_mode,explicitly_destroy)
 
         # Synchronize device IDs
         local_device_id = self.runtime.get_local_device_id()
