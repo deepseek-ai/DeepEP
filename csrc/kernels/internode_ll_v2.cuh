@@ -12,9 +12,9 @@ namespace internode_ll {
 
 constexpr int kNumMaxWarpGroups = 32;
 
-#define ENABLE_DEBUG_TIMING_TENSOR
+#define ENABLE_DEBUG_TIMING_TENSOR 0
 
-#ifdef ENABLE_DEBUG_TIMING_TENSOR
+#if ENABLE_DEBUG_TIMING_TENSOR
 constexpr int DT_MAX_NUM_EVENT_GROUPS = 10;
 constexpr int DT_MAX_NUM_EVENTS_PER_GROUP = 100;
 constexpr int DT_MAX_NUM_MODES = 2;
@@ -186,7 +186,7 @@ __forceinline__ __device__ void dispatch_send(
         tesfl_idx += flat_worker_num, debug_iter_idx += 1
     ) {
 //         if (subroutine_thread_id % 32 == 0) { printf("[R%d,S%d,T%d] dispatch_send tesfl_idx=%d START \n", rank, sm_id, subroutine_thread_id, tesfl_idx); }
-#ifdef ENABLE_DEBUG_TIMING_TENSOR
+#if ENABLE_DEBUG_TIMING_TENSOR
         write_debug_time(
             debug_tensor, t_start,
             /* event_group_id */ 0,
@@ -347,7 +347,7 @@ __forceinline__ __device__ void dispatch_send(
         }
 //             }
 
-#ifdef ENABLE_DEBUG_TIMING_TENSOR
+#if ENABLE_DEBUG_TIMING_TENSOR
         write_debug_time(
             debug_tensor, t_start,
             /* event_group_id */ 1,
@@ -527,7 +527,7 @@ __forceinline__ __device__ void dispatch_recv(
     const int cooperate_idx = flatten_id / num_ranks;
     const int src_rank = flatten_id % num_ranks;
 
-#ifdef ENABLE_DEBUG_TIMING_TENSOR
+#if ENABLE_DEBUG_TIMING_TENSOR
     int debug_ld_token_signal_event_id = 0;
 #endif
 
@@ -537,7 +537,7 @@ __forceinline__ __device__ void dispatch_recv(
     EP_DEVICE_ASSERT(num_warp_groups == 1); // not consider multi warp_group case below
     for (int local_expert_idx = 0; local_expert_idx < num_local_experts; ++local_expert_idx) {
 //         if (subroutine_thread_id % 32 == 0) { printf("[R%d,S%d,T%d] dispatch_recv local_expert_idx=%d START \n", rank, sm_id, subroutine_thread_id, local_expert_idx); }
-#ifdef ENABLE_DEBUG_TIMING_TENSOR
+#if ENABLE_DEBUG_TIMING_TENSOR
         write_debug_time(
             debug_tensor, t_start,
             /* event_group_id */ 0,
@@ -578,7 +578,7 @@ __forceinline__ __device__ void dispatch_recv(
             layout = -layout - 1;
             unpack2(layout, num_recv_tokens, token_start_offset);
 
-#ifdef ENABLE_DEBUG_TIMING_TENSOR
+#if ENABLE_DEBUG_TIMING_TENSOR
             write_debug_time(
                 debug_tensor, t_start,
                 /* event_group_id */ 1,
@@ -662,7 +662,7 @@ __forceinline__ __device__ void dispatch_recv(
                 }
                 recv_src_idx = -recv_src_idx-1;
 
-#ifdef ENABLE_DEBUG_TIMING_TENSOR
+#if ENABLE_DEBUG_TIMING_TENSOR
                 write_debug_time(
                     debug_tensor, t_start,
                     /* event_group_id */ 2,
