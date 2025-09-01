@@ -455,7 +455,7 @@ class Buffer:
                 recv_src_meta, send_rdma_head, send_nvl_head = handle
             num_recv_tokens = recv_src_meta.size(0)
             num_rdma_recv_tokens = send_nvl_head.size(0)
-            recv_x, recv_x_scales, _, _, _, _, _, _, _, _, _, _, _, _, event = self.runtime.internode_dispatch(
+            recv_x, recv_x_scales, _, _, _, _, _, _, _, _, _, _, _, _, _, event = self.runtime.internode_dispatch(
                 x, x_scales, topk_idx, topk_weights,
                 None, None, is_token_in_rank, None,
                 num_recv_tokens, num_rdma_recv_tokens,
@@ -529,6 +529,8 @@ class Buffer:
                              cumulative_local_expert_recv_stats: Optional[torch.Tensor] = None,
                              dispatch_wait_recv_cost_stats: Optional[torch.Tensor] = None,
                              use_fp8: bool = True, round_scale: bool = False, use_ue8m0: bool = False,
+                             use_per_tensor_quantization: bool = False,
+                             static_scale: Optional[torch.Tensor] = None,
                              async_finish: bool = False, return_recv_hook: bool = False) -> \
             Tuple[Tuple[torch.Tensor, torch.Tensor], torch.Tensor, Tuple, EventOverlap, Callable]:
         """
@@ -583,7 +585,8 @@ class Buffer:
                                               cumulative_local_expert_recv_stats,
                                               dispatch_wait_recv_cost_stats,
                                               num_max_dispatch_tokens_per_rank, num_experts,
-                                              use_fp8, round_scale, use_ue8m0,
+                                              use_fp8, round_scale, use_ue8m0,use_per_tensor_quantization,
+                                              static_scale,
                                               async_finish, return_recv_hook)
         handle = (packed_recv_src_info, packed_recv_layout_range, num_max_dispatch_tokens_per_rank, x.size(1), num_experts)
         tensors_to_record = (x, topk_idx,
