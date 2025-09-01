@@ -1,9 +1,14 @@
+import inspect
+import json
+import tempfile
+from pathlib import Path
+
+import numpy as np
 import os
 import sys
-import numpy as np
 import torch
 import torch.distributed as dist
-from typing import Optional
+from typing import Optional, Union
 
 
 def init_dist(local_rank: int, num_local_ranks: int):
@@ -12,14 +17,18 @@ def init_dist(local_rank: int, num_local_ranks: int):
     port = int(os.getenv('MASTER_PORT', '8361'))
     num_nodes = int(os.getenv('WORLD_SIZE', 1))
     node_rank = int(os.getenv('RANK', 0))
-    assert (num_local_ranks < 8 and num_nodes == 1) or num_local_ranks == 8
 
-    dist.init_process_group(
-        backend='nccl',
-        init_method=f'tcp://{ip}:{port}',
-        world_size=num_nodes * num_local_ranks,
-        rank=node_rank * num_local_ranks + local_rank
-    )
+    sig = inspect.signature(dist.init_process_group)
+    params = {
+        'backend': 'nccl',
+        'init_method': f'tcp://{ip}:{port}',
+        'world_size': num_nodes * num_local_ranks,
+        'rank': node_rank * num_local_ranks + local_rank,
+    }
+    if 'device_id' in sig.parameters:
+        # noinspection PyTypeChecker
+        params['device_id'] = torch.device(f'cuda:{local_rank}')
+    dist.init_process_group(**params)
     torch.set_default_dtype(torch.bfloat16)
     torch.set_default_device('cuda')
     torch.cuda.set_device(local_rank)
@@ -43,8 +52,10 @@ def per_token_cast_to_fp8(x: torch.Tensor):
 
 
 def per_token_cast_back(x_fp8: torch.Tensor, x_scales: torch.Tensor):
+    if x_fp8.numel() == 0:
+        return x_fp8.to(torch.bfloat16)
     if x_scales.dtype == torch.int:
-        x_scales = x_scales.view(dtype=torch.int8).to(torch.int) << 23
+        x_scales = x_scales.view(dtype=torch.uint8).to(torch.int) << 23
         x_scales = x_scales.view(dtype=torch.float)
     x_fp32 = x_fp8.to(torch.float32).view(x_fp8.size(0), -1, 128)
     x_scales = x_scales.view(x_fp8.size(0), -1, 1)
@@ -74,7 +85,7 @@ def create_grouped_scores(scores: torch.Tensor, group_idx: torch.Tensor, num_gro
     return (scores * mask).view(num_tokens, num_experts)
 
 
-def bench(fn, num_warmups: int = 20, num_tests: int = 30, post_fn=None):
+def bench(fn, num_warmups: int = 50, num_tests: int = 50, post_fn=None):
     # Flush L2 cache with 256 MB data
     torch.cuda.synchronize()
     cache = torch.empty(int(256e6 // 4), dtype=torch.int, device='cuda')
@@ -145,8 +156,9 @@ class suppress_stdout_stderr:
         self.errnull_file.close()
 
 
-def bench_kineto(fn, kernel_names, num_tests: int = 30, suppress_kineto_output: bool = False,
-                 trace_path: Optional[str] = None, barrier_comm_profiling: bool = False):
+def bench_kineto(fn, kernel_names: Union[str, tuple], num_tests: int = 30, suppress_kineto_output: bool = False,
+                 trace_path: Optional[str] = None, barrier_comm_profiling: bool = False,
+                 num_kernels_per_period: int = 1):
     # Profile
     suppress = suppress_stdout_stderr if suppress_kineto_output else empty_suppress
     with suppress():
@@ -161,11 +173,12 @@ def bench_kineto(fn, kernel_names, num_tests: int = 30, suppress_kineto_output: 
                     dist.all_reduce(torch.ones(1, dtype=torch.float, device='cuda'))
                 for _ in range(num_tests):
                     fn()
+                torch.cuda.synchronize()
                 prof.step()
 
     # Parse the profiling table
     assert isinstance(kernel_names, str) or isinstance(kernel_names, tuple)
-    is_tupled = isinstance(kernel_names, tuple)
+    is_tuple = isinstance(kernel_names, tuple)
     prof_lines = prof.key_averages().table(sort_by='cuda_time_total', max_name_column_width=100).split('\n')
     kernel_names = (kernel_names, ) if isinstance(kernel_names, str) else kernel_names
     assert all([isinstance(name, str) for name in kernel_names])
@@ -176,20 +189,37 @@ def bench_kineto(fn, kernel_names, num_tests: int = 30, suppress_kineto_output: 
     if trace_path is not None:
         prof.export_chrome_trace(trace_path)
 
-    # Return average kernel times
+    # Return average kernel durations
     units = {'ms': 1e3, 'us': 1e6}
-    kernel_times = []
+    kernel_durations = []
     for name in kernel_names:
         for line in prof_lines:
             if name in line:
                 time_str = line.split()[-2]
                 for unit, scale in units.items():
                     if unit in time_str:
-                        kernel_times.append(float(time_str.replace(unit, '')) / scale)
+                        kernel_durations.append(float(time_str.replace(unit, '')) / scale)
                         break
                 break
-    return tuple(kernel_times) if is_tupled else kernel_times[0]
+
+    # Expand the kernels by periods
+    if num_kernels_per_period > 1:
+        with tempfile.NamedTemporaryFile(suffix='.json') as tmp:
+            prof.export_chrome_trace(tmp.name)
+            profile_data = json.loads(Path(tmp.name).read_text())
+
+        for i, kernel_name in enumerate(kernel_names):
+            events = [event for event in profile_data['traceEvents'] if f'::{kernel_name}' in event['name']]
+            events = sorted(events, key=lambda event: event['ts'])
+            durations = [event['dur'] / 1e6 for event in events]
+            assert len(durations) % num_kernels_per_period == 0
+            num_kernel_patterns = len(durations) // num_kernels_per_period
+            kernel_durations[i] = [sum(durations[j::num_kernels_per_period]) / num_kernel_patterns
+                               for j in range(num_kernels_per_period)]
+
+    # Return execution durations
+    return kernel_durations if is_tuple else kernel_durations[0]
 
 
 def hash_tensor(t: torch.Tensor):
-    return t.view(torch.int64).sum().item()
+    return t.view(torch.int).sum().item()

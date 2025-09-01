@@ -1,16 +1,37 @@
 import os
 import subprocess
 import setuptools
+import importlib
+
+from pathlib import Path
 from torch.utils.cpp_extension import BuildExtension, CUDAExtension
 
 
+# Wheel specific: the wheels only include the soname of the host library `libnvshmem_host.so.X`
+def get_nvshmem_host_lib_name(base_dir):
+    path = Path(base_dir).joinpath('lib')
+    for file in path.rglob('libnvshmem_host.so.*'):
+        return file.name
+    raise ModuleNotFoundError('libnvshmem_host.so not found')
+
+
 if __name__ == '__main__':
+    disable_nvshmem = False
     nvshmem_dir = os.getenv('NVSHMEM_DIR', None)
-    disable_nvshmem = nvshmem_dir is None
-    if disable_nvshmem:
-        print('Warning: `NVSHMEM_DIR` is not specified, all internode and low-latency features are disabled\n')
+    nvshmem_host_lib = 'libnvshmem_host.so'
+    if nvshmem_dir is None:
+        try:
+            nvshmem_dir = importlib.util.find_spec("nvidia.nvshmem").submodule_search_locations[0]
+            nvshmem_host_lib = get_nvshmem_host_lib_name(nvshmem_dir)
+            import nvidia.nvshmem as nvshmem
+        except (ModuleNotFoundError, AttributeError, IndexError):
+            print('Warning: `NVSHMEM_DIR` is not specified, and the NVSHMEM module is not installed. All internode and low-latency features are disabled\n')
+            disable_nvshmem = True
     else:
-        assert os.path.exists(nvshmem_dir), f'Failed to find NVSHMEM: {nvshmem_dir}'
+        disable_nvshmem = False
+
+    if not disable_nvshmem:
+        assert os.path.exists(nvshmem_dir), f'The specified NVSHMEM directory does not exist: {nvshmem_dir}'
 
     cxx_flags = ['-O3', '-Wno-deprecated-declarations', '-Wno-unused-variable',
                  '-Wno-sign-compare', '-Wno-reorder', '-Wno-attributes']
@@ -29,8 +50,8 @@ if __name__ == '__main__':
         sources.extend(['csrc/kernels/internode.cu', 'csrc/kernels/internode_ll.cu'])
         include_dirs.extend([f'{nvshmem_dir}/include'])
         library_dirs.extend([f'{nvshmem_dir}/lib'])
-        nvcc_dlink.extend(['-dlink', f'-L{nvshmem_dir}/lib', '-lnvshmem'])
-        extra_link_args.extend(['-l:libnvshmem.a', '-l:nvshmem_bootstrap_uid.so', f'-Wl,-rpath,{nvshmem_dir}/lib'])
+        nvcc_dlink.extend(['-dlink', f'-L{nvshmem_dir}/lib', '-lnvshmem_device'])
+        extra_link_args.extend([f'-l:{nvshmem_host_lib}', '-l:libnvshmem_device.a', f'-Wl,-rpath,{nvshmem_dir}/lib'])
 
     if int(os.getenv('DISABLE_SM90_FEATURES', 0)):
         # Prefer A100
@@ -42,10 +63,6 @@ if __name__ == '__main__':
 
         # Disable internode and low-latency kernels
         assert disable_nvshmem
-
-        # Disable LD/ST tricks, as some CUDA version does not support `.L1::no_allocate`
-        assert int(os.getenv('DISABLE_AGGRESSIVE_PTX_INSTRS', 1)) == 1
-        os.environ['DISABLE_AGGRESSIVE_PTX_INSTRS'] = '1'
     else:
         # Prefer H800 series
         os.environ['TORCH_CUDA_ARCH_LIST'] = os.getenv('TORCH_CUDA_ARCH_LIST', '9.0')
@@ -53,8 +70,13 @@ if __name__ == '__main__':
         # CUDA 12 flags
         nvcc_flags.extend(['-rdc=true', '--ptxas-options=--register-usage-level=10'])
 
+    # Disable LD/ST tricks, as some CUDA version does not support `.L1::no_allocate`
+    if os.environ['TORCH_CUDA_ARCH_LIST'].strip() != '9.0':
+        assert int(os.getenv('DISABLE_AGGRESSIVE_PTX_INSTRS', 1)) == 1
+        os.environ['DISABLE_AGGRESSIVE_PTX_INSTRS'] = '1'
+
     # Disable aggressive PTX instructions
-    if int(os.getenv('DISABLE_AGGRESSIVE_PTX_INSTRS', '0')):
+    if int(os.getenv('DISABLE_AGGRESSIVE_PTX_INSTRS', '1')):
         cxx_flags.append('-DDISABLE_AGGRESSIVE_PTX_INSTRS')
         nvcc_flags.append('-DDISABLE_AGGRESSIVE_PTX_INSTRS')
 

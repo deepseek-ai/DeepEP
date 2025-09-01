@@ -29,11 +29,13 @@ class Buffer:
 
     num_sms: int = 20
 
-    def __init__(self, group: dist.ProcessGroup,
+    def __init__(self, group: Optional[dist.ProcessGroup],
                  num_nvl_bytes: int = 0, num_rdma_bytes: int = 0,
-                 low_latency_mode: bool = False, num_qps_per_rank: int = 12,
+                 low_latency_mode: bool = False, num_qps_per_rank: int = 24,
                  allow_nvlink_for_low_latency_mode: bool = True,
-                 allow_mnnvl: bool = False) -> None:
+                 allow_mnnvl: bool = False,
+                 explicitly_destroy: bool = False,
+                 comm: Optional["mpi4py.MPI.Comm"] = None) -> None:
         """
         Initialize the communication buffer.
 
@@ -49,39 +51,54 @@ class Buffer:
                 Warning: PCIe connections may lead to errors due to memory ordering issues,
                 please make sure all connections are via NVLink.
             allow_mnnvl: whether to allow MNNVL
+            explicitly_destroy: If this flag is set to True, you need to explicitly call `destroy()` to release resources;
+                otherwise, the resources will be released by the destructor.
+                Note: Releasing resources in the destructor may cause Python's exception handling process to hang.
+            comm: the mpi4py.MPI.Comm communicator to use in case the group parameter is absent.
         """
         check_nvlink_connections(group)
 
         # Initialize the CPP runtime
-        self.rank = group.rank()
-        self.group_size = group.size()
-        self.group = group
+        if group is not None:
+            self.rank = group.rank()
+            self.group_size = group.size()
+
+            def all_gather_object(obj):
+                object_list = [None] * self.group_size
+                dist.all_gather_object(object_list, obj, group)
+                return object_list
+        elif comm is not None:
+            self.rank = comm.Get_rank()
+            self.group_size = comm.Get_size()
+
+            def all_gather_object(obj):
+                return comm.allgather(obj)
+        else:
+            raise ValueError("Either 'group' or 'comm' must be provided.")
         self.num_nvl_bytes = num_nvl_bytes
         self.num_rdma_bytes = num_rdma_bytes
         self.low_latency_mode = low_latency_mode
-        self.runtime = deep_ep_cpp.Buffer(self.rank, self.group_size, num_nvl_bytes, num_rdma_bytes, low_latency_mode)
+        self.explicitly_destroy = explicitly_destroy
+        self.runtime = deep_ep_cpp.Buffer(self.rank, self.group_size, num_nvl_bytes, num_rdma_bytes, low_latency_mode, explicitly_destroy)
 
         # Synchronize device IDs
-        device_ids = [None, ] * self.group_size
         local_device_id = self.runtime.get_local_device_id()
-        dist.all_gather_object(device_ids, local_device_id, group)
+        device_ids = all_gather_object(local_device_id)
 
         # Synchronize IPC handles
-        ipc_handles = [None, ] * self.group_size
         local_ipc_handle = self.runtime.get_local_ipc_handle()
-        dist.all_gather_object(ipc_handles, local_ipc_handle, group)
+        ipc_handles = all_gather_object(local_ipc_handle)
 
         # Synchronize NVSHMEM unique IDs
         root_unique_id = None
         if self.runtime.get_num_rdma_ranks() > 1 or low_latency_mode:
-            # Enable IBGDA 
+            # Enable IBGDA
             assert num_qps_per_rank > 0
             os.environ['NVSHMEM_DISABLE_P2P'] = '0' if allow_nvlink_for_low_latency_mode else '1'
             os.environ['NVSHMEM_IB_ENABLE_IBGDA'] = '1'
-            os.environ['NVSHMEM_IBGDA_NIC_HANDLER'] = 'gpu'
             os.environ['NVSHMEM_IBGDA_NUM_RC_PER_PE'] = f'{num_qps_per_rank}'
             # Make sure QP depth is always larger than the number of on-flight WRs, so that we can skip WQ slot check
-            os.environ['NVSHMEM_QP_DEPTH'] = '1024'
+            os.environ['NVSHMEM_QP_DEPTH'] = os.environ.get('NVSHMEM_QP_DEPTH', '1024')
 
             # Reduce gpu memory usage
             # 6 default teams + 1 extra team
@@ -96,15 +113,26 @@ class Buffer:
                 os.environ['NVSHMEM_DISABLE_MNNVL'] = '1'
 
             # Synchronize using the root ID
-            nvshmem_unique_ids = [None, ] * self.group_size
             if (low_latency_mode and self.rank == 0) or (not low_latency_mode and self.runtime.get_rdma_rank() == 0):
                 root_unique_id = self.runtime.get_local_nvshmem_unique_id()
-            dist.all_gather_object(nvshmem_unique_ids, root_unique_id, group)
+            nvshmem_unique_ids = all_gather_object(root_unique_id)
             root_unique_id = nvshmem_unique_ids[0 if low_latency_mode else self.runtime.get_root_rdma_rank(True)]
 
         # Make CPP runtime available
         self.runtime.sync(device_ids, ipc_handles, root_unique_id)
         assert self.runtime.is_available()
+
+    def destroy(self):
+        """
+        Destroy the cpp runtime and release resources.
+
+        """
+
+        assert self.explicitly_destroy, '`explicitly_destroy` flag must be set'
+
+        self.runtime.destroy()
+        self.runtime = None
+
 
     @staticmethod
     def is_sm90_compiled():
@@ -148,6 +176,16 @@ class Buffer:
         """
         return deep_ep_cpp.get_low_latency_rdma_size_hint(num_max_dispatch_tokens_per_rank, hidden, num_ranks, num_experts)
 
+    def get_comm_stream(self) -> torch.Stream:
+        """
+        Get the communication stream.
+
+        Returns:
+            stream: the communication stream.
+        """
+        ts: torch.Stream = self.runtime.get_comm_stream()
+        return torch.cuda.Stream(stream_id=ts.stream_id, device_index=ts.device_index, device_type=ts.device_type)
+
     def get_local_buffer_tensor(self, dtype: torch.dtype, size: Optional[torch.Size] = None,
                                 offset: int = 0, use_rdma_buffer: bool = False) -> torch.Tensor:
         """
@@ -167,6 +205,16 @@ class Buffer:
         return tensor[:size.numel()].view(size)
 
     @staticmethod
+    def _unpack_bias(bias: Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]):
+        bias_0, bias_1 = None, None
+        if isinstance(bias, torch.Tensor):
+            bias_0 = bias
+        elif isinstance(bias, tuple):
+            assert len(bias) == 2
+            bias_0, bias_1 = bias
+        return bias_0, bias_1
+
+    @staticmethod
     def get_dispatch_config(num_ranks: int) -> Config:
         """
         Get a recommended dispatch config.
@@ -183,9 +231,9 @@ class Buffer:
             2: Config(Buffer.num_sms, 24, 256, 6, 128),
             4: Config(Buffer.num_sms, 6, 256, 6, 128),
             8: Config(Buffer.num_sms, 6, 256, 6, 128),
-            16: Config(Buffer.num_sms, 16, 288, 20, 128),
+            16: Config(Buffer.num_sms, 36, 288, 20, 128),
             24: Config(Buffer.num_sms, 8, 288, 32, 128),
-            32: Config(Buffer.num_sms, 8, 288, 32, 128),
+            32: Config(Buffer.num_sms, 32, 288, 32, 128),
             64: Config(Buffer.num_sms, 20, 288, 28, 128),
             128: Config(Buffer.num_sms, 20, 560, 32, 128),
             144: Config(Buffer.num_sms, 32, 720, 12, 128),
@@ -211,9 +259,9 @@ class Buffer:
             2: Config(Buffer.num_sms, 10, 256, 6, 128),
             4: Config(Buffer.num_sms, 9, 256, 6, 128),
             8: Config(Buffer.num_sms, 4, 256, 6, 128),
-            16: Config(Buffer.num_sms, 2, 288, 28, 128),
-            24: Config(Buffer.num_sms, 1, 288, 20, 128),
-            32: Config(Buffer.num_sms, 1, 288, 20, 128),
+            16: Config(Buffer.num_sms, 4, 288, 12, 128),
+            24: Config(Buffer.num_sms, 1, 288, 8, 128),
+            32: Config(Buffer.num_sms, 1, 288, 8, 128),
             64: Config(Buffer.num_sms, 1, 288, 20, 128),
             128: Config(Buffer.num_sms, 1, 560, 12, 128),
             144: Config(Buffer.num_sms, 2, 720, 8, 128),
@@ -336,6 +384,7 @@ class Buffer:
     # noinspection PyTypeChecker
     def combine(self, x: torch.Tensor, handle: Tuple,
                 topk_weights: Optional[torch.Tensor] = None,
+                bias: Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]] = None,
                 config: Optional[Config] = None,
                 previous_event: Optional[EventOverlap] = None, async_finish: bool = False,
                 allocate_on_comm_stream: bool = False) -> \
@@ -366,14 +415,15 @@ class Buffer:
 
         # Internode
         if self.runtime.get_num_rdma_ranks() > 1:
-            return self.internode_combine(x, handle, topk_weights, config, previous_event, async_finish, allocate_on_comm_stream)
+            return self.internode_combine(x, handle, topk_weights, bias, config, previous_event, async_finish, allocate_on_comm_stream)
 
         # NOTES: the second `_` is for the sending side, so we should use the third one
         rank_prefix_matrix, _, channel_prefix_matrix, src_idx, is_recv_token_in_rank, send_head = handle
+        bias_0, bias_1 = Buffer._unpack_bias(bias)
 
         # Launch the kernel
         recv_x, recv_topk_weights, event = self.runtime.intranode_combine(
-            x, topk_weights,
+            x, topk_weights, bias_0, bias_1,
             src_idx, rank_prefix_matrix, channel_prefix_matrix, send_head, config,
             getattr(previous_event, 'event', None), async_finish, allocate_on_comm_stream)
         return recv_x, recv_topk_weights, EventOverlap(event)
@@ -432,6 +482,7 @@ class Buffer:
     # noinspection PyTypeChecker
     def internode_combine(self, x: torch.Tensor, handle: Union[tuple, list],
                           topk_weights: Optional[torch.Tensor] = None,
+                          bias: Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]] = None,
                           config: Optional[Config] = None,
                           previous_event: Optional[EventOverlap] = None, async_finish: bool = False,
                           allocate_on_comm_stream: bool = False) -> \
@@ -442,15 +493,16 @@ class Buffer:
         """
         assert config is not None
 
-        # Unpack handle
+        # Unpack handle and bias
         is_combined_token_in_rank, \
             _, _, \
             rdma_channel_prefix_matrix, rdma_rank_prefix_sum, gbl_channel_prefix_matrix, gbl_rank_prefix_sum, \
             src_meta, send_rdma_head, send_nvl_head = handle
+        bias_0, bias_1 = Buffer._unpack_bias(bias)
 
         # Launch the kernel
         combined_x, combined_topk_weights, event = self.runtime.internode_combine(
-            x, topk_weights,
+            x, topk_weights, bias_0, bias_1,
             src_meta, is_combined_token_in_rank,
             rdma_channel_prefix_matrix, rdma_rank_prefix_sum, gbl_channel_prefix_matrix,
             send_rdma_head, send_nvl_head, config, getattr(previous_event, 'event', None),
@@ -475,6 +527,7 @@ class Buffer:
     def low_latency_dispatch(self, x: torch.Tensor, topk_idx: torch.Tensor,
                              num_max_dispatch_tokens_per_rank: int, num_experts: int,
                              cumulative_local_expert_recv_stats: Optional[torch.Tensor] = None,
+                             dispatch_wait_recv_cost_stats: Optional[torch.Tensor] = None,
                              use_fp8: bool = True, round_scale: bool = False, use_ue8m0: bool = False,
                              async_finish: bool = False, return_recv_hook: bool = False) -> \
             Tuple[Tuple[torch.Tensor, torch.Tensor], torch.Tensor, Tuple, EventOverlap, Callable]:
@@ -495,6 +548,9 @@ class Buffer:
             cumulative_local_expert_recv_stats: a cumulative expert count tensor for statistics, which should have shape
                 `[num_local_experts]` and be typed as `torch.int`. This is useful for online service EP load balance
                 monitoring.
+            dispatch_wait_recv_cost_stats: a cumulative time spent waiting to receive each token tensor for statistics,
+                which should have shape `[num_ranks, num_ranks]` and be typed as `torch.int64`.
+                This is useful for detecting and pre-cisely localizing slow anomalies.
             use_fp8: whether to enable FP8 casting, with this, the received data will be a tuple of FP8 tensor and scaling factors.
             round_scale: whether round the scaling factors into power of 2.
             use_ue8m0: whether use UE8M0 as scaling factor format (available only with `round_scale=True`).
@@ -525,6 +581,7 @@ class Buffer:
         packed_recv_x, packed_recv_x_scales, packed_recv_count, packed_recv_src_info, packed_recv_layout_range, event, hook = \
             self.runtime.low_latency_dispatch(x, topk_idx,
                                               cumulative_local_expert_recv_stats,
+                                              dispatch_wait_recv_cost_stats,
                                               num_max_dispatch_tokens_per_rank, num_experts,
                                               use_fp8, round_scale, use_ue8m0,
                                               async_finish, return_recv_hook)
@@ -538,8 +595,9 @@ class Buffer:
 
     # noinspection PyTypeChecker
     def low_latency_combine(self, x: torch.Tensor, topk_idx: torch.Tensor, topk_weights: torch.Tensor,
-                            handle: tuple, zero_copy: bool = False, async_finish: bool = False,
-                            return_recv_hook: bool = False, out: Optional[torch.Tensor] = None) -> \
+                            handle: tuple, use_logfmt: bool = False, zero_copy: bool = False, async_finish: bool = False,
+                            return_recv_hook: bool = False, out: Optional[torch.Tensor] = None,
+                            combine_wait_recv_cost_stats: Optional[torch.Tensor] = None) -> \
             Tuple[torch.Tensor, EventOverlap, Callable]:
         """
         A low-latency implementation for combining tokens (reduce **with weights**) with IBGDA.
@@ -557,6 +615,7 @@ class Buffer:
             topk_weights: `[num_combined_tokens, num_topk]` with `torch.float`, the expert weights selected by the dispatched
                 tokens. The received tokens will be reduced with the weights in this tensor.
             handle: the communication handle given by the `dispatch` function.
+            use_logfmt: whether to use an internal "LogFMT with dynamic per-64-channel cast" format (10 bits).
             zero_copy: whether the tensor is already copied into the RDMA buffer, should be cooperative
                 with `get_next_low_latency_combine_buffer`.
             async_finish: the current stream will not wait for the communication kernels to be finished if set.
@@ -564,6 +623,9 @@ class Buffer:
                 but **without actually receiving the data**. You must call the received hook to make sure the data's arrival.
                 If you do not set this flag, the kernel will ensure the data's arrival.
             out: the in-place output tensor, if set, the kernel will write the result to this tensor and return it directly.
+            combine_wait_recv_cost_stats: a cumulative time spent waiting to receive each token tensor for statistics,
+                which should have shape `[num_ranks, num_ranks]` and be typed as `torch.int64`.
+                This is useful for detecting and pre-cisely localizing slow anomalies.
 
         Returns:
             combined_x: the reduced token tensor, with shape `[num_combined_tokens, hidden]` and type `torch.bfloat16`.
@@ -572,8 +634,10 @@ class Buffer:
         """
         src_info, layout_range, num_max_dispatch_tokens_per_rank, hidden, num_experts = handle
         combined_x, event, hook = self.runtime.low_latency_combine(x, topk_idx, topk_weights, src_info, layout_range,
+                                                                   combine_wait_recv_cost_stats,
                                                                    num_max_dispatch_tokens_per_rank, num_experts,
-                                                                   zero_copy, async_finish, return_recv_hook, out)
+                                                                   use_logfmt, zero_copy, async_finish, return_recv_hook,
+                                                                   out)
         tensors_to_record = (x, topk_idx, topk_weights, src_info, layout_range, combined_x)
         return combined_x, EventOverlap(event, tensors_to_record if async_finish else None), hook
 
