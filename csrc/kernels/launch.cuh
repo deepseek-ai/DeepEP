@@ -86,12 +86,12 @@ cfg.dynamicSmemBytes = smem_size;
 
 #define SWITCH_HIDDEN(case_macro) \
     switch (hidden) { \
-        case 2048: case_macro(2048); \
-        case 2560: case_macro(2560); \
-        case 4096: case_macro(4096); \
-        case 5120: case_macro(5120); \
-        case 6144: case_macro(6144); /* For qwen3 coder */ \
+        /* case 2048: case_macro(2048); */  \
+        /* case 2560: case_macro(2560); */  \
+        /* case 4096: case_macro(4096); */  \
+        /* case 5120: case_macro(5120); */  \
+        /* case 6144: case_macro(6144); */  /* For qwen3 coder */ \
         case 7168: case_macro(7168); \
-        case 8192: case_macro(8192); \
+        /* case 8192: case_macro(8192); */ \
         default: EP_HOST_ASSERT(false and "Unsupported hidden"); \
     } while (false)

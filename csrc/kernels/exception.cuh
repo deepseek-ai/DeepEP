@@ -49,3 +49,6 @@ do { \
     } \
 } while (0)
 #endif
+
+#define EP_DEBUG_DEVICE_ASSERT(cond) EP_DEVICE_ASSERT(cond)
+// #define EP_DEBUG_DEVICE_ASSERT(cond) do {} while (0)

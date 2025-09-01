@@ -6,7 +6,7 @@
 namespace deep_ep {
 
 template <typename dtype_t>
-dtype_t ceil_div(dtype_t a, dtype_t b) {
+constexpr dtype_t ceil_div(dtype_t a, dtype_t b) {
     return (a + b - 1) / b;
 }
 
@@ -89,6 +89,11 @@ struct Config {
         num_bytes += num_channels * num_rdma_ranks * num_max_rdma_chunked_recv_tokens * kNumMaxTopK * sizeof(float) * 2;
         num_bytes += num_channels * num_rdma_ranks * num_max_rdma_chunked_recv_tokens * kNumMaxScales * sizeof(float) * 2;
         num_bytes += num_channels * num_rdma_ranks * num_max_rdma_chunked_recv_tokens * sizeof(int4) * 2;
+
+        // NOTE Please keep in sync: Config.get_nvl_buffer_size_hint, LowLatencyLayout.constructor, internode_ll_v2
+        // NOTE add a large number to be safe
+        num_bytes += 1048576;
+
         num_bytes = ((num_bytes + 127) / 128) * 128;
         return num_bytes;
 #else
@@ -102,7 +107,9 @@ struct LowLatencyBuffer {
 
     void* dispatch_rdma_send_buffer = nullptr;
     void* dispatch_rdma_recv_data_buffer = nullptr;
-    int* dispatch_rdma_recv_count_buffer = nullptr;
+    // NOTE rename
+    // int* dispatch_rdma_recv_count_buffer = nullptr;
+    int* dispatch_rdma_general_signal_buffer = nullptr;
 
     void* combine_rdma_send_buffer = nullptr;
     void* combine_rdma_recv_data_buffer = nullptr;
@@ -112,8 +119,8 @@ struct LowLatencyBuffer {
     size_t num_bytes_per_combine_msg = 0;
 
     std::pair<int*, int> clean_meta() {
-        EP_HOST_ASSERT(dispatch_rdma_recv_count_buffer == combine_rdma_recv_flag_buffer);
-        return {dispatch_rdma_recv_count_buffer, num_clean_int};
+        EP_HOST_ASSERT(dispatch_rdma_general_signal_buffer == combine_rdma_recv_flag_buffer);
+        return {dispatch_rdma_general_signal_buffer, num_clean_int};
     }
 };
 
@@ -128,6 +135,9 @@ struct LowLatencyLayout {
 
     LowLatencyLayout(void* rdma_buffer, int num_max_dispatch_tokens_per_rank, int hidden, int num_ranks, int num_experts) {
         const int num_scales = hidden / 128;
+
+        EP_HOST_ASSERT(num_experts % num_ranks == 0);
+        const int num_local_experts = num_experts / num_ranks;
 
         // Dispatch and combine layout:
         //  - 2 symmetric odd/even send buffer
@@ -157,9 +167,13 @@ struct LowLatencyLayout {
         total_bytes += recv_buffer_bytes * 2;
 
         // Symmetric signaling buffers
-        size_t dispatch_recv_count_buffer_bytes = num_experts * sizeof(int);
-        size_t combine_recv_flag_buffer_bytes = dispatch_recv_count_buffer_bytes;
-        size_t signaling_buffer_bytes = std::max(dispatch_recv_count_buffer_bytes, combine_recv_flag_buffer_bytes);
+        // NOTE can only increase instead of decrease to be compatible with v1
+        // NOTE be careful about alignment
+        // size_t dispatch_recv_count_buffer_bytes = num_experts * sizeof(int);
+        // NOTE Please keep in sync: Config.get_nvl_buffer_size_hint, LowLatencyLayout.constructor, internode_ll_v2
+        size_t dispatch_general_signal_buffer_bytes = num_experts * sizeof(int64_t) + num_local_experts * sizeof(int);
+        size_t combine_recv_flag_buffer_bytes = dispatch_general_signal_buffer_bytes;
+        size_t signaling_buffer_bytes = std::max(dispatch_general_signal_buffer_bytes, combine_recv_flag_buffer_bytes);
         size_t signaling_buffer_bytes_aligned = align<size_t>(signaling_buffer_bytes, 128);
         total_bytes += signaling_buffer_bytes_aligned * 2;
 
