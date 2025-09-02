@@ -1066,8 +1066,8 @@ void combine(void* combined_x,
 
 #define COMBINE_LAUNCH_CASE(hidden) { \
 auto combine_func = use_logfmt ? \
-    combine<true, hidden, kNumMaxTopk, kNumMaxUnrolls> : \
-    combine<false, hidden, kNumMaxTopk, kNumMaxUnrolls>; \
+    combine<true, hidden, kNumMaxTopk, kNumMaxExperts, kNumMaxUnrolls> : \
+    combine<false, hidden, kNumMaxTopk, kNumMaxExperts, kNumMaxUnrolls>; \
 SET_SHARED_MEMORY_FOR_TMA(combine_func); \
 LAUNCH_KERNEL(&cfg, combine_func, \
               combined_x, \
