@@ -353,7 +353,7 @@ void dispatch(void* packed_recv_x, void* packed_recv_x_scales,
               int* next_clean, int num_next_clean_int,
               int num_tokens, int hidden, int num_max_dispatch_tokens_per_rank,
               int num_topk, int num_experts, int rank, int num_ranks,
-              bool use_fp8, bool round_scale, bool use_ue8m0,const float* static_scale, 
+              bool use_fp8, bool round_scale, bool use_ue8m0,bool use_per_tensor_quantization,const float* static_scale, 
               void* workspace, int num_device_sms,
               cudaStream_t stream, int phases) {
     constexpr int kNumMaxTopK = 9;
