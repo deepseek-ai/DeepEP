@@ -348,6 +348,7 @@ void dispatch(void* packed_recv_x, void* packed_recv_x_scales,
               void* workspace, int num_device_sms,
               cudaStream_t stream, int phases) {
     constexpr int kNumMaxTopK = 9;
+    constexpr int kNumMaxExperts = 288;
     const int num_warp_groups = ceil_div(num_experts, num_device_sms);
     const int num_warps_per_group = 32 / num_warp_groups;
     EP_HOST_ASSERT(num_warp_groups > 0 and num_warps_per_group > 0);
@@ -356,6 +357,7 @@ void dispatch(void* packed_recv_x, void* packed_recv_x_scales,
     const auto num_warps = num_warp_groups * num_warps_per_group;
     const auto num_sms = ceil_div(num_experts, num_warp_groups);
     EP_HOST_ASSERT(num_topk <= kNumMaxTopK);
+    EP_HOST_ASSERT(num_experts <= kNumMaxExperts);
 
     // Workspace checks
     auto atomic_counter_per_expert = static_cast<int*>(workspace);
@@ -551,7 +553,7 @@ __forceinline__ __device__ void decode_and_accumulate(uint32_t* ld_buffer, float
     }
 }
 
-template <bool kUseLogFMT, int kHidden, int kNumMaxTopk, int kNumMaxUnrolls>
+template <bool kUseLogFMT, int kHidden, int kNumMaxTopk, int kNumMaxExperts, int kNumMaxUnrolls>
 __global__ __launch_bounds__(1024, 1) void
 combine(void* combined_x,
         void* rdma_recv_x, int* rdma_recv_flag, void* rdma_send_x,
@@ -618,7 +620,7 @@ combine(void* combined_x,
     }
 
     // Shared between warps in sms for overlap mode, where each sm only has one warp group
-    __shared__ int shared_vaild_signal_prefix_sum[288];
+    __shared__ int shared_vaild_signal_prefix_sum[kNumMaxExperts];
     __shared__ int shared_vaild_signal_sum, shared_local_expert_idx;
 
     // Compute prefix sums of valid signal counts per local expert
@@ -1014,6 +1016,7 @@ void combine(void* combined_x,
              void* workspace, int num_device_sms, int num_sms,
              cudaStream_t stream, int phases, bool zero_copy) {
     constexpr int kNumMaxTopk = 9;
+    constexpr int kNumMaxExperts = 288;
     int num_warp_groups, num_warps_per_group, num_recv_per_sm, num_warps;
 
     if (overlap == true and phases == LOW_LATENCY_SEND_PHASE) {
@@ -1040,6 +1043,7 @@ void combine(void* combined_x,
     auto atomic_finish_counter_per_expert = atomic_clean_flag + 1;
     EP_HOST_ASSERT((1 + num_experts) * sizeof(int) <= NUM_WORKSPACE_BYTES);
     EP_HOST_ASSERT(num_topk <= kNumMaxTopk);
+    EP_HOST_ASSERT(num_experts <= kNumMaxExperts);
 
     // Online cast cannot use zero-copy
     EP_HOST_ASSERT(not (zero_copy and use_logfmt));
