@@ -113,12 +113,12 @@ def test_main(num_tokens: int, hidden: int, num_experts: int, num_topk: int,
                                     for i in range(num_local_experts):
                                         vaild_num = ceil_div(packed_recv_count[i], block_m)
                                         comp_signal[i * total_num_per_expert : i * total_num_per_expert + vaild_num] = threshold
-                                    combined_x, event, hook = buffer.ll_overlap_combine(simulated_gemm_x, topk_idx, topk_weights, handle,
-                                                                                    overlap = overlap, packed_recv_count = packed_recv_count,
-                                                                                    comp_signal = comp_signal, block_m = block_m, threshold = threshold, num_sms = num_sms,
-                                                                                    use_logfmt=use_logfmt,
-                                                                                    async_finish=not return_recv_hook, zero_copy=zero_copy,
-                                                                                    return_recv_hook=return_recv_hook, out=out)
+                                    combined_x, event, hook = buffer.low_latency_combine(simulated_gemm_x, topk_idx, topk_weights, handle,
+                                                                                        overlap = overlap, packed_recv_count = packed_recv_count,
+                                                                                        comp_signal = comp_signal, block_m = block_m, threshold = threshold, num_sms = num_sms,
+                                                                                        use_logfmt=use_logfmt,
+                                                                                        async_finish=not return_recv_hook, zero_copy=zero_copy,
+                                                                                        return_recv_hook=return_recv_hook, out=out)
                                 else:
                                     combined_x, event, hook = buffer.low_latency_combine(simulated_gemm_x, topk_idx, topk_weights, handle,
                                                                                         use_logfmt=use_logfmt,

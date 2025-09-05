@@ -594,8 +594,10 @@ class Buffer:
             EventOverlap(event, tensors_to_record if async_finish else None), hook
 
     # noinspection PyTypeChecker
-    def low_latency_combine(self, x: torch.Tensor, topk_idx: torch.Tensor, topk_weights: torch.Tensor,
-                            handle: tuple, use_logfmt: bool = False, zero_copy: bool = False, async_finish: bool = False,
+    def low_latency_combine(self, x: torch.Tensor, topk_idx: torch.Tensor, topk_weights: torch.Tensor, handle: tuple,
+                            overlap: bool = False, packed_recv_count: torch.Tensor = None, comp_signal: torch.Tensor = None,
+                            block_m: int = 64, threshold: int = 0, num_sms: int = 3,
+                            use_logfmt: bool = False, zero_copy: bool = False, async_finish: bool = False,
                             return_recv_hook: bool = False, out: Optional[torch.Tensor] = None,
                             combine_wait_recv_cost_stats: Optional[torch.Tensor] = None) -> \
             Tuple[torch.Tensor, EventOverlap, Callable]:
@@ -615,59 +617,7 @@ class Buffer:
             topk_weights: `[num_combined_tokens, num_topk]` with `torch.float`, the expert weights selected by the dispatched
                 tokens. The received tokens will be reduced with the weights in this tensor.
             handle: the communication handle given by the `dispatch` function.
-            use_logfmt: whether to use an internal "LogFMT with dynamic per-64-channel cast" format (10 bits).
-            zero_copy: whether the tensor is already copied into the RDMA buffer, should be cooperative
-                with `get_next_low_latency_combine_buffer`.
-            async_finish: the current stream will not wait for the communication kernels to be finished if set.
-            return_recv_hook: return a receiving hook if set. If set, the kernel will just do the RDMA request issues,
-                but **without actually receiving the data**. You must call the received hook to make sure the data's arrival.
-                If you do not set this flag, the kernel will ensure the data's arrival.
-            out: the in-place output tensor, if set, the kernel will write the result to this tensor and return it directly.
-            combine_wait_recv_cost_stats: a cumulative time spent waiting to receive each token tensor for statistics,
-                which should have shape `[num_ranks, num_ranks]` and be typed as `torch.int64`.
-                This is useful for detecting and pre-cisely localizing slow anomalies.
-
-        Returns:
-            combined_x: the reduced token tensor, with shape `[num_combined_tokens, hidden]` and type `torch.bfloat16`.
-            event: the event after executing the kernel (valid only if `async_finish` is set).
-            hook: the receiving hook function (valid only if `return_recv_hook` is set).
-        """
-        src_info, layout_range, num_max_dispatch_tokens_per_rank, hidden, num_experts = handle
-        overlap, packed_recv_count, comp_signal, block_m, threshold, num_sms = False, None, None, 64, 0, 3
-        combined_x, event, hook = self.runtime.low_latency_combine(x, topk_idx, topk_weights, src_info, layout_range,
-                                                                   overlap, packed_recv_count, comp_signal, block_m, threshold, num_sms,
-                                                                   combine_wait_recv_cost_stats,
-                                                                   num_max_dispatch_tokens_per_rank, num_experts,
-                                                                   use_logfmt, zero_copy, async_finish, return_recv_hook,
-                                                                   out)
-        tensors_to_record = (x, topk_idx, topk_weights, src_info, layout_range, combined_x)
-        return combined_x, EventOverlap(event, tensors_to_record if async_finish else None), hook
-
-# noinspection PyTypeChecker
-    def ll_overlap_combine(self, x: torch.Tensor, topk_idx: torch.Tensor, topk_weights: torch.Tensor, handle: tuple, 
-                           overlap: bool = False, packed_recv_count: torch.Tensor = None, comp_signal: torch.Tensor = None, 
-                           block_m: int = 64, threshold: int = 0, num_sms: int = 3,
-                           use_logfmt: bool = False, zero_copy: bool = False, async_finish: bool = False,
-                           return_recv_hook: bool = False, out: Optional[torch.Tensor] = None,
-                           combine_wait_recv_cost_stats: Optional[torch.Tensor] = None) -> \
-            Tuple[torch.Tensor, EventOverlap, Callable]:
-        """
-        A low-latency implementation for combining tokens (reduce **with weights**) with IBGDA.
-        It overlaps the down gemm computation with combine send phase, coordinated via a signaling mechanism.
-        This kernel requires all the ranks (no matter intranode or internode) should be visible via RDMA
-            (specifically, IBGDA must be enabled).
-        Warning: as there are only two buffers, and the returned tensors reuse the buffer, you cannot hold more than 2
-            low-latency kernels' result tensors at a single moment.
-
-        Arguments:
-            x: `[num_local_experts, num_max_dispatch_tokens_per_rank * num_ranks, hidden]` with `torch.bfloat16`,
-                the local calculated tokens to be sent to this original rank and reduced.
-            topk_idx: `[num_combined_tokens, num_topk]` with `torch.int64`, the expert indices selected by the dispatched
-                tokens. `-1` indices (not selecting any expert) are supported. Note that, `num_combined_tokens` equals
-                to the number of dispatched tokens.
-            topk_weights: `[num_combined_tokens, num_topk]` with `torch.float`, the expert weights selected by the dispatched
-                tokens. The received tokens will be reduced with the weights in this tensor.
-            handle: the communication handle given by the `dispatch` function.
+            overlap: whether to overlap the down gemm with the combine send phase.
             packed_recv_count: a tensor shaped `[num_local_experts]` with type `torch.int`, indicating how many tokens each
                 expert receive.
             comp_signal: `[num_local_experts * ceil_div(num_tokens * num_max_dispatch_tokens_per_rank, block_m)]` with `torch.int32`, 
@@ -677,7 +627,6 @@ class Buffer:
             block_m: set by DeepGEMM.
             threshold: set by DeepGEMM. When a valid element in comp_signal reaches this threshold, it means that all the tokens 
                 corresponding to this element have been computed by DeepGEMM and can be sent.
-            overlap: whether to overlap the down gemm with the combine send phase.
             num_sms: the number of sms used by low_latency_combine send, only needs to be set when overlap is `True`.
             use_logfmt: whether to use an internal "LogFMT with dynamic per-64-channel cast" format (10 bits).
             zero_copy: whether the tensor is already copied into the RDMA buffer, should be cooperative
@@ -697,6 +646,7 @@ class Buffer:
             hook: the receiving hook function (valid only if `return_recv_hook` is set).
         """
         src_info, layout_range, num_max_dispatch_tokens_per_rank, hidden, num_experts = handle
+        overlap, packed_recv_count, comp_signal, block_m, threshold, num_sms = False, None, None, 64, 0, 3
         combined_x, event, hook = self.runtime.low_latency_combine(x, topk_idx, topk_weights, src_info, layout_range,
                                                                    overlap, packed_recv_count, comp_signal, block_m, threshold, num_sms,
                                                                    combine_wait_recv_cost_stats,
