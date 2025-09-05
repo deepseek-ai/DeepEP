@@ -646,7 +646,6 @@ class Buffer:
             hook: the receiving hook function (valid only if `return_recv_hook` is set).
         """
         src_info, layout_range, num_max_dispatch_tokens_per_rank, hidden, num_experts = handle
-        overlap, packed_recv_count, comp_signal, block_m, threshold, num_sms = False, None, None, 64, 0, 3
         combined_x, event, hook = self.runtime.low_latency_combine(x, topk_idx, topk_weights, src_info, layout_range,
                                                                    overlap, packed_recv_count, comp_signal, block_m, threshold, num_sms,
                                                                    combine_wait_recv_cost_stats,
