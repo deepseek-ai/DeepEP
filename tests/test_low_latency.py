@@ -77,7 +77,6 @@ def test_main(num_tokens: int, hidden: int, num_experts: int, num_topk: int,
                         elif dispatch_use_nvfp4:
                             recv_x_scale_view = packed_recv_x[1]
                             recv_x_scale_view = recv_x_scale_view.permute(5, 2, 0, 1, 4, 3)
-                            print(f'for num_times: {num_times}, recv_x_scale_view.shape: {recv_x_scale_view.shape}')
                             recv_x_scale_view = recv_x_scale_view.contiguous().view(num_local_experts, int(num_ranks * num_tokens), hidden // 16)
                             packed_recv_x = (packed_recv_x[0], recv_x_scale_view)
                             simulated_gemm_x = per_token_cast_back(packed_recv_x[0], packed_recv_x[1], x_global_scales, use_ue8m0_for_nvfp4_x_scale=use_ue8m0_for_nvfp4_x_scale, src_data_format='nvfp4')

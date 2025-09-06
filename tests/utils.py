@@ -90,8 +90,7 @@ def int32_to_8floats_lookup(tensor: torch.Tensor, table: torch.Tensor) -> torch.
     return out
 
 
-def cast_nvfp4_to_fp32(x_nvfp4: torch.Tensor, x_scales: torch.Tensor, x_global_scales: float, use_ue8m0_for_nvfp4_x_scale: bool = False):
-    assert(x_global_scales.dim() == 0, f"expect x_global_scales.dim() == 0, but got {x_global_scales.dim()}")
+def cast_nvfp4_to_fp32(x_nvfp4: torch.Tensor, x_scales: torch.Tensor, x_global_scales: torch.Tensor, use_ue8m0_for_nvfp4_x_scale: bool = False):
     NVFP4_TABLE = torch.tensor([0, 0.5, 1, 1.5, 2, 3, 4, 6, 0, -0.5, -1.0, -1.5, -2, -3, -4, -6], dtype=torch.float32, device='cuda')
     if use_ue8m0_for_nvfp4_x_scale:
         x_scales = x_scales.view(dtype=torch.int8).to(torch.int) << 23
