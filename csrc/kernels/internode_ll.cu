@@ -450,7 +450,8 @@ dispatch(void* packed_recv_x, void* packed_recv_x_scales,
         const auto recv_src_info = packed_recv_src_info + local_expert_idx * num_ranks * num_max_dispatch_tokens_per_rank;
         const auto recv_range = packed_recv_layout_range + local_expert_idx * num_ranks;
         const auto num_aligned_scales = align<int>(num_scales, sizeof(float) / sizeof(scale_t));
-        const auto recv_x_scales = static_cast<scale_t*>(packed_recv_x_scales) + local_expert_idx * num_ranks * num_max_dispatch_tokens_per_rank * num_aligned_scales;
+        const auto num_aligned_tokens = align<int>(num_ranks * num_max_dispatch_tokens_per_rank, 128);
+        const auto recv_x_scales = static_cast<scale_t*>(packed_recv_x_scales) + local_expert_idx * num_aligned_tokens * num_aligned_scales;
 
         // Shared between sub-warps in warp groups
         __shared__ int shared_num_recv_tokens[kNumMaxWarpGroups], shared_recv_token_begin_idx[kNumMaxWarpGroups];
