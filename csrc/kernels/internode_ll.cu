@@ -76,7 +76,7 @@ dispatch(void* packed_recv_x, void* packed_recv_x_scales,
     const size_t hidden_bytes = kHidden * (kUseFP8 ? sizeof(__nv_fp8_storage_t) : sizeof(nv_bfloat16));
     const size_t hidden_int4 = hidden_bytes / sizeof(int4);
 
-    // Message package: hidden data, FP8 scales, index at source
+    // Message package: index at source (int), 3 reserved int fields, hidden data, FP8 scales
     // NOTES: currently we have 3 reserved int fields for future use
     using vec_t = std::conditional_t<kUseFP8, int2, int4>;
     const size_t num_bytes_per_msg = sizeof(int4) + (kUseFP8 ? (kHidden + num_scales * sizeof(float)) : (kHidden * sizeof(nv_bfloat16)));
@@ -824,10 +824,11 @@ void combine(bool enable_v2, void* combined_x,
     const int num_warp_groups = ceil_div(num_experts, num_device_sms);
     const int num_warps_per_group = 32 / num_warp_groups;
     const int num_recv_per_sm = ceil_div(num_combined_tokens, num_device_sms);
-    EP_HOST_ASSERT(num_warp_groups > 0 and num_warps_per_group > 0 and ((num_combined_tokens == 0) or (num_recv_per_sm > 0)));
+    EP_HOST_ASSERT(num_warp_groups > 0 and num_warps_per_group > 0 and num_recv_per_sm >= 0);
 
     const auto num_warps = num_warp_groups * num_warps_per_group;
-    const auto num_sms = max(ceil_div(num_experts, num_warp_groups), ceil_div(num_combined_tokens, num_recv_per_sm));
+    const auto num_sms = max(ceil_div(num_experts, num_warp_groups),
+                             num_recv_per_sm == 0 ? 1 : ceil_div(num_combined_tokens, num_recv_per_sm));
 
     // Check workspace
     auto atomic_clean_flag = static_cast<int*>(workspace);
