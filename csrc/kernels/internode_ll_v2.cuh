@@ -890,7 +890,7 @@ void dispatch_v2(void* packed_recv_x, void* packed_recv_x_scales,
               int* remote_start_offset_buffer, int* zeroed_buffer_for_atomic_counter_per_expert,
               int* debug_tensor) {
 
-    EP_HOST_ASSERT(false, "should re-create deep_ep.cpp cudaMallocAndZero before using this");
+    EP_HOST_ASSERT(false); // should re-create deep_ep.cpp cudaMallocAndZero before using this
 
     constexpr int kNumMaxTopK = 9;
 
