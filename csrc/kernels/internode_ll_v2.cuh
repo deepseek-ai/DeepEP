@@ -889,6 +889,9 @@ void dispatch_v2(void* packed_recv_x, void* packed_recv_x_scales,
               uint32_t* count_per_expert, int64_t* token_idx_and_dst_expert_and_dst_slot_idx_flat_list,
               int* remote_start_offset_buffer, int* zeroed_buffer_for_atomic_counter_per_expert,
               int* debug_tensor) {
+
+    EP_HOST_ASSERT(false, "should re-create deep_ep.cpp cudaMallocAndZero before using this");
+
     constexpr int kNumMaxTopK = 9;
 
     // NOTE simple renaming
