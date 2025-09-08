@@ -15,7 +15,7 @@ import test_low_latency
 # noinspection PyShadowingNames
 def test_main(args: argparse.Namespace, num_sms: int,
               local_rank: int, num_local_ranks: int, num_ranks: int, num_nodes: int, rank: int,
-              buffer: deep_ep.Buffer, group: dist.ProcessGroup):
+              buffer: deep_ep.Buffer, group: dist.ProcessGroup, skip_benchmark: bool = False):
     # Settings
     num_tokens, hidden = args.num_tokens, args.hidden
     num_topk_groups, num_topk, num_experts = args.num_topk_groups, args.num_topk, args.num_experts
@@ -174,6 +174,9 @@ def test_main(args: argparse.Namespace, num_sms: int,
     if local_rank == 0:
         print('', flush=True)
 
+    if skip_benchmark:
+        return 
+
     # Tune dispatch performance
     best_dispatch_results = None
     fp8_factor = (1 + 4 / 128) / 2
@@ -238,11 +241,14 @@ def test_loop(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
                             num_qps_per_rank=num_qps_per_rank, explicitly_destroy=True)
     assert num_local_ranks == 8 and num_ranks > 8
     torch.manual_seed(rank)
-
-    for i in (num_sms, ):
-        test_main(args, i, local_rank, num_local_ranks, num_ranks, num_nodes, rank, buffer, group)
-        if local_rank == 0:
-            print('', flush=True)
+    
+    while True:
+        for i in (num_sms, ):
+            test_main(args, i, local_rank, num_local_ranks, num_ranks, num_nodes, rank, buffer, group, args.pressure_test_mode == 1)
+            if local_rank == 0:
+                print('', flush=True)
+        if args.pressure_test_mode == 0:
+            break
 
     # Test compatibility with low latency functions
     if args.test_ll_compatibility:
@@ -267,6 +273,8 @@ if __name__ == '__main__':
                        help='Number of top-k groups (default: `min(num_nodes, 4)`)')
     parser.add_argument('--num-topk', type=int, default=8,
                        help='Number of top-k experts (default: 8)')
+    parser.add_argument('--pressure-test-mode', type=int, default=0,
+                       help='Pressure test mode. 0: don\'t do pressure test, 1: do pressure test without benchmarks, 2: do pressure test with benchmarks')
     parser.add_argument('--num-experts', type=int, default=256,
                        help='Number of experts (default: 256')
     parser.add_argument('--test-ll-compatibility', action='store_true',
