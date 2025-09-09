@@ -6,7 +6,7 @@ import torch.distributed as dist
 
 # noinspection PyUnresolvedReferences
 import deep_ep
-from utils import init_dist, bench, bench_kineto, calc_diff, create_grouped_scores, inplace_unique, per_token_cast_to_fp8, per_token_cast_back
+from utils import init_dist, bench, bench_kineto, calc_diff, create_grouped_scores, inplace_unique, per_token_cast_to_fp8, per_token_cast_back, hash_tensor
 
 # Test compatibility with low latency functions
 import test_low_latency
@@ -28,6 +28,7 @@ def test_main(args: argparse.Namespace, num_sms: int,
     x = torch.ones((num_tokens, hidden), dtype=torch.bfloat16, device='cuda') * rank
     x_pure_rand = torch.randn((num_tokens, hidden), dtype=torch.bfloat16, device='cuda')
     x_e4m3 = per_token_cast_to_fp8(x)
+    x_pure_rand_e4m3 = per_token_cast_to_fp8(x_pure_rand)
     x_e4m3 = (x_e4m3[0], x_e4m3[1].T.contiguous().T)
     scores = torch.randn((num_tokens, num_experts), dtype=torch.float32, device='cuda').abs() + 1
     group_scores = scores.view(num_tokens, num_nodes, -1).amax(dim=-1)
@@ -42,6 +43,7 @@ def test_main(args: argparse.Namespace, num_sms: int,
     rdma_rank_idx = rank_idx // num_local_ranks
     rdma_rank_idx.masked_fill_(rank_idx == -1, -1)
     inplace_unique(rdma_rank_idx, num_nodes)
+    hash_value = 0
 
     # RDMA dispatch counts
     rdma_idx = topk_idx // (num_experts // num_nodes)
@@ -103,25 +105,33 @@ def test_main(args: argparse.Namespace, num_sms: int,
 
     for previous_mode in (False, True):
         for async_mode in (False, True):
-            for current_x in (x_pure_rand, x, x_e4m3):
+            for current_x in (x_pure_rand, x, x_pure_rand_e4m3, x_e4m3):
                 for with_topk in (False, True):
+                    is_rand = current_x is x_pure_rand or current_x is x_pure_rand_e4m3
                     if local_rank == 0:
                         print(f'[testing] Running with {"FP8" if isinstance(current_x, tuple) else "BF16"}, {"with" if with_topk else "without"} top-k (async={async_mode}, previous={previous_mode}) ...', flush=True, end='')
                     dispatch_args = {'x': current_x, 'num_tokens_per_rank': num_tokens_per_rank, 'num_tokens_per_rdma_rank': num_tokens_per_rdma_rank,  'is_token_in_rank': is_token_in_rank,
                                      'num_tokens_per_expert': num_tokens_per_expert, 'config': config, 'async_finish': async_mode}
                     if with_topk:
-                        dispatch_args.update({'topk_idx': topk_idx, 'topk_weights': topk_weights_pure_rand if current_x is x_pure_rand else topk_weights})
+                        dispatch_args.update({'topk_idx': topk_idx, 'topk_weights': topk_weights_pure_rand if is_rand else topk_weights})
                     if previous_mode:
                         dispatch_args.update({'previous_event': buffer.capture()})
                     recv_x, recv_topk_idx, recv_topk_weights, recv_num_tokens_per_expert_list, handle, event = buffer.dispatch(**dispatch_args)
                     event.current_stream_wait() if async_mode else ()
+
+                    if current_x is x_pure_rand:
+                        hash_value += hash_tensor(recv_x)
+                    elif current_x is x_pure_rand_e4m3:
+                        hash_value += hash_tensor(recv_x[0])
+                        hash_value += hash_tensor(recv_x[1])
+
                     recv_x = per_token_cast_back(*recv_x) if isinstance(recv_x, tuple) else recv_x
 
                     # Checks
                     recv_gbl_rank_prefix_sum = handle[-4]
                     assert gbl_num_tokens_per_rank[rank].item() == recv_x.size(0), f'{gbl_num_tokens_per_rank[rank].item()} != {recv_x.size(0)}'
                     assert gbl_num_tokens_per_expert.view(num_ranks, -1)[rank].tolist() == recv_num_tokens_per_expert_list
-                    if current_x is not x_pure_rand:
+                    if not is_rand:
                         check_data(recv_x, recv_gbl_rank_prefix_sum)
                     if with_topk:
                         # Check `topk_idx`
@@ -130,7 +140,7 @@ def test_main(args: argparse.Namespace, num_sms: int,
                             assert recv_topk_idx.eq(i).sum().item() == count
 
                         # Check `topk_weights`
-                        if current_x is not x_pure_rand:
+                        if not is_rand:
                             recv_topk_weights[recv_topk_idx.eq(-1)] = recv_topk_weights.amax(dim=1, keepdim=True).expand_as(recv_topk_weights)[recv_topk_idx.eq(-1)]
                             check_data(recv_topk_weights, recv_gbl_rank_prefix_sum)
 
@@ -142,7 +152,7 @@ def test_main(args: argparse.Namespace, num_sms: int,
                         recv_x, _, _, _, _, event = buffer.dispatch(**dispatch_args)
                         event.current_stream_wait() if async_mode else ()
                         recv_x = per_token_cast_back(*recv_x) if isinstance(recv_x, tuple) else recv_x
-                        if current_x is not x_pure_rand:
+                        if not is_rand:
                             check_data(recv_x, recv_gbl_rank_prefix_sum)
 
                     # Test combine
@@ -156,12 +166,15 @@ def test_main(args: argparse.Namespace, num_sms: int,
                     combined_x, combined_topk_weights, event = buffer.combine(**combine_args)
                     event.current_stream_wait() if async_mode else ()
                     check_x = (combined_x.float() - bias_0.float() - bias_1.float()) / is_token_in_rank.sum(dim=1).unsqueeze(1)
-                    ref_x = x_pure_rand if current_x is x_pure_rand else x
-                    assert calc_diff(check_x, ref_x) < 5e-6
+                    ref_x = x_pure_rand if is_rand else x
+                    assert calc_diff(check_x, ref_x) < 5e-4 if current_x is x_pure_rand_e4m3 else 5e-6 
                     if with_topk:
-                        check_topk_weights = combined_topk_weights if (current_x is x_pure_rand) else (combined_topk_weights / is_token_in_rank.sum(dim=1).unsqueeze(1))
-                        ref_topk_weights = topk_weights_pure_rand if current_x is x_pure_rand else topk_weights
+                        check_topk_weights = combined_topk_weights if is_rand else (combined_topk_weights / is_token_in_rank.sum(dim=1).unsqueeze(1))
+                        ref_topk_weights = topk_weights_pure_rand if is_rand else topk_weights
                         assert calc_diff(check_topk_weights, ref_topk_weights) < 1e-9
+
+                    if current_x is x_pure_rand or current_x is x_pure_rand_e4m3:
+                        hash_value += hash_tensor(recv_x)
 
                     # For later tuning
                     dispatch_bf16_rdma_send_bytes = num_rdma_token_sent * hidden * 2
@@ -175,7 +188,7 @@ def test_main(args: argparse.Namespace, num_sms: int,
         print('', flush=True)
 
     if skip_benchmark:
-        return 
+        return hash_value
 
     # Tune dispatch performance
     best_dispatch_results = None
@@ -225,6 +238,7 @@ def test_main(args: argparse.Namespace, num_sms: int,
     if local_rank == 0:
         print(f'[tuning] Best combine: SMs {best_results[0]}, NVL chunk {best_results[1]}, RDMA chunk {best_results[2]}, transmit: {best_time * 1e6:.2f} us, notify: {best_results[3] * 1e6:.2f} us, BW: {combine_bf16_rdma_recv_bytes / 1e9 / best_time:.2f} GB/s (RDMA), {combine_bf16_nvl_send_bytes / 1e9 / best_time:.2f} GB/s (NVL)', flush=True)
         print('', flush=True)
+    return hash_value
 
 
 # noinspection PyUnboundLocalVariable,PyShadowingNames
@@ -240,15 +254,31 @@ def test_loop(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
     buffer = deep_ep.Buffer(group, int(2e9), int(1e9), low_latency_mode=args.test_ll_compatibility,
                             num_qps_per_rank=num_qps_per_rank, explicitly_destroy=True)
     assert num_local_ranks == 8 and num_ranks > 8
-    torch.manual_seed(rank)
-    
-    while True:
+
+    for seed in range(int(1e9)):
+        if local_rank == 0:
+            print(f'Testing with seed {seed} ...', flush=True)
+        torch.manual_seed(rank + seed)
+        ref_hash = 0
         for i in (num_sms, ):
-            test_main(args, i, local_rank, num_local_ranks, num_ranks, num_nodes, rank, buffer, group, args.pressure_test_mode == 1)
+            ref_hash += test_main(args, i, local_rank, num_local_ranks, num_ranks, num_nodes, rank, buffer, group, args.pressure_test_mode == 1)
             if local_rank == 0:
                 print('', flush=True)
         if args.pressure_test_mode == 0:
             break
+        
+        if local_rank == 0:
+            print(f'{ref_hash=}')
+            print('', flush=True)
+
+        for j in range(20):
+            torch.manual_seed(rank + seed)
+            current_hash = 0
+            for i in (num_sms, ):
+                current_hash += test_main(args, i, local_rank, num_local_ranks, num_ranks, num_nodes, rank, buffer, group, args.pressure_test_mode == 1)
+                if local_rank == 0:
+                    print('', flush=True)
+            assert current_hash == ref_hash
 
     # Test compatibility with low latency functions
     if args.test_ll_compatibility:
