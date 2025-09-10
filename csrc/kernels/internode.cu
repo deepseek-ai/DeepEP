@@ -943,16 +943,17 @@ dispatch(int4* recv_x, float* recv_x_scales, int64_t* recv_topk_idx, float* recv
                 }
                 __syncwarp();
                 mbarrier_wait(tma_mbarrier, tma_phase);
-                if (lane_id == 0)
+                if (lane_id == 0) {
                     tma_store_1d(tma_buffer, recv_x + recv_token_idx * hidden_int4, hidden_bytes, false);
+                    if (scale_aligned)
+                        tma_store_1d(tma_buffer + hidden_bytes, recv_x_scales + recv_token_idx * num_scales, scale_bytes, false);
+                }
                 __syncwarp();
                 shifted += hidden_bytes;
 
                 // Copy scales
                 // TODO: make it as templated
-                if (scale_aligned) {
-                    tma_store_1d(tma_buffer + hidden_bytes, recv_x_scales + recv_token_idx * num_scales, scale_bytes, false);
-                } else {
+                if (not scale_aligned) {
                     UNROLLED_WARP_COPY(1, lane_id, num_scales,
                                        recv_x_scales + recv_token_idx * num_scales,
                                        reinterpret_cast<float*>(shifted),
