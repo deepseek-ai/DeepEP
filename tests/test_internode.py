@@ -119,9 +119,9 @@ def test_main(args: argparse.Namespace, num_sms: int,
                     recv_x, recv_topk_idx, recv_topk_weights, recv_num_tokens_per_expert_list, handle, event = buffer.dispatch(**dispatch_args)
                     event.current_stream_wait() if async_mode else ()
 
-                    if current_x is x_pure_rand:
+                    if current_x is x_pure_rand or current_x is x:
                         hash_value += hash_tensor(recv_x)
-                    elif current_x is x_pure_rand_e4m3:
+                    else:
                         hash_value += hash_tensor(recv_x[0])
                         hash_value += hash_tensor(recv_x[1])
 
@@ -173,8 +173,7 @@ def test_main(args: argparse.Namespace, num_sms: int,
                         ref_topk_weights = topk_weights_pure_rand if is_rand else topk_weights
                         assert calc_diff(check_topk_weights, ref_topk_weights) < 1e-9
 
-                    if current_x is x_pure_rand or current_x is x_pure_rand_e4m3:
-                        hash_value += hash_tensor(recv_x)
+                    hash_value += hash_tensor(recv_x)
 
                     # For later tuning
                     dispatch_bf16_rdma_send_bytes = num_rdma_token_sent * hidden * 2
