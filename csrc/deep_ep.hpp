@@ -20,6 +20,33 @@
 #define TORCH_EXTENSION_NAME deep_ep_cpp
 #endif
 
+namespace shared_memory {
+
+union MemHandleInner {
+  cudaIpcMemHandle_t cuda_ipc_mem_handle;
+  CUmemFabricHandle cu_mem_fabric_handle;
+};
+
+struct MemHandle {
+    MemHandleInner inner;
+    size_t size;
+};
+
+constexpr size_t HANDLE_SIZE = sizeof(MemHandle);
+
+class SharedMemoryAllocator {
+public:
+    SharedMemoryAllocator();
+    void malloc(void** ptr, size_t size);
+    void free(void* ptr);
+    void get_mem_handle(MemHandle* mem_handle, void* ptr);
+    void open_mem_handle(void** ptr, MemHandle* mem_handle);
+    void close_mem_handle(void* ptr);
+private:
+    bool enable_fabric;
+};
+}
+
 namespace deep_ep {
 
 struct Buffer {
@@ -44,7 +71,7 @@ private:
     int num_device_sms;
     int rank, rdma_rank, nvl_rank;
     int num_ranks, num_rdma_ranks, num_nvl_ranks;
-    cudaIpcMemHandle_t ipc_handles[NUM_MAX_NVL_PEERS];
+    shared_memory::MemHandle ipc_handles[NUM_MAX_NVL_PEERS];
 
     // Stream for communication
     at::cuda::CUDAStream comm_stream;
@@ -75,6 +102,8 @@ private:
     // Host-side RDMA-level MoE info
     volatile int* moe_recv_rdma_counter = nullptr;
     int* moe_recv_rdma_counter_mapped = nullptr;
+
+    shared_memory::SharedMemoryAllocator shared_memory_allocator;
 
 public:
     Buffer(int rank, int num_ranks, int64_t num_nvl_bytes, int64_t num_rdma_bytes, bool low_latency_mode, bool explicitly_destroy);
@@ -144,20 +173,28 @@ public:
     void clean_low_latency_buffer(int num_max_dispatch_tokens_per_rank, int hidden, int num_experts);
 
     std::tuple<torch::Tensor, std::optional<torch::Tensor>, torch::Tensor, torch::Tensor, torch::Tensor, std::optional<EventHandle>, std::optional<std::function<void()>>>
-    low_latency_dispatch(const torch::Tensor& x, const torch::Tensor& topk_idx,
+    low_latency_dispatch(bool enable_v2, const torch::Tensor& x, const torch::Tensor& topk_idx,
                          const std::optional<torch::Tensor>& cumulative_local_expert_recv_stats,
                          const std::optional<torch::Tensor>& dispatch_wait_recv_cost_stats,
                          int num_max_dispatch_tokens_per_rank, int num_experts,
                          bool use_fp8, bool round_scale, bool use_ue8m0,
-                         bool async, bool return_recv_hook);
+                         bool async, bool return_recv_hook,
+                         const std::optional<torch::Tensor>& zeroed_tensor_a,
+                         const std::optional<torch::Tensor>& zeroed_tensor_b,
+                         const std::optional<torch::Tensor>& zeroed_buffer_for_atomic_counter_per_expert,
+                         bool use_nvfp4,
+                         const std::optional<torch::Tensor>& dst_signals,
+                         const std::optional<torch::Tensor>& count_per_expert, const std::optional<torch::Tensor>& token_idx_and_dst_expert_and_dst_slot_idx_flat_list,
+                         const std::optional<torch::Tensor>& debug_tensor);
 
     std::tuple<torch::Tensor, std::optional<EventHandle>, std::optional<std::function<void()>>>
-    low_latency_combine(const torch::Tensor& x, const torch::Tensor& topk_idx, const torch::Tensor& topk_weights,
+    low_latency_combine(bool enable_v2, const torch::Tensor& x, const torch::Tensor& topk_idx, const torch::Tensor& topk_weights,
                         const torch::Tensor& src_info, const torch::Tensor& layout_range,
                         const std::optional<torch::Tensor>& combine_wait_recv_cost_stats,
                         int num_max_dispatch_tokens_per_rank, int num_experts,
                         bool use_logfmt, bool zero_copy, bool async, bool return_recv_hook,
-                        const std::optional<torch::Tensor>& out = std::nullopt);
+                        const std::optional<torch::Tensor>& out = std::nullopt,
+                        const std::optional<torch::Tensor>& src_signals = std::nullopt, uint32_t src_signal_expect_value = 0);
 
     torch::Tensor
     get_next_low_latency_combine_buffer(int num_max_dispatch_tokens_per_rank, int hidden, int num_experts) const;

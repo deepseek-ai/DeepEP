@@ -31,6 +31,18 @@ do { \
 } while (0)
 #endif
 
+#ifndef CU_CHECK
+#define CU_CHECK(cmd) \
+do { \
+    CUresult e = (cmd); \
+    if (e != CUDA_SUCCESS) { \
+        const char *error_str = NULL; \
+        cuGetErrorString(e, &error_str); \
+        throw EPException("CU", __FILE__, __LINE__, std::string(error_str)); \
+    } \
+} while (0)
+#endif
+
 #ifndef EP_HOST_ASSERT
 #define EP_HOST_ASSERT(cond) \
 do { \
@@ -49,3 +61,6 @@ do { \
     } \
 } while (0)
 #endif
+
+#define EP_DEBUG_DEVICE_ASSERT(cond) EP_DEVICE_ASSERT(cond)
+// #define EP_DEBUG_DEVICE_ASSERT(cond) do {} while (0)

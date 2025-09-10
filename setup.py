@@ -40,7 +40,7 @@ if __name__ == '__main__':
     include_dirs = ['csrc/']
     library_dirs = []
     nvcc_dlink = []
-    extra_link_args = []
+    extra_link_args = ['-lcuda']
 
     # NVSHMEM flags
     if disable_nvshmem:
@@ -79,6 +79,9 @@ if __name__ == '__main__':
     if int(os.getenv('DISABLE_AGGRESSIVE_PTX_INSTRS', '1')):
         cxx_flags.append('-DDISABLE_AGGRESSIVE_PTX_INSTRS')
         nvcc_flags.append('-DDISABLE_AGGRESSIVE_PTX_INSTRS')
+
+    if (extra_nvcc_flags := os.environ.get("DEEPEP_EXTRA_NVCC_FLAGS")) is not None:
+        nvcc_flags += extra_nvcc_flags.split(" ")
 
     # Put them together
     extra_compile_args = {

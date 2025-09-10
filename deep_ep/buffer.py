@@ -531,7 +531,15 @@ class Buffer:
                              cumulative_local_expert_recv_stats: Optional[torch.Tensor] = None,
                              dispatch_wait_recv_cost_stats: Optional[torch.Tensor] = None,
                              use_fp8: bool = True, round_scale: bool = False, use_ue8m0: bool = False,
-                             async_finish: bool = False, return_recv_hook: bool = False) -> \
+                             async_finish: bool = False, return_recv_hook: bool = False,
+                             enable_v2: bool = False,
+                             zeroed_tensor_a: Optional[torch.Tensor] = None,
+                             zeroed_tensor_b: Optional[torch.Tensor] = None,
+                             zeroed_tensor_c: Optional[torch.Tensor] = None,
+                             use_nvfp4: bool = False,
+                             dst_signals: Optional[torch.Tensor] = None,
+                             count_per_expert: Optional[torch.Tensor] = None, token_idx_and_dst_expert_and_dst_slot_idx_flat_list: Optional[torch.Tensor] = None,
+                             debug_tensor: Optional[torch.Tensor] = None) -> \
             Tuple[Tuple[torch.Tensor, torch.Tensor], torch.Tensor, Tuple, EventOverlap, Callable]:
         """
         A low-latency implementation for dispatching with IBGDA.
@@ -561,6 +569,13 @@ class Buffer:
                 but **without actually receiving the data**. You must call the received hook to make sure the data's arrival.
                 If you do not set this flag, the kernel will ensure the data's arrival.
 
+    		count_per_expert: (num_global_experts,)
+                * how many tokens a expert has
+    		# token_ids_of_expert: (num_global_experts, max_num_tokens)
+    		# 	* for expert_id-th item, only first `count_per_expert[expert_id]` elements are valid
+    		# 	* means which token ids should be sent in this expert
+    		token_idx_and_dst_expert_and_dst_slot_idx_flat_list: TODO
+
         Returns:
             recv_x: a tensor or tuple with received tokens for each expert.
                 With `use_fp8=True`: the first element is a `torch.Tensor` shaped as
@@ -581,12 +596,17 @@ class Buffer:
             hook: the receiving hook function (valid only if `return_recv_hook` is set).
         """
         packed_recv_x, packed_recv_x_scales, packed_recv_count, packed_recv_src_info, packed_recv_layout_range, event, hook = \
-            self.runtime.low_latency_dispatch(x, topk_idx,
+            self.runtime.low_latency_dispatch(enable_v2, x, topk_idx,
                                               cumulative_local_expert_recv_stats,
                                               dispatch_wait_recv_cost_stats,
                                               num_max_dispatch_tokens_per_rank, num_experts,
                                               use_fp8, round_scale, use_ue8m0,
-                                              async_finish, return_recv_hook)
+                                              async_finish, return_recv_hook,
+                                              zeroed_tensor_a, zeroed_tensor_b, zeroed_tensor_c,
+                                              use_nvfp4,
+                                              dst_signals,
+                                              count_per_expert, token_idx_and_dst_expert_and_dst_slot_idx_flat_list,
+                                              debug_tensor)
         handle = (packed_recv_src_info, packed_recv_layout_range, num_max_dispatch_tokens_per_rank, x.size(1), num_experts)
         tensors_to_record = (x, topk_idx,
                              packed_recv_x, packed_recv_x_scales, packed_recv_count,
@@ -599,7 +619,9 @@ class Buffer:
     def low_latency_combine(self, x: torch.Tensor, topk_idx: torch.Tensor, topk_weights: torch.Tensor,
                             handle: tuple, use_logfmt: bool = False, zero_copy: bool = False, async_finish: bool = False,
                             return_recv_hook: bool = False, out: Optional[torch.Tensor] = None,
-                            combine_wait_recv_cost_stats: Optional[torch.Tensor] = None) -> \
+                            combine_wait_recv_cost_stats: Optional[torch.Tensor] = None,
+                            enable_v2: bool = False,
+                            src_signals: Optional[torch.Tensor] = None, src_signal_expect_value: int = 0) -> \
             Tuple[torch.Tensor, EventOverlap, Callable]:
         """
         A low-latency implementation for combining tokens (reduce **with weights**) with IBGDA.
@@ -635,11 +657,12 @@ class Buffer:
             hook: the receiving hook function (valid only if `return_recv_hook` is set).
         """
         src_info, layout_range, num_max_dispatch_tokens_per_rank, hidden, num_experts = handle
-        combined_x, event, hook = self.runtime.low_latency_combine(x, topk_idx, topk_weights, src_info, layout_range,
+        combined_x, event, hook = self.runtime.low_latency_combine(enable_v2, x, topk_idx, topk_weights, src_info, layout_range,
                                                                    combine_wait_recv_cost_stats,
                                                                    num_max_dispatch_tokens_per_rank, num_experts,
                                                                    use_logfmt, zero_copy, async_finish, return_recv_hook,
-                                                                   out)
+                                                                   out,
+                                                                   src_signals, src_signal_expect_value)
         tensors_to_record = (x, topk_idx, topk_weights, src_info, layout_range, combined_x)
         return combined_x, EventOverlap(event, tensors_to_record if async_finish else None), hook
 

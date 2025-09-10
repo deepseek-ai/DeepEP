@@ -33,6 +33,25 @@
     } \
 }
 
+// old
+// #define UNROLLED_WARP_COPY(UNROLL_FACTOR, LANE_ID, N, DST, SRC, LD_FUNC, ST_FUNC) \
+// { \
+//     constexpr int kLoopStride = 32 * (UNROLL_FACTOR); \
+//     typename std::remove_reference<decltype(LD_FUNC((SRC) + 0))>::type unrolled_values[(UNROLL_FACTOR)]; \
+//     auto __src = (SRC); \
+//     auto __dst = (DST); \
+//     for (int __i = (LANE_ID); __i < ((N) / kLoopStride) * kLoopStride; __i += kLoopStride) { \
+//         _Pragma("unroll") \
+//         for (int __j = 0; __j < (UNROLL_FACTOR); ++ __j) \
+//             unrolled_values[__j] = LD_FUNC(__src + __i + __j * 32); \
+//         _Pragma("unroll") \
+//         for (int __j = 0; __j < (UNROLL_FACTOR); ++ __j) \
+//             ST_FUNC(__dst + __i + __j * 32, unrolled_values[__j]); \
+//     } \
+//     for (int __i = ((N) / kLoopStride) * kLoopStride + (LANE_ID); __i < (N); __i += 32) \
+//         ST_FUNC(__dst + __i, LD_FUNC(__src + __i)); \
+// }
+
 namespace deep_ep {
 
 template <int kBytes>
@@ -114,6 +133,12 @@ __device__ __forceinline__ int atomic_add_release_global(const int* ptr, int val
     return ret;
 }
 
+__device__ __forceinline__ uint32_t atomic_add_release_global(const uint32_t* ptr, uint32_t value) {
+    uint32_t ret;
+    asm volatile("atom.add.release.gpu.global.u32 %0, [%1], %2;" : "=r"(ret) : "l"(ptr), "r"(value));
+    return ret;
+}
+
 __device__ __forceinline__ int ld_acquire_cta(const int *ptr) {
     int ret;
     asm volatile("ld.acquire.cta.s32 %0, [%1];" : "=r"(ret) : "l"(ptr));
@@ -142,6 +167,11 @@ __device__ __forceinline__ uint64_t ld_na_relaxed(const uint64_t *ptr) {
     uint64_t ret;
     asm volatile("ld.relaxed.gpu.global.L1::no_allocate.b64 %0, [%1];" : "=l"(ret) : "l"(ptr));
     return ret;
+}
+
+// NOTE ADD
+__device__ __forceinline__ void st_volatile_global(int64_t *ptr, int64_t val) {
+    asm volatile("st.volatile.global.s64 [%0], %1;" : : "l"(ptr), "l"(val));
 }
 
 __device__  __forceinline__ int ld_volatile_global(const int *ptr) {
@@ -593,6 +623,24 @@ __forceinline__ __device__ T warp_reduce_and(T value) {
 template <int kNumLanesPerGroup = 32, bool kIntergroupReduce = false, typename T>
 __forceinline__ __device__ T warp_reduce_or(T value) {
     return warp_reduce<kNumLanesPerGroup, kIntergroupReduce, T>(value, ReduceOr<T>{});
+}
+
+// TODO wait once per thraed block, not per thread
+// TODO correct?
+__device__ __forceinline__ void wait_signal(uint32_t* addr, uint32_t expect_value) {
+  while (true) {
+    uint32_t ready = 0;
+    asm volatile("ld.acquire.gpu.global.u32 %0, [%1];"
+                 : "=r"(ready)
+                 : "l"(addr)
+                 : "memory");
+
+    if (ready == expect_value) {
+        return;
+    }
+
+    asm volatile("nanosleep.u32 20;");
+  };
 }
 
 } // namespace deep_ep
