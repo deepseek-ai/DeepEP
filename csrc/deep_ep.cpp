@@ -392,7 +392,11 @@ void Buffer::sync(const std::vector<int>& device_ids,
 
 std::tuple<torch::Tensor, std::optional<torch::Tensor>, torch::Tensor, torch::Tensor, std::optional<EventHandle>>
 Buffer::get_dispatch_layout(
-    const torch::Tensor& topk_idx, int num_experts, std::optional<EventHandle>& previous_event, bool async, bool allocate_on_comm_stream) {
+    const torch::Tensor& topk_idx, int num_experts, std::optional<EventHandle>& previous_event, bool async, bool allocate_on_comm_stream, bool return_recv_hook) {
+    if (return_recv_hook) {
+        EP_HOST_ASSERT(not async);
+    }
+
     EP_HOST_ASSERT(topk_idx.dim() == 2);
     EP_HOST_ASSERT(topk_idx.is_contiguous());
     EP_HOST_ASSERT(num_experts > 0);
@@ -400,16 +404,19 @@ Buffer::get_dispatch_layout(
     // Allocate all tensors on comm stream if set
     // NOTES: do not allocate tensors upfront!
     auto compute_stream = at::cuda::getCurrentCUDAStream();
+    auto launch_stream = return_recv_hook ? compute_stream : comm_stream;
     if (allocate_on_comm_stream) {
         EP_HOST_ASSERT(previous_event.has_value() and async);
         at::cuda::setCurrentCUDAStream(comm_stream);
     }
 
     // Wait previous tasks to be finished
-    if (previous_event.has_value()) {
-        stream_wait(comm_stream, previous_event.value());
-    } else {
-        stream_wait(comm_stream, compute_stream);
+    if(not return_recv_hook) {
+        if (previous_event.has_value()) {
+            stream_wait(launch_stream, previous_event.value());
+        } else {
+            stream_wait(launch_stream, compute_stream);
+        }
     }
 
     auto num_tokens = static_cast<int>(topk_idx.size(0)), num_topk = static_cast<int>(topk_idx.size(1));
@@ -429,14 +436,14 @@ Buffer::get_dispatch_layout(
                                 num_topk,
                                 num_ranks,
                                 num_experts,
-                                comm_stream);
+                                launch_stream);
 
     // Wait streams
     std::optional<EventHandle> event;
     if (async) {
-        event = EventHandle(comm_stream);
+        event = EventHandle(launch_stream);
         for (auto& t : {topk_idx, num_tokens_per_rank, num_tokens_per_expert, is_token_in_rank}) {
-            t.record_stream(comm_stream);
+            t.record_stream(launch_stream);
             if (allocate_on_comm_stream)
                 t.record_stream(compute_stream);
         }
@@ -445,8 +452,8 @@ Buffer::get_dispatch_layout(
             if (allocate_on_comm_stream)
                 to.has_value() ? to->record_stream(compute_stream) : void();
         }
-    } else {
-        stream_wait(compute_stream, comm_stream);
+    } else if (not return_recv_hook) {
+        stream_wait(compute_stream, launch_stream);
     }
 
     // Switch back compute stream

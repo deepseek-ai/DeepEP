@@ -308,7 +308,7 @@ class Buffer:
     # noinspection PyTypeChecker
     def get_dispatch_layout(self, topk_idx: torch.Tensor, num_experts: int,
                             previous_event: Optional[EventOverlap] = None, async_finish: bool = False,
-                            allocate_on_comm_stream: bool = False) -> \
+                            allocate_on_comm_stream: bool = False, return_recv_hook: bool = False) -> \
             Tuple[torch.Tensor, Optional[torch.Tensor], torch.Tensor, torch.Tensor, EventOverlap]:
         """
         Calculate the layout required for later communication.
@@ -331,7 +331,7 @@ class Buffer:
         """
         num_tokens_per_rank, num_tokens_per_rdma_rank, num_tokens_per_expert, is_token_in_rank, event = \
             self.runtime.get_dispatch_layout(topk_idx, num_experts, getattr(previous_event, 'event', None),
-                                             async_finish, allocate_on_comm_stream)
+                                             async_finish, allocate_on_comm_stream, return_recv_hook)
         return num_tokens_per_rank, num_tokens_per_rdma_rank, num_tokens_per_expert, is_token_in_rank, EventOverlap(event)
 
     # noinspection PyTypeChecker

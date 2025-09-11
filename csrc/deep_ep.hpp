@@ -155,7 +155,7 @@ public:
         int num_experts,
         std::optional<EventHandle>& previous_event,
         bool async,
-        bool allocate_on_comm_stream);
+        bool allocate_on_comm_stream, bool return_recv_hook);
 
     std::tuple<torch::Tensor,
                std::optional<torch::Tensor>,
