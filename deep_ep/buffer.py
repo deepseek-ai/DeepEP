@@ -625,7 +625,7 @@ class Buffer:
             comp_signal: `[num_local_experts * ceil_div(num_tokens * num_max_dispatch_tokens_per_rank, block_m)]` with `torch.int32`, 
                 each element indicates the processing progress of `block_m` tokens in DeepGEMM. 
                 Note that, the fixed-length tensor is used to support cuda graph, 
-                only the first `ceil_div(num_tokens * num_ranks, block_m)` elements within its corresponding segment are valid.
+                only the first `ceil_div(num_tokens * num_ranks, block_m)` elements of each local_expert are valid.
             block_m: set by DeepGEMM.
             threshold: set by DeepGEMM. When a valid element in comp_signal reaches this threshold, it means that all the tokens 
                 corresponding to this element have been computed by DeepGEMM and can be sent.
