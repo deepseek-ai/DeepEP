@@ -444,7 +444,7 @@ dispatch(int4* recv_x, float* recv_x_scales, int64_t* recv_topk_idx, float* recv
     // TMA stuffs
     extern __shared__ __align__(1024) uint8_t smem_tma_buffer[];
     auto tma_buffer = smem_tma_buffer + target_rank * kNumTMABytesPerWarp;
-    auto tma_mbarrier = reinterpret_cast<uint64_t*>(tma_buffer + hidden_bytes);
+    auto tma_mbarrier = reinterpret_cast<uint64_t*>(tma_buffer + num_bytes_per_token);
     uint32_t tma_phase = 0;
     if ((warp_role == WarpRole::kRDMAAndNVLForwarder or warp_role == WarpRole::kNVLReceivers) and lane_id == 0) {
         mbarrier_init(tma_mbarrier, 1);
@@ -943,16 +943,17 @@ dispatch(int4* recv_x, float* recv_x_scales, int64_t* recv_topk_idx, float* recv
                 }
                 __syncwarp();
                 mbarrier_wait(tma_mbarrier, tma_phase);
-                if (lane_id == 0)
+                if (lane_id == 0) {
                     tma_store_1d(tma_buffer, recv_x + recv_token_idx * hidden_int4, hidden_bytes, false);
+                    if (scale_aligned)
+                        tma_store_1d(tma_buffer + hidden_bytes, recv_x_scales + recv_token_idx * num_scales, scale_bytes, false);
+                }
                 __syncwarp();
                 shifted += hidden_bytes;
 
                 // Copy scales
                 // TODO: make it as templated
-                if (scale_aligned) {
-                    tma_store_1d(tma_buffer + hidden_bytes, recv_x_scales + recv_token_idx * num_scales, scale_bytes, false);
-                } else {
+                if (not scale_aligned) {
                     UNROLLED_WARP_COPY(1, lane_id, num_scales,
                                        recv_x_scales + recv_token_idx * num_scales,
                                        reinterpret_cast<float*>(shifted),
@@ -1438,13 +1439,13 @@ combine(int4* combined_x, float* combined_topk_weights,
         // TMA stuffs
         extern __shared__ __align__(1024) uint8_t smem_tma_buffer[];
         auto tma_buffer = smem_tma_buffer + dst_nvl_rank * kNumTMABytesPerSenderWarp;
-        auto tma_mbarrier = reinterpret_cast<uint64_t*>(tma_buffer + hidden_bytes);
+        auto tma_mbarrier = reinterpret_cast<uint64_t*>(tma_buffer + num_bytes_per_token);
         uint32_t tma_phase = 0;
         if (lane_id == 0) {
             mbarrier_init(tma_mbarrier, 1);
             fence_view_async_shared();
             fence_barrier_init();
-            EP_DEVICE_ASSERT(hidden_bytes + sizeof(uint64_t) <= kNumTMABytesPerSenderWarp);
+            EP_DEVICE_ASSERT(num_bytes_per_token + sizeof(uint64_t) <= kNumTMABytesPerSenderWarp);
         }
         __syncwarp();
 
