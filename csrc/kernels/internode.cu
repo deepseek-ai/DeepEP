@@ -58,9 +58,7 @@ std::pair<int, int> get_rdma_clean_meta(int hidden_int4, int num_scales, int num
 }
 
 __host__ __device__ __forceinline__
-std::pair<int, int> get_nvl_clean_meta(int hidden_int4, int num_scales, int num_topk_idx,
-                                       int num_topk_weights, int num_rdma_ranks, int num_nvl_ranks,
-                                       int num_nvl_recv_buffer_tokens, int num_channels, bool is_dispatch) {
+std::pair<int, int> get_nvl_clean_meta(int hidden_int4, int num_scales, int num_topk_idx, int num_topk_weights, int num_rdma_ranks, int num_nvl_ranks, int num_nvl_recv_buffer_tokens, int num_channels, bool is_dispatch) {
     // Return `int32_t` offset and to clean
     EP_STATIC_ASSERT(sizeof(SourceMeta) % sizeof(int) == 0, "Invalid size of `SourceMeta`");
 
