@@ -223,3 +223,7 @@ def bench_kineto(fn, kernel_names: Union[str, tuple], num_tests: int = 30, suppr
 
 def hash_tensor(t: torch.Tensor):
     return t.view(torch.int).sum().item()
+
+
+def ceil_div(a, b):
+    return (a + b - 1) // b
