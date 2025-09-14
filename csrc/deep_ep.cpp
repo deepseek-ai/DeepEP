@@ -10,6 +10,131 @@
 #include "kernels/api.cuh"
 #include "kernels/configs.cuh"
 
+namespace shared_memory {
+void cu_mem_set_access_all(void* ptr, size_t size) {
+    int device_count;
+    CUDA_CHECK(cudaGetDeviceCount(&device_count));
+
+    CUmemAccessDesc access_desc[device_count];
+    for (int idx = 0; idx < device_count; ++idx) {
+        access_desc[idx].location.type = CU_MEM_LOCATION_TYPE_DEVICE;
+        access_desc[idx].location.id = idx;
+        access_desc[idx].flags = CU_MEM_ACCESS_FLAGS_PROT_READWRITE;
+    }
+
+    CU_CHECK(cuMemSetAccess((CUdeviceptr)ptr, size, access_desc, device_count));
+}
+
+void cu_mem_free(void* ptr) {
+    CUmemGenericAllocationHandle handle;
+    CU_CHECK(cuMemRetainAllocationHandle(&handle, ptr));
+
+    size_t size = 0;
+    CU_CHECK(cuMemGetAddressRange(NULL, &size, (CUdeviceptr)ptr));
+
+    CU_CHECK(cuMemUnmap((CUdeviceptr)ptr, size));
+    CU_CHECK(cuMemAddressFree((CUdeviceptr)ptr, size));
+    CU_CHECK(cuMemRelease(handle));
+}
+
+size_t get_size_align_to_granularity(size_t size_raw, size_t granularity) {
+    size_t size = (size_raw + granularity - 1) & ~(granularity - 1);
+    if (size == 0) size = granularity;
+    return size;
+}
+
+bool support_fabric() {
+    int device_count;
+    CUDA_CHECK(cudaGetDeviceCount(&device_count));
+
+    for (int device = 0; device < device_count; ++device) {
+        int support = 0;
+        CU_CHECK(cuDeviceGetAttribute(&support, CU_DEVICE_ATTRIBUTE_HANDLE_TYPE_FABRIC_SUPPORTED, device));
+        if (!support) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+SharedMemoryAllocator::SharedMemoryAllocator() : enable_fabric(support_fabric()) {}
+
+void SharedMemoryAllocator::malloc(void** ptr, size_t size_raw) {
+    if (enable_fabric) {
+        CUdevice device;
+        CU_CHECK(cuCtxGetDevice(&device));
+
+        CUmemAllocationProp prop = {};
+        prop.type = CU_MEM_ALLOCATION_TYPE_PINNED;
+        prop.location.type = CU_MEM_LOCATION_TYPE_DEVICE;
+        prop.requestedHandleTypes = CU_MEM_HANDLE_TYPE_FABRIC;
+        prop.location.id = device;
+
+        size_t granularity = 0;
+        CU_CHECK(cuMemGetAllocationGranularity(&granularity, &prop, CU_MEM_ALLOC_GRANULARITY_MINIMUM));
+
+        size_t size = get_size_align_to_granularity(size_raw, granularity);
+
+        CUmemGenericAllocationHandle handle;
+        CU_CHECK(cuMemCreate(&handle, size, &prop, 0));
+
+        CU_CHECK(cuMemAddressReserve((CUdeviceptr *)ptr, size, granularity, 0, 0));
+        CU_CHECK(cuMemMap((CUdeviceptr)*ptr, size, 0, handle, 0));
+        cu_mem_set_access_all(*ptr, size);
+    } else {
+        CUDA_CHECK(cudaMalloc(ptr, size_raw));
+    }
+}
+
+void SharedMemoryAllocator::free(void* ptr) {
+    if (enable_fabric) {
+        cu_mem_free(ptr);
+    } else {
+        CUDA_CHECK(cudaFree(ptr));
+    }
+}
+
+void SharedMemoryAllocator::get_mem_handle(MemHandle* mem_handle, void* ptr) {
+    size_t size = 0;
+    CU_CHECK(cuMemGetAddressRange(NULL, &size, (CUdeviceptr)ptr));
+
+    mem_handle->size = size;
+
+    if (enable_fabric) {
+        CUmemGenericAllocationHandle handle;
+        CU_CHECK(cuMemRetainAllocationHandle(&handle, ptr));
+
+        CU_CHECK(cuMemExportToShareableHandle(&mem_handle->inner.cu_mem_fabric_handle, handle, CU_MEM_HANDLE_TYPE_FABRIC, 0));
+    } else {
+        CUDA_CHECK(cudaIpcGetMemHandle(&mem_handle->inner.cuda_ipc_mem_handle, ptr));
+    }
+}
+
+void SharedMemoryAllocator::open_mem_handle(void** ptr, MemHandle* mem_handle) {
+    if (enable_fabric) {
+        size_t size = mem_handle->size;
+
+        CUmemGenericAllocationHandle handle;
+        CU_CHECK(cuMemImportFromShareableHandle(&handle, &mem_handle->inner.cu_mem_fabric_handle, CU_MEM_HANDLE_TYPE_FABRIC));
+
+        CU_CHECK(cuMemAddressReserve((CUdeviceptr *)ptr, size, 0, 0, 0));
+        CU_CHECK(cuMemMap((CUdeviceptr)*ptr, size, 0, handle, 0));
+        cu_mem_set_access_all(*ptr, size);
+    } else {
+        CUDA_CHECK(cudaIpcOpenMemHandle(ptr, mem_handle->inner.cuda_ipc_mem_handle, cudaIpcMemLazyEnablePeerAccess));
+    }
+}
+
+void SharedMemoryAllocator::close_mem_handle(void* ptr) {
+    if (enable_fabric) {
+        cu_mem_free(ptr);
+    } else {
+        CUDA_CHECK(cudaIpcCloseMemHandle(ptr));
+    }
+}
+}
+
 namespace deep_ep {
 
 Buffer::Buffer(int rank, int num_ranks, int64_t num_nvl_bytes, int64_t num_rdma_bytes, bool low_latency_mode, bool explicitly_destroy):
@@ -46,8 +171,8 @@ Buffer::Buffer(int rank, int num_ranks, int64_t num_nvl_bytes, int64_t num_rdma_
 
     if (num_nvl_bytes > 0) {
         // Local IPC: alloc local memory and set local IPC handles
-        CUDA_CHECK(cudaMalloc(&buffer_ptrs[nvl_rank], num_nvl_bytes + barrier_signal_bytes + buffer_ptr_bytes + barrier_signal_ptr_bytes));
-        CUDA_CHECK(cudaIpcGetMemHandle(&ipc_handles[nvl_rank], buffer_ptrs[nvl_rank]));
+        shared_memory_allocator.malloc(&buffer_ptrs[nvl_rank], num_nvl_bytes + barrier_signal_bytes + buffer_ptr_bytes + barrier_signal_ptr_bytes);
+        shared_memory_allocator.get_mem_handle(&ipc_handles[nvl_rank], buffer_ptrs[nvl_rank]);
         buffer_ptrs_gpu = reinterpret_cast<void**>(static_cast<uint8_t*>(buffer_ptrs[nvl_rank]) + num_nvl_bytes + barrier_signal_bytes);
 
         // Set barrier signals
@@ -115,7 +240,8 @@ int Buffer::get_local_device_id() const {
 }
 
 pybind11::bytearray Buffer::get_local_ipc_handle() const {
-    return {ipc_handles[nvl_rank].reserved, CUDA_IPC_HANDLE_SIZE};
+    const shared_memory::MemHandle& handle = ipc_handles[nvl_rank];
+    return {reinterpret_cast<const char*>(&handle), sizeof(handle)};
 }
 
 pybind11::bytearray Buffer::get_local_nvshmem_unique_id() const {
@@ -154,11 +280,11 @@ void Buffer::destroy() {
         // Close remote IPC
         if (is_available()) {
             for (int i = 0; i < num_nvl_ranks; ++ i) if (i != nvl_rank)
-                CUDA_CHECK(cudaIpcCloseMemHandle(buffer_ptrs[i]));
+                shared_memory_allocator.close_mem_handle(buffer_ptrs[i]);
         }
 
         // Free local buffer and error flag
-        CUDA_CHECK(cudaFree(buffer_ptrs[nvl_rank]));
+        shared_memory_allocator.free(buffer_ptrs[nvl_rank]);
     }
 
     // Free NVSHMEM
@@ -194,13 +320,13 @@ void Buffer::sync(const std::vector<int> &device_ids,
         for (int i = 0, offset = rdma_rank * num_nvl_ranks; i < num_nvl_ranks; ++ i) {
             EP_HOST_ASSERT(all_gathered_handles[offset + i].has_value());
             auto handle_str = std::string(all_gathered_handles[offset + i].value());
-            EP_HOST_ASSERT(handle_str.size() == CUDA_IPC_HANDLE_SIZE);
+            EP_HOST_ASSERT(handle_str.size() == shared_memory::HANDLE_SIZE);
             if (offset + i != rank) {
-                std::memcpy(ipc_handles[i].reserved, handle_str.c_str(), CUDA_IPC_HANDLE_SIZE);
-                CUDA_CHECK(cudaIpcOpenMemHandle(&buffer_ptrs[i], ipc_handles[i], cudaIpcMemLazyEnablePeerAccess));
+                std::memcpy(&ipc_handles[i], handle_str.c_str(), shared_memory::HANDLE_SIZE);
+                shared_memory_allocator.open_mem_handle(&buffer_ptrs[i], &ipc_handles[i]);
                 barrier_signal_ptrs[i] = reinterpret_cast<int*>(static_cast<uint8_t*>(buffer_ptrs[i]) + num_nvl_bytes);
             } else {
-                EP_HOST_ASSERT(std::memcmp(ipc_handles[i].reserved, handle_str.c_str(), CUDA_IPC_HANDLE_SIZE) == 0);
+                EP_HOST_ASSERT(std::memcmp(&ipc_handles[i], handle_str.c_str(), shared_memory::HANDLE_SIZE) == 0);
             }
         }
 
