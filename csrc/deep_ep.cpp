@@ -1372,7 +1372,8 @@ Buffer::low_latency_combine(const torch::Tensor& x, const torch::Tensor& topk_id
                             const std::optional<torch::Tensor>& combine_wait_recv_cost_stats,
                             int num_max_dispatch_tokens_per_rank, int num_experts,
                             bool use_logfmt, bool zero_copy, bool async, bool return_recv_hook,
-                            const std::optional<torch::Tensor>& out) {
+                            const std::optional<torch::Tensor>& out,
+                            bool overlap, const std::optional<torch::Tensor>& src_signals, uint32_t src_signal_expect_value) {
 #ifndef DISABLE_NVSHMEM
     EP_HOST_ASSERT(low_latency_mode);
 
@@ -1442,7 +1443,8 @@ Buffer::low_latency_combine(const torch::Tensor& x, const torch::Tensor& topk_id
                               num_topk, num_experts, rank, num_ranks,
                               use_logfmt,
                               workspace, num_device_sms,
-                              launch_stream, phases, zero_copy);
+                              launch_stream, phases, zero_copy,
+                              overlap, src_signals.has_value() ? src_signals->data_ptr<uint32_t>() : nullptr, src_signal_expect_value);
     };
     launcher(return_recv_hook ? LOW_LATENCY_SEND_PHASE : (LOW_LATENCY_SEND_PHASE | LOW_LATENCY_RECV_PHASE));
 
