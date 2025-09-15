@@ -609,8 +609,6 @@ combine(void* combined_x,
 
         // Notify before executing `int_p`
         __syncwarp();
-        if (lane_id == 0)
-            atomic_add_release_global(atomic_clean_flag, num_experts);
     }
 
     // Issue IBGDA sends
@@ -739,7 +737,6 @@ combine(void* combined_x,
         EP_DEVICE_ASSERT(num_warps_per_group > 1 and num_warp_groups < 16);
         asm volatile("bar.sync %0, %1;" :: "r"(warp_group_id + 1), "r"(num_warps_per_group * 32));
         if (sub_warp_id == 1 and lane_id == 0) {
-            while (ld_acquire_global(atomic_clean_flag) == 0);
             auto dst_ptr = reinterpret_cast<uint64_t>(rdma_recv_flag + global_expert_idx);
             auto dst_p2p_ptr = nvshmemi_get_p2p_ptr(dst_ptr, rank, dst_rank);
             if (dst_p2p_ptr == 0) {
@@ -747,7 +744,6 @@ combine(void* combined_x,
             } else {
                 st_release_sys_global(reinterpret_cast<int*>(dst_p2p_ptr), 1);
             }
-            atomic_add_release_global(atomic_clean_flag, -1);
         }
         __syncwarp();
 
