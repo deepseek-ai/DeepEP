@@ -348,7 +348,9 @@ void dispatch(void* packed_recv_x, void* packed_recv_x_scales,
               void* workspace, int num_device_sms,
               cudaStream_t stream, int phases) {
     constexpr int kNumMaxTopK = 9;
-    const int num_warp_groups = ceil_div(num_experts, num_device_sms);
+    const int num_warp_groups = ((phases & LOW_LATENCY_RECV_PHASE) == 0)
+        ? 9
+        : ceil_div(num_experts, num_device_sms);
     const int num_warps_per_group = 32 / num_warp_groups;
     EP_HOST_ASSERT(num_warp_groups > 0 and num_warps_per_group > 0);
     EP_HOST_ASSERT(kNumMaxTopK + 1 <= num_warp_groups * num_warps_per_group);
@@ -929,7 +931,9 @@ void combine(void* combined_x,
              void* workspace, int num_device_sms,
              cudaStream_t stream, int phases, bool zero_copy) {
     constexpr int kNumMaxTopk = 9;
-    const int num_warp_groups = ceil_div(num_experts, num_device_sms);
+    const int num_warp_groups = ((phases & LOW_LATENCY_RECV_PHASE) == 0)
+        ? 9
+        : ceil_div(num_experts, num_device_sms);
     const int num_warps_per_group = 32 / num_warp_groups;
     const int num_recv_per_sm = ceil_div(num_combined_tokens, num_device_sms);
     EP_HOST_ASSERT(num_warp_groups > 0 and num_warps_per_group > 0 and num_recv_per_sm >= 0);
