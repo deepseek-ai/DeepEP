@@ -595,4 +595,22 @@ __forceinline__ __device__ T warp_reduce_or(T value) {
     return warp_reduce<kNumLanesPerGroup, kIntergroupReduce, T>(value, ReduceOr<T>{});
 }
 
+// TODO wait once per thraed block, not per thread
+// TODO correct?
+__device__ __forceinline__ void wait_signal(uint32_t* addr, uint32_t expect_value) {
+  while (true) {
+    uint32_t ready = 0;
+    asm volatile("ld.acquire.gpu.global.u32 %0, [%1];"
+                 : "=r"(ready)
+                 : "l"(addr)
+                 : "memory");
+
+    if (ready == expect_value) {
+        return;
+    }
+
+    asm volatile("nanosleep.u32 20;");
+  };
+}
+
 } // namespace deep_ep
