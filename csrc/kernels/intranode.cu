@@ -596,6 +596,10 @@ combine(dtype_t* recv_x, float* recv_topk_weights,
 
     // TMA stuffs
 #ifndef DISABLE_SM90_FEATURES
+    auto set_n_bits = [](const int x) -> uint32_t {
+        static constexpr uint64_t one = 1; 
+        return static_cast<uint32_t>((one << x) - one);
+    };
     extern __shared__ __align__(1024) uint8_t smem_buffer[];
     auto tma_buffer = smem_buffer + (thread_id / 32) * kNumTMABytesPerWarp;
 #endif
@@ -837,10 +841,13 @@ combine(dtype_t* recv_x, float* recv_topk_weights,
                         out_dtypes[j] = static_cast<dtype_t>(values[j]);
 
 #ifndef DISABLE_SM90_FEATURES
+		    const int num_participating_threads = min(32, hidden_int4 - i);
+                    const unsigned int warp_mask = set_n_bits(num_participating_threads);
+
                     // Wait TMA arrival
                     if (elect_one_sync())
                         tma_store_wait<kNumStages - 1>();
-                    __syncwarp();
+                    __syncwarp(warp_mask);
 
                     // Write into TMA buffer
                     auto tma_stage_idx = (i / 32) % kNumStages;
@@ -848,13 +855,13 @@ combine(dtype_t* recv_x, float* recv_topk_weights,
 
                     // Issue TMA
                     tma_store_fence();
-                    __syncwarp();
+                    __syncwarp(warp_mask);
                     if (elect_one_sync()) {
                         auto tma_bytes = min(32, hidden_int4 - i) * static_cast<int>(sizeof(int4));
                         tma_store_1d(reinterpret_cast<int4*>(tma_buffer) + tma_stage_idx * 32,
                                      recv_int4 + token_idx * hidden_int4 + i, tma_bytes, false);
                     }
-                    __syncwarp();
+                    __syncwarp(warp_mask);
 #else
                     recv_int4[token_idx * hidden_int4 + i] = out_int4;
 #endif
