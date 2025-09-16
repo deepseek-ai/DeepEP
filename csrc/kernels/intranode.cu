@@ -848,6 +848,7 @@ combine(dtype_t* recv_x, float* recv_topk_weights,
 
                     // Issue TMA
                     tma_store_fence();
+                    __syncwarp();
                     if (elect_one_sync()) {
                         auto tma_bytes = min(32, hidden_int4 - i) * static_cast<int>(sizeof(int4));
                         tma_store_1d(reinterpret_cast<int4*>(tma_buffer) + tma_stage_idx * 32,
