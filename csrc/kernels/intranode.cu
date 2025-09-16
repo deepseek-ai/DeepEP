@@ -402,7 +402,7 @@ dispatch(int4* recv_x, float* recv_x_scales, int* recv_src_idx, int64_t* recv_to
                 if (elect_one_sync()) {
                     #pragma unroll
                     for (int i = 0; i < 2; ++ i) {
-                        tma_store_wait();
+                        tma_store_wait<0>();
                         tma_load_1d(tma_buffer, shifted_buffer_x_int4 + i * half_hidden_int4, tma_mbarrier, half_hidden_bytes);
                         mbarrier_arrive_and_expect_tx(tma_mbarrier, half_hidden_bytes);
                         mbarrier_wait(tma_mbarrier, tma_phase);
@@ -792,7 +792,7 @@ combine(dtype_t* recv_x, float* recv_topk_weights,
                 // Wait shared memory release
 #ifndef DISABLE_SM90_FEATURES
                 if (elect_one_sync())
-                    tma_store_wait();
+                    tma_store_wait<0>();
                 __syncwarp();
 #endif
 

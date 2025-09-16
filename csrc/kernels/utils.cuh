@@ -395,7 +395,7 @@ __device__ __forceinline__ void tma_store_1d(const void* smem_ptr, const void* g
     asm volatile("cp.async.bulk.commit_group;");
 }
 
-template <int N = 0>
+template <int N>
 __device__ __forceinline__ void tma_store_wait() {
     asm volatile("cp.async.bulk.wait_group.read %0;" :: "n"(N) : "memory");
 }
