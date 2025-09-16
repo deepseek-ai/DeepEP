@@ -448,14 +448,7 @@ dispatch(int4* recv_x, float* recv_x_scales, int* recv_src_idx, int64_t* recv_to
             // Exit
             num_tokens_to_recv -= num_recv_tokens;
         }
-
-        // Make TMA store visible to the next kernel
-#ifndef DISABLE_SM90_FEATURES
-        if (lane_id == 0)
-            tma_store_wait();
-#endif
     }
-
 
     // Clean unused `recv_topk_idx` as -1
     if (num_worst_tokens > 0) {
@@ -880,12 +873,6 @@ combine(dtype_t* recv_x, float* recv_topk_weights,
             __syncwarp();
             if (lane_id == 0)
                 warp_retired[recv_warp_id] = true;
-
-            // Make TMA store visible to the next kernel
-#ifndef DISABLE_SM90_FEATURES
-            if (lane_id == 0)
-                tma_store_wait();
-#endif
         }
     }
 }

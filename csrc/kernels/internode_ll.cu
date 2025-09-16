@@ -911,9 +911,6 @@ combine(void* combined_x,
                 __syncwarp();
             }
         }
-
-        // Flush all stores
-        tma_store_wait<0>();
     }
 }
 
