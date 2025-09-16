@@ -230,7 +230,6 @@ dispatch(int4* recv_x, float* recv_x_scales, int* recv_src_idx, int64_t* recv_to
     uint32_t tma_phase = 0;
     if (lane_id == 0) {
         mbarrier_init(tma_mbarrier, 1);
-        fence_view_async_shared();
         fence_barrier_init();
         EP_DEVICE_ASSERT(hidden_int4 % 2 == 0 and half_hidden_bytes + sizeof(uint64_t) <= kNumTMABytesPerWarp);
     }

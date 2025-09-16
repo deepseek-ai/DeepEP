@@ -645,7 +645,6 @@ combine(void* combined_x,
         // Initialize m-barriers
         if (lane_id < kNumStages) {
             mbarrier_init(full_barriers[lane_id], 1);
-            fence_view_async_shared();
             fence_barrier_init();
         }
         __syncwarp();
@@ -754,7 +753,6 @@ combine(void* combined_x,
         // Destroy m-barriers
         if (lane_id < kNumStages) {
             mbarrier_inval(full_barriers[lane_id]);
-            fence_view_async_shared();
             fence_barrier_init();
         }
         __syncwarp();

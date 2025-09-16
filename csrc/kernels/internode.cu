@@ -448,7 +448,6 @@ dispatch(int4* recv_x, float* recv_x_scales, int64_t* recv_topk_idx, float* recv
     uint32_t tma_phase = 0;
     if ((warp_role == WarpRole::kRDMAAndNVLForwarder or warp_role == WarpRole::kNVLReceivers) and lane_id == 0) {
         mbarrier_init(tma_mbarrier, 1);
-        fence_view_async_shared();
         fence_barrier_init();
         EP_DEVICE_ASSERT(num_bytes_per_token + sizeof(uint64_t) <= kNumTMABytesPerWarp);
     }
@@ -1138,7 +1137,6 @@ __global__ void cached_notify(const int rdma_clean_offset, const int rdma_num_in
             uint32_t tma_phase = 0;
             if (lane_id == 0) {
                 mbarrier_init(tma_mbarrier, 1);
-                fence_view_async_shared();
                 fence_barrier_init();
             }
             __syncwarp();
@@ -1443,7 +1441,6 @@ combine(int4* combined_x, float* combined_topk_weights,
         uint32_t tma_phase = 0;
         if (lane_id == 0) {
             mbarrier_init(tma_mbarrier, 1);
-            fence_view_async_shared();
             fence_barrier_init();
             EP_DEVICE_ASSERT(num_bytes_per_token + sizeof(uint64_t) <= kNumTMABytesPerSenderWarp);
         }
@@ -1597,7 +1594,6 @@ combine(int4* combined_x, float* combined_topk_weights,
             uint32_t tma_phase[kNumStages] = {0};
             if (lane_id < kNumStages) {
                 mbarrier_init(tma_mbarrier(lane_id), 32);
-                fence_view_async_shared();
                 fence_barrier_init();
             }
             __syncwarp();

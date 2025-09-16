@@ -322,10 +322,6 @@ __device__ __forceinline__ uint32_t elect_one_sync(int lane_id) {
     return pred;
 }
 
-__device__ __forceinline__ void fence_view_async_shared() {
-    asm volatile("fence.proxy.async.shared::cta; \n" :: );
-}
-
 __device__ __forceinline__ void fence_barrier_init() {
     asm volatile("fence.mbarrier_init.release.cluster; \n" :: );
 }
