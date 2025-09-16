@@ -304,10 +304,14 @@ __device__  __forceinline__ float exp2f_approx(const float &x) {
     return ret;
 }
 
-// TMA PTX instructions
-#ifndef DISABLE_SM90_FEATURES
+__forceinline__ __device__ int get_lane_id() {
+    int lane_id;
+    asm("mov.s32 %0, %laneid;" : "=r"(lane_id));
+    return lane_id;
+}
 
 __device__ __forceinline__ uint32_t elect_one_sync() {
+#ifndef DISABLE_SM90_FEATURES
     uint32_t pred = 0;
     asm volatile(
       "{\n"
@@ -319,7 +323,13 @@ __device__ __forceinline__ uint32_t elect_one_sync() {
       : "+r"(pred)
       : "r"(0xffffffff));
     return pred;
+#else
+    return get_lane_id() == 0;
+#endif
 }
+
+// TMA PTX instructions
+#ifndef DISABLE_SM90_FEATURES
 
 __device__ __forceinline__ void fence_barrier_init() {
     asm volatile("fence.mbarrier_init.release.cluster; \n" :: );
@@ -434,12 +444,6 @@ __device__ __forceinline__ dtype_t broadcast(dtype_t& ptr, int src_lane_idx) {
     for (int i = 0; i < sizeof(dtype_t) / sizeof(int); ++ i)
         recv_int_values[i] = __shfl_sync(0xffffffff, send_int_values[i], src_lane_idx);
     return *reinterpret_cast<dtype_t*>(recv_int_values);
-}
-
-__forceinline__ __device__ int get_lane_id() {
-    int lane_id;
-    asm("mov.s32 %0, %laneid;" : "=r"(lane_id));
-    return lane_id;
 }
 
 constexpr float kFP8Margin = 1e-4;

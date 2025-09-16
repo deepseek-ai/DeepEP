@@ -89,7 +89,7 @@ notify_dispatch(const int* num_tokens_per_rank, int* moe_recv_counter_mapped,
             for (int64_t i = token_start_idx + lane_id; i < token_end_idx; i += 32)
                 count += is_token_in_rank[i * kNumRanks + dst_rank];
             count = warp_reduce_sum(count);
-            if (lane_id == 0)
+            if (elect_one_sync())
                 channel_prefix_matrix[dst_rank * num_channels + channel_id] = count;
         }
         __syncthreads();
@@ -247,7 +247,7 @@ dispatch(int4* recv_x, float* recv_x_scales, int* recv_src_idx, int64_t* recv_to
 
         // Send offset by `-value - 1`, e.g. 0 -> -1, 1 -> -2
         // NOTES: this is for distinguishing zero tokens
-        if (lane_id == 0 and send_warp_id_in_rank == 0) {
+        if (send_warp_id_in_rank == 0 and elect_one_sync()) {
             int value = responsible_channel > 0 ? channel_prefix_matrix[responsible_rank * num_channels + responsible_channel - 1] : 0;
             st_relaxed_sys_global(channel_start_offset.buffer(), -value - 1);
             value = channel_prefix_matrix[responsible_rank * num_channels + responsible_channel];
@@ -265,16 +265,18 @@ dispatch(int4* recv_x, float* recv_x_scales, int* recv_src_idx, int64_t* recv_to
             // Check destination queue emptiness, or wait a buffer to be released (rare cases)
             // NOTES: the head index received by different warps may not be the same
             auto start_time = clock64();
-            while (lane_id == 0) {
-                // NOTES: we only consider the worst case, because counting the real numbers are time-consuming
-                int num_used_slots = cached_channel_tail_idx - ld_volatile_global(channel_head_idx.buffer());
-                if (num_recv_buffer_tokens - num_used_slots >= num_max_send_tokens)
-                    break;
+            if (elect_one_sync()) {
+                while (true) {
+                    // NOTES: we only consider the worst case, because counting the real numbers are time-consuming
+                    int num_used_slots = cached_channel_tail_idx - ld_volatile_global(channel_head_idx.buffer());
+                    if (num_recv_buffer_tokens - num_used_slots >= num_max_send_tokens)
+                        break;
 
-                // Rare cases to loop again
-                if (clock64() - start_time > NUM_TIMEOUT_CYCLES) {
-                    printf("DeepEP timeout for dispatch senders, rank %d, responsible_channel = %d\n", rank, responsible_channel);
-                    trap();
+                    // Rare cases to loop again
+                    if (clock64() - start_time > NUM_TIMEOUT_CYCLES) {
+                        printf("DeepEP timeout for dispatch senders, rank %d, responsible_channel = %d\n", rank, responsible_channel);
+                        trap();
+                    }
                 }
             }
             __syncwarp();
@@ -282,7 +284,7 @@ dispatch(int4* recv_x, float* recv_x_scales, int* recv_src_idx, int64_t* recv_to
             int chunk_token_idx = 0;
             while (chunk_token_idx < num_max_send_tokens and token_idx < token_end_idx) {
                 // NOTES: for the same token, the warp assigned to save `send_head` may be different from the warp assigned to send the following data
-                if (lane_id == 0 and token_idx % num_send_warps_per_rank == send_warp_id_in_rank)
+                if (token_idx % num_send_warps_per_rank == send_warp_id_in_rank and elect_one_sync())
                     send_head[token_idx * kNumRanks + responsible_rank] = is_token_in_rank[token_idx * kNumRanks + responsible_rank] ? cached_channel_tail_idx : -1;
 
                 // Skip if not selected
@@ -300,7 +302,7 @@ dispatch(int4* recv_x, float* recv_x_scales, int* recv_src_idx, int64_t* recv_to
                     UNROLLED_WARP_COPY(5, lane_id, hidden_int4, shifted_channel_x_buffers, shifted_x, __ldg, st_na_global);
 
                     // Copy source index
-                    if (lane_id == 0)
+                    if (elect_one_sync())
                         channel_src_idx_buffers[dst_slot_idx] = static_cast<int>(token_idx);
 
                     // Copy `topk_idx` and `topk_weights` with transformed index
@@ -332,7 +334,7 @@ dispatch(int4* recv_x, float* recv_x_scales, int* recv_src_idx, int64_t* recv_to
             // Move tail index
             // NOTES: here all warps should share the same new tail
             asm volatile("bar.sync %0, %1;" :: "r"(responsible_rank), "r"(num_threads_per_rank));
-            if (send_warp_id_in_rank == 0 and lane_id == 0)
+            if (send_warp_id_in_rank == 0 and elect_one_sync())
                 st_release_sys_global(channel_tail_idx.buffer(), cached_channel_tail_idx);
         }
     } else {
@@ -351,9 +353,9 @@ dispatch(int4* recv_x, float* recv_x_scales, int* recv_src_idx, int64_t* recv_to
 
         // Receive channel offset
         int total_offset, num_tokens_to_recv;
-        while (lane_id == 0 and (total_offset = ld_volatile_global(channel_start_offset.buffer())) == 0);
-        while (lane_id == 0 and (num_tokens_to_recv = ld_volatile_global(channel_end_offset.buffer())) == 0);
-        if (lane_id == 0) {
+        if (elect_one_sync()) {
+            while ((total_offset = ld_volatile_global(channel_start_offset.buffer())) == 0);
+            while ((num_tokens_to_recv = ld_volatile_global(channel_end_offset.buffer())) == 0);
             total_offset = -total_offset - 1, num_tokens_to_recv = -num_tokens_to_recv - 1;
             if (recv_warp_id_in_rank == 0)
                 recv_channel_offset[responsible_rank * num_channels + responsible_channel] = total_offset;
@@ -443,7 +445,7 @@ dispatch(int4* recv_x, float* recv_x_scales, int* recv_src_idx, int64_t* recv_to
             cached_channel_head_idx += num_recv_tokens;
             total_offset += num_recv_tokens;
             asm volatile("bar.sync %0, %1;" :: "r"(responsible_rank), "r"(num_threads_per_rank));
-            if (recv_warp_id_in_rank == num_recv_warps_per_rank - 1 and lane_id == 0)
+            if (recv_warp_id_in_rank == num_recv_warps_per_rank - 1 and elect_one_sync())
                 st_relaxed_sys_global(channel_head_idx.buffer(), cached_channel_head_idx);
 
             // Exit
@@ -641,16 +643,18 @@ combine(dtype_t* recv_x, float* recv_topk_weights,
             // Check destination queue emptiness, or wait a buffer to be released (rare cases)
             auto start_time = clock64();
             int num_round_tokens = min(num_max_send_tokens, token_end_idx - static_cast<int>(token_idx));
-            while (lane_id == 0) {
-                // NOTES: we only consider the worst case, because counting the real numbers are time-consuming
-                int num_used_slots = current_channel_tail_idx - ld_volatile_global(channel_head_idx.buffer());
-                if (num_recv_buffer_tokens - num_used_slots >= num_round_tokens)
-                    break;
+            if (elect_one_sync()) {
+                while (true) {
+                    // NOTES: we only consider the worst case, because counting the real numbers are time-consuming
+                    int num_used_slots = current_channel_tail_idx - ld_volatile_global(channel_head_idx.buffer());
+                    if (num_recv_buffer_tokens - num_used_slots >= num_round_tokens)
+                        break;
 
-                // Rare cases to loop again
-                if (clock64() - start_time > NUM_TIMEOUT_CYCLES) {
-                    printf("DeepEP timeout for combine senders, rank %d, responsible_channel = %d\n", rank, responsible_channel);
-                    trap();
+                    // Rare cases to loop again
+                    if (clock64() - start_time > NUM_TIMEOUT_CYCLES) {
+                        printf("DeepEP timeout for combine senders, rank %d, responsible_channel = %d\n", rank, responsible_channel);
+                        trap();
+                    }
                 }
             }
             __syncwarp();
@@ -667,7 +671,7 @@ combine(dtype_t* recv_x, float* recv_topk_weights,
                 UNROLLED_WARP_COPY(4, lane_id, hidden_int4, shifted_x_buffers, shifted_x, ld_nc_global, st_na_global);
 
                 // Send source index
-                if (lane_id == 0)
+                if (elect_one_sync())
                     channel_src_idx_buffers[dst_slot_idx] = __ldg(src_idx + token_idx + i);
 
                 // Send `topk_weights`
@@ -679,7 +683,7 @@ combine(dtype_t* recv_x, float* recv_topk_weights,
 
             // Move tail index
             asm volatile("bar.sync %0, %1;" :: "r"(send_rank_id), "r"(num_threads_per_rank));
-            if (lane_id == 0 and send_warp_id_in_rank == 0)
+            if (send_warp_id_in_rank == 0 and elect_one_sync())
                 st_release_sys_global(channel_tail_idx.buffer(), current_channel_tail_idx);
         }
     } else {
@@ -871,7 +875,7 @@ combine(dtype_t* recv_x, float* recv_topk_weights,
 
             // Retired
             __syncwarp();
-            if (lane_id == 0)
+            if (elect_one_sync())
                 warp_retired[recv_warp_id] = true;
         }
     }
