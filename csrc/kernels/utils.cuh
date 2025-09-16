@@ -310,7 +310,7 @@ __forceinline__ __device__ int get_lane_id() {
     return lane_id;
 }
 
-__device__ __forceinline__ uint32_t elect_one_sync() {
+__device__ __forceinline__ uint32_t elect_one_sync(const uint32_t membermask=0xffffffff) {
 #ifndef DISABLE_SM90_FEATURES
     uint32_t pred = 0;
     asm volatile(
@@ -321,7 +321,7 @@ __device__ __forceinline__ uint32_t elect_one_sync() {
       "@%%px mov.s32 %0, 1;\n"
       "}\n"
       : "+r"(pred)
-      : "r"(0xffffffff));
+      : "r"(membermask));
     return pred;
 #else
     return get_lane_id() == 0;
