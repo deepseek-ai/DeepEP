@@ -1628,20 +1628,18 @@ combine(int4* combined_x, float* combined_topk_weights,
                 auto token_end_idx = min(token_start_idx + num_max_rdma_chunked_send_tokens, num_tokens_to_combine);
                 auto num_chunked_tokens = token_end_idx - token_start_idx;
                 auto start_time = clock64();
-                if (sub_warp_id == 0 and elect_one_sync()) {
-                    while (true) {
-                        // Inequality: `num_max_rdma_chunked_recv_tokens - (tail - head) >= num_chunked_tokens`
-                        // Here, `token_start_idx` is the actual tail
-                        int num_used_slots = token_start_idx - ld_volatile_global(rdma_channel_head.buffer(dst_rdma_rank));
-                        if (num_max_rdma_chunked_recv_tokens - num_used_slots >= num_chunked_tokens)
-                            break;
+                while (sub_warp_id == 0 and lane_id == 0) {
+                    // Inequality: `num_max_rdma_chunked_recv_tokens - (tail - head) >= num_chunked_tokens`
+                    // Here, `token_start_idx` is the actual tail
+                    int num_used_slots = token_start_idx - ld_volatile_global(rdma_channel_head.buffer(dst_rdma_rank));
+                    if (num_max_rdma_chunked_recv_tokens - num_used_slots >= num_chunked_tokens)
+                        break;
 
-                        // Timeout check
-                        if (clock64() - start_time > NUM_TIMEOUT_CYCLES) {
-                            printf("DeepEP combine forwarder (RDMA check) timeout, channel: %d, RDMA: %d, nvl: %d, dst RDMA: %d, head: %ld, tail: %d, chunked: %d\n",
-                                   channel_id, rdma_rank, nvl_rank, dst_rdma_rank, ld_volatile_global(rdma_channel_head.buffer(dst_rdma_rank)), token_start_idx, num_chunked_tokens);
-                            trap();
-                        }
+                    // Timeout check
+                    if (clock64() - start_time > NUM_TIMEOUT_CYCLES) {
+                        printf("DeepEP combine forwarder (RDMA check) timeout, channel: %d, RDMA: %d, nvl: %d, dst RDMA: %d, head: %ld, tail: %d, chunked: %d\n",
+                               channel_id, rdma_rank, nvl_rank, dst_rdma_rank, ld_volatile_global(rdma_channel_head.buffer(dst_rdma_rank)), token_start_idx, num_chunked_tokens);
+                        trap();
                     }
                 }
                 sync_large_warp();
