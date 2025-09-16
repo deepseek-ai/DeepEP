@@ -772,8 +772,8 @@ __forceinline__ __device__ void decode_and_accumulate(uint32_t* ld_buffer, float
 // TODO unify with original code
 template <bool kUseLogFMT, int kHidden, int kNumMaxTopk, int kNumMaxUnrolls>
 __global__
-// __launch_bounds__(1024, 1)
-__maxnreg__(48) // TODO
+__launch_bounds__(1024, 1)
+// __maxnreg__(48) // rm
 void
 combine_v2(void* combined_x,
         void* rdma_recv_x, int* rdma_recv_flag, void* rdma_send_x,
