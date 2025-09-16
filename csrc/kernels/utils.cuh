@@ -307,17 +307,16 @@ __device__  __forceinline__ float exp2f_approx(const float &x) {
 // TMA PTX instructions
 #ifndef DISABLE_SM90_FEATURES
 
-__device__ __forceinline__ uint32_t elect_one_sync(int lane_id) {
+__device__ __forceinline__ uint32_t elect_one_sync() {
     uint32_t pred = 0;
     asm volatile(
       "{\n"
       ".reg .b32 %%rx;\n"
       ".reg .pred %%px;\n"
-      "      elect.sync %%rx|%%px, %2;\n"
-      "@%%px mov.s32 %1, 1;\n"
-      "      mov.s32 %0, %%rx;\n"
+      "      elect.sync %%rx|%%px, %1;\n"
+      "@%%px mov.s32 %0, 1;\n"
       "}\n"
-      : "+r"(lane_id), "+r"(pred)
+      : "+r"(pred)
       : "r"(0xffffffff));
     return pred;
 }

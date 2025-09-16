@@ -228,7 +228,7 @@ dispatch(int4* recv_x, float* recv_x_scales, int* recv_src_idx, int64_t* recv_to
     auto tma_buffer = smem_buffer + (thread_id / 32) * kNumTMABytesPerWarp;
     auto tma_mbarrier = reinterpret_cast<uint64_t*>(tma_buffer + half_hidden_bytes);
     uint32_t tma_phase = 0;
-    if (lane_id == 0) {
+    if (elect_one_sync()) {
         mbarrier_init(tma_mbarrier, 1);
         fence_barrier_init();
         EP_DEVICE_ASSERT(hidden_int4 % 2 == 0 and half_hidden_bytes + sizeof(uint64_t) <= kNumTMABytesPerWarp);
@@ -397,13 +397,15 @@ dispatch(int4* recv_x, float* recv_x_scales, int* recv_src_idx, int64_t* recv_to
                 auto shifted_buffer_x_int4 = channel_x_buffers.buffer() + token_idx_in_buffer * hidden_int4;
                 auto shifted_recv_x_int4 = recv_x + static_cast<int64_t>(total_offset + chunk_idx) * hidden_int4;
 #ifndef DISABLE_SM90_FEATURES
-                #pragma unroll
-                for (int i = 0; i < 2; ++ i) if (lane_id == 0) {
-                    tma_store_wait();
-                    tma_load_1d(tma_buffer, shifted_buffer_x_int4 + i * half_hidden_int4, tma_mbarrier, half_hidden_bytes);
-                    mbarrier_arrive_and_expect_tx(tma_mbarrier, half_hidden_bytes);
-                    mbarrier_wait(tma_mbarrier, tma_phase);
-                    tma_store_1d(tma_buffer, shifted_recv_x_int4 + i * half_hidden_int4, half_hidden_bytes, false);
+                if (elect_one_sync()) {
+                    #pragma unroll
+                    for (int i = 0; i < 2; ++ i) {
+                        tma_store_wait();
+                        tma_load_1d(tma_buffer, shifted_buffer_x_int4 + i * half_hidden_int4, tma_mbarrier, half_hidden_bytes);
+                        mbarrier_arrive_and_expect_tx(tma_mbarrier, half_hidden_bytes);
+                        mbarrier_wait(tma_mbarrier, tma_phase);
+                        tma_store_1d(tma_buffer, shifted_recv_x_int4 + i * half_hidden_int4, half_hidden_bytes, false);
+                    }
                 }
                 __syncwarp();
 #else
@@ -434,7 +436,7 @@ dispatch(int4* recv_x, float* recv_x_scales, int* recv_src_idx, int64_t* recv_to
                 int chunk_idx = i / num_scales, scales_idx = i % num_scales;
                 int token_idx_in_buffer = (cached_channel_head_idx + chunk_idx) % num_recv_buffer_tokens;
                 recv_x_scales[static_cast<int64_t>(total_offset + chunk_idx) * num_scales + scales_idx] =
-                        ld_nc_global(channel_x_scales_buffers.buffer() + token_idx_in_buffer * num_scales + scales_idx);
+                    ld_nc_global(channel_x_scales_buffers.buffer() + token_idx_in_buffer * num_scales + scales_idx);
             }
 
             // Move queue
@@ -785,7 +787,7 @@ combine(dtype_t* recv_x, float* recv_topk_weights,
 
                 // Wait shared memory release
 #ifndef DISABLE_SM90_FEATURES
-                if (lane_id == 0)
+                if (elect_one_sync())
                     tma_store_wait();
                 __syncwarp();
 #endif
@@ -832,7 +834,7 @@ combine(dtype_t* recv_x, float* recv_topk_weights,
 
 #ifndef DISABLE_SM90_FEATURES
                     // Wait TMA arrival
-                    if (lane_id == 0)
+                    if (elect_one_sync())
                         tma_store_wait<kNumStages - 1>();
                     __syncwarp();
 
@@ -842,8 +844,7 @@ combine(dtype_t* recv_x, float* recv_topk_weights,
 
                     // Issue TMA
                     tma_store_fence();
-                    __syncwarp();
-                    if (lane_id == 0) {
+                    if (elect_one_sync()) {
                         auto tma_bytes = min(32, hidden_int4 - i) * static_cast<int>(sizeof(int4));
                         tma_store_1d(reinterpret_cast<int4*>(tma_buffer) + tma_stage_idx * 32,
                                      recv_int4 + token_idx * hidden_int4 + i, tma_bytes, false);
