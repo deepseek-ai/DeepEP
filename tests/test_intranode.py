@@ -5,7 +5,7 @@ import torch.distributed as dist
 
 # noinspection PyUnresolvedReferences
 import deep_ep
-from utils import init_dist, bench, calc_diff, inplace_unique, per_token_cast_to_fp8, per_token_cast_back
+from utils import init_dist, bench, calc_diff, inplace_unique, per_token_cast_to_fp8, per_token_cast_back, quantize_bfloat16_to_nvfp4, dequantize_nvfp4_back_to_bfloat16
 
 # Test compatibility with low latency functions
 import test_low_latency
@@ -27,6 +27,8 @@ def test_main(args: argparse.Namespace, num_sms: int, local_rank: int, num_ranks
     x_pure_rand = torch.randn((num_tokens, hidden), dtype=torch.bfloat16, device='cuda')
     x_e4m3 = per_token_cast_to_fp8(x) if deep_ep.Buffer.is_sm90_compiled() else None
     x_e4m3 = (x_e4m3[0], x_e4m3[1].T.contiguous().T) if x_e4m3 is not None else None
+    
+    x_e2m1 = quantize_bfloat16_to_nvfp4(x)
     scores = torch.randn((num_tokens, num_experts), dtype=torch.float32, device='cuda').abs() + 1
     topk_idx = torch.topk(scores, num_topk, dim=-1, largest=True, sorted=False)[1]
     topk_weights = torch.ones((num_tokens, num_topk), dtype=torch.float32, device='cuda') * rank
@@ -85,19 +87,27 @@ def test_main(args: argparse.Namespace, num_sms: int, local_rank: int, num_ranks
 
     for previous_mode in (False, True):
         for async_mode in (False, True):
-            for current_x in filter(lambda elem: elem is not None, (x_pure_rand, x, x_e4m3)):
+            for current_x in filter(lambda elem: elem is not None, (x_pure_rand, x, x_e4m3, x_e2m1)):
                 for with_topk in (False, True):
+                    precision = "BF16"
+                    if isinstance(current_x, tuple) and len(current_x) == 2:
+                        precision = "FP8"
+                    elif isinstance(current_x, tuple) and len(current_x) == 3:
+                        precision = "NVFP4"
                     if local_rank == 0:
-                        print(f'[testing] Running with {"FP8" if isinstance(current_x, tuple) else "BF16"}, {"with" if with_topk else "without"} top-k (async={async_mode}, previous={previous_mode}) ...', flush=True, end='')
+                        print(f'[testing] Running with {precision}, {"with" if with_topk else "without"} top-k (async={async_mode}, previous={previous_mode}) ...', flush=True, end='')
                     dispatch_args = {'x': current_x, 'num_tokens_per_rank': num_tokens_per_rank,  'is_token_in_rank': is_token_in_rank,
-                                     'num_tokens_per_expert': num_tokens_per_expert, 'config': config, 'async_finish': async_mode}
+                                    'num_tokens_per_expert': num_tokens_per_expert, 'config': config, 'async_finish': async_mode}
                     if with_topk:
                         dispatch_args.update({'topk_idx': topk_idx, 'topk_weights': topk_weights_pure_rand if current_x is x_pure_rand else topk_weights})
                     if previous_mode:
                         dispatch_args.update({'previous_event': buffer.capture()})
                     recv_x, recv_topk_idx, recv_topk_weights, recv_num_tokens_per_expert_list, handle, event = buffer.dispatch(**dispatch_args)
                     event.current_stream_wait() if async_mode else ()
-                    recv_x = per_token_cast_back(*recv_x) if isinstance(recv_x, tuple) else recv_x
+                    if precision == "NVFP4":
+                        recv_x = dequantize_nvfp4_back_to_bfloat16(*recv_x)
+                    else:
+                        recv_x = per_token_cast_back(*recv_x) if isinstance(recv_x, tuple) else recv_x
 
                     # Checks
                     rank_prefix_matrix = handle[0]
@@ -124,7 +134,10 @@ def test_main(args: argparse.Namespace, num_sms: int, local_rank: int, num_ranks
                         dispatch_args.update({'num_worst_tokens': num_worst_tokens})
                         recv_worst_x, recv_worst_topk_idx, recv_worst_topk_weights, empty_list, _, event = buffer.dispatch(**dispatch_args)
                         event.current_stream_wait() if async_mode else ()
-                        recv_worst_x = per_token_cast_back(*recv_worst_x) if isinstance(recv_worst_x, tuple) else recv_worst_x
+                        if precision == "NVFP4":
+                            recv_worst_x = dequantize_nvfp4_back_to_bfloat16(*recv_worst_x)
+                        else:
+                            recv_worst_x = per_token_cast_back(*recv_worst_x) if isinstance(recv_worst_x, tuple) else recv_worst_x
                         assert len(empty_list) == 0
                         assert num_worst_tokens == recv_worst_x.size(0)
                         assert num_worst_tokens == recv_worst_topk_idx.size(0)
@@ -141,7 +154,10 @@ def test_main(args: argparse.Namespace, num_sms: int, local_rank: int, num_ranks
                             dispatch_args.update({'previous_event': buffer.capture()})
                         recv_x, _, _, _, _, event = buffer.dispatch(**dispatch_args)
                         event.current_stream_wait() if async_mode else ()
-                        recv_x = per_token_cast_back(*recv_x) if isinstance(recv_x, tuple) else recv_x
+                        if precision == "NVFP4":
+                            recv_x = dequantize_nvfp4_back_to_bfloat16(*recv_x)
+                        else:
+                            recv_x = per_token_cast_back(*recv_x) if isinstance(recv_x, tuple) else recv_x
                         if current_x is not x_pure_rand:
                             check_data(recv_x, rank_prefix_matrix)
 
@@ -173,9 +189,15 @@ def test_main(args: argparse.Namespace, num_sms: int, local_rank: int, num_ranks
     # Tune dispatch performance
     best_dispatch_results = None
     fp8_factor = (1 + 4 / 128) / 2
-    for current_x in filter(lambda elem: elem is not None, (x_e4m3, x)):
+    nvfp4_factor = (1 + 2 / 16 + 8 / hidden) / 4
+    for current_x in filter(lambda elem: elem is not None, (x_e4m3, x, x_e2m1)):
         best_time, best_results = 1e10, None
-        nvl_recv_bytes = (dispatch_bf16_nvl_recv_bytes * fp8_factor) if isinstance(current_x, tuple) else dispatch_bf16_nvl_recv_bytes
+        if isinstance(current_x, tuple) and len(current_x) == 2:
+            nvl_recv_bytes = (dispatch_bf16_nvl_recv_bytes * fp8_factor)
+        elif isinstance(current_x, tuple) and len(current_x) == 3:
+            nvl_recv_bytes = (dispatch_bf16_nvl_recv_bytes * nvfp4_factor)
+        else:
+            nvl_recv_bytes = dispatch_bf16_nvl_recv_bytes
         for nvl_chunk_size in tuple(range(4, 33, 2)) + (0, ):
             if nvl_chunk_size > 0:
                 config = deep_ep.Config(num_sms, nvl_chunk_size, nvl_buffer_size)
@@ -191,7 +213,12 @@ def test_main(args: argparse.Namespace, num_sms: int, local_rank: int, num_ranks
                 print(f'[tuning] SMs {num_sms}, NVL chunk {nvl_chunk_size if nvl_chunk_size else "default"}: '
                       f'{nvl_recv_bytes / 1e9 / t:.2f} GB/s (NVL), {t * 1e6:.2f} us', flush=True)
         if local_rank == 0:
-            print(f'[tuning] Best dispatch ({"FP8" if isinstance(current_x, tuple) else "BF16"}): SMs {best_results[0]}, NVL chunk {best_results[1]}, {nvl_recv_bytes / 1e9 / best_time:.2f} GB/s (NVL), t: {best_time * 1e6:.2f} us', flush=True)
+            precision = "BF16"
+            if isinstance(current_x, tuple) and len(current_x) == 2:
+                precision = "FP8"
+            elif isinstance(current_x, tuple) and len(current_x) == 3:
+                precision = "NVFP4"
+            print(f'[tuning] Best dispatch ({precision}): SMs {best_results[0]}, NVL chunk {best_results[1]}, {nvl_recv_bytes / 1e9 / best_time:.2f} GB/s (NVL), t: {best_time * 1e6:.2f} us', flush=True)
             print('', flush=True)
 
         # Gather the best config from rank 0 and the first test setting
