@@ -42,8 +42,10 @@ def calc_diff(x: torch.Tensor, y: torch.Tensor):
     sim = 2 * (x * y).sum() / denominator
     return (1 - sim).item()
 
+
 def align_up(x, y):
     return (x + y - 1) // y * y
+
 
 def per_token_cast_to_fp8(x: torch.Tensor):
     assert x.dim() == 2
