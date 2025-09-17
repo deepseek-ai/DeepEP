@@ -589,6 +589,7 @@ combine(dtype_t* recv_x, float* recv_topk_weights,
 
     constexpr int kDtypePerInt4 = sizeof(int4) / sizeof(dtype_t);
     int hidden_int4 = hidden * sizeof(dtype_t) / sizeof(int4);
+    int hidden_int4_aligned = hidden_int4 / 32 * 32;
     auto x_int4 = reinterpret_cast<const int4*>(x);
     auto bias_0_int4 = reinterpret_cast<const int4*>(bias_0);
     auto bias_1_int4 = reinterpret_cast<const int4*>(bias_1);
@@ -837,26 +838,30 @@ combine(dtype_t* recv_x, float* recv_topk_weights,
                         out_dtypes[j] = static_cast<dtype_t>(values[j]);
 
 #ifndef DISABLE_SM90_FEATURES
-                    // Wait TMA arrival
-                    if (elect_one_sync())
-                        tma_store_wait<kNumStages - 1>();
-                    __syncwarp();
+                    if (i < hidden_int4_aligned) {
+                        // Wait TMA arrival
+                        if (elect_one_sync())
+                            tma_store_wait<kNumStages - 1>();
+                        __syncwarp();
 
-                    // Write into TMA buffer
-                    auto tma_stage_idx = (i / 32) % kNumStages;
-                    reinterpret_cast<int4*>(tma_buffer)[tma_stage_idx * 32 + lane_id] = out_int4;
+                        // Write into TMA buffer
+                        auto tma_stage_idx = (i / 32) % kNumStages;
+                        reinterpret_cast<int4*>(tma_buffer)[tma_stage_idx * 32 + lane_id] = out_int4;
 
-                    // Issue TMA
-                    tma_store_fence();
-                    __syncwarp();
-                    if (elect_one_sync()) {
-                        auto tma_bytes = min(32, hidden_int4 - i) * static_cast<int>(sizeof(int4));
-                        tma_store_1d(reinterpret_cast<int4*>(tma_buffer) + tma_stage_idx * 32,
-                                     recv_int4 + token_idx * hidden_int4 + i, tma_bytes, false);
+                        // Issue TMA
+                        tma_store_fence();
+                        __syncwarp();
+                        if (elect_one_sync()) {
+                            auto tma_bytes = min(32, hidden_int4 - i) * static_cast<int>(sizeof(int4));
+                            tma_store_1d(reinterpret_cast<int4*>(tma_buffer) + tma_stage_idx * 32,
+                                        recv_int4 + token_idx * hidden_int4 + i, tma_bytes, false);
+                        }
+                        __syncwarp();
+                    } else {
+#endif
+                        recv_int4[token_idx * hidden_int4 + i] = out_int4;
+#ifndef DISABLE_SM90_FEATURES
                     }
-                    __syncwarp();
-#else
-                    recv_int4[token_idx * hidden_int4 + i] = out_int4;
 #endif
                 }
 
