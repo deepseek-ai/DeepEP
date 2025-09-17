@@ -399,10 +399,10 @@ dispatch(int4* recv_x, float* recv_x_scales, int* recv_src_idx, int64_t* recv_to
                 auto shifted_buffer_x_int4 = channel_x_buffers.buffer() + token_idx_in_buffer * hidden_int4;
                 auto shifted_recv_x_int4 = recv_x + static_cast<int64_t>(total_offset + chunk_idx) * hidden_int4;
 #ifndef DISABLE_SM90_FEATURES
-                if (elect_one_sync()) {
-                    #pragma unroll
-                    for (int i = 0; i < 2; ++ i) {
-                        tma_store_wait<0>();
+                #pragma unroll
+                for (int i = 0; i < 2; ++ i) {
+                    tma_store_wait<0>();
+                    if (elect_one_sync()) {
                         tma_load_1d(tma_buffer, shifted_buffer_x_int4 + i * half_hidden_int4, tma_mbarrier, half_hidden_bytes);
                         mbarrier_arrive_and_expect_tx(tma_mbarrier, half_hidden_bytes);
                         mbarrier_wait(tma_mbarrier, tma_phase);
@@ -792,8 +792,7 @@ combine(dtype_t* recv_x, float* recv_topk_weights,
 
                 // Wait shared memory release
 #ifndef DISABLE_SM90_FEATURES
-                if (elect_one_sync())
-                    tma_store_wait<0>();
+                tma_store_wait<0>();
                 __syncwarp();
 #endif
 
@@ -840,8 +839,7 @@ combine(dtype_t* recv_x, float* recv_topk_weights,
 #ifndef DISABLE_SM90_FEATURES
                     if (i < hidden_int4_aligned) {
                         // Wait TMA arrival
-                        if (elect_one_sync())
-                            tma_store_wait<kNumStages - 1>();
+                        tma_store_wait<kNumStages - 1>();
                         __syncwarp();
 
                         // Write into TMA buffer

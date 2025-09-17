@@ -1516,8 +1516,8 @@ combine(int4* combined_x, float* combined_topk_weights,
                     // Load data
                     auto shifted_x_buffers = nvl_channel_x.buffer() + dst_slot_idx * num_bytes_per_token;
                     auto shifted_x = x + token_idx * hidden_int4;
+                    tma_store_wait<0>();
                     if (elect_one_sync()) {
-                        tma_store_wait<0>();
                         tma_load_1d(tma_buffer, shifted_x, tma_mbarrier, hidden_bytes);
                         mbarrier_arrive_and_expect_tx(tma_mbarrier, hidden_bytes);
                     }
