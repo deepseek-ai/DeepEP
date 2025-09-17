@@ -63,39 +63,41 @@ class EventOverlap:
             self.event.current_stream_wait()
 
 
-def check_nvlink_connections(group: dist.ProcessGroup):
+def check_nvlink_connections(group: dist.ProcessGroup, 
+                              allow_nvlink_for_normal_mode: bool = True,
+                              allow_nvlink_for_low_latency_mode: bool = True,
+                              low_latency_mode: bool = False) -> None:
     """
-    Check NVLink connection between every pair of GPUs.
-
+    Check NVLink requirements based on the mode and configuration.
+    
     Arguments:
         group: the communication group.
+        allow_nvlink_for_normal_mode: whether NVLink is allowed for normal mode.
+        allow_nvlink_for_low_latency_mode: whether NVLink is allowed for low-latency mode.
+        low_latency_mode: whether running in low-latency mode.
     """
-    # Check NVLink connection
-    # NOTES: some A100 PCIE GPUs only have pairwise NVLink connection, so that we can only use EP2
-    # TODO: check all cases, all local-node GPUs in the group should be connected via NVLink
-    if 'PCIE' in torch.cuda.get_device_name():
-        assert group.size() <= 2, 'PCIe GPUs only have pairwise NVLink connections'
+    # Determine which setting to check
+    allow_nvlink = allow_nvlink_for_low_latency_mode if low_latency_mode else allow_nvlink_for_normal_mode
+    if not allow_nvlink:
+        return 
+    
+    # noinspection PyUnresolvedReferences
+    import pynvml
+    
+    pynvml.nvmlInit()
+    devices = os.environ.get('CUDA_VISIBLE_DEVICES', '0,1,2,3,4,5,6,7').strip(',').split(',')
+    physical_device_indices = [0] * group.size()
+    physical_device_indices[group.rank()] = int(devices[torch.cuda.current_device()])
+    dist.all_gather_object(physical_device_indices, physical_device_indices[group.rank()], group)
+    
+    handles = [pynvml.nvmlDeviceGetHandleByIndex(i) for i in physical_device_indices]
+    for i in range(len(handles)):
+        for j in range(i + 1, len(handles)):
+            status = pynvml.nvmlDeviceGetP2PStatus(handles[i], handles[j], pynvml.NVML_P2P_CAPS_INDEX_NVLINK)
+            assert status == pynvml.NVML_P2P_STATUS_OK, \
+                f'No NVLink connection between GPU {physical_device_indices[i]} and GPU {physical_device_indices[j]}, ' \
+                f'but allow_nvlink_for_{"low_latency" if low_latency_mode else "normal"}_mode=True'
+    
+    pynvml.nvmlShutdown()
 
-        # noinspection PyUnresolvedReferences
-        import pynvml
-        pynvml.nvmlInit()
 
-        # noinspection PyTypeChecker
-        devices = os.environ.get('CUDA_VISIBLE_DEVICES', '0,1,2,3,4,5,6,7').strip(',').split(',')
-        physical_device_idx = int(devices[torch.cuda.current_device()])
-        physical_device_indices = [0, ] * group.size()
-        dist.all_gather_object(physical_device_indices, physical_device_idx, group)
-
-        # Check whether they are all connected via NVLink
-        # Reference: https://github.com/vllm-project/vllm/blob/b8e809a057765c574726a6077fd124db5077ce1f/vllm/platforms/cuda.py#L438
-        handles = [pynvml.nvmlDeviceGetHandleByIndex(i) for i in physical_device_indices]
-        for i, handle in enumerate(handles):
-            for j, peer_handle in enumerate(handles):
-                if i >= j:
-                    continue
-                status = pynvml.nvmlDeviceGetP2PStatus(handle, peer_handle, pynvml.NVML_P2P_CAPS_INDEX_NVLINK)
-                assert status == pynvml.NVML_P2P_STATUS_OK,\
-                    f'GPU {physical_device_indices[i]} and GPU {physical_device_indices[j]} are not connected via NVLink'
-
-        # Close NVML
-        pynvml.nvmlShutdown()

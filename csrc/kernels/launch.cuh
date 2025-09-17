@@ -56,6 +56,7 @@ cfg.dynamicSmemBytes = smem_size;
         case 2: case_macro(2); \
         case 4: case_macro(4); \
         case 8: case_macro(8); \
+        case 16: case_macro(16); \
         default: EP_HOST_ASSERT(false and "Unsupported ranks"); \
     } while (false)
 

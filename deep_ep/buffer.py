@@ -31,7 +31,8 @@ class Buffer:
 
     def __init__(self, group: Optional[dist.ProcessGroup],
                  num_nvl_bytes: int = 0, num_rdma_bytes: int = 0,
-                 low_latency_mode: bool = False, num_qps_per_rank: int = 24,
+                 low_latency_mode: bool = False,  num_qps_per_rank: int = 24,
+                 allow_nvlink_for_normal_mode: bool = True,
                  allow_nvlink_for_low_latency_mode: bool = True,
                  allow_mnnvl: bool = False,
                  explicitly_destroy: bool = False,
@@ -46,6 +47,7 @@ class Buffer:
             low_latency_mode: whether to enable low-latency mode.
             num_qps_per_rank: the number of QPs for RDMA, the low-latency mode requires that this number equals
                 to the number of local experts.
+            allow_nvlink_for_normal_mode: whether to use NVLink for normal mode, if False, then use RDMA/PCIe.
             allow_nvlink_for_low_latency_mode: whether allow NVLink traffic for low-latency mode, you should notice
                 this is somehow incompatible with the hook-based overlapping.
                 Warning: PCIe connections may lead to errors due to memory ordering issues,
@@ -56,7 +58,8 @@ class Buffer:
                 Note: Releasing resources in the destructor may cause Python's exception handling process to hang.
             comm: the `mpi4py.MPI.Comm` communicator to use in case the group parameter is absent.
         """
-        check_nvlink_connections(group)
+        # Check NVLink requirements based on configuration
+        check_nvlink_connections(group, allow_nvlink_for_normal_mode, allow_nvlink_for_low_latency_mode, low_latency_mode)
 
         # Initialize the CPP runtime
         if group is not None:
@@ -80,8 +83,9 @@ class Buffer:
         self.num_nvl_bytes = num_nvl_bytes
         self.num_rdma_bytes = num_rdma_bytes
         self.low_latency_mode = low_latency_mode
+        self.disable_nvlink_for_normal_mode = not allow_nvlink_for_normal_mode
         self.explicitly_destroy = explicitly_destroy
-        self.runtime = deep_ep_cpp.Buffer(self.rank, self.group_size, num_nvl_bytes, num_rdma_bytes, low_latency_mode, explicitly_destroy)
+        self.runtime = deep_ep_cpp.Buffer(self.rank, self.group_size, num_nvl_bytes, num_rdma_bytes, low_latency_mode, self.disable_nvlink_for_normal_mode,explicitly_destroy)
 
         # Synchronize device IDs
         local_device_id = self.runtime.get_local_device_id()
@@ -93,8 +97,8 @@ class Buffer:
 
         # Synchronize NVSHMEM unique IDs
         root_unique_id = None
-        if self.runtime.get_num_rdma_ranks() > 1 or low_latency_mode:
-            # Enable IBGDA
+        if self.runtime.get_num_rdma_ranks() > 1 or low_latency_mode or self.disable_nvlink_for_normal_mode:
+            # Enable IBGDA 
             assert num_qps_per_rank > 0
             os.environ['NVSHMEM_DISABLE_P2P'] = '0' if allow_nvlink_for_low_latency_mode else '1'
             os.environ['NVSHMEM_IB_ENABLE_IBGDA'] = '1'
@@ -115,10 +119,10 @@ class Buffer:
                 os.environ['NVSHMEM_DISABLE_MNNVL'] = '1'
 
             # Synchronize using the root ID
-            if (low_latency_mode and self.rank == 0) or (not low_latency_mode and self.runtime.get_rdma_rank() == 0):
+            if (low_latency_mode and self.rank == 0) or (not low_latency_mode and self.runtime.get_rdma_rank() == 0) or (self.disable_nvlink_for_normal_mode and self.rank == 0):
                 root_unique_id = self.runtime.get_local_nvshmem_unique_id()
             nvshmem_unique_ids = all_gather_object(root_unique_id)
-            root_unique_id = nvshmem_unique_ids[0 if low_latency_mode else self.runtime.get_root_rdma_rank(True)]
+            root_unique_id = nvshmem_unique_ids[0 if low_latency_mode or self.disable_nvlink_for_normal_mode else self.runtime.get_root_rdma_rank(True)]
 
         # Make CPP runtime available
         self.runtime.sync(device_ids, ipc_handles, root_unique_id)
@@ -355,6 +359,12 @@ class Buffer:
         # Default config
         config = self.get_dispatch_config(self.group_size) if config is None else config
 
+        # Normal mode w/o NVLink
+        if self.disable_nvlink_for_normal_mode:
+            assert num_worst_tokens == 0, 'Internode dispatch does not support `num_worst_tokens > 0`'
+            return self.dispatch_pcie(x, handle, num_tokens_per_rank, is_token_in_rank, num_tokens_per_expert,
+                                     topk_idx, topk_weights, expert_alignment, config, previous_event, async_finish, allocate_on_comm_stream)
+
         # Internode
         if self.runtime.get_num_rdma_ranks() > 1:
             assert num_worst_tokens == 0, 'Internode dispatch does not support `num_worst_tokens > 0`'
@@ -416,6 +426,10 @@ class Buffer:
         # Default config
         config = self.get_combine_config(self.group_size) if config is None else config
 
+        # Normal mode w/o NVLink
+        if self.disable_nvlink_for_normal_mode:
+            return self.combine_pcie(x, handle, topk_weights, bias, config, previous_event, async_finish, allocate_on_comm_stream)
+
         # Internode
         if self.runtime.get_num_rdma_ranks() > 1:
             return self.internode_combine(x, handle, topk_weights, bias, config, previous_event, async_finish, allocate_on_comm_stream)
@@ -430,6 +444,82 @@ class Buffer:
             src_idx, rank_prefix_matrix, channel_prefix_matrix, send_head, config,
             getattr(previous_event, 'event', None), async_finish, allocate_on_comm_stream)
         return recv_x, recv_topk_weights, EventOverlap(event)
+
+    # noinspection PyTypeChecker
+    def dispatch_pcie(self, x: Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]],
+                           handle: Optional[Tuple] = None,
+                           num_tokens_per_rank: Optional[torch.Tensor] = None, 
+                           is_token_in_rank: Optional[torch.Tensor] = None, num_tokens_per_expert: Optional[torch.Tensor] = None,
+                           topk_idx: Optional[torch.Tensor] = None, topk_weights: Optional[torch.Tensor] = None, expert_alignment: int = 1,
+                           config: Optional[Config] = None,
+                           previous_event: Optional[EventOverlap] = None, async_finish: bool = False,
+                           allocate_on_comm_stream: bool = False) -> \
+            Tuple[Union[Tuple[torch.Tensor, torch.Tensor], torch.Tensor], Optional[torch.Tensor],
+            Optional[torch.Tensor], List[int], Tuple, EventOverlap]:
+        """
+        PCIe dispatch implementation, for more details, please refer to the `dispatch` docs.
+        Normally, you should not directly call this function.
+        """
+        assert config is not None
+
+        # Launch the kernel with cached or non-cached mode
+        x, x_scales = x if isinstance(x, tuple) else (x, None)
+        if handle is not None:
+            assert topk_idx is None and topk_weights is None
+            is_token_in_rank, \
+                rdma_channel_prefix_matrix, recv_rdma_channel_prefix_matrix, recv_rdma_rank_prefix_sum, \
+                num_recv_tokens, send_rdma_head = handle
+            recv_x, recv_x_scales, _, _, _, _, _, _, _, event = self.runtime.dispatch_pcie(
+                x, x_scales, topk_idx, topk_weights,
+                None, is_token_in_rank, None,
+                num_recv_tokens,
+                rdma_channel_prefix_matrix, recv_rdma_rank_prefix_sum, 
+                expert_alignment, config, getattr(previous_event, 'event', None), async_finish, allocate_on_comm_stream)
+            return (recv_x, recv_x_scales) if x_scales is not None else recv_x, None, None, None, None, EventOverlap(event)
+        else:
+            assert num_tokens_per_rank is not None and is_token_in_rank is not None and num_tokens_per_expert is not None
+            recv_x, recv_x_scales, recv_topk_idx, recv_topk_weights, num_recv_tokens_per_expert_list, \
+                rdma_channel_prefix_matrix, recv_rdma_channel_prefix_matrix, recv_rdma_rank_prefix_sum, \
+                send_rdma_head, event = self.runtime.dispatch_pcie(
+                x, x_scales, topk_idx, topk_weights,
+                num_tokens_per_rank, is_token_in_rank, num_tokens_per_expert,
+                0, None, None,
+                expert_alignment, config, getattr(previous_event, 'event', None), async_finish, allocate_on_comm_stream)
+            handle = (is_token_in_rank, 
+                    rdma_channel_prefix_matrix, recv_rdma_channel_prefix_matrix, recv_rdma_rank_prefix_sum, 
+                    recv_x.shape[0], send_rdma_head)
+            return (recv_x, recv_x_scales) if x_scales is not None else recv_x, recv_topk_idx, recv_topk_weights, num_recv_tokens_per_expert_list, handle, EventOverlap(event)
+
+    # noinspection PyTypeChecker
+    def combine_pcie(self, recv_x: torch.Tensor, handle: Union[tuple, list],
+                          topk_weights: Optional[torch.Tensor] = None,
+                          bias: Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]] = None,
+                          config: Optional[Config] = None,
+                          previous_event: Optional[EventOverlap] = None, async_finish: bool = False,
+                          allocate_on_comm_stream: bool = False) -> \
+            Tuple[torch.Tensor, Optional[torch.Tensor], EventOverlap]:
+        """
+        Internode combine implementation, for more details, please refer to the `combine` docs.
+        Normally, you should not directly call this function.
+        """
+        assert config is not None
+
+        # Unpack handle and bias
+        is_combined_token_in_rank, \
+            _, \
+            recv_gbl_channel_prefix_matrix, recv_rank_prefix_sum, \
+            _, send_rdma_head = handle
+        bias_0, bias_1 = Buffer._unpack_bias(bias)
+
+        num_combined_tokens = is_combined_token_in_rank.shape[0]
+        # Launch the kernel
+        combined_x, combined_topk_weights, event = self.runtime.combine_pcie(
+            recv_x, topk_weights, bias_0, bias_1,
+            send_rdma_head,
+            recv_gbl_channel_prefix_matrix, recv_rank_prefix_sum,
+            num_combined_tokens, config, getattr(previous_event, 'event', None),
+            async_finish, allocate_on_comm_stream)
+        return combined_x, combined_topk_weights, EventOverlap(event)
 
     # noinspection PyTypeChecker
     def internode_dispatch(self, x: Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]],

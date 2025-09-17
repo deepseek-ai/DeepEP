@@ -100,6 +100,31 @@ struct Config {
         EP_HOST_ASSERT(false and "NVSHMEM is disable during compilation");
 #endif
     }
+
+    size_t get_pcie_buffer_size_hint(int64_t hidden_bytes, int num_ranks) const {
+#ifndef DISABLE_NVSHMEM
+        // Below are some assumptions
+        // TODO: add assertions
+        constexpr int kNumMaxTopK = 128;
+        constexpr int kNumMaxScales = 128;
+        EP_HOST_ASSERT(num_sms % 2 == 0);
+        const int num_channels = num_sms / 2;
+
+        size_t num_bytes = 0;
+        num_bytes += num_channels * num_ranks * 2 * 2 * sizeof(int);//used for rdma_channel_meta
+        num_bytes += num_channels * num_ranks * num_max_rdma_chunked_recv_tokens * hidden_bytes * 2;
+        // num_bytes += num_channels * num_ranks * num_max_rdma_chunked_recv_tokens * pcie::get_source_meta_bytes() * 2;
+        num_bytes += num_channels * num_ranks * num_max_rdma_chunked_recv_tokens * kNumMaxTopK * sizeof(int64_t) * 2;
+        num_bytes += num_channels * num_ranks * num_max_rdma_chunked_recv_tokens * kNumMaxTopK * sizeof(float) * 2;
+        num_bytes += num_channels * num_ranks * num_max_rdma_chunked_recv_tokens * kNumMaxScales * sizeof(float) * 2;
+        num_bytes += num_channels * num_ranks * num_max_rdma_chunked_recv_tokens * sizeof(int4) * 2;
+        num_bytes = ((num_bytes + 127) / 128) * 128;
+        return num_bytes;
+#else
+        EP_HOST_ASSERT(false and "NVSHMEM is disable during compilation");
+#endif
+    }
+
 };
 
 struct LowLatencyBuffer {

@@ -30,6 +30,9 @@ private:
     int low_latency_buffer_idx = 0;
     bool low_latency_mode = false;
 
+    // PCIe mode buffer
+    bool disable_nvlink_for_normal_mode = false;
+
     // NVLink Buffer
     int64_t num_nvl_bytes;
     void* buffer_ptrs[NUM_MAX_NVL_PEERS] = {nullptr};
@@ -77,7 +80,7 @@ private:
     int* moe_recv_rdma_counter_mapped = nullptr;
 
 public:
-    Buffer(int rank, int num_ranks, int64_t num_nvl_bytes, int64_t num_rdma_bytes, bool low_latency_mode, bool explicitly_destroy);
+    Buffer(int rank, int num_ranks, int64_t num_nvl_bytes, int64_t num_rdma_bytes, bool low_latency_mode,bool disable_nvlink_for_normal_mode, bool explicitly_destroy);
 
     ~Buffer() noexcept(false);
 
@@ -132,6 +135,22 @@ public:
                        const std::optional<torch::Tensor>& cached_rdma_channel_prefix_matrix, const std::optional<torch::Tensor>& cached_recv_rdma_rank_prefix_sum,
                        const std::optional<torch::Tensor>& cached_gbl_channel_prefix_matrix, const std::optional<torch::Tensor>& cached_recv_gbl_rank_prefix_sum,
                        int expert_alignment, const Config& config, std::optional<EventHandle>& previous_event, bool async, bool allocate_on_comm_stream);
+
+    std::tuple<torch::Tensor, std::optional<torch::Tensor>, std::optional<torch::Tensor>, std::optional<torch::Tensor>, std::vector<int>, torch::Tensor, std::optional<torch::Tensor>, torch::Tensor, std::optional<torch::Tensor>, std::optional<EventHandle>>
+    dispatch_pcie(const torch::Tensor& x, const std::optional<torch::Tensor>& x_scales,
+                  const std::optional<torch::Tensor>& topk_idx, const std::optional<torch::Tensor>& topk_weights,
+                  const std::optional<torch::Tensor>& num_tokens_per_rank,
+                  const torch::Tensor& is_token_in_rank, const std::optional<torch::Tensor>& num_tokens_per_expert,
+                  int cached_num_recv_tokens, 
+                  const std::optional<torch::Tensor>& cached_rdma_channel_prefix_matrix, const std::optional<torch::Tensor>& cached_recv_rdma_rank_prefix_sum,
+                  int expert_alignment,const Config& config, std::optional<EventHandle>& previous_event, bool async, bool allocate_on_comm_stream);
+
+    std::tuple<torch::Tensor, std::optional<torch::Tensor>, std::optional<EventHandle>>
+    combine_pcie(const torch::Tensor& recv_x, const std::optional<torch::Tensor>& recv_topk_weights,
+                 const std::optional<torch::Tensor>& bias_0, const std::optional<torch::Tensor>& bias_1,
+                 const torch::Tensor& combined_rdma_head,
+                 const torch::Tensor& recv_gbl_channel_prefix_matrix, const torch::Tensor& recv_rank_prefix_sum,
+                 int num_combined_tokens, const Config& config, std::optional<EventHandle>& previous_event, bool async, bool allocate_on_comm_stream);
 
     std::tuple<torch::Tensor, std::optional<torch::Tensor>, std::optional<EventHandle>>
     internode_combine(const torch::Tensor& x, const std::optional<torch::Tensor>& topk_weights,
