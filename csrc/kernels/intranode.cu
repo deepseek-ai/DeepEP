@@ -837,7 +837,15 @@ combine(dtype_t* recv_x, float* recv_topk_weights,
                         out_dtypes[j] = static_cast<dtype_t>(values[j]);
 
 #ifndef DISABLE_SM90_FEATURES
-		    auto const warp_mask = __activemask();
+
+		    uint32_t warp_mask = 0xffffffff;
+		    bool const is_tail_loop = ((i - lane_id) + 32) > hidden_int4;
+		    if (is_tail_loop) {
+			static constexpr uint64_t one = 1;
+			int const num_active_threads = hidden_int4 - (i - lane_id);
+    			warp_mask = static_cast<uint32_t>((one << num_active_threads) - one);
+		    }
+
 
                     // Wait TMA arrival
                     if (elect_one_sync(warp_mask))
