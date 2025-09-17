@@ -304,27 +304,32 @@ __device__  __forceinline__ float exp2f_approx(const float &x) {
     return ret;
 }
 
-// TMA PTX instructions
-#ifndef DISABLE_SM90_FEATURES
+__forceinline__ __device__ int get_lane_id() {
+    int lane_id;
+    asm("mov.s32 %0, %laneid;" : "=r"(lane_id));
+    return lane_id;
+}
 
-__device__ __forceinline__ uint32_t elect_one_sync(int lane_id) {
+__device__ __forceinline__ uint32_t elect_one_sync() {
+#ifndef DISABLE_SM90_FEATURES
     uint32_t pred = 0;
     asm volatile(
       "{\n"
       ".reg .b32 %%rx;\n"
       ".reg .pred %%px;\n"
-      "      elect.sync %%rx|%%px, %2;\n"
-      "@%%px mov.s32 %1, 1;\n"
-      "      mov.s32 %0, %%rx;\n"
+      "      elect.sync %%rx|%%px, %1;\n"
+      "@%%px mov.s32 %0, 1;\n"
       "}\n"
-      : "+r"(lane_id), "+r"(pred)
+      : "+r"(pred)
       : "r"(0xffffffff));
     return pred;
+#else
+    return get_lane_id() == 0;
+#endif
 }
 
-__device__ __forceinline__ void fence_view_async_shared() {
-    asm volatile("fence.proxy.async.shared::cta; \n" :: );
-}
+// TMA PTX instructions
+#ifndef DISABLE_SM90_FEATURES
 
 __device__ __forceinline__ void fence_barrier_init() {
     asm volatile("fence.mbarrier_init.release.cluster; \n" :: );
@@ -390,7 +395,7 @@ __device__ __forceinline__ void tma_store_1d(const void* smem_ptr, const void* g
     asm volatile("cp.async.bulk.commit_group;");
 }
 
-template <int N = 0>
+template <int N>
 __device__ __forceinline__ void tma_store_wait() {
     asm volatile("cp.async.bulk.wait_group.read %0;" :: "n"(N) : "memory");
 }
@@ -403,8 +408,13 @@ __host__ __device__ constexpr dtype_t ceil_div(dtype_t a, dtype_t b) {
 }
 
 template <typename dtype_t>
-__host__ __device__ constexpr dtype_t align(dtype_t a, dtype_t b) {
+__host__ __device__ constexpr dtype_t align_up(dtype_t a, dtype_t b) {
     return ceil_div<dtype_t>(a, b) * b;
+}
+
+template <typename dtype_t>
+__host__ __device__ constexpr dtype_t align_down(dtype_t a, dtype_t b) {
+    return a / b * b;
 }
 
 __forceinline__ __device__ void get_channel_task_range(int num_tokens, int num_sms, int sm_id,
@@ -439,12 +449,6 @@ __device__ __forceinline__ dtype_t broadcast(dtype_t& ptr, int src_lane_idx) {
     for (int i = 0; i < sizeof(dtype_t) / sizeof(int); ++ i)
         recv_int_values[i] = __shfl_sync(0xffffffff, send_int_values[i], src_lane_idx);
     return *reinterpret_cast<dtype_t*>(recv_int_values);
-}
-
-__forceinline__ __device__ int get_lane_id() {
-    int lane_id;
-    asm("mov.s32 %0, %laneid;" : "=r"(lane_id));
-    return lane_id;
 }
 
 constexpr float kFP8Margin = 1e-4;
