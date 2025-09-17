@@ -589,7 +589,7 @@ combine(dtype_t* recv_x, float* recv_topk_weights,
 
     constexpr int kDtypePerInt4 = sizeof(int4) / sizeof(dtype_t);
     int hidden_int4 = hidden * sizeof(dtype_t) / sizeof(int4);
-    int hidden_int4_aligned = hidden_int4 / 32 * 32;
+    int hidden_int4_aligned = align_down(hidden_int4, 32);
     auto x_int4 = reinterpret_cast<const int4*>(x);
     auto bias_0_int4 = reinterpret_cast<const int4*>(bias_0);
     auto bias_1_int4 = reinterpret_cast<const int4*>(bias_1);

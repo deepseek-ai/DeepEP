@@ -408,8 +408,13 @@ __host__ __device__ constexpr dtype_t ceil_div(dtype_t a, dtype_t b) {
 }
 
 template <typename dtype_t>
-__host__ __device__ constexpr dtype_t align(dtype_t a, dtype_t b) {
+__host__ __device__ constexpr dtype_t align_up(dtype_t a, dtype_t b) {
     return ceil_div<dtype_t>(a, b) * b;
+}
+
+template <typename dtype_t>
+__host__ __device__ constexpr dtype_t align_down(dtype_t a, dtype_t b) {
+    return a / b * b;
 }
 
 __forceinline__ __device__ void get_channel_task_range(int num_tokens, int num_sms, int sm_id,
