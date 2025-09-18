@@ -585,9 +585,9 @@ class Buffer:
                                               cumulative_local_expert_recv_stats,
                                               dispatch_wait_recv_cost_stats,
                                               num_max_dispatch_tokens_per_rank, num_experts,
-                                              use_fp8, round_scale, use_ue8m0,use_per_tensor_quantization,
-                                              static_scale,
-                                              async_finish, return_recv_hook)
+                                              use_fp8, round_scale, use_ue8m0,
+                                              async_finish, return_recv_hook,use_per_tensor_quantization,
+                                              static_scale)
         handle = (packed_recv_src_info, packed_recv_layout_range, num_max_dispatch_tokens_per_rank, x.size(1), num_experts)
         tensors_to_record = (x, topk_idx,
                              packed_recv_x, packed_recv_x_scales, packed_recv_count,

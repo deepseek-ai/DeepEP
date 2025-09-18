@@ -1092,10 +1092,10 @@ Buffer::low_latency_dispatch(const torch::Tensor& x, const torch::Tensor& topk_i
                              const std::optional<torch::Tensor>& cumulative_local_expert_recv_stats,
                              const std::optional<torch::Tensor>& dispatch_wait_recv_cost_stats,
                              int num_max_dispatch_tokens_per_rank, int num_experts,
-                             bool use_fp8, bool round_scale, bool use_ue8m0,
+                             bool use_fp8, bool round_scale, bool use_ue8m0,  
+                             bool async, bool return_recv_hook,
                              bool use_per_tensor_quantization,
-                             const std::optional<torch::Tensor>& static_scale,  // 新增静态量化参数
-                             bool async, bool return_recv_hook) {
+                             const std::optional<torch::Tensor>& static_scale) {
 #ifndef DISABLE_NVSHMEM
     EP_HOST_ASSERT(low_latency_mode);
 

@@ -137,7 +137,7 @@ dispatch(void* packed_recv_x, void* packed_recv_x_scales,
                         EP_STATIC_ASSERT(kNumElemsPerRead * 32 / kNumPerChannels == 2, "Invalid vectorization");
                         amax = warp_reduce_max<16>(amax);
                         calculate_fp8_scales(amax, scale, scale_inv, round_scale);
-                        if (lane_id == 0)
+                        if (lane_id == 0 or lane_id == 16)
                             rdma_x_scales[i * kNumElemsPerRead / 128] = scale_inv;   
                     }
                     
