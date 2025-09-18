@@ -1092,8 +1092,10 @@ Buffer::low_latency_dispatch(const torch::Tensor& x, const torch::Tensor& topk_i
                              const std::optional<torch::Tensor>& cumulative_local_expert_recv_stats,
                              const std::optional<torch::Tensor>& dispatch_wait_recv_cost_stats,
                              int num_max_dispatch_tokens_per_rank, int num_experts,
-                             bool use_fp8, bool round_scale, bool use_ue8m0,
-                             bool async, bool return_recv_hook) {
+                             bool use_fp8, bool round_scale, bool use_ue8m0,  
+                             bool async, bool return_recv_hook,
+                             bool use_per_tensor_quantization,
+                             const std::optional<torch::Tensor>& static_scale) {
 #ifndef DISABLE_NVSHMEM
     EP_HOST_ASSERT(low_latency_mode);
 
@@ -1148,7 +1150,7 @@ Buffer::low_latency_dispatch(const torch::Tensor& x, const torch::Tensor& topk_i
     void* packed_recv_x_scales_ptr = nullptr;
     EP_HOST_ASSERT((num_ranks * num_max_dispatch_tokens_per_rank) % 4 == 0 and "TMA requires the number of tokens to be multiple of 4");
 
-    if (use_fp8) {
+    if (use_fp8 and not use_per_tensor_quantization) {
         // TODO: support unaligned cases
         EP_HOST_ASSERT(hidden % 512 == 0);
         if (not use_ue8m0) {
@@ -1163,6 +1165,19 @@ Buffer::low_latency_dispatch(const torch::Tensor& x, const torch::Tensor& topk_i
         packed_recv_x_scales_ptr = packed_recv_x_scales->data_ptr();
     }
 
+    // 检查静态量化参数
+    if (static_scale.has_value()) {
+        EP_HOST_ASSERT(use_fp8 && "Static scale requires FP8 quantization");
+        auto scale_tensor = static_scale.value();
+        EP_HOST_ASSERT(scale_tensor.is_contiguous());
+        EP_HOST_ASSERT(scale_tensor.scalar_type() == torch::kFloat32);
+        if (use_per_tensor_quantization) {
+            EP_HOST_ASSERT(scale_tensor.numel() == 1);
+        } else {
+            EP_HOST_ASSERT(scale_tensor.numel() == hidden / 128);
+        }
+    }
+    
     // Kernel launch
     auto next_clean_meta = next_buffer.clean_meta();
     auto launcher = [=](int phases) {
@@ -1177,7 +1192,8 @@ Buffer::low_latency_dispatch(const torch::Tensor& x, const torch::Tensor& topk_i
                                next_clean_meta.first, next_clean_meta.second,
                                num_tokens, hidden, num_max_dispatch_tokens_per_rank,
                                num_topk, num_experts, rank, num_ranks,
-                               use_fp8, round_scale, use_ue8m0,
+                               use_fp8, round_scale, use_ue8m0, use_per_tensor_quantization,
+                               static_scale.has_value() ? static_scale->data_ptr<float>() : nullptr,  // 传递静态量化参数
                                workspace, num_device_sms,
                                launch_stream, phases);
     };
