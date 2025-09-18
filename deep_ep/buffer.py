@@ -455,7 +455,7 @@ class Buffer:
                 recv_src_meta, send_rdma_head, send_nvl_head = handle
             num_recv_tokens = recv_src_meta.size(0)
             num_rdma_recv_tokens = send_nvl_head.size(0)
-            recv_x, recv_x_scales, _, _, _, _, _, _, _, _, _, _, _, _, _, event = self.runtime.internode_dispatch(
+            recv_x, recv_x_scales, _, _, _, _, _, _, _, _, _, _, _, _, event = self.runtime.internode_dispatch(
                 x, x_scales, topk_idx, topk_weights,
                 None, None, is_token_in_rank, None,
                 num_recv_tokens, num_rdma_recv_tokens,
