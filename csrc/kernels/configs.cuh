@@ -58,6 +58,20 @@ typedef int __nv_fp8x4_e4m3;
 typedef uint8_t __nv_fp8_storage_t;
 #endif
 
+namespace deep_ep {
+
+#ifndef TOPK_IDX_BITS
+#define TOPK_IDX_BITS 64
+#endif
+
+#define INT_BITS_T2(bits) int##bits##_t
+#define INT_BITS_T(bits) INT_BITS_T2(bits)
+typedef INT_BITS_T(TOPK_IDX_BITS) topk_idx_t;  // int32_t or int64_t
+#undef INT_BITS_T
+#undef INT_BITS_T2
+
+} // namespace deep_ep
+
 #ifndef DISABLE_NVSHMEM
 #include <nvshmem.h>
 #include <nvshmemx.h>

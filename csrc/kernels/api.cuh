@@ -2,6 +2,8 @@
 
 #include <vector>
 
+#include "configs.cuh"
+
 namespace deep_ep {
 
 // Intranode runtime
@@ -31,7 +33,7 @@ void finalize();
 // Layout kernels
 namespace layout {
 
-void get_dispatch_layout(const int64_t* topk_idx,
+void get_dispatch_layout(const topk_idx_t* topk_idx,
                          int* num_tokens_per_rank, int* num_tokens_per_rdma_rank,
                          int* num_tokens_per_expert, bool* is_token_in_rank,
                          int num_tokens, int num_topk, int num_ranks, int num_experts,
@@ -53,8 +55,8 @@ void cached_notify_dispatch(const int* rank_prefix_matrix, int num_memset_int,
                             void** buffer_ptrs, int** barrier_signal_ptrs, int rank, int num_ranks,
                             cudaStream_t stream);
 
-void dispatch(void* recv_x, float* recv_x_scales, int* recv_src_idx, int64_t* recv_topk_idx, float* recv_topk_weights, int* recv_channel_offset,
-              int* send_head, const void* x, const float* x_scales, const int64_t* topk_idx, const float* topk_weights,
+void dispatch(void* recv_x, float* recv_x_scales, int* recv_src_idx, topk_idx_t* recv_topk_idx, float* recv_topk_weights, int* recv_channel_offset,
+              int* send_head, const void* x, const float* x_scales, const topk_idx_t* topk_idx, const float* topk_weights,
               const bool* is_token_in_rank, const int* channel_prefix_matrix,
               int num_tokens, int num_worst_tokens, int hidden_int4, int num_topk, int num_experts, int num_scales,
               int scale_token_stride, int scale_hidden_stride,
@@ -95,8 +97,8 @@ void notify_dispatch(const int* num_tokens_per_rank, int* moe_recv_counter_mappe
                      cudaStream_t stream, int64_t num_rdma_bytes, int64_t num_nvl_bytes,
                      bool low_latency_mode);
 
-void dispatch(void* recv_x, float* recv_x_scales, int64_t* recv_topk_idx, float* recv_topk_weights, void* recv_src_meta,
-              const void* x, const float* x_scales, const int64_t* topk_idx, const float* topk_weights,
+void dispatch(void* recv_x, float* recv_x_scales, topk_idx_t* recv_topk_idx, float* recv_topk_weights, void* recv_src_meta,
+              const void* x, const float* x_scales, const topk_idx_t* topk_idx, const float* topk_weights,
               int* send_rdma_head, int* send_nvl_head,
               int* recv_rdma_channel_prefix_matrix, int* recv_gbl_channel_prefix_matrix,
               const int* rdma_channel_prefix_matrix, const int* recv_rdma_rank_prefix_sum,
@@ -145,7 +147,7 @@ void dispatch(void* packed_recv_x, void* packed_recv_x_scales,
               int* cumulative_local_expert_recv_stats,
               int64_t* dispatch_wait_recv_cost_stats,
               void* rdma_recv_x, int* rdma_recv_count, void* rdma_x,
-              const void* x, const int64_t* topk_idx,
+              const void* x, const topk_idx_t* topk_idx,
               int* next_clean, int num_next_clean_int,
               int num_tokens, int hidden, int num_max_dispatch_tokens_per_rank,
               int num_topk, int num_experts, int rank, int num_ranks,
@@ -155,7 +157,7 @@ void dispatch(void* packed_recv_x, void* packed_recv_x_scales,
 
 void combine(void* combined_x,
              void* rdma_recv_x, int* rdma_recv_flag, void* rdma_send_x,
-             const void* x, const int64_t* topk_idx, const float* topk_weights,
+             const void* x, const topk_idx_t* topk_idx, const float* topk_weights,
              const int* src_info, const int64_t* layout_range,
              int64_t* combine_wait_recv_cost_stats,
              int* next_clean, int num_next_clean_int,

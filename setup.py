@@ -80,6 +80,12 @@ if __name__ == '__main__':
         cxx_flags.append('-DDISABLE_AGGRESSIVE_PTX_INSTRS')
         nvcc_flags.append('-DDISABLE_AGGRESSIVE_PTX_INSTRS')
 
+    # Bits of `topk_idx.dtype`, choices are 32 and 64
+    if "TOPK_IDX_BITS" in os.environ:
+        topk_idx_bits = int(os.environ['TOPK_IDX_BITS'])
+        cxx_flags.append(f'-DTOPK_IDX_BITS={topk_idx_bits}')
+        nvcc_flags.append(f'-DTOPK_IDX_BITS={topk_idx_bits}')
+
     # Put them together
     extra_compile_args = {
         'cxx': cxx_flags,
