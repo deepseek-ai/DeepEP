@@ -14,6 +14,51 @@ def get_nvshmem_host_lib_name(base_dir):
         return file.name
     raise ModuleNotFoundError('libnvshmem_host.so not found')
 
+def get_extension_hybrid_ep_cpp():
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    USE_GB200 = os.getenv("USE_GB200", "False")
+    enable_multinode = os.getenv("HYBRID_EP_MULTINODE", "0") != "0"
+    assert not enable_multinode, "Multinode is not supported yet"
+
+    # Basic compile arguments
+    compile_args = {
+        "cxx": [
+            "-std=c++17",
+            "-O3",
+        ],
+        "nvcc": [
+            "-std=c++17",
+            "-Xcompiler",
+            "-fPIC",
+            "--expt-relaxed-constexpr",
+            "-O3",
+            "--shared",
+        ],
+    }
+    if USE_GB200 == "True":
+        compile_args["nvcc"].append("-DUSE_GB200")
+
+    sources = [
+        os.path.join(current_dir, "csrc/hybrid_ep.cu"),
+    ]
+    include_dirs = [
+        os.path.join(current_dir, "csrc"),
+    ]
+    extra_link_args = [
+        "-lnvtx3interop",
+    ]
+    libraries = ["cuda"]
+
+    extension_hybrid_ep_cpp = CUDAExtension(
+            "hybrid_ep_cpp",
+            sources=sources,
+            include_dirs=include_dirs,
+            libraries=libraries,
+            extra_compile_args=compile_args,
+            extra_link_args=extra_link_args,
+        )
+
+    return extension_hybrid_ep_cpp
 
 if __name__ == '__main__':
     disable_nvshmem = False
@@ -120,7 +165,8 @@ if __name__ == '__main__':
                 sources=sources,
                 extra_compile_args=extra_compile_args,
                 extra_link_args=extra_link_args
-            )
+            ),
+            get_extension_hybrid_ep_cpp()
         ],
         cmdclass={
             'build_ext': BuildExtension
