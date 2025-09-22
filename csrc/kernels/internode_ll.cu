@@ -66,6 +66,7 @@ __global__ void clean_low_latency_buffer_with_mask(int* clean_0, int num_clean_i
             }
             __syncthreads();
             if (thread_id == 0) atomicAdd(sync_buffer_ptr + rank, -1);
+            __syncthreads();
         } else {
             // Clean
             #pragma unroll
