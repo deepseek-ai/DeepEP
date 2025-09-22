@@ -8,51 +8,10 @@ namespace deep_ep {
 namespace internode_ll {
 
 template <int kNumThreads> __launch_bounds__(kNumThreads, 1)
-__global__ void barrier_with_mask(int rank, int num_ranks,
-                                  int* mask_buffer_ptr,
-                                  int* sync_buffer_ptr) {
-    EP_DEVICE_ASSERT(kNumThreads >= num_ranks);
-    auto thread_id = static_cast<int>(threadIdx.x);
-
-    int cnt_before_update = sync_buffer_ptr[rank];
-
-    if (thread_id < num_ranks && rank != thread_id) {
-        const auto dst_rank = thread_id;
-        const auto dst_ptr = reinterpret_cast<uint64_t>(sync_buffer_ptr + rank);
-        const auto dst_p2p_ptr = nvshmemi_get_p2p_ptr(dst_ptr, rank, dst_rank);
-        
-        if (mask_buffer_ptr == nullptr || ld_acquire_sys_global(mask_buffer_ptr + dst_rank) == 0) {
-            // Update remote counter
-            if (dst_p2p_ptr == 0) {
-                nvshmemi_ibgda_amo_nonfetch_add(reinterpret_cast<int*>(dst_ptr), -1, dst_rank, 0);
-            } else {
-                st_release_sys_global(reinterpret_cast<int*>(dst_p2p_ptr), cnt_before_update - 1);
-            }
-            auto start_time = clock64();
-            uint64_t wait_recv_cost = 0;
-            // Wait for local counter to be updated
-            while ((ld_acquire_global(sync_buffer_ptr + dst_rank) != (cnt_before_update - 1))               // remote is not ready
-                   && (mask_buffer_ptr == nullptr || ((wait_recv_cost = clock64()-start_time) <= NUM_TIMEOUT_CYCLES)) // not timeout
-            );
-            // Mask rank if timeout
-            if (mask_buffer_ptr != nullptr && wait_recv_cost > NUM_TIMEOUT_CYCLES) {
-                atomicExch(mask_buffer_ptr + dst_rank, 1);
-                // printf("[rank %d] Clean LL buffer: rank %d is masked due to timeout\n", rank, dst_rank);
-            }
-        }
-    }
-
-    __syncthreads();
-    if (thread_id == 0) atomicAdd(sync_buffer_ptr + rank, -1);
-}
-
-template <int kNumThreads> __launch_bounds__(kNumThreads, 1)
 __global__ void clean_low_latency_buffer(int* clean_0, int num_clean_int_0,
-                                         int* clean_1, int num_clean_int_1,
-                                         bool barrier) {
+                                         int* clean_1, int num_clean_int_1) {
     // Barrier before cleaning (in case of unfinished chunked EP)
-    if (barrier)
-        nvshmemx_barrier_all_block();
+    nvshmemx_barrier_all_block();
 
     // Clean
     auto thread_id = static_cast<int>(threadIdx.x);
@@ -64,8 +23,59 @@ __global__ void clean_low_latency_buffer(int* clean_0, int num_clean_int_0,
         clean_1[i] = 0;
 
     // Barrier after cleaning (make sure the low-latency mode works fine)
-    if (barrier)
-        nvshmemx_barrier_all_block();
+    nvshmemx_barrier_all_block();
+}
+
+template <int kNumThreads> __launch_bounds__(kNumThreads, 1)
+__global__ void clean_low_latency_buffer_with_mask(int* clean_0, int num_clean_int_0,
+                                                   int* clean_1, int num_clean_int_1,
+                                                   int rank, int num_ranks, int* mask_buffer_ptr, int* sync_buffer_ptr) {
+    auto thread_id = static_cast<int>(threadIdx.x);
+    const auto num_rounds = 3; // Barrier - Clean - Barrier
+    for (int round_id = 0; round_id < num_rounds; round_id++) {
+        if (round_id != 1) {
+            // Barrier before cleaning (in case of unfinished chunked EP)
+            // and Barrier after cleaning (make sure the low-latency mode works fine)
+            int cnt_before_update = sync_buffer_ptr[rank];
+            EP_DEVICE_ASSERT(kNumThreads >= num_ranks);
+
+            if (thread_id < num_ranks && rank != thread_id) {
+                const auto dst_rank = thread_id;
+                const auto dst_ptr = reinterpret_cast<uint64_t>(sync_buffer_ptr + rank);
+                const auto dst_p2p_ptr = nvshmemi_get_p2p_ptr(dst_ptr, rank, dst_rank);
+                
+                if (mask_buffer_ptr == nullptr || ld_acquire_sys_global(mask_buffer_ptr + dst_rank) == 0) {
+                    // Update remote counter
+                    if (dst_p2p_ptr == 0) {
+                        nvshmemi_ibgda_amo_nonfetch_add(reinterpret_cast<int*>(dst_ptr), -1, dst_rank, 0);
+                    } else {
+                        st_release_sys_global(reinterpret_cast<int*>(dst_p2p_ptr), cnt_before_update - 1);
+                    }
+                    auto start_time = clock64();
+                    uint64_t wait_recv_cost = 0;
+                    // Wait for local counter to be updated
+                    while ((ld_acquire_global(sync_buffer_ptr + dst_rank) != (cnt_before_update - 1))               // remote is not ready
+                        && (mask_buffer_ptr == nullptr || ((wait_recv_cost = clock64()-start_time) <= NUM_TIMEOUT_CYCLES)) // not timeout
+                    );
+                    // Mask rank if timeout
+                    if (mask_buffer_ptr != nullptr && wait_recv_cost > NUM_TIMEOUT_CYCLES) {
+                        atomicExch(mask_buffer_ptr + dst_rank, 1);
+                        // printf("[rank %d] Clean LL buffer: rank %d is masked due to timeout\n", rank, dst_rank);
+                    }
+                }
+            }
+            __syncthreads();
+            if (thread_id == 0) atomicAdd(sync_buffer_ptr + rank, -1);
+        } else {
+            // Clean
+            #pragma unroll
+            for (int i = thread_id; i < num_clean_int_0; i += kNumThreads)
+                clean_0[i] = 0;
+            #pragma unroll
+            for (int i = thread_id; i < num_clean_int_1; i += kNumThreads)
+                clean_1[i] = 0;
+        }
+    }
 }
 
 void clean_low_latency_buffer(int* clean_0, int num_clean_int_0,
@@ -78,13 +88,10 @@ void clean_low_latency_buffer(int* clean_0, int num_clean_int_0,
 
     if (sync_buffer_ptr == nullptr) {
         LAUNCH_KERNEL(&cfg, clean_low_latency_buffer<kNumThreads>,
-                    clean_0, num_clean_int_0, clean_1, num_clean_int_1, true);
+                    clean_0, num_clean_int_0, clean_1, num_clean_int_1);
     } else {
-        LAUNCH_KERNEL(&cfg, barrier_with_mask<kNumThreads>,
-                    rank, num_ranks, mask_buffer_ptr, sync_buffer_ptr);
-        LAUNCH_KERNEL(&cfg, clean_low_latency_buffer<kNumThreads>,
-                    clean_0, num_clean_int_0, clean_1, num_clean_int_1, false);
-        LAUNCH_KERNEL(&cfg, barrier_with_mask<kNumThreads>,
+        LAUNCH_KERNEL(&cfg, clean_low_latency_buffer_with_mask<kNumThreads>,
+                    clean_0, num_clean_int_0, clean_1, num_clean_int_1, \
                     rank, num_ranks, mask_buffer_ptr, sync_buffer_ptr);
     }
 }
@@ -1125,101 +1132,6 @@ void clean_mask_buffer(int* mask_buffer_ptr, int num_ranks, cudaStream_t stream)
     SETUP_LAUNCH_CONFIG(num_sms, kNumThreads, stream);
     LAUNCH_KERNEL(&cfg, clean_mask_buffer<kNumThreads>, mask_buffer_ptr, num_ranks);
 }
-
-template <int kNumThreads> __launch_bounds__(kNumThreads, 1)
-__global__ void allgather(void* in_out_tensor, void* data_buffer, int num_input_bytes,
-                          int rank, int num_ranks, int* mask_buffer_ptr, int* sync_buffer_ptr) {
-    const auto sm_id = static_cast<int>(blockIdx.x);
-    const auto thread_id = static_cast<int>(threadIdx.x);
-    const auto warp_id = thread_id / 32, lane_id = get_lane_id();
-    const auto num_sms = static_cast<int>(gridDim.x);
-    const auto num_threads = num_sms * static_cast<int>(blockDim.x);
-    const auto num_warps = num_threads / 32;
-    const auto global_warp_id = sm_id * 32 + warp_id;
-    const auto global_thread_id = global_warp_id * 32 + thread_id;
-
-    EP_DEVICE_ASSERT(num_input_bytes % 4 == 0);
-    const auto num_int = num_input_bytes / 4;
-
-    const auto in_out_ptr = reinterpret_cast<int*>(in_out_tensor);
-    const auto data_buffer_ptr = reinterpret_cast<int*>(data_buffer);
-
-    // Record current counter
-    int cnt_before_update = sync_buffer_ptr[rank];
-
-    // Copy to local send buffer
-    for (int i = global_thread_id; i < num_int; i += num_threads) {
-        *(data_buffer_ptr + rank * num_int + i) = *(in_out_ptr + rank * num_int + i);
-    }
-
-    cg::this_grid().sync();
-
-    // Issue IBGDA sends
-    for (int dst_rank = global_warp_id; dst_rank < num_ranks; dst_rank += num_warps) {
-        if (dst_rank != rank &&
-            (mask_buffer_ptr == nullptr || ld_acquire_sys_global(mask_buffer_ptr + dst_rank) == 0)) {
-            const auto dst_p2p_ptr = nvshmemi_get_p2p_ptr(reinterpret_cast<uint64_t>(data_buffer_ptr), rank, dst_rank);
-            const auto dst_cnt_p2p_ptr = nvshmemi_get_p2p_ptr(reinterpret_cast<uint64_t>(sync_buffer_ptr), rank, dst_rank);
-            if (dst_p2p_ptr == 0) {
-                nvshmemi_ibgda_put_nbi_warp(reinterpret_cast<uint64_t>(data_buffer_ptr + rank * num_int), reinterpret_cast<uint64_t>(data_buffer_ptr + rank * num_int), num_input_bytes, dst_rank, 0, lane_id, 0);
-            } else {
-                auto dst_p2p_ptr_int = reinterpret_cast<int*>(dst_p2p_ptr) + rank * num_int;
-                for (int i = lane_id; i < num_int; i += 32) {
-                    *(dst_p2p_ptr_int + i) = *(data_buffer_ptr + rank * num_int + i);
-                }
-            }
-            __syncwarp();
-            if (lane_id == 0) {
-                if (dst_cnt_p2p_ptr == 0) {
-                    nvshmemi_ibgda_amo_nonfetch_add(reinterpret_cast<int*>(sync_buffer_ptr) + rank, -1, dst_rank, 0);
-                } else {
-                    st_release_sys_global(reinterpret_cast<int*>(dst_cnt_p2p_ptr) + rank, cnt_before_update - 1);
-                }
-            }
-        }
-    }
-
-    // Wait for data to arrive
-    for (int src_rank = global_warp_id; src_rank < num_ranks; src_rank += num_warps) {
-        if (src_rank != rank) {
-            auto start_time = clock64();
-            uint64_t wait_recv_cost = 0;
-            while (
-                (mask_buffer_ptr == nullptr || (ld_acquire_sys_global(mask_buffer_ptr + src_rank)) == 0)    // rank not masked
-                && ld_acquire_sys_global(sync_buffer_ptr + src_rank) != cnt_before_update - 1               // recv not ready
-                && (mask_buffer_ptr == nullptr || ((wait_recv_cost = clock64()-start_time) <= NUM_TIMEOUT_CYCLES))    // not timeout
-            );
-            if (mask_buffer_ptr != nullptr && ld_acquire_sys_global(mask_buffer_ptr + src_rank) != 0) {
-                // Rank is masked, so skip the data copy
-            } else if (mask_buffer_ptr != nullptr && wait_recv_cost > NUM_TIMEOUT_CYCLES) {
-                if (lane_id == 0) {
-                    atomicExch(mask_buffer_ptr + src_rank, 1);
-                    // printf("[rank %d] AllGather: rank %d is masked due to timeout\n", rank, src_rank);
-                }
-            } else {
-                for (int i = lane_id; i < num_int; i += 32) {
-                    *(in_out_ptr + src_rank * num_int + i) = *(data_buffer_ptr + src_rank * num_int + i);
-                }
-            }
-        }
-    }
-    cg::this_grid().sync();
-    if (global_thread_id == 0)
-        atomic_add_release_global(sync_buffer_ptr + rank, -1);
-}
-
-void allgather(void* in_out_tensor, void* data_buffer_ptr, int num_input_bytes,
-               int rank, int num_ranks, int* mask_buffer_ptr, int* sync_buffer_ptr,
-               cudaStream_t stream) {
-    constexpr int kNumSms = 2;
-    constexpr int kNumThreads = 1024;
-
-    SETUP_LAUNCH_CONFIG(kNumSms, kNumThreads, stream);
-    LAUNCH_KERNEL(&cfg, allgather<kNumThreads>,
-                  in_out_tensor, data_buffer_ptr, num_input_bytes,
-                  rank, num_ranks, mask_buffer_ptr, sync_buffer_ptr);
-}
-
 
 } // namespace internode_ll
 

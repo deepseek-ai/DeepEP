@@ -168,10 +168,6 @@ void combine(void* combined_x,
              void* workspace, int num_device_sms,
              cudaStream_t stream, int phases, bool zero_copy);
 
-void allgather(void* in_out_tensor, void* data_buffer_ptr, int num_input_bytes,
-               int rank, int num_ranks, int* mask_buffer_ptr, int* sync_buffer_ptr,
-               cudaStream_t stream);
-
 void query_mask_buffer(int* mask_buffer_ptr, int num_ranks, int* output_mask_tensor, cudaStream_t stream);
 
 void update_mask_buffer(int* mask_buffer_ptr, int rank_to_mask, bool mask, cudaStream_t stream);

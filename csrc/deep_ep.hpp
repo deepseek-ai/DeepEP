@@ -39,14 +39,10 @@ private:
     int64_t num_rdma_bytes;
     void* rdma_buffer_ptr = nullptr;
 
-    // Elastic mode buffer
-    bool enable_elastic = false;
+    // Shrink mode buffer
+    bool enable_shrink = false;
     int *mask_buffer_ptr = nullptr;
     int *sync_buffer_ptr = nullptr;
-
-    // AllGather Buffer
-    int num_coll_buffer_bytes = 0;
-    int *coll_buffer_ptr = nullptr;
 
     // Device info and communication
     int device_id;
@@ -86,7 +82,7 @@ private:
     int* moe_recv_rdma_counter_mapped = nullptr;
 
 public:
-    Buffer(int rank, int num_ranks, int64_t num_nvl_bytes, int64_t num_rdma_bytes, bool low_latency_mode, bool explicitly_destroy, bool enable_elastic, int num_coll_buffer_bytes);
+    Buffer(int rank, int num_ranks, int64_t num_nvl_bytes, int64_t num_rdma_bytes, bool low_latency_mode, bool explicitly_destroy, bool enable_shrink);
 
     ~Buffer() noexcept(false);
 
@@ -167,8 +163,6 @@ public:
                         int num_max_dispatch_tokens_per_rank, int num_experts,
                         bool use_logfmt, bool zero_copy, bool async, bool return_recv_hook,
                         const std::optional<torch::Tensor>& out = std::nullopt);
-
-    std::optional<EventHandle> low_latency_allgather(const torch::Tensor &in_out_tensor, bool use_default_stream, bool async_finish);
 
     torch::Tensor
     get_next_low_latency_combine_buffer(int num_max_dispatch_tokens_per_rank, int hidden, int num_experts) const;

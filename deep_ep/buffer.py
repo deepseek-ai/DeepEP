@@ -35,7 +35,7 @@ class Buffer:
                  allow_nvlink_for_low_latency_mode: bool = True,
                  allow_mnnvl: bool = False,
                  explicitly_destroy: bool = False,
-                 enable_elastic: bool = False, num_coll_buffer_bytes: int = 0,
+                 enable_shrink: bool = False,
                  comm: Optional["mpi4py.MPI.Comm"] = None) -> None:
         """
         Initialize the communication buffer.
@@ -52,9 +52,7 @@ class Buffer:
                 Warning: PCIe connections may lead to errors due to memory ordering issues,
                 please make sure all connections are via NVLink.
             allow_mnnvl: whether to allow MNNVL
-            enable_elastic: whether to enable elastic mode. The enable mode allocates a mask buffer to support masking ranks dynamically.
-            num_coll_buffer_bytes: the buffer size for collective communication. Currently, only AllGather is supported.
-                You should make sure this value is not smaller than the allgathered tensor size.
+            enable_shrink: whether to enable shrink mode. The enable mode allocates a mask buffer to support masking ranks dynamically.
             explicitly_destroy: If this flag is set to True, you need to explicitly call `destroy()` to release resources;
                 otherwise, the resources will be released by the destructor.
                 Note: Releasing resources in the destructor may cause Python's exception handling process to hang.
@@ -85,8 +83,8 @@ class Buffer:
         self.num_rdma_bytes = num_rdma_bytes
         self.low_latency_mode = low_latency_mode
         self.explicitly_destroy = explicitly_destroy
-        self.enable_elastic = enable_elastic
-        self.runtime = deep_ep_cpp.Buffer(self.rank, self.group_size, num_nvl_bytes, num_rdma_bytes, low_latency_mode, explicitly_destroy, enable_elastic, num_coll_buffer_bytes)
+        self.enable_shrink = enable_shrink
+        self.runtime = deep_ep_cpp.Buffer(self.rank, self.group_size, num_nvl_bytes, num_rdma_bytes, low_latency_mode, explicitly_destroy, enable_shrink)
 
         # Synchronize device IDs
         local_device_id = self.runtime.get_local_device_id()
@@ -653,26 +651,9 @@ class Buffer:
         tensors_to_record = (x, topk_idx, topk_weights, src_info, layout_range, combined_x)
         return combined_x, EventOverlap(event, tensors_to_record if async_finish else None), hook
 
-    def low_latency_allgather(self, x: torch.Tensor,
-                              use_default_stream: bool = False, async_finish: bool = False) -> EventOverlap:
-        """
-        An in-place low-latency implementation for AllGather with IBGDA.
-
-        Arguments:
-            x: `[num_gathered_elems]` with `torch.int`, the result of allgather
-            use_default_stream: whether to use the default stream or not.
-                Use the default stream if `True`, and the omm stream defined in DeepEP if `False`.
-            async_finish: the current stream will not wait for the communication kernels to be finished if set.
-
-        Returns:
-            the event after executing the kernel (valid only if `async_finish` is set).
-        """
-        event = self.runtime.low_latency_allgather(x, use_default_stream, async_finish)
-        return EventOverlap(event)
-
     def low_latency_update_mask_buffer(self, rank_to_mask: int, mask: bool = False):
         """
-        Mask (unmask) a rank during communication (dispatch, combine, allgather, and clean)
+        Mask (unmask) a rank during communication (dispatch, combine, and clean)
 
         Arguments: 
             rank: the rank to mask (unmask).
