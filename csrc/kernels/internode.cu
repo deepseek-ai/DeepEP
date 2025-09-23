@@ -1111,7 +1111,7 @@ void dispatch(void* recv_x, float* recv_x_scales, topk_idx_t* recv_topk_idx, flo
 #undef DISPATCH_LAUNCH_CASE
 }
 
-template <bool kLowLatencyMode, int kNumTMABytesPerWarp>
+template <bool kLowLatencyMode, int kNumTMABytesPerWarp, int kNumBlocksPerChannel>
 __global__ void cached_notify(const int rdma_clean_offset, const int rdma_num_int_clean,
                               const int nvl_clean_offset, const int nvl_num_int_clean,
                               int* combined_rdma_head, int num_combined_tokens, int num_channels,
@@ -1212,7 +1212,7 @@ __global__ void cached_notify(const int rdma_clean_offset, const int rdma_num_in
             }
             __syncwarp();
 
-            for (int dst_rdma_rank = sm_id - 2; dst_rdma_rank < num_rdma_ranks; dst_rdma_rank += num_channels * 2 - 2) {
+            for (int dst_rdma_rank = sm_id - 2; dst_rdma_rank < num_rdma_ranks; dst_rdma_rank += num_channels * kNumBlocksPerChannel - 2) {
                 // Iterate in reverse order
                 int token_start_idx = warp_id == 0 ? 0 : rdma_channel_prefix_matrix[dst_rdma_rank * num_channels + warp_id - 1];
                 int token_end_idx = rdma_channel_prefix_matrix[dst_rdma_rank * num_channels + warp_id];
@@ -1267,6 +1267,7 @@ void cached_notify(int hidden_int4, int num_scales, int num_topk_idx, int num_to
     const auto num_rdma_ranks = num_ranks / NUM_MAX_NVL_PEERS;
     const int kNumTMABytesPerWarp = 8192;
     const int smem_size = kNumTMABytesPerWarp * num_warps;
+    const int num_blocks_per_channel = zero_copy ? 1 : 2;
 
     // Get clean meta
     auto rdma_clean_meta = get_rdma_clean_meta(hidden_int4, num_scales, num_topk_idx, num_topk_weights, num_rdma_ranks, num_max_rdma_chunked_recv_tokens, num_channels, zero_copy, is_cached_dispatch);
@@ -1275,11 +1276,13 @@ void cached_notify(int hidden_int4, int num_scales, int num_topk_idx, int num_to
     EP_HOST_ASSERT((nvl_clean_meta.first + nvl_clean_meta.second) * sizeof(int) <= num_nvl_bytes);
     EP_HOST_ASSERT(num_rdma_bytes < std::numeric_limits<int>::max());
     EP_HOST_ASSERT(num_nvl_bytes < std::numeric_limits<int>::max());
-    EP_HOST_ASSERT(num_channels * 2 > 3);
+    EP_HOST_ASSERT(num_channels * num_blocks_per_channel > 3);
 
     // Launch kernel
-    auto cached_notify_func = low_latency_mode ? cached_notify<true, kNumTMABytesPerWarp> : cached_notify<false, kNumTMABytesPerWarp>;
-    SETUP_LAUNCH_CONFIG(num_channels * 2, num_threads, stream);
+    auto cached_notify_func =
+        zero_copy ? (low_latency_mode ? cached_notify<true, kNumTMABytesPerWarp, 1> : cached_notify<false, kNumTMABytesPerWarp, 1>) :
+        (low_latency_mode ? cached_notify<true, kNumTMABytesPerWarp, 2> : cached_notify<false, kNumTMABytesPerWarp, 2>);
+    SETUP_LAUNCH_CONFIG(num_channels * num_blocks_per_channel, num_threads, stream);
     SET_SHARED_MEMORY_FOR_TMA(cached_notify_func);
     LAUNCH_KERNEL(&cfg, cached_notify_func,
                   rdma_clean_meta.first, rdma_clean_meta.second,
