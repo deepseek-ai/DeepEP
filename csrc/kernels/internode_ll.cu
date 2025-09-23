@@ -7,14 +7,72 @@ namespace deep_ep {
 
 namespace internode_ll {
 
+__forceinline__ __device__ bool is_rank_masked(int* mask_buffer_ptr, int rank) {
+    return mask_buffer_ptr != nullptr && ld_acquire_sys_global(mask_buffer_ptr + rank) != 0;
+}
+
+template <int kNumThreads>
+__forceinline__ __device__ void barrier(int thread_id, int rank, int num_ranks, 
+                                        int* mask_buffer_ptr, int* sync_buffer_ptr) {
+    EP_DEVICE_ASSERT(kNumThreads >= num_ranks);
+
+    // Quiet all QPs
+    auto qps_per_rank = ibgda_get_state()->num_rc_per_pe * ibgda_get_state()->num_devices_initialized;
+    
+    for (int i = thread_id; i < qps_per_rank * (num_ranks - 1); i += kNumThreads) {
+        auto dst_rank = (rank + 1 + i / qps_per_rank) % num_ranks;
+        auto qp_id = i % qps_per_rank;
+        nvshmemi_ibgda_quiet(dst_rank, qp_id);
+    }
+
+    // Update local counter
+    if (thread_id == 0) atomicAdd(sync_buffer_ptr + rank, -1);
+    __syncthreads();
+
+    int cnt = sync_buffer_ptr[rank];
+    // Update remote counter and wait for local counter to be updated
+    if (thread_id < num_ranks && thread_id != rank) {
+        const auto dst_rank = thread_id;
+        const auto dst_ptr = reinterpret_cast<uint64_t>(sync_buffer_ptr + rank);
+        const auto dst_p2p_ptr = nvshmemi_get_p2p_ptr(dst_ptr, rank, dst_rank);
+
+        if (not is_rank_masked(mask_buffer_ptr, dst_rank)) {
+            if (dst_p2p_ptr == 0) {
+                nvshmemi_ibgda_rma_p(reinterpret_cast<int*>(dst_ptr), cnt, dst_rank, 0);
+                // nvshmemi_ibgda_amo_nonfetch_add(reinterpret_cast<int*>(dst_ptr), -1, dst_rank, 0);
+            } else {
+                st_release_sys_global(reinterpret_cast<int*>(dst_p2p_ptr), cnt);
+            }
+
+            auto start_time = clock64();
+            uint64_t wait_recv_cost = 0;
+            while ((ld_acquire_sys_global(sync_buffer_ptr + dst_rank) != cnt)   // remote is not ready
+                && (wait_recv_cost = clock64()-start_time) <= NUM_TIMEOUT_CYCLES               // not timeout
+            );
+            // Mask rank if timeout
+            if (wait_recv_cost > NUM_TIMEOUT_CYCLES) {
+                printf("Warning: DeepEP timeout for barrier, rank %d, dst_rank %d\n", rank, dst_rank);
+                EP_DEVICE_ASSERT(mask_buffer_ptr != nullptr);
+                atomicExch(mask_buffer_ptr + dst_rank, 1);
+            }
+        }
+    }
+    __syncthreads();
+}
+
 template <int kNumThreads> __launch_bounds__(kNumThreads, 1)
 __global__ void clean_low_latency_buffer(int* clean_0, int num_clean_int_0,
-                                         int* clean_1, int num_clean_int_1) {
+                                         int* clean_1, int num_clean_int_1,
+                                         int rank, int num_ranks, int* mask_buffer_ptr, int* sync_buffer_ptr) {
+    auto thread_id = static_cast<int>(threadIdx.x);
+
     // Barrier before cleaning (in case of unfinished chunked EP)
-    nvshmemx_barrier_all_block();
+    if (sync_buffer_ptr == nullptr)
+        nvshmemx_barrier_all_block();
+    else
+        barrier<kNumThreads>(thread_id, rank, num_ranks, mask_buffer_ptr, sync_buffer_ptr);
 
     // Clean
-    auto thread_id = static_cast<int>(threadIdx.x);
     #pragma unroll
     for (int i = thread_id; i < num_clean_int_0; i += kNumThreads)
         clean_0[i] = 0;
@@ -23,60 +81,10 @@ __global__ void clean_low_latency_buffer(int* clean_0, int num_clean_int_0,
         clean_1[i] = 0;
 
     // Barrier after cleaning (make sure the low-latency mode works fine)
-    nvshmemx_barrier_all_block();
-}
-
-template <int kNumThreads> __launch_bounds__(kNumThreads, 1)
-__global__ void clean_low_latency_buffer_with_mask(int* clean_0, int num_clean_int_0,
-                                                   int* clean_1, int num_clean_int_1,
-                                                   int rank, int num_ranks, int* mask_buffer_ptr, int* sync_buffer_ptr) {
-    auto thread_id = static_cast<int>(threadIdx.x);
-    const auto num_rounds = 3; // Barrier - Clean - Barrier
-    for (int round_id = 0; round_id < num_rounds; round_id++) {
-        if (round_id != 1) {
-            // Barrier before cleaning (in case of unfinished chunked EP)
-            // and Barrier after cleaning (make sure the low-latency mode works fine)
-            int cnt_before_update = sync_buffer_ptr[rank];
-            EP_DEVICE_ASSERT(kNumThreads >= num_ranks);
-
-            if (thread_id < num_ranks && rank != thread_id) {
-                const auto dst_rank = thread_id;
-                const auto dst_ptr = reinterpret_cast<uint64_t>(sync_buffer_ptr + rank);
-                const auto dst_p2p_ptr = nvshmemi_get_p2p_ptr(dst_ptr, rank, dst_rank);
-                
-                if (mask_buffer_ptr == nullptr || ld_acquire_sys_global(mask_buffer_ptr + dst_rank) == 0) {
-                    // Update remote counter
-                    if (dst_p2p_ptr == 0) {
-                        nvshmemi_ibgda_amo_nonfetch_add(reinterpret_cast<int*>(dst_ptr), -1, dst_rank, 0);
-                    } else {
-                        st_release_sys_global(reinterpret_cast<int*>(dst_p2p_ptr), cnt_before_update - 1);
-                    }
-                    auto start_time = clock64();
-                    uint64_t wait_recv_cost = 0;
-                    // Wait for local counter to be updated
-                    while ((ld_acquire_global(sync_buffer_ptr + dst_rank) != (cnt_before_update - 1))               // remote is not ready
-                        && (mask_buffer_ptr == nullptr || ((wait_recv_cost = clock64()-start_time) <= NUM_TIMEOUT_CYCLES)) // not timeout
-                    );
-                    // Mask rank if timeout
-                    if (mask_buffer_ptr != nullptr && wait_recv_cost > NUM_TIMEOUT_CYCLES) {
-                        atomicExch(mask_buffer_ptr + dst_rank, 1);
-                        // printf("[rank %d] Clean LL buffer: rank %d is masked due to timeout\n", rank, dst_rank);
-                    }
-                }
-            }
-            __syncthreads();
-            if (thread_id == 0) atomicAdd(sync_buffer_ptr + rank, -1);
-            __syncthreads();
-        } else {
-            // Clean
-            #pragma unroll
-            for (int i = thread_id; i < num_clean_int_0; i += kNumThreads)
-                clean_0[i] = 0;
-            #pragma unroll
-            for (int i = thread_id; i < num_clean_int_1; i += kNumThreads)
-                clean_1[i] = 0;
-        }
-    }
+    if (sync_buffer_ptr == nullptr)
+        nvshmemx_barrier_all_block();
+    else
+        barrier<kNumThreads>(thread_id, rank, num_ranks, mask_buffer_ptr, sync_buffer_ptr);
 }
 
 void clean_low_latency_buffer(int* clean_0, int num_clean_int_0,
@@ -87,14 +95,9 @@ void clean_low_latency_buffer(int* clean_0, int num_clean_int_0,
 
     SETUP_LAUNCH_CONFIG(1, kNumThreads, stream);
 
-    if (sync_buffer_ptr == nullptr) {
-        LAUNCH_KERNEL(&cfg, clean_low_latency_buffer<kNumThreads>,
-                    clean_0, num_clean_int_0, clean_1, num_clean_int_1);
-    } else {
-        LAUNCH_KERNEL(&cfg, clean_low_latency_buffer_with_mask<kNumThreads>,
-                    clean_0, num_clean_int_0, clean_1, num_clean_int_1, \
-                    rank, num_ranks, mask_buffer_ptr, sync_buffer_ptr);
-    }
+    LAUNCH_KERNEL(&cfg, clean_low_latency_buffer<kNumThreads>,
+                  clean_0, num_clean_int_0, clean_1, num_clean_int_1, \
+                  rank, num_ranks, mask_buffer_ptr, sync_buffer_ptr);
 }
 
 template <bool kUseFP8, bool kUseUE8M0, int kHidden>
@@ -222,7 +225,7 @@ dispatch(void* packed_recv_x, void* packed_recv_x_scales,
                                      rank * num_max_dispatch_tokens_per_rank * num_bytes_per_msg +
                                      slot_idx * num_bytes_per_msg;
                 const auto dst_p2p_ptr = nvshmemi_get_p2p_ptr(dst_ptr, rank, dst_rank);
-                if (mask_buffer_ptr == nullptr || ld_acquire_sys_global(mask_buffer_ptr + dst_rank) == 0) {
+                if (not is_rank_masked(mask_buffer_ptr, dst_rank)) {
                     if (dst_p2p_ptr == 0) {
                         nvshmemi_ibgda_put_nbi_warp(dst_ptr, src_ptr, num_bytes_per_msg, dst_rank, dst_expert_local_idx, lane_id, slot_idx);
                     } else {
@@ -232,6 +235,7 @@ dispatch(void* packed_recv_x, void* packed_recv_x_scales,
                         UNROLLED_WARP_COPY(8, lane_id, num_int4_per_msg, dst_int4_ptr, src_int4_ptr, ld_nc_global, st_na_global);
                     }
                 }
+
                 // Increase counter after finishing
                 __syncwarp();
                 lane_id == 0 ? atomic_add_release_global(atomic_finish_counter_per_expert + dst_expert_idx, 1) : 0;
@@ -290,7 +294,7 @@ dispatch(void* packed_recv_x, void* packed_recv_x_scales,
         while (ld_acquire_global(atomic_finish_counter_per_expert + responsible_expert_idx) != FINISHED_SUM_TAG * 2);
         auto dst_ptr = reinterpret_cast<uint64_t>(rdma_recv_count + dst_expert_local_idx * num_ranks + rank);
         auto dst_p2p_ptr = nvshmemi_get_p2p_ptr(dst_ptr, rank, dst_rank);
-        if (mask_buffer_ptr == nullptr || ld_acquire_sys_global(mask_buffer_ptr + dst_rank) == 0) {
+        if (not is_rank_masked(mask_buffer_ptr, dst_rank)) {
             if (dst_p2p_ptr == 0) {
                 nvshmemi_ibgda_amo_nonfetch_add(reinterpret_cast<int*>(dst_ptr), -num_tokens_sent - 1, dst_rank, dst_expert_local_idx);
             } else {
@@ -341,21 +345,22 @@ dispatch(void* packed_recv_x, void* packed_recv_x_scales,
         if (sub_warp_id == 1 and lane_id == 0) {
             auto start_time = clock64();
             uint64_t wait_recv_cost = 0;
-            while (
-                (mask_buffer_ptr == nullptr || ld_acquire_sys_global(mask_buffer_ptr + src_rank) == 0)  // rank not masked
-                && (num_recv_tokens = ld_acquire_sys_global(rdma_recv_count + local_expert_idx * num_ranks + src_rank)) == 0    // data not arrived
-                && (mask_buffer_ptr == nullptr || ((wait_recv_cost = clock64()-start_time) <= NUM_TIMEOUT_CYCLES))    // not timeout
+            while (not is_rank_masked(mask_buffer_ptr, src_rank)   // rank not masked
+                   && (num_recv_tokens = ld_acquire_sys_global(rdma_recv_count + local_expert_idx * num_ranks + src_rank)) == 0    // data not arrived
+                   && (wait_recv_cost = clock64()-start_time) <= NUM_TIMEOUT_CYCLES    // not timeout
             );
             // Do not receive tokens if rank timeout or masked
             if (num_recv_tokens == 0)
                 num_recv_tokens = -1;
             // Mask rank if timeout
-            if (mask_buffer_ptr != nullptr && wait_recv_cost > NUM_TIMEOUT_CYCLES) {
+            if (wait_recv_cost > NUM_TIMEOUT_CYCLES) {
                 if (local_expert_idx == 0) {
+                    printf("Warning: DeepEP timeout for dispatch receive, rank %d, src_rank %d\n", rank, src_rank);
+                    EP_DEVICE_ASSERT(mask_buffer_ptr != nullptr);
                     atomicExch(mask_buffer_ptr + src_rank, 1);
-                    // printf("[rank %d] Dispatch: rank %d is masked due to timeout\n", rank, src_rank);
                 }
             }
+
             num_recv_tokens = -num_recv_tokens - 1;
             recv_token_begin_idx = atomicAdd(packed_recv_count + local_expert_idx, num_recv_tokens);
             shared_num_recv_tokens[warp_group_id] = num_recv_tokens;
@@ -741,7 +746,7 @@ combine(void* combined_x,
         };
 
         // Issue IBGDA send
-        if (mask_buffer_ptr == nullptr || ld_acquire_sys_global(mask_buffer_ptr + dst_rank) == 0) {
+        if (not is_rank_masked(mask_buffer_ptr, dst_rank)) {
             for (int token_idx = offset + sub_warp_id; token_idx < offset + num_tokens_to_send; token_idx += num_warps_per_group) {
                 const auto x_int4 = local_x + token_idx * hidden_bf16_int4;
                 const auto rdma_send_type_row = reinterpret_cast<int*>(rdma_send_x_vec + token_idx * num_bytes_per_slot);
@@ -825,7 +830,7 @@ combine(void* combined_x,
             while (ld_acquire_global(atomic_clean_flag) == 0);
             auto dst_ptr = reinterpret_cast<uint64_t>(rdma_recv_flag + global_expert_idx);
             auto dst_p2p_ptr = nvshmemi_get_p2p_ptr(dst_ptr, rank, dst_rank);
-            if (mask_buffer_ptr == nullptr || ld_acquire_sys_global(mask_buffer_ptr + dst_rank) == 0) {
+            if (not is_rank_masked(mask_buffer_ptr, dst_rank)) {
                 if (dst_p2p_ptr == 0) {
                     nvshmemi_ibgda_amo_nonfetch_add(reinterpret_cast<int*>(dst_ptr), 1, dst_rank, local_expert_idx);
                 } else {
@@ -856,17 +861,19 @@ combine(void* combined_x,
             const auto src_rank = responsible_expert_idx / num_local_experts;
             auto start_time = clock64();
             uint64_t wait_recv_cost = 0;
-            while (
-                (mask_buffer_ptr == nullptr || ld_acquire_sys_global(mask_buffer_ptr + src_rank) == 0)    // rank not masked
-                && ld_acquire_sys_global(rdma_recv_flag + responsible_expert_idx) == 0                      // recv not ready
-                && (mask_buffer_ptr == nullptr || ((wait_recv_cost = clock64()-start_time) <= NUM_TIMEOUT_CYCLES))  // not timeout
+            while (not is_rank_masked(mask_buffer_ptr, src_rank)                            // rank not masked
+                   && ld_acquire_sys_global(rdma_recv_flag + responsible_expert_idx) == 0   // recv not ready
+                   && (wait_recv_cost = clock64()-start_time) <= NUM_TIMEOUT_CYCLES       // not timeout
             );
-            if (mask_buffer_ptr != nullptr && wait_recv_cost > NUM_TIMEOUT_CYCLES) {
-                if (ld_acquire_sys_global(mask_buffer_ptr + src_rank) == 0) {
+            // Mask rank if timeout
+            if (wait_recv_cost > NUM_TIMEOUT_CYCLES) {
+                if (responsible_expert_idx % num_local_experts == 0) {
+                    printf("Warning: DeepEP timeout for combine receive, rank %d, src_rank %d\n", rank, src_rank);
+                    EP_DEVICE_ASSERT(mask_buffer_ptr != nullptr);
                     atomicExch(mask_buffer_ptr + src_rank, 1);
-                    // printf("[rank %d] Combine: rank %d is masked due to timeout\n", rank, src_rank);
                 }
             }
+
             if (combine_wait_recv_cost_stats != nullptr) {
                 atomicAdd(reinterpret_cast<unsigned long long*>(combine_wait_recv_cost_stats + src_rank), wait_recv_cost);
             }
@@ -928,7 +935,7 @@ combine(void* combined_x,
                     int topk_idx_reg = __shfl_sync(0xffffffff, topk_idx_by_lane, i);
                     if (topk_idx_reg < 0)
                         continue;
-                    if (mask_buffer_ptr != nullptr && ld_acquire_sys_global(mask_buffer_ptr + topk_idx_reg / num_local_experts) != 0)
+                    if (is_rank_masked(mask_buffer_ptr, topk_idx_reg / num_local_experts))
                         continue;
 
                     mbarrier_wait<true>(empty_barriers[stage_idx], tma_phase, stage_idx);
@@ -967,7 +974,7 @@ combine(void* combined_x,
                     int topk_idx_reg = __shfl_sync(0xffffffff, topk_idx_by_lane, i);
                     if (topk_idx_reg < 0)
                         continue;
-                    if (mask_buffer_ptr != nullptr && ld_acquire_sys_global(mask_buffer_ptr + topk_idx_reg / num_local_experts) != 0)
+                    if (is_rank_masked(mask_buffer_ptr, topk_idx_reg / num_local_experts))
                         continue;
                     const auto& topk_weight = __shfl_sync(0xffffffff, topk_weights_by_lane, i);
 

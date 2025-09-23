@@ -169,8 +169,10 @@ void Buffer::destroy() {
         CUDA_CHECK(cudaDeviceSynchronize());
         internode::barrier();
         internode::free(rdma_buffer_ptr);
-        internode::free(mask_buffer_ptr);
-        internode::free(sync_buffer_ptr);
+        if (enable_shrink) {
+            internode::free(mask_buffer_ptr);
+            internode::free(sync_buffer_ptr);
+        }
         internode::finalize();
     }
 #endif
