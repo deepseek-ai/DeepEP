@@ -301,23 +301,33 @@ dispatch(void* packed_recv_x, void* packed_recv_x_scales,
             }
         }
     }
-    __syncthreads();
-    // clean data ready flag
-    #pragma unroll
-    for (int token_idx = sm_id; token_idx < num_max_dispatch_tokens_per_rank; token_idx += num_sms) {
-        #pragma unroll
-        for (int rank_id = thread_id; rank_id < num_ranks; rank_id+=blockDim.x) {
-            auto node_id = rank_id/num_nvl_ranks;
-            auto nvl_rank_id = rank_id%num_nvl_ranks;
-            auto* data_ready_flag_ptr = reinterpret_cast<int*>(next_clean_data_ready_counter) +
-                node_id * num_max_dispatch_tokens_per_rank * num_nvl_ranks +
-                token_idx * num_nvl_ranks +
-                rank % num_nvl_ranks;
-            EP_DEVICE_ASSERT(data_ready_flag_ptr-next_clean_data_ready_counter < num_max_dispatch_tokens_per_rank*num_nodes*num_nvl_ranks*sizeof(int));
-            const auto data_ready_p2p_src_ptr = nvshmemi_get_p2p_ptr(uint64_t(data_ready_flag_ptr), rank, rank/num_nvl_ranks*num_nvl_ranks + nvl_rank_id);
-            reinterpret_cast<int*>(data_ready_p2p_src_ptr)[0] = 0;
+
+    if (sm_id == num_sms-1) {
+        // clean data ready flag
+        #pragma unroll 8
+        for (int i = thread_id; i < num_max_dispatch_tokens_per_rank*num_ranks; i += blockDim.x) {
+            int token_idx = i/num_ranks;
+            int rank_id = i%num_ranks;
+            {
+                auto node_id = rank_id/num_nvl_ranks;
+                auto nvl_rank_id = rank_id%num_nvl_ranks;
+                auto* data_ready_flag_ptr = reinterpret_cast<int*>(next_clean_data_ready_counter) +
+                    node_id * num_max_dispatch_tokens_per_rank * num_nvl_ranks +
+                    token_idx * num_nvl_ranks +
+                    rank % num_nvl_ranks;
+                EP_DEVICE_ASSERT(data_ready_flag_ptr-next_clean_data_ready_counter < num_max_dispatch_tokens_per_rank*num_nodes*num_nvl_ranks*sizeof(int));
+                const auto data_ready_p2p_src_ptr = nvshmemi_get_p2p_ptr(uint64_t(data_ready_flag_ptr), rank, rank/num_nvl_ranks*num_nvl_ranks + nvl_rank_id);
+                reinterpret_cast<int*>(data_ready_p2p_src_ptr)[0] = 0;
+            }
         }
+        __syncthreads();
+        #pragma unroll
+        for (int i = thread_id; i < num_experts; i += blockDim.x)
+            atomic_add_release_global(atomic_finish_counter_per_expert + i, FINISHED_SUM_TAG);
     }
+
+    __syncthreads();
+
     // Issue count sends
     if (responsible_expert_idx < num_experts and sub_warp_id == 0 and lane_id == 0) {
         const auto dst_rank = responsible_expert_idx / num_local_experts;
@@ -326,7 +336,7 @@ dispatch(void* packed_recv_x, void* packed_recv_x_scales,
         auto real_write_dst_rank = dst_rank / num_nvl_ranks * num_nvl_ranks + rank % num_nvl_ranks;
         auto start_time = clock64();
         // Wait local sends issued and send expert counts
-        while (ld_acquire_global(atomic_finish_counter_per_expert + responsible_expert_idx) != FINISHED_SUM_TAG * 2);
+        while (ld_acquire_global(atomic_finish_counter_per_expert + responsible_expert_idx) != FINISHED_SUM_TAG * 3);
         auto dst_ptr = reinterpret_cast<int4*>(rdma_recv_count) + 
             dst_expert_local_idx * num_ranks + 
             (rank/num_nvl_ranks) * num_nvl_ranks +
@@ -745,14 +755,14 @@ combine(void* combined_x,
         goto LOW_LATENCY_COMBINE_RECV;
 
     // Clean up next buffer
-    if (sm_id == 0 and warp_group_id == 0 and sub_warp_id == 0) {
+    if (sm_id == num_sms-1) {
         #pragma unroll
-        for (int i = lane_id; i < num_experts; i += 32)
+        for (int i = thread_id; i < num_experts; i += num_threads)
             next_clean[i] = 0;
 
         next_clean_int4 = next_clean_int4 + num_experts;
         #pragma unroll
-        for (int i = lane_id; i < num_experts; i += 32) {// clean for dispatch
+        for (int i = thread_id; i < num_experts; i += num_threads) {// clean for dispatch
             const auto src_rank = i / num_local_experts;
             const auto local_expert_idx = i % num_local_experts;
             const auto read_recv_counter_rank = rank / num_nvl_ranks * num_nvl_ranks + src_rank % num_nvl_ranks; // read recv counter from from remote nvl_rank
@@ -765,9 +775,26 @@ combine(void* combined_x,
             const auto real_counter_p2p_src_ptr = nvshmemi_get_p2p_ptr(uint64_t(counter_ptr), rank, read_recv_counter_rank);
             st_release_sys_global(reinterpret_cast<int4*>(real_counter_p2p_src_ptr), {0,0,0,0});
         }
+        // clean data ready flag
+        #pragma unroll 8
+        for (int i = thread_id; i < num_max_dispatch_tokens_per_rank*num_ranks; i += num_threads) {
+            int token_idx = i/num_ranks;
+            int rank_id = i%num_ranks;
+            {
+                auto node_id = rank_id/num_nvl_ranks;
+                auto nvl_rank_id = rank_id%num_nvl_ranks;
+                auto* data_ready_flag_ptr = reinterpret_cast<int*>(next_clean_data_ready_counter) +
+                    node_id * num_max_dispatch_tokens_per_rank * num_nvl_ranks +
+                    token_idx * num_nvl_ranks +
+                    rank % num_nvl_ranks;
+                EP_DEVICE_ASSERT(data_ready_flag_ptr-next_clean_data_ready_counter < num_max_dispatch_tokens_per_rank*num_nodes*num_nvl_ranks*sizeof(int));
+                const auto data_ready_p2p_src_ptr = nvshmemi_get_p2p_ptr(uint64_t(data_ready_flag_ptr), rank, rank/num_nvl_ranks*num_nvl_ranks + nvl_rank_id);
+                reinterpret_cast<int*>(data_ready_p2p_src_ptr)[0] = 0;
+            }
+        }
         // Notify before executing `int_p`
-        __syncwarp();
-        if (lane_id == 0)
+        __syncthreads();
+        if (thread_id == 0)
             atomic_add_release_global(atomic_clean_flag, num_experts);
     }
 
@@ -916,22 +943,6 @@ combine(void* combined_x,
         __syncwarp();
     }
 
-    // clean data ready flag
-    #pragma unroll
-    for (int token_idx = sm_id; token_idx < num_max_dispatch_tokens_per_rank; token_idx += num_sms) {
-        #pragma unroll
-        for (int rank_id = thread_id; rank_id < num_ranks; rank_id+=blockDim.x) {
-            auto node_id = rank_id/num_nvl_ranks;
-            auto nvl_rank_id = rank_id%num_nvl_ranks;
-            auto* data_ready_flag_ptr = reinterpret_cast<int*>(next_clean_data_ready_counter) +
-                node_id * num_max_dispatch_tokens_per_rank * num_nvl_ranks +
-                token_idx * num_nvl_ranks +
-                rank % num_nvl_ranks;
-            EP_DEVICE_ASSERT(data_ready_flag_ptr-next_clean_data_ready_counter < num_max_dispatch_tokens_per_rank*num_nodes*num_nvl_ranks*sizeof(int));
-            const auto data_ready_p2p_src_ptr = nvshmemi_get_p2p_ptr(uint64_t(data_ready_flag_ptr), rank, rank/num_nvl_ranks*num_nvl_ranks + nvl_rank_id);
-            reinterpret_cast<int*>(data_ready_p2p_src_ptr)[0] = 0;
-        }
-    }
     // Receiving phase
     LOW_LATENCY_COMBINE_RECV:
     if ((phases & LOW_LATENCY_RECV_PHASE) == 0)
