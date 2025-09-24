@@ -6,38 +6,34 @@ import torch
 import torch.distributed as dist
 import numpy as np
 from functools import partial
-from typing import Optional
+from typing import Optional, Literal
 
 import deep_ep
 from utils import init_dist, bench, bench_kineto, calc_diff, hash_tensor, per_token_cast_back
 
+def simulate_failure_and_skip(rank: int, api: Literal["dispatch", "combine", "clean"], expected_masked_ranks: set[int]):
+    # Simulates rank failure when the rank first calls the corresponding communication API
+    failed_api_ranks = {
+        # API -> rank to fail (rank fails when it first calls the corresponding communication API)
+        'dispatch': 1, 'combine': 3, 'clean': 5
+    }
+    if rank in expected_masked_ranks:
+        # Rank already failed
+        return True
+    if api in failed_api_ranks.keys():
+        expected_masked_ranks.add(failed_api_ranks[api])
+        if failed_api_ranks[api] == rank:
+            print(f"Rank {rank} failed when first calling {api} communication API, exit...", flush=True)
+            return True
+    return False
+
+def query_mask_buffer_and_check(api: Literal["dispatch", "combine", "clean"], buffer: deep_ep.Buffer, mask_status: torch.Tensor, expected_masked_ranks: set[int]):
+    buffer.low_latency_query_mask_buffer(mask_status)
+    assert set(mask_status.nonzero().squeeze(-1).tolist()) == expected_masked_ranks
 
 def test_main(num_tokens: int, hidden: int, num_experts: int, num_topk: int,
               rank: int, num_ranks: int, group: dist.ProcessGroup, buffer: deep_ep.Buffer,
               use_logfmt: bool = False, shrink_test: bool = False, seed: int = 0):
-    mask_status = torch.zeros((num_ranks, ), dtype=torch.int, device='cuda')
-    expected_masked_ranks = set()
-
-    def simulate_failure_and_skip(api):
-        # Simulates rank failure when the rank first calls the corresponding communication API
-        failed_api_ranks = {
-            # API -> rank to fail (rank fails when it first calls the corresponding communication API)
-            'dispatch': 1, 'combine': 3, 'clean': 5
-        }
-        if rank in expected_masked_ranks:
-            # Rank already failed
-            return True
-        if api in failed_api_ranks.keys():
-            expected_masked_ranks.add(failed_api_ranks[api])
-            if failed_api_ranks[api] == rank:
-                print(f"Rank {rank} failed when first calling {api} communication API, exit...", flush=True)
-                return True
-        return False
-
-    def query_mask_buffer_and_check(api):
-        buffer.low_latency_query_mask_buffer(mask_status)
-        assert set(mask_status.nonzero().squeeze(-1).tolist()) == expected_masked_ranks
-
     torch.manual_seed(seed + rank)
     random.seed(seed + rank)
 
@@ -69,6 +65,10 @@ def test_main(num_tokens: int, hidden: int, num_experts: int, num_topk: int,
     all_topk_idx = torch.empty((num_ranks, num_tokens, num_topk), dtype=topk_idx.dtype, device='cuda')
     dist.all_gather_into_tensor(all_topk_idx, topk_idx, group=group)
 
+    # For failure simulation and shrink testing
+    mask_status = torch.zeros((num_ranks, ), dtype=torch.int, device='cuda')
+    expected_masked_ranks = set()
+
     # Check dispatch correctness
     do_check = True
     hash_value, num_times = 0, 0
@@ -77,7 +77,7 @@ def test_main(num_tokens: int, hidden: int, num_experts: int, num_topk: int,
             for dispatch_use_fp8 in (False, True):
                 for round_scale in (False, True) if dispatch_use_fp8 else (False, ):
                     for use_ue8m0 in (False, True) if round_scale else (False, ):
-                        if shrink_test and simulate_failure_and_skip("dispatch"):
+                        if shrink_test and simulate_failure_and_skip(rank, "dispatch", expected_masked_ranks):
                             break
                         num_times += 1
                         for i in range((num_times % 2) + 1):
@@ -89,7 +89,7 @@ def test_main(num_tokens: int, hidden: int, num_experts: int, num_topk: int,
                                                             async_finish=not return_recv_hook, return_recv_hook=return_recv_hook)
                             hook() if return_recv_hook else event.current_stream_wait()
                         if shrink_test:
-                            query_mask_buffer_and_check("dispatch")
+                            query_mask_buffer_and_check("dispatch", buffer, mask_status, expected_masked_ranks)
                         packed_recv_x = (packed_recv_x[0], packed_recv_x[1].contiguous()) if dispatch_use_fp8 else packed_recv_x
                         simulated_gemm_x = per_token_cast_back(packed_recv_x[0].view(-1, hidden), packed_recv_x[1].view(-1, hidden // 128)).view(packed_recv_x[0].shape) \
                             if dispatch_use_fp8 else packed_recv_x.clone()
@@ -132,7 +132,7 @@ def test_main(num_tokens: int, hidden: int, num_experts: int, num_topk: int,
                                 hash_value ^= hash_tensor(packed_recv_x[i, :num_valid_tokens])
 
                         # Check combine correctness
-                        if shrink_test and simulate_failure_and_skip("combine"):
+                        if shrink_test and simulate_failure_and_skip(rank, "combine", expected_masked_ranks):
                             break
                         for zero_copy in (False, ) if use_logfmt else (False, True):
                             if zero_copy:
@@ -144,7 +144,7 @@ def test_main(num_tokens: int, hidden: int, num_experts: int, num_topk: int,
                                                                                 return_recv_hook=return_recv_hook, out=out)
                             hook() if return_recv_hook else event.current_stream_wait()
                             if shrink_test:
-                                query_mask_buffer_and_check("combine")
+                                query_mask_buffer_and_check("combine", buffer, mask_status, expected_masked_ranks)
                             if do_check:
                                 if shrink_test:
                                     owner_by_expert = (torch.arange(num_experts, device='cuda') // num_local_experts)
@@ -160,11 +160,11 @@ def test_main(num_tokens: int, hidden: int, num_experts: int, num_topk: int,
 
                         # Clean buffer API
                         if shrink_test:
-                            if simulate_failure_and_skip("clean"):
+                            if simulate_failure_and_skip(rank, "clean", expected_masked_ranks):
                                 break
 
                             buffer.clean_low_latency_buffer(num_tokens, hidden, num_experts)
-                            query_mask_buffer_and_check("clean")
+                            query_mask_buffer_and_check("clean", buffer, mask_status, expected_masked_ranks)
 
     if shrink_test:
         return

@@ -39,20 +39,20 @@ __forceinline__ __device__ void barrier(int thread_id, int rank, int num_ranks,
         if (not is_rank_masked(mask_buffer_ptr, dst_rank)) {
             if (dst_p2p_ptr == 0) {
                 nvshmemi_ibgda_rma_p(reinterpret_cast<int*>(dst_ptr), cnt, dst_rank, 0);
-                // nvshmemi_ibgda_amo_nonfetch_add(reinterpret_cast<int*>(dst_ptr), -1, dst_rank, 0);
             } else {
                 st_release_sys_global(reinterpret_cast<int*>(dst_p2p_ptr), cnt);
             }
 
             auto start_time = clock64();
             uint64_t wait_recv_cost = 0;
-            while ((ld_acquire_sys_global(sync_buffer_ptr + dst_rank) != cnt)   // remote is not ready
-                && (wait_recv_cost = clock64()-start_time) <= NUM_TIMEOUT_CYCLES               // not timeout
+            while (ld_acquire_sys_global(sync_buffer_ptr + dst_rank) != cnt   // remote is not ready
+                   && (wait_recv_cost = clock64() - start_time) <= NUM_TIMEOUT_CYCLES               // not timeout
             );
             // Mask rank if timeout
             if (wait_recv_cost > NUM_TIMEOUT_CYCLES) {
                 printf("Warning: DeepEP timeout for barrier, rank %d, dst_rank %d\n", rank, dst_rank);
-                EP_DEVICE_ASSERT(mask_buffer_ptr != nullptr);
+                if (mask_buffer_ptr == nullptr)
+                    trap();
                 atomicExch(mask_buffer_ptr + dst_rank, 1);
             }
         }
@@ -347,18 +347,17 @@ dispatch(void* packed_recv_x, void* packed_recv_x_scales,
             uint64_t wait_recv_cost = 0;
             while (not is_rank_masked(mask_buffer_ptr, src_rank)   // rank not masked
                    && (num_recv_tokens = ld_acquire_sys_global(rdma_recv_count + local_expert_idx * num_ranks + src_rank)) == 0    // data not arrived
-                   && (wait_recv_cost = clock64()-start_time) <= NUM_TIMEOUT_CYCLES    // not timeout
+                   && (wait_recv_cost = clock64() - start_time) <= NUM_TIMEOUT_CYCLES    // not timeout
             );
             // Do not receive tokens if rank timeout or masked
             if (num_recv_tokens == 0)
                 num_recv_tokens = -1;
             // Mask rank if timeout
             if (wait_recv_cost > NUM_TIMEOUT_CYCLES) {
-                if (local_expert_idx == 0) {
-                    printf("Warning: DeepEP timeout for dispatch receive, rank %d, src_rank %d\n", rank, src_rank);
-                    EP_DEVICE_ASSERT(mask_buffer_ptr != nullptr);
-                    atomicExch(mask_buffer_ptr + src_rank, 1);
-                }
+                printf("Warning: DeepEP timeout for dispatch receive, rank %d, local_expert_idx %d, src_rank %d\n", rank, local_expert_idx, src_rank);
+                if (mask_buffer_ptr == nullptr)
+                    trap();
+                atomicExch(mask_buffer_ptr + src_rank, 1);
             }
 
             num_recv_tokens = -num_recv_tokens - 1;
@@ -863,15 +862,14 @@ combine(void* combined_x,
             uint64_t wait_recv_cost = 0;
             while (not is_rank_masked(mask_buffer_ptr, src_rank)                            // rank not masked
                    && ld_acquire_sys_global(rdma_recv_flag + responsible_expert_idx) == 0   // recv not ready
-                   && (wait_recv_cost = clock64()-start_time) <= NUM_TIMEOUT_CYCLES       // not timeout
+                   && (wait_recv_cost = clock64() - start_time) <= NUM_TIMEOUT_CYCLES       // not timeout
             );
             // Mask rank if timeout
             if (wait_recv_cost > NUM_TIMEOUT_CYCLES) {
-                if (responsible_expert_idx % num_local_experts == 0) {
-                    printf("Warning: DeepEP timeout for combine receive, rank %d, src_rank %d\n", rank, src_rank);
-                    EP_DEVICE_ASSERT(mask_buffer_ptr != nullptr);
-                    atomicExch(mask_buffer_ptr + src_rank, 1);
-                }
+                printf("Warning: DeepEP timeout for combine receive, rank %d, local_expert_idx %d, src_rank %d\n", rank, responsible_expert_idx % num_local_experts, src_rank);
+                if (mask_buffer_ptr == nullptr)
+                    trap();
+                atomicExch(mask_buffer_ptr + src_rank, 1);
             }
 
             if (combine_wait_recv_cost_stats != nullptr) {
