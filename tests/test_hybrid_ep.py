@@ -7,14 +7,14 @@ import torch.distributed as dist
 import os
 import deep_ep
 
-from utils import TorchRef, bench, bench_kineto
+from utils import TorchRef, bench, bench_kineto, init_dist
 
 HIDDEN_DIM = 7168
 MAX_NUM_OF_TOKENS_PER_RANK = 4096
 # NUM_TOKENS_PER_RANK should equal or less than MAX_NUM_OF_TOKENS_PER_RANK
 NUM_TOKENS_PER_RANK = 4096
 NUM_LOCAL_EXPERTS = 8
-NUM_OF_RANKS_PER_NODE = 32
+NUM_OF_RANKS_PER_NODE = 4
 TOPK = 8
 NUM_OF_EXPERTS = NUM_LOCAL_EXPERTS * NUM_OF_RANKS_PER_NODE
 ITERATIONS = 100
@@ -24,29 +24,6 @@ torch.cuda.manual_seed(SEED)
 torch.cuda.manual_seed_all(SEED)
 torch.backends.cudnn.deterministic = True
 torch.backends.cudnn.benchmark = False
-
-
-def init_dist(local_rank: int, num_local_ranks: int):
-    # NOTES: you may rewrite this function with your own cluster settings
-    num_nodes = int(os.getenv('WORLD_SIZE', 1))
-    node_rank = int(os.getenv('RANK', 0))
-    # local_size = int(os.getenv("LOCAL_WORLD_SIZE", "1"))
-
-    # Call the init process.
-    ip = os.getenv('MASTER_ADDR', '127.0.0.1')
-    port = int(os.getenv('MASTER_PORT', '8361'))
-
-    dist.init_process_group(
-        backend="nccl",
-        init_method=f'tcp://{ip}:{port}',
-        world_size=num_nodes * num_local_ranks,
-        rank=node_rank * num_local_ranks + local_rank,
-    )
-    torch.set_default_dtype(torch.bfloat16)
-    torch.set_default_device("cuda")
-    torch.cuda.set_device(local_rank)
-
-    return dist.get_rank(), dist.get_world_size(), dist.new_group(list(range(num_local_ranks * num_nodes)))
 
 
 def init_tensor(
@@ -86,7 +63,7 @@ def init_tensor(
     return hidden, probs, scaling_factor, routing_map, topk_idx, topk_weights
 
 
-def test_intra_node_correctness(buffer: deep_ep.HybridEpBuffer, ref: TorchRef, use_fp8: bool):
+def test_hybrid_ep_correctness(buffer: deep_ep.HybridEpBuffer, ref: TorchRef, use_fp8: bool):
     hidden, probs, scaling_factor, routing_map, topk_idx, topk_weights  = init_tensor(
         hidden_dim=HIDDEN_DIM,
         seq_len=NUM_TOKENS_PER_RANK,
@@ -160,7 +137,7 @@ def test_intra_node_correctness(buffer: deep_ep.HybridEpBuffer, ref: TorchRef, u
         print("Correctness check passed")
 
 
-def test_intra_node_benchmark(buffer: deep_ep.HybridEpBuffer, group: dist.ProcessGroup, use_fp8: bool, nsys_profile: bool):
+def test_hybrid_ep_benchmark(buffer: deep_ep.HybridEpBuffer, group: dist.ProcessGroup, use_fp8: bool, nsys_profile: bool):
     hidden, probs, scaling_factor, routing_map, topk_idx, topk_weights = init_tensor(
         hidden_dim=HIDDEN_DIM,
         seq_len=NUM_TOKENS_PER_RANK,
@@ -256,8 +233,8 @@ def test_main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
     )
 
     # Test body
-    test_intra_node_correctness(buffer, ref, args.use_fp8)
-    test_intra_node_benchmark(buffer, group, args.use_fp8, args.nsys_profile)
+    test_hybrid_ep_correctness(buffer, ref, args.use_fp8)
+    test_hybrid_ep_benchmark(buffer, group, args.use_fp8, args.nsys_profile)
 
     # Destroy
     dist.barrier()

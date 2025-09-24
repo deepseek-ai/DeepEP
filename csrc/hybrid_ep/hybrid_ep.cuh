@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: MIT
 // SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved
 #pragma once
-#include "kernels/hybrid_ep_backend_configs.hpp"
-#include "kernels/hybrid_ep_backend.cuh"
+#include "config.cuh"
+#include "backend/hybrid_ep_backend.cuh"
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/util/Optional.h>
 #include <torch/torch.h>

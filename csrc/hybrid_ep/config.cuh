@@ -10,7 +10,7 @@ constexpr int MAX_NUM_OF_TOKENS_PER_RANK = 4096; // NUM_OF_TOKENS_PER_RANK = NUM
 constexpr int NUM_OF_EXPERTS_PER_RANK = 8; // (NUM_OF_EXPERTS_PER_RANKxNUM_OF_RANKS_PER_NODE) = 4xN
 
 constexpr int NUM_OF_NODES = 1;  // Note: this is the number of nvlink domains
-constexpr int NUM_OF_RANKS_PER_NODE = 32; // Note: this is the number of ranks in each NVLink domain
+constexpr int NUM_OF_RANKS_PER_NODE = 4; // Note: this is the number of ranks in each NVLink domain
 
 // Multi-node NVLink Staff
 constexpr bool USE_MNNVLINK = true;
