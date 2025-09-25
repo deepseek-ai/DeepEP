@@ -11,6 +11,7 @@ from typing import Optional, Literal
 import deep_ep
 from utils import init_dist, bench, bench_kineto, calc_diff, hash_tensor, per_token_cast_back
 
+
 def simulate_failure_and_skip(rank: int, api: Literal["dispatch", "combine", "clean"], expected_masked_ranks: set[int]):
     # Simulates rank failure when the rank first calls the corresponding communication API
     failed_api_ranks = {
@@ -27,9 +28,11 @@ def simulate_failure_and_skip(rank: int, api: Literal["dispatch", "combine", "cl
             return True
     return False
 
+
 def query_mask_buffer_and_check(api: Literal["dispatch", "combine", "clean"], buffer: deep_ep.Buffer, mask_status: torch.Tensor, expected_masked_ranks: set[int]):
     buffer.low_latency_query_mask_buffer(mask_status)
     assert set(mask_status.nonzero().squeeze(-1).tolist()) == expected_masked_ranks
+
 
 def test_main(num_tokens: int, hidden: int, num_experts: int, num_topk: int,
               rank: int, num_ranks: int, group: dist.ProcessGroup, buffer: deep_ep.Buffer,

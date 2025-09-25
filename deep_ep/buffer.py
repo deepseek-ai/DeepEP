@@ -138,7 +138,6 @@ class Buffer:
         self.runtime.destroy()
         self.runtime = None
 
-
     @staticmethod
     def is_sm90_compiled():
         return deep_ep_cpp.is_sm90_compiled()
