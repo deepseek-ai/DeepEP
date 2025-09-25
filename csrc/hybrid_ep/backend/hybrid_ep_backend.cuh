@@ -10,37 +10,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-#define CUDA_CHECK(call)                                                       \
-  do {                                                                         \
-    cudaError_t const status = call;                                           \
-    if (status != cudaSuccess) {                                               \
-      cudaGetLastError();                                                      \
-      fprintf(stderr,                                                          \
-              "CUDA error encountered at: "                                    \
-              "file=%s, line=%d, "                                             \
-              "call='%s', Reason=%s:%s",                                       \
-              __FILE__, __LINE__, #call, cudaGetErrorName(status),             \
-              cudaGetErrorString(status));                                     \
-      abort();                                                                 \
-    }                                                                          \
-  } while (0)
-
-#define CU_CHECK(call)                                                         \
-  do {                                                                         \
-    auto result = call;                                                        \
-    if (result != CUDA_SUCCESS) {                                              \
-      const char *p_err_str = nullptr;                                         \
-      if (cuGetErrorString(result, &p_err_str) == CUDA_ERROR_INVALID_VALUE) {  \
-        p_err_str = "Unrecoginzed CU error num";                               \
-      }                                                                        \
-      fprintf(stderr, "CU error encountered at: "                              \
-              "file=%s line=%d, call='%s' Reason=%s.\n",                       \
-              __FILE__, __LINE__,                                              \
-              #call, p_err_str);                                               \
-      abort();                                                                 \
-    }                                                                          \
-  } while (0)
-
+#include "hybrid_ep_utils.cuh"
 
 namespace hybrid_ep{
 
@@ -283,18 +253,6 @@ struct combine_kernel_param_t{
   // The number of token output by attn layer on a rank/GPU.
   int num_of_tokens_per_rank;
 };
-
-__device__ __forceinline__ bool elect_sync(uint32_t membermask) {
-  uint32_t is_elected;
-  asm volatile("{\n\t"
-               "  .reg .pred p;\n\t"
-               "  elect.sync _|p, %1;\n\t"
-               "  selp.u32 %0, 1, 0, p;\n\t"
-               "}\n\t"
-               : "=r"(is_elected)
-               : "r"(membermask));
-  return is_elected != 0;
-}
 
 // Each CUDA block has sixteen named barriers numbered 0..15.
 // __syncthreads(); will use the 0 named barriers, so we want to avoid that.

@@ -41,9 +41,10 @@ def get_extension_hybrid_ep_cpp():
 
     sources = [
         os.path.join(current_dir, "csrc/hybrid_ep/hybrid_ep.cu"),
+        os.path.join(current_dir, "csrc/hybrid_ep/allocator/allocator.cu"),
     ]
     include_dirs = [
-        os.path.join(current_dir, "csrc"),
+        os.path.join(current_dir, "csrc/hybrid_ep"),
     ]
     extra_link_args = [
         "-lnvtx3interop",

@@ -2,8 +2,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved
 #pragma once
 #include <tuple>
-
-enum class TOKEN_DATA_TYPE { UINT16, UINT8 };
+#include "hybrid_ep_utils.cuh"
 
 constexpr int HIDDEN_DIM = 7168; // HIDDEN_DIM = 512xN, N in [0,1,2,....]
 constexpr int MAX_NUM_OF_TOKENS_PER_RANK = 4096; // NUM_OF_TOKENS_PER_RANK = NUM_OF_TOKENS_PER_CHUNK_DISPATCH_APIxN, N in [0,1,2,....]
@@ -26,10 +25,7 @@ constexpr int NUM_OF_BLOCKS_DISPATCH_API = 32;            // how much SM will be
 constexpr bool FORWARD_DISPATCH_API = true;
 constexpr bool DEVICE_SIDE_SYNC_DISPATCH_API = true;
 
-
-
 // Combine API Config
-// Combine API specific configuration.
 constexpr int NUM_OF_STAGES_G2S_COMBINE_API = 12;
 constexpr int NUM_OF_STAGES_S2G_COMBINE_API = 2;
 constexpr int NUM_OF_TOKENS_PER_CHUNK_COMBINE_API = 128;

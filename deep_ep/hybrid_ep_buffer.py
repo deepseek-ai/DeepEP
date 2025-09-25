@@ -13,7 +13,7 @@ class HybridEpBuffer:
         num_of_experts: int,
         use_fp8: bool = False,
         num_of_ranks_per_node: int = 32,
-        num_sms_preprocessing_api: int = 32,
+        num_sms_preprocessing_api: int = 128,
         num_sms_dispatch_api: int = 32,
         num_sms_combine_api: int = 32,
     ):
@@ -114,7 +114,7 @@ class HybridEpBuffer:
         assert self.config is not None, "Please initialize the config first."
         # Create C++ buffer - this will allocate all buffers during construction
         self.runtime = hybrid_ep_cpp.HybridEpBuffer(
-            self.config, self.rank, self.group_size, self.num_of_ranks_per_node
+            self.config, self.local_rank, self.node_rank, self.group_size, self.num_of_ranks_per_node
         )
         
         # Exchange IPC addresses using C++ distributed communication
@@ -141,8 +141,6 @@ class HybridEpBuffer:
         combine_in_backward <- local_unpermute -> expert_mlp -> local_permute -> dispatch_in_backward
         """
         num_of_tokens = tensor.shape[0]
-        # Update the num_of_tokens_per_rank, both dispatch and combine will use this value
-        self.runtime.update_num_of_tokens_per_rank(num_of_tokens)
         routing_map_as_input_and_probs_as_output = routing_map is not None
         if routing_map is not None:
             assert routing_map.dtype == torch.bool
