@@ -8,7 +8,10 @@ namespace deep_ep {
 namespace internode_ll {
 
 __forceinline__ __device__ bool is_rank_masked(int* mask_buffer_ptr, int rank) {
-    return mask_buffer_ptr != nullptr && ld_acquire_sys_global(mask_buffer_ptr + rank) != 0;
+    if (mask_buffer_ptr == nullptr) {
+        return false;
+    }
+    return __shfl_sync(0xffffffff, __ldg(mask_buffer_ptr + rank), 0) != 0;
 }
 
 template <int kNumThreads>
@@ -345,10 +348,11 @@ dispatch(void* packed_recv_x, void* packed_recv_x_scales,
         if (sub_warp_id == 1 and lane_id == 0) {
             auto start_time = clock64();
             uint64_t wait_recv_cost = 0;
-            while (not is_rank_masked(mask_buffer_ptr, src_rank)   // rank not masked
-                   && (num_recv_tokens = ld_acquire_sys_global(rdma_recv_count + local_expert_idx * num_ranks + src_rank)) == 0    // data not arrived
-                   && (wait_recv_cost = clock64() - start_time) <= NUM_TIMEOUT_CYCLES    // not timeout
-            );
+            if (not is_rank_masked(mask_buffer_ptr, src_rank)) {
+                while ((num_recv_tokens = ld_acquire_sys_global(rdma_recv_count + local_expert_idx * num_ranks + src_rank)) == 0    // data not arrived
+                       && (wait_recv_cost = clock64() - start_time) <= NUM_TIMEOUT_CYCLES    // not timeout
+                );
+            }
             // Do not receive tokens if rank timeout or masked
             if (num_recv_tokens == 0)
                 num_recv_tokens = -1;
@@ -860,10 +864,11 @@ combine(void* combined_x,
             const auto src_rank = responsible_expert_idx / num_local_experts;
             auto start_time = clock64();
             uint64_t wait_recv_cost = 0;
-            while (not is_rank_masked(mask_buffer_ptr, src_rank)                            // rank not masked
-                   && ld_acquire_sys_global(rdma_recv_flag + responsible_expert_idx) == 0   // recv not ready
-                   && (wait_recv_cost = clock64() - start_time) <= NUM_TIMEOUT_CYCLES       // not timeout
-            );
+            if (not is_rank_masked(mask_buffer_ptr, src_rank)) {
+                while (ld_acquire_sys_global(rdma_recv_flag + responsible_expert_idx) == 0   // recv not ready
+                       && (wait_recv_cost = clock64() - start_time) <= NUM_TIMEOUT_CYCLES    // not timeout
+                );
+            }
             // Mask rank if timeout
             if (wait_recv_cost > NUM_TIMEOUT_CYCLES) {
                 printf("Warning: DeepEP timeout for combine receive, rank %d, local_expert_idx %d, src_rank %d\n", rank, responsible_expert_idx % num_local_experts, src_rank);
