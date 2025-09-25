@@ -7,11 +7,16 @@ namespace deep_ep {
 
 namespace internode_ll {
 
+template<bool use_warp_sync = false>
 __forceinline__ __device__ bool is_rank_masked(int* mask_buffer_ptr, int rank) {
     if (mask_buffer_ptr == nullptr) {
         return false;
     }
-    return __shfl_sync(0xffffffff, __ldg(mask_buffer_ptr + rank), 0) != 0;
+    if constexpr (use_warp_sync) {
+        return __shfl_sync(0xffffffff, ld_acquire_global(mask_buffer_ptr + rank), 0) != 0;
+    } else {
+        return ld_acquire_global(mask_buffer_ptr + rank) != 0;
+    }
 }
 
 template <int kNumThreads>
@@ -228,7 +233,7 @@ dispatch(void* packed_recv_x, void* packed_recv_x_scales,
                                      rank * num_max_dispatch_tokens_per_rank * num_bytes_per_msg +
                                      slot_idx * num_bytes_per_msg;
                 const auto dst_p2p_ptr = nvshmemi_get_p2p_ptr(dst_ptr, rank, dst_rank);
-                if (not is_rank_masked(mask_buffer_ptr, dst_rank)) {
+                if (not is_rank_masked<true>(mask_buffer_ptr, dst_rank)) {
                     if (dst_p2p_ptr == 0) {
                         nvshmemi_ibgda_put_nbi_warp(dst_ptr, src_ptr, num_bytes_per_msg, dst_rank, dst_expert_local_idx, lane_id, slot_idx);
                     } else {
@@ -343,7 +348,7 @@ dispatch(void* packed_recv_x, void* packed_recv_x_scales,
 
         // Wait tokens to arrive
         // NOTES: using sub-warp 1 to overlap with sub-warp 0
-        int num_recv_tokens, recv_token_begin_idx;
+        int num_recv_tokens = 0, recv_token_begin_idx;
         EP_DEVICE_ASSERT(num_warps_per_group > 1 and num_warp_groups < 15);
         if (sub_warp_id == 1 and lane_id == 0) {
             auto start_time = clock64();
@@ -749,7 +754,7 @@ combine(void* combined_x,
         };
 
         // Issue IBGDA send
-        if (not is_rank_masked(mask_buffer_ptr, dst_rank)) {
+        if (not is_rank_masked<true>(mask_buffer_ptr, dst_rank)) {
             for (int token_idx = offset + sub_warp_id; token_idx < offset + num_tokens_to_send; token_idx += num_warps_per_group) {
                 const auto x_int4 = local_x + token_idx * hidden_bf16_int4;
                 const auto rdma_send_type_row = reinterpret_cast<int*>(rdma_send_x_vec + token_idx * num_bytes_per_slot);
