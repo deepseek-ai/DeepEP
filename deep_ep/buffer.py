@@ -540,7 +540,9 @@ class Buffer:
                              cumulative_local_expert_recv_stats: Optional[torch.Tensor] = None,
                              dispatch_wait_recv_cost_stats: Optional[torch.Tensor] = None,
                              use_fp8: bool = True, round_scale: bool = False, use_ue8m0: bool = False,
-                             async_finish: bool = False, return_recv_hook: bool = False) -> \
+                             async_finish: bool = False, return_recv_hook: bool = False,
+                             use_per_tensor_quantization: bool = False,
+                             static_scale: Optional[torch.Tensor] = None) -> \
             Tuple[Tuple[torch.Tensor, torch.Tensor], torch.Tensor, Tuple, EventOverlap, Callable]:
         """
         A low-latency implementation for dispatching with IBGDA.
@@ -569,6 +571,8 @@ class Buffer:
             return_recv_hook: return a receiving hook if set. If set, the kernel will just do the RDMA request issues,
                 but **without actually receiving the data**. You must call the received hook to make sure the data's arrival.
                 If you do not set this flag, the kernel will ensure the data's arrival.
+            use_per_tensor_quantization: whether use per tensor quantization
+            static_scale: Optional[torch.Tensor]: per tensor quantization scale
 
         Returns:
             recv_x: a tensor or tuple with received tokens for each expert.
@@ -596,7 +600,8 @@ class Buffer:
                                               dispatch_wait_recv_cost_stats,
                                               num_max_dispatch_tokens_per_rank, num_experts,
                                               use_fp8, round_scale, use_ue8m0,
-                                              async_finish, return_recv_hook)
+                                              async_finish, return_recv_hook,use_per_tensor_quantization,
+                                              static_scale)
         handle = (packed_recv_src_info, packed_recv_layout_range, num_max_dispatch_tokens_per_rank, x.size(1), num_experts)
         tensors_to_record = (x, topk_idx,
                              packed_recv_x, packed_recv_x_scales, packed_recv_count,
