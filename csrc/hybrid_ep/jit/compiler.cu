@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT 
+// SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+
 #include "compiler.cuh"
 
 inline std::string get_env(std::string name) {

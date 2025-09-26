@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT 
+// SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 
 #include <pybind11/functional.h>
 #include <pybind11/pybind11.h>
