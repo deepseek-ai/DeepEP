@@ -35,7 +35,7 @@ class Buffer:
                  allow_nvlink_for_low_latency_mode: bool = True,
                  allow_mnnvl: bool = False,
                  explicitly_destroy: bool = False,
-                 comm: Optional["mpi4py.MPI.Comm"] = None) -> None:
+                 comm: Optional["mpi4py.MPI.Comm"] = None) -> None:  # noqa: F821
         """
         Initialize the communication buffer.
 
