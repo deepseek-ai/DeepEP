@@ -8,8 +8,12 @@ AccessModifierOffset: -4
 DerivePointerAlignment: false
 PointerAlignment: Left
 ReferenceAlignment: Left
-AllowShortFunctionsOnASingleLine: None
+AllowShortFunctionsOnASingleLine: Inline
 AllowShortIfStatementsOnASingleLine: false
-AllowShortLoopsOnASingleLine: false
 BreakBeforeBinaryOperators: NonAssignment 
 Cpp11BracedListStyle: true
+ContinuationIndentWidth: 0
+
+BinPackArguments: false
+BinPackParameters: false
+
