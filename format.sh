@@ -14,6 +14,116 @@
 # Cause the script to exit if a single command fails
 set -eo pipefail
 
+# If yapf/ruff is not installed, install according to the requirements
+if ! (yapf --version &>/dev/null && ruff --version &>/dev/null); then
+    pip install -r requirements-lint.txt
+fi
+
+YAPF_VERSION=$(yapf --version | awk '{print $2}')
+RUFF_VERSION=$(ruff --version | awk '{print $2}')
+
+echo 'yapf: Check Start'
+
+YAPF_FLAGS=(
+    '--recursive'
+    '--parallel'
+)
+
+YAPF_EXCLUDES=(
+    '--exclude' 'build/**'
+)
+
+# Format specified files
+format() {
+    yapf --in-place "${YAPF_FLAGS[@]}" "$@"
+}
+
+# Format all files
+format_all() {
+    yapf --in-place "${YAPF_FLAGS[@]}" "${YAPF_EXCLUDES[@]}" .
+}
+
+# Format files that differ from main branch
+format_changed() {
+    # The `if` guard ensures that the list of filenames is not empty, which
+    # could cause ruff to receive 0 positional arguments, making it hang
+    # waiting for STDIN.
+    #
+    # `diff-filter=ACM` and $MERGEBASE is to ensure we only lint files that
+    # exist on both branches.
+    if git show-ref --verify --quiet refs/remotes/origin/main; then
+        BASE_BRANCH="origin/main"
+    else
+        BASE_BRANCH="main"
+    fi
+
+    MERGEBASE="$(git merge-base $BASE_BRANCH HEAD)"
+
+    if ! git diff --diff-filter=ACM --quiet --exit-code "$MERGEBASE" -- '*.py' '*.pyi' &>/dev/null; then
+        git diff --name-only --diff-filter=ACM "$MERGEBASE" -- '*.py' '*.pyi' | xargs -P 5 \
+             yapf --in-place "${YAPF_EXCLUDES[@]}" "${YAPF_FLAGS[@]}"
+    fi
+}
+
+## This flag formats individual files. --files *must* be the first command line
+## arg to use this option.
+if [[ "$1" == '--files' ]]; then
+   format "${@:2}"
+   # If `--all` is passed, then any further arguments are ignored and the
+   # entire python directory is formatted.
+elif [[ "$1" == '--all' ]]; then
+   format_all
+else
+   # Format only the files that changed in last commit.
+   format_changed
+fi
+echo 'yapf: Done'
+
+echo 'ruff: Check Start'
+# Lint specified files
+lint() {
+    ruff check "$@"
+}
+
+# Lint files that differ from main branch. Ignores dirs that are not slated
+# for autolint yet.
+lint_changed() {
+    # The `if` guard ensures that the list of filenames is not empty, which
+    # could cause ruff to receive 0 positional arguments, making it hang
+    # waiting for STDIN.
+    #
+    # `diff-filter=ACM` and $MERGEBASE is to ensure we only lint files that
+    # exist on both branches.
+    if git show-ref --verify --quiet refs/remotes/origin/main; then
+        BASE_BRANCH="origin/main"
+    else
+        BASE_BRANCH="main"
+    fi
+
+    MERGEBASE="$(git merge-base $BASE_BRANCH HEAD)"
+
+    if ! git diff --diff-filter=ACM --quiet --exit-code "$MERGEBASE" -- '*.py' '*.pyi' &>/dev/null; then
+        git diff --name-only --diff-filter=ACM "$MERGEBASE" -- '*.py' '*.pyi' | xargs \
+             ruff check
+    fi
+}
+
+# Run Ruff
+### This flag lints individual files. --files *must* be the first command line
+### arg to use this option.
+if [[ "$1" == '--files' ]]; then
+   lint "${@:2}"
+   # If `--all` is passed, then any further arguments are ignored and the
+   # entire python directory is linted.
+elif [[ "$1" == '--all' ]]; then
+   lint deep_ep
+else
+   # Format only the files that changed in last commit.
+   lint_changed
+fi
+
+echo 'ruff: Done'
+
 # # params: tool name, tool version, required version
 tool_version_check() {
     if [[ $2 != $3 ]]; then
