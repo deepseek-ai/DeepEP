@@ -234,7 +234,7 @@ class Buffer:
             4: Config(Buffer.num_sms, 6, 256, 6, 128),
             8: Config(Buffer.num_sms, 6, 256, 6, 128),
             16: Config(Buffer.num_sms, 36, 288, 20, 128),
-            24: Config(Buffer.num_sms, 8, 288, 32, 128),
+            24: Config(Buffer.num_sms, 32, 288, 8, 128),
             32: Config(Buffer.num_sms, 32, 288, 8, 128),
             48: Config(Buffer.num_sms, 32, 288, 8, 128),
             64: Config(Buffer.num_sms, 32, 288, 8, 128),
