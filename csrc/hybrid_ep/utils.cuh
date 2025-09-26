@@ -5,6 +5,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string>
+#include <sstream>
+#include <algorithm>
+#include <type_traits>
 
 enum class TOKEN_DATA_TYPE { UINT16, UINT8 };
 
@@ -26,6 +29,7 @@ inline int get_token_data_type_size(TOKEN_DATA_TYPE token_data_type) {
   case TOKEN_DATA_TYPE::UINT8:
     return sizeof(uint8_t);
   }
+  return 0;
 }
 
 
@@ -40,6 +44,28 @@ __device__ __forceinline__ bool elect_sync(uint32_t membermask) {
                     : "r"(membermask));
     return is_elected != 0;
 }
+
+// We combine all the input config parameters to a string key
+template <typename... Args>
+inline std::string get_key(Args&&... args) {
+  std::string result;
+  std::size_t count = 0;
+
+  // Convert the arguments to string.
+  auto to_string_helper = [](auto&& t) -> std::string {
+    if constexpr (std::is_arithmetic_v<std::decay_t<decltype(t)>>) {
+      return std::to_string(t);
+    } else {
+      std::ostringstream oss;
+      oss << t;
+      return oss.str();
+    }
+  };
+
+  ((result += to_string_helper(args) + (++count < sizeof...(args) ? "-" : "")), ...);
+  return result;
+}
+
 
 #define CUDA_CHECK(call)                                                       \
   do {                                                                         \
@@ -72,4 +98,27 @@ __device__ __forceinline__ bool elect_sync(uint32_t membermask) {
     }                                                                          \
   } while (0)
 
+inline std::string convert_to_nvcc_arch_flags(std::string torch_arch_list) {
+  std::stringstream ss(torch_arch_list);
+  std::string item;
+  std::string nvcc_arch_flags;
 
+  while (std::getline(ss, item, ';')) {
+    // Remove the dot from the item
+    item.erase(std::remove(item.begin(), item.end(), '.'), item.end());
+    // Generate the nvcc flags
+    nvcc_arch_flags += "-gencode=arch=compute_" + item + ",code=sm_" + item + " ";
+  }
+
+  // If the nvcc_arch_flags is empty, get the cuda version from the device
+  if (nvcc_arch_flags.empty()) {
+    int device;
+    CUDA_CHECK(cudaGetDevice(&device));
+    int cc_major, cc_minor;
+    CUDA_CHECK(cudaDeviceGetAttribute(&cc_major, cudaDevAttrComputeCapabilityMajor, device));
+    CUDA_CHECK(cudaDeviceGetAttribute(&cc_minor, cudaDevAttrComputeCapabilityMinor, device));
+    nvcc_arch_flags = "-arch=sm_" + std::to_string(cc_major) + std::to_string(cc_minor);
+  }
+
+  return nvcc_arch_flags;
+}

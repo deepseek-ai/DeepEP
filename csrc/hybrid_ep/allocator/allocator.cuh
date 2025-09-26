@@ -6,7 +6,7 @@
 #include <cuda_profiler_api.h>
 #include <cuda_runtime.h>
 #include <cuda_runtime_api.h>
-#include "hybrid_ep_utils.cuh"
+#include "utils.cuh"
 
 struct MemHandle {
   union MemHandleInner {

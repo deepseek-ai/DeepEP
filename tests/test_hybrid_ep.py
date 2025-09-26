@@ -56,7 +56,10 @@ def init_tensor(
         selected_experts = torch.randperm(num_of_experts, device="cuda")[:topk]
         topk_idx[i, :] = selected_experts.to(torch.int64)
         topk_weights[i, :] = torch.rand(topk, device="cuda", dtype=torch.float32)
-        # selected_experts = [0,8,16,24,32,40,48,56] # force balanced routing for testing
+        # Force balanced routing for testing
+        # selected_experts = [
+        #     ((i * topk) % num_of_experts + val) % num_of_experts for val in range(topk)
+        # ]
         routing_map[i, selected_experts] = True
         probs[i, selected_experts] = topk_weights[i, :]
 
@@ -84,13 +87,11 @@ def test_hybrid_ep_correctness(buffer: deep_ep.HybridEpBuffer, ref: TorchRef, us
             dispatched_hidden,
             dispatched_probs,
             dispatched_scaling_factor,
-            num_of_tokens_for_experts,
-            local_expert_routing_map,
             handle,
         ) = buffer.dispatch(
             tensor=hidden, scaling_factor=scaling_factor, topk_idx=topk_idx, topk_weights=topk_weights if with_probs else None
         )
-
+            
         assert torch.allclose(dispatched_hidden_ref, dispatched_hidden)
         if dispatched_probs is not None and dispatched_probs_ref is not None:
             start, end = ref._local_expert_range()
@@ -106,6 +107,7 @@ def test_hybrid_ep_correctness(buffer: deep_ep.HybridEpBuffer, ref: TorchRef, us
                 dispatched_scaling_factor_ref, dispatched_scaling_factor
             )
 
+        _, _, _, num_of_tokens_for_experts, local_expert_routing_map, _ = handle
         # expert the local routing map from the local routing map
         num_of_tokens_for_experts = num_of_tokens_for_experts.cpu()
         local_expert_routing_map = local_expert_routing_map[
@@ -148,7 +150,7 @@ def test_hybrid_ep_benchmark(buffer: deep_ep.HybridEpBuffer, group: dist.Process
 
     # warmup
     for _ in range(10):
-        dispatched_hidden, dispatched_probs, _, _, _, handle = (
+        dispatched_hidden, dispatched_probs, _, handle = (
             buffer.dispatch(tensor=hidden, scaling_factor=scaling_factor, topk_idx=topk_idx, topk_weights=topk_weights)
         )
         if dispatched_hidden.dtype == torch.uint8:
@@ -169,7 +171,7 @@ def test_hybrid_ep_benchmark(buffer: deep_ep.HybridEpBuffer, group: dist.Process
     print(f'[rank {rank}] HybridEP dispatch torch API ({"FP8" if hidden.dtype == torch.uint8 else "BF16"}): '
             f'{nvl_recv_bytes / 1e9 / t:.2f} GB/s (NVL), t: {t * 1e6:.2f} us, nvl_recv_bytes: {nvl_recv_bytes / 1e6:.2f} MB', flush=True)
 
-    dispatched_hidden, dispatched_probs, _, _, _, handle= (
+    dispatched_hidden, dispatched_probs, _, handle= (
         buffer.dispatch(tensor=hidden, scaling_factor=scaling_factor, topk_idx=topk_idx, topk_weights=topk_weights)
     )
     combine_args = {'tensor': dispatched_hidden_bf16, 'probs': dispatched_probs, 'handle': handle}
@@ -181,7 +183,7 @@ def test_hybrid_ep_benchmark(buffer: deep_ep.HybridEpBuffer, group: dist.Process
     if not nsys_profile:
         # noinspection PyShadowingNames
         def test_func():
-            dispatched_hidden, dispatched_probs, _, _, _, handle = (
+            dispatched_hidden, dispatched_probs, _, handle = (
                 buffer.dispatch(tensor=hidden, scaling_factor=scaling_factor, topk_idx=topk_idx, topk_weights=topk_weights)
             )
             if dispatched_hidden.dtype == torch.uint8:
@@ -215,31 +217,28 @@ def test_hybrid_ep_benchmark(buffer: deep_ep.HybridEpBuffer, group: dist.Process
 
 def test_main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
     rank, num_ranks, group = init_dist(local_rank, num_local_ranks)
-    buffer = deep_ep.HybridEpBuffer(
-        group=group,
-        hidden_dim=HIDDEN_DIM,
-        max_num_of_tokens_per_rank=MAX_NUM_OF_TOKENS_PER_RANK,
-        num_local_experts=NUM_LOCAL_EXPERTS,
-        num_of_experts=NUM_OF_EXPERTS,
-        use_fp8=args.use_fp8,
-        num_of_ranks_per_node=NUM_OF_RANKS_PER_NODE,
-    )
+    try:
+        buffer = deep_ep.HybridEpBuffer(
+            group=group,
+            hidden_dim=HIDDEN_DIM,
+            max_num_of_tokens_per_rank=MAX_NUM_OF_TOKENS_PER_RANK,
+            num_local_experts=NUM_LOCAL_EXPERTS,
+            num_of_experts=NUM_OF_EXPERTS,
+            use_fp8=args.use_fp8,
+        )
 
-    # Initialize the torchRef
-    ref = TorchRef(
-        ep_group=group,
-        num_of_experts=NUM_OF_EXPERTS,
-        num_of_ranks_per_node=NUM_OF_RANKS_PER_NODE,
-    )
+        ref = TorchRef(
+            ep_group=group,
+            num_of_experts=NUM_OF_EXPERTS,
+            num_of_ranks_per_node=NUM_OF_RANKS_PER_NODE,
+        )
 
-    # Test body
-    test_hybrid_ep_correctness(buffer, ref, args.use_fp8)
-    test_hybrid_ep_benchmark(buffer, group, args.use_fp8, args.nsys_profile)
+        test_hybrid_ep_correctness(buffer, ref, args.use_fp8)
+        test_hybrid_ep_benchmark(buffer, group, args.use_fp8, args.nsys_profile)
 
-    # Destroy
-    dist.barrier()
-    dist.destroy_process_group()
-
+    finally:
+        dist.barrier()
+        dist.destroy_process_group()
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Test intranode EP kernels')

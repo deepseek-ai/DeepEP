@@ -2,12 +2,10 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved
 #include "hybrid_ep.cuh"
 
-HybridEpBuffer::HybridEpBuffer(HybridEpConfigInstance config, int local_rank, int node_rank, int group_size, int num_of_ranks_per_node)
+HybridEpBuffer::HybridEpBuffer(HybridEpConfigInstance config, int local_rank, int node_rank, int group_size, int num_of_ranks_per_node, int nvlink_domain_size)
     : config(config), local_rank(local_rank), node_rank(node_rank), group_size(group_size),
-      num_of_ranks_per_node(num_of_ranks_per_node) {
+      num_of_ranks_per_node(num_of_ranks_per_node), kernel_cache(local_rank), nvlink_domain_size(nvlink_domain_size) {
 
-    const char* nvlink_env = std::getenv("NVLINK_DOMAIN_SIZE");
-    int nvlink_domain_size = nvlink_env ? atoi(nvlink_env) : 8;
     assert(config.num_of_ranks_per_node <= nvlink_domain_size);
 
     if(group_size <= config.num_of_ranks_per_node) {
@@ -400,39 +398,37 @@ void HybridEpBuffer::open_handles_from_other_ranks(
 
 std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor,
            torch::Tensor>
-HybridEpBuffer::metadata_preprocessing(torch::Tensor routing_map, int64_t node_rank,
-                               int64_t local_rank) {
+HybridEpBuffer::metadata_preprocessing(torch::Tensor routing_map, int64_t num_of_tokens_per_rank) {
   assert(routing_map.device().is_cuda());
   assert(routing_map.is_contiguous());
 
   // padding for the routing map
-  const int rdma_to_attn_map_size_per_node = (((config.num_of_tokens_per_rank - 1) / 16) + 1) * 16;
+  const int rdma_to_attn_map_size_per_node = (((num_of_tokens_per_rank - 1) / 16) + 1) * 16;
 
   // Construt the output tensor of the metadata preprocessing kernel.
   auto sparse_to_dense_map =
-      torch::empty({config.num_of_tokens_per_rank * config.num_of_nodes,
+      torch::empty({num_of_tokens_per_rank * config.num_of_nodes,
                     config.num_of_ranks_per_node},
                    torch::dtype(torch::kInt32).device(torch::kCUDA));
   auto rdma_to_attn_map =
       torch::empty({rdma_to_attn_map_size_per_node, config.num_of_nodes},
                    torch::dtype(torch::kBool).device(torch::kCUDA));
   auto attn_to_rdma_map =
-      torch::empty({config.num_of_tokens_per_rank, config.num_of_nodes - 1},
+      torch::empty({num_of_tokens_per_rank, config.num_of_nodes - 1},
                    torch::dtype(torch::kBool).device(torch::kCUDA));
   auto num_of_tokens_for_experts =
       torch::zeros({1}, torch::dtype(torch::kInt32).device(torch::kCUDA));
   auto local_expert_routing_map = torch::empty(
-      {config.num_of_tokens_per_rank * config.num_of_ranks_per_node * config.num_of_nodes, config.num_of_experts_per_rank},
+      {num_of_tokens_per_rank * config.num_of_ranks_per_node * config.num_of_nodes, config.num_of_experts_per_rank},
       torch::dtype(torch::kBool).device(torch::kCUDA));
-
-  hybrid_ep::hybrid_ep<HIDDEN_DIM, MAX_NUM_OF_TOKENS_PER_RANK, NUM_OF_RANKS_PER_NODE,
-      NUM_OF_NODES, NUM_OF_EXPERTS_PER_RANK>::metadata_preprocessing<NUM_THREADS_PER_BLOCK_PREPROCESSING_API, NUM_OF_BLOCKS_PREPROCESSING_API>(
-      routing_map.data_ptr<bool>(), this->preprocessing_tmp,
+  
+  kernel_cache.run_proprecess_kernel(
+      config, routing_map.data_ptr<bool>(), this->preprocessing_tmp,
       sparse_to_dense_map.data_ptr<int32_t>(),
       rdma_to_attn_map.data_ptr<bool>(), attn_to_rdma_map.data_ptr<bool>(),
       num_of_tokens_for_experts.data_ptr<int32_t>(),
       local_expert_routing_map.data_ptr<bool>(), static_cast<int>(node_rank),
-      static_cast<int>(local_rank), static_cast<int>(config.num_of_tokens_per_rank), at::cuda::getCurrentCUDAStream());
+      static_cast<int>(local_rank), num_of_tokens_per_rank, at::cuda::getCurrentCUDAStream());
 
   return std::make_tuple(sparse_to_dense_map, rdma_to_attn_map,
                          attn_to_rdma_map, num_of_tokens_for_experts,
@@ -444,7 +440,9 @@ HybridEpBuffer::dispatch(torch::Tensor hidden, c10::optional<torch::Tensor> prob
                  c10::optional<torch::Tensor> scaling_factor,
                  torch::Tensor sparse_to_dense_map,
                  torch::Tensor rdma_to_attn_map, torch::Tensor attn_to_rdma_map,
-                 int64_t num_of_tokens_for_experts, bool with_probs) {
+                 int64_t num_of_tokens_for_experts, 
+                 int64_t num_of_tokens_per_rank,
+                 bool with_probs) {
 
   // Use exact token count if available, otherwise use maximum bound
   auto token_count = (num_of_tokens_for_experts >= 0) ? num_of_tokens_for_experts : max_num_of_tokens_for_experts;
@@ -518,9 +516,8 @@ HybridEpBuffer::dispatch(torch::Tensor hidden, c10::optional<torch::Tensor> prob
   // Template function to setup and launch kernel parameters for uint8
   auto launch_uint8_kernel = [&]() {
     auto hidden_uint8 = hidden.view(torch::kUInt8);
-    assert(NUM_OF_RANKS_PER_NODE == config.num_of_ranks_per_node);
     
-    hybrid_ep::dispatch_kernel_param_t<uint8_t, NUM_OF_RANKS_PER_NODE> param;
+    hybrid_ep::dispatch_kernel_param_t<uint8_t> param;
     param.attn_input_token = hidden_uint8.data_ptr<uint8_t>();
     param.attn_input_prob = probs_fp32;
     param.attn_input_token_scaling_factor = scaling_factor_fp32;
@@ -548,30 +545,25 @@ HybridEpBuffer::dispatch(torch::Tensor hidden, c10::optional<torch::Tensor> prob
     param.sparse_to_dense_map = sparse_to_dense_map.data_ptr<int32_t>();
     param.local_rank = local_rank;
     param.node_rank = node_rank;
-    param.num_of_tokens_per_rank = config.num_of_tokens_per_rank;
+    param.num_of_tokens_per_rank = num_of_tokens_per_rank;
     param.expected_rdma_flag_value = dispatch_buffers.expected_rdma_flag_value;
     param.expected_intra_node_flag_value = dispatch_buffers.expected_intra_node_flag_value;
     
     // Launch kernel
     if (with_probs) {
-      hybrid_ep::hybrid_ep<HIDDEN_DIM, MAX_NUM_OF_TOKENS_PER_RANK, NUM_OF_RANKS_PER_NODE, 
-                          NUM_OF_NODES, NUM_OF_EXPERTS_PER_RANK>
-      ::dispatch<uint8_t, NUM_OF_STAGES_DISPATCH_API, NUM_OF_TOKENS_PER_CHUNK_DISPATCH_API,
-                NUM_OF_BLOCKS_DISPATCH_API, true, DEVICE_SIDE_SYNC_DISPATCH_API>(param, stream);
+      config.forward_dispatch_api = true;
+      kernel_cache.run_dispatch_kernel<uint8_t>(config, param, stream);
     } else {
-      hybrid_ep::hybrid_ep<HIDDEN_DIM, MAX_NUM_OF_TOKENS_PER_RANK, NUM_OF_RANKS_PER_NODE, 
-                          NUM_OF_NODES, NUM_OF_EXPERTS_PER_RANK>
-      ::dispatch<uint8_t, NUM_OF_STAGES_DISPATCH_API, NUM_OF_TOKENS_PER_CHUNK_DISPATCH_API,
-                NUM_OF_BLOCKS_DISPATCH_API, false, DEVICE_SIDE_SYNC_DISPATCH_API>(param, stream);
+      config.forward_dispatch_api = false;
+      kernel_cache.run_dispatch_kernel<uint8_t>(config, param, stream);
     }
   };
 
   // Template function to setup and launch kernel parameters for uint16
   auto launch_uint16_kernel = [&]() {
     auto hidden_uint16 = hidden.view(torch::kUInt16);
-    assert(NUM_OF_RANKS_PER_NODE == config.num_of_ranks_per_node);
     
-    hybrid_ep::dispatch_kernel_param_t<uint16_t, NUM_OF_RANKS_PER_NODE> param;
+    hybrid_ep::dispatch_kernel_param_t<uint16_t> param;
     param.attn_input_token = hidden_uint16.data_ptr<uint16_t>();
     param.attn_input_prob = probs_fp32;
     param.attn_input_token_scaling_factor = scaling_factor_fp32;
@@ -599,21 +591,17 @@ HybridEpBuffer::dispatch(torch::Tensor hidden, c10::optional<torch::Tensor> prob
     param.sparse_to_dense_map = sparse_to_dense_map.data_ptr<int32_t>();
     param.local_rank = local_rank;
     param.node_rank = node_rank;
-    param.num_of_tokens_per_rank = config.num_of_tokens_per_rank;
+    param.num_of_tokens_per_rank = num_of_tokens_per_rank;
     param.expected_rdma_flag_value = dispatch_buffers.expected_rdma_flag_value;
     param.expected_intra_node_flag_value = dispatch_buffers.expected_intra_node_flag_value;
  
     // Launch kernel
     if (with_probs) {
-      hybrid_ep::hybrid_ep<HIDDEN_DIM, MAX_NUM_OF_TOKENS_PER_RANK, NUM_OF_RANKS_PER_NODE, 
-                          NUM_OF_NODES, NUM_OF_EXPERTS_PER_RANK>
-      ::dispatch<uint16_t, NUM_OF_STAGES_DISPATCH_API, NUM_OF_TOKENS_PER_CHUNK_DISPATCH_API,
-                NUM_OF_BLOCKS_DISPATCH_API, true, DEVICE_SIDE_SYNC_DISPATCH_API>(param, stream);
+      config.forward_dispatch_api = true;
+      kernel_cache.run_dispatch_kernel<uint16_t>(config, param, stream);
     } else {
-      hybrid_ep::hybrid_ep<HIDDEN_DIM, MAX_NUM_OF_TOKENS_PER_RANK, NUM_OF_RANKS_PER_NODE, 
-                          NUM_OF_NODES, NUM_OF_EXPERTS_PER_RANK>
-      ::dispatch<uint16_t, NUM_OF_STAGES_DISPATCH_API, NUM_OF_TOKENS_PER_CHUNK_DISPATCH_API,
-                NUM_OF_BLOCKS_DISPATCH_API, false, DEVICE_SIDE_SYNC_DISPATCH_API>(param, stream);
+      config.forward_dispatch_api = false;
+      kernel_cache.run_dispatch_kernel<uint16_t>(config, param, stream);
     }
   };
 
@@ -645,23 +633,24 @@ std::tuple<torch::Tensor, torch::Tensor>
 HybridEpBuffer::combine(torch::Tensor hidden, c10::optional<torch::Tensor> probs,
                 torch::Tensor sparse_to_dense_map,
                 torch::Tensor rdma_to_attn_map, torch::Tensor attn_to_rdma_map,
+                int64_t num_of_tokens_per_rank,
                 bool with_probs) {
 
   // The result tensor of the combine kernel
   torch::Tensor combined_tokens, combined_probs;
   combined_tokens =
-      torch::empty({config.num_of_tokens_per_rank, config.hidden_dim},
+      torch::empty({num_of_tokens_per_rank, config.hidden_dim},
                    torch::dtype(hidden.dtype()).device(torch::kCUDA));
   if (with_probs) {
     combined_probs =
-        torch::empty({config.num_of_tokens_per_rank,
+        torch::empty({num_of_tokens_per_rank,
                       config.num_of_experts_per_rank *
                           config.num_of_ranks_per_node * config.num_of_nodes},
                      torch::dtype(torch::kFloat32).device(torch::kCUDA));
   }
 
   // Fast return if there are no tokens after combine
-  if (config.num_of_tokens_per_rank == 0) {
+  if (num_of_tokens_per_rank == 0) {
     return std::make_tuple(combined_tokens, combined_probs);
   }
 
@@ -698,8 +687,7 @@ HybridEpBuffer::combine(torch::Tensor hidden, c10::optional<torch::Tensor> probs
 
   bool kernel_launched = false;
 
-  assert(NUM_OF_RANKS_PER_NODE == config.num_of_ranks_per_node);
-  hybrid_ep::combine_kernel_param_t<NUM_OF_RANKS_PER_NODE> param;
+  hybrid_ep::combine_kernel_param_t param;
       for (int i = 0; i < config.num_of_ranks_per_node; i++) {
         param.expert_input_token[i] =
             combine_buffers.expert_input_token_all_ranks[i];
@@ -725,7 +713,7 @@ HybridEpBuffer::combine(torch::Tensor hidden, c10::optional<torch::Tensor> probs
       param.attn_to_rdma_map = attn_to_rdma_map.data_ptr<bool>();
       param.sparse_to_dense_map = sparse_to_dense_map.data_ptr<int32_t>();
       param.node_rank = this->node_rank;
-      param.num_of_tokens_per_rank = config.num_of_tokens_per_rank;
+      param.num_of_tokens_per_rank = num_of_tokens_per_rank;
       param.expected_rdma_flag_value = combine_buffers.expected_rdma_flag_value;
       param.expected_intra_node_flag_value =
           combine_buffers.expected_intra_node_flag_value;
@@ -734,39 +722,11 @@ HybridEpBuffer::combine(torch::Tensor hidden, c10::optional<torch::Tensor> probs
       //   param.mr_info = combine_buffers.mr_info;
       // Call the combine kernel directly using template instantiation
       if (with_probs) {
-          hybrid_ep::hybrid_ep<
-              HIDDEN_DIM, 
-              MAX_NUM_OF_TOKENS_PER_RANK, 
-              NUM_OF_RANKS_PER_NODE, 
-              NUM_OF_NODES, 
-              NUM_OF_EXPERTS_PER_RANK
-          >::combine<
-              NUM_OF_STAGES_G2S_COMBINE_API, 
-              NUM_OF_STAGES_S2G_COMBINE_API, 
-              NUM_OF_TOKENS_PER_CHUNK_COMBINE_API, 
-              NUM_OF_TOKENS_PER_GROUP_COMBINE_API, 
-              NUM_OF_BLOCKS_COMBINE_API, 
-              NUM_OF_ADDITIONAL_IN_FLIGHT_S2G_COMBINE_API, 
-              true, 
-              DEVICE_SIDE_SYNC_COMBINE_API
-          >(param, stream);
+        config.backward_combine_api = true;
+        kernel_cache.run_combine_kernel(config, param, stream);
       } else {
-          hybrid_ep::hybrid_ep<
-              HIDDEN_DIM, 
-              MAX_NUM_OF_TOKENS_PER_RANK, 
-              NUM_OF_RANKS_PER_NODE, 
-              NUM_OF_NODES, 
-              NUM_OF_EXPERTS_PER_RANK
-          >::combine<
-              NUM_OF_STAGES_G2S_COMBINE_API, 
-              NUM_OF_STAGES_S2G_COMBINE_API, 
-              NUM_OF_TOKENS_PER_CHUNK_COMBINE_API, 
-              NUM_OF_TOKENS_PER_GROUP_COMBINE_API, 
-              NUM_OF_BLOCKS_COMBINE_API, 
-              NUM_OF_ADDITIONAL_IN_FLIGHT_S2G_COMBINE_API, 
-              false, 
-              DEVICE_SIDE_SYNC_COMBINE_API
-          >(param, stream);
+        config.backward_combine_api = false;
+        kernel_cache.run_combine_kernel(config, param, stream);
       }
       kernel_launched = true;
 
@@ -779,89 +739,3 @@ HybridEpBuffer::combine(torch::Tensor hidden, c10::optional<torch::Tensor> probs
   return std::make_tuple(combined_tokens, combined_probs);
 }
 
-PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-  m.doc() = "HybridEP, efficiently enable the expert-parallel communication in "
-            "the Hopper+ architectures";
-
-  pybind11::enum_<TOKEN_DATA_TYPE>(m, "TokenDataType")
-      .value("UINT16", TOKEN_DATA_TYPE::UINT16)
-      .value("UINT8", TOKEN_DATA_TYPE::UINT8)
-      .export_values() // So we can use hybrid_ep_cpp.TYPE instead of the
-                       // hybrid_ep_cpp.TOKEN_DATA_TYPE.TYPE
-      .def("__str__",
-           [](const TOKEN_DATA_TYPE &type) { return type_to_string(type); });
-
-  pybind11::class_<HybridEpConfigInstance>(m, "HybridEpConfigInstance")
-      .def(py::init<>())
-      // Hybrid-ep Config
-      .def_readwrite("hidden_dim", &HybridEpConfigInstance::hidden_dim)
-      .def_readwrite("num_of_tokens_per_rank",
-                     &HybridEpConfigInstance::num_of_tokens_per_rank)
-      .def_readwrite("max_num_of_tokens_per_rank",
-                     &HybridEpConfigInstance::max_num_of_tokens_per_rank)
-      .def_readwrite("num_of_experts_per_rank",
-                     &HybridEpConfigInstance::num_of_experts_per_rank)
-      .def_readwrite("num_of_ranks_per_node",
-                     &HybridEpConfigInstance::num_of_ranks_per_node)
-      .def_readwrite("num_of_nodes", &HybridEpConfigInstance::num_of_nodes)
-      // Metadata-preprocessing API Config
-      .def_readwrite(
-          "num_of_threads_per_block_preprocessing_api",
-          &HybridEpConfigInstance::num_of_threads_per_block_preprocessing_api)
-      .def_readwrite("num_of_blocks_preprocessing_api",
-                     &HybridEpConfigInstance::num_of_blocks_preprocessing_api)
-      // Dispatch API Config
-      .def_readwrite("token_data_type", &HybridEpConfigInstance::token_data_type)
-      .def_readwrite("num_of_stages_dispatch_api",
-                     &HybridEpConfigInstance::num_of_stages_dispatch_api)
-      .def_readwrite("num_of_tokens_per_chunk_dispatch_api",
-                     &HybridEpConfigInstance::num_of_tokens_per_chunk_dispatch_api)
-      .def_readwrite("num_of_blocks_dispatch_api",
-                     &HybridEpConfigInstance::num_of_blocks_dispatch_api)
-      .def_readwrite("forward_dispatch_api",
-                     &HybridEpConfigInstance::forward_dispatch_api)
-      .def_readwrite("device_side_sync_dispatch_api",
-                     &HybridEpConfigInstance::device_side_sync_dispatch_api)
-      // Combine API Config
-      .def_readwrite("num_of_stages_g2s_combine_api",
-                     &HybridEpConfigInstance::num_of_stages_g2s_combine_api)
-      .def_readwrite("num_of_stages_s2g_combine_api",
-                     &HybridEpConfigInstance::num_of_stages_s2g_combine_api)
-      .def_readwrite("num_of_tokens_per_chunk_combine_api",
-                     &HybridEpConfigInstance::num_of_tokens_per_chunk_combine_api)
-      .def_readwrite("num_of_tokens_per_group_combine_api",
-                     &HybridEpConfigInstance::num_of_tokens_per_group_combine_api)
-      .def_readwrite("num_of_blocks_combine_api",
-                     &HybridEpConfigInstance::num_of_blocks_combine_api)
-      .def_readwrite(
-          "num_of_additional_in_flight_s2g_combine_api",
-          &HybridEpConfigInstance::num_of_additional_in_flight_s2g_combine_api)
-      .def_readwrite("backward_combine_api",
-                     &HybridEpConfigInstance::backward_combine_api)
-      .def_readwrite("device_side_sync_combine_api",
-                     &HybridEpConfigInstance::device_side_sync_combine_api)
-      .def("__repr__", [](const HybridEpConfigInstance &config) {
-        return "<HybridEpConfigInstance hidden_dim=" +
-               std::to_string(config.hidden_dim) + " max_num_of_tokens_per_rank=" +
-               std::to_string(config.max_num_of_tokens_per_rank) +
-               " token_data_type=" + type_to_string(config.token_data_type) +
-               ">";
-      });
-
-  pybind11::class_<HybridEpBuffer>(m, "HybridEpBuffer")
-      .def(py::init<HybridEpConfigInstance, int, int, int, int>())
-      .def("exchange_ipc_address", &HybridEpBuffer::exchange_ipc_address)
-      .def("metadata_preprocessing", &HybridEpBuffer::metadata_preprocessing,
-           py::kw_only(), py::arg("routing_map"), py::arg("node_rank"),
-           py::arg("local_rank"))
-      .def("dispatch", &HybridEpBuffer::dispatch, py::kw_only(), py::arg("hidden"),
-           py::arg("probs") = c10::nullopt,
-           py::arg("scaling_factor") = c10::nullopt,
-           py::arg("sparse_to_dense_map"), py::arg("rdma_to_attn_map"),
-           py::arg("attn_to_rdma_map"),
-           py::arg("num_of_tokens_for_experts") = -1, py::arg("with_probs"))
-      .def("combine", &HybridEpBuffer::combine, py::kw_only(), py::arg("hidden"),
-           py::arg("probs") = c10::nullopt, py::arg("sparse_to_dense_map"),
-           py::arg("rdma_to_attn_map"), py::arg("attn_to_rdma_map"),
-           py::arg("with_probs"));
-}

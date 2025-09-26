@@ -4,7 +4,8 @@
 #include "config.cuh"
 #include "backend/hybrid_ep_backend.cuh"
 #include "allocator/allocator.cuh"
-#include "hybrid_ep_utils.cuh"
+#include "utils.cuh"
+#include "jit/compiler.cuh"
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/util/Optional.h>
 #include <torch/torch.h>
@@ -16,8 +17,7 @@
 
 class HybridEpBuffer {
 public:
-  HybridEpBuffer(HybridEpConfigInstance config, int local_rank, int node_rank, int group_size,
-         int num_of_ranks_per_node);
+  HybridEpBuffer(HybridEpConfigInstance config, int local_rank, int node_rank, int group_size, int num_of_ranks_per_node, int nvlink_domain_size);
   ~HybridEpBuffer();
 
   // Exchange IPC addresses using C++ distributed communication
@@ -25,24 +25,26 @@ public:
 
   std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor,
              torch::Tensor>
-  metadata_preprocessing(torch::Tensor routing_map, int64_t node_rank,
-                         int64_t local_rank);
+  metadata_preprocessing(torch::Tensor routing_map, int64_t num_of_tokens_per_rank);
 
   std::tuple<torch::Tensor, torch::Tensor, torch::Tensor>
   dispatch(torch::Tensor hidden, c10::optional<torch::Tensor> probs,
            c10::optional<torch::Tensor> scaling_factor,
            torch::Tensor sparse_to_dense_map, torch::Tensor rdma_to_attn_map,
            torch::Tensor attn_to_rdma_map, int64_t num_of_tokens_for_experts,
+           int64_t num_of_tokens_per_rank,
            bool with_probs);
 
   std::tuple<torch::Tensor, torch::Tensor>
   combine(torch::Tensor hidden, c10::optional<torch::Tensor> probs,
           torch::Tensor sparse_to_dense_map, torch::Tensor rdma_to_attn_map,
-          torch::Tensor attn_to_rdma_map, bool with_probs);
+          torch::Tensor attn_to_rdma_map, int64_t num_of_tokens_per_rank,
+          bool with_probs);
 
 private:
   ExtendedMemoryAllocator remote_allocator;
   HybridEpConfigInstance config;
+  KernelCache kernel_cache;
 
   void allocate_buffer();
   void allocate_buffer_for_preprocessing();
@@ -57,6 +59,7 @@ private:
   int node_rank;
   int num_of_ranks_per_node;
   int group_size;
+  int nvlink_domain_size;
   // Maximum number of tokens for experts.
   int64_t max_num_of_tokens_for_experts; 
   bool use_fp8_dispatch;

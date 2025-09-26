@@ -10,7 +10,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-#include "hybrid_ep_utils.cuh"
+#include "utils.cuh"
+#define MAX_NUM_OF_RANKS_PER_NODE 72
 
 namespace hybrid_ep{
 
@@ -198,17 +199,16 @@ struct combine_kernel_dynamic_shared_memory_buffer_t<NUM_OF_STAGES_G2S, NUM_OF_S
 
 
 // Data structure for kernel parameter for dispatch kernel.
-template<typename TOKEN_DATA_TYPE,
-         int NUM_OF_RANKS_PER_NODE>
+template<typename TOKEN_DATA_TYPE>
 struct dispatch_kernel_param_t{
   // Input buffers. These buffers are local buffers.
   const TOKEN_DATA_TYPE* attn_input_token;
   const float* attn_input_prob; // Needed by expert layer, so only valid in forward dispatch.
   const float* attn_input_token_scaling_factor; // If input token is FP8 dtype, we need scaling factor for tokens.
   // Output buffers. These buffers are both local and remote buffers.
-  TOKEN_DATA_TYPE* expert_output_token[NUM_OF_RANKS_PER_NODE];
-  float* expert_output_prob[NUM_OF_RANKS_PER_NODE]; // Only valid in forward dispatch.
-  float* expert_output_scaling_factor[NUM_OF_RANKS_PER_NODE]; // Only valid for FP8 token type.
+  TOKEN_DATA_TYPE* expert_output_token[MAX_NUM_OF_RANKS_PER_NODE];
+  float* expert_output_prob[MAX_NUM_OF_RANKS_PER_NODE]; // Only valid in forward dispatch.
+  float* expert_output_scaling_factor[MAX_NUM_OF_RANKS_PER_NODE]; // Only valid for FP8 token type.
   // Internal temp buffers. These buffers are local buffers.
   const TOKEN_DATA_TYPE* rdma_inter_node_group_token;
   const float* rdma_inter_node_group_prob; // Only valid in forward dispatch.
@@ -228,11 +228,10 @@ struct dispatch_kernel_param_t{
 };
 
 // Data structure for kernel parameter for combine kernel.
-template<int NUM_OF_RANKS_PER_NODE>
 struct combine_kernel_param_t{
   // Input buffers. These buffers are both local and remote buffers.
-  uint16_t* expert_input_token[NUM_OF_RANKS_PER_NODE];
-  float* expert_input_prob[NUM_OF_RANKS_PER_NODE];
+  uint16_t* expert_input_token[MAX_NUM_OF_RANKS_PER_NODE];
+  float* expert_input_prob[MAX_NUM_OF_RANKS_PER_NODE];
   // Output buffers. These buffers are local buffers.
   uint16_t* attn_output_token;
   float* attn_output_prob;
@@ -1709,7 +1708,7 @@ inline __device__ void inter_node_red_warp_group_device_function(const int node_
 }
 
 __launch_bounds__(1, 1)
-__global__ void device_sync_kernel(uint32_t* intra_node_remote_flags, const uint32_t* expected_flag_value)
+static __global__ void device_sync_kernel(uint32_t* intra_node_remote_flags, const uint32_t* expected_flag_value)
 {
   // Atomically reduce add 1 to the u32 flag on rank #0 in current NVLink domain. 
   // Need a strong system-scope red to make sure all ranks from current NVLink domain can see the side effect.
@@ -1774,7 +1773,7 @@ template<typename TOKEN_DATA_TYPE,
 // 1. inter-node warp group(i.e. RDMA N2N warp group, 1 warp, only valid for multinode scenario) 2. intra-node G2S warp group(i.e. NVL G2S warp group, 1 warp). 
 // 3. intra-node S2G warp group(i.e. NVL S2G warp group, 1 warp). Total 2 or 3 warps per CUDA block/SM.
 __launch_bounds__(INTER_NODE_GROUP::size() + INTRA_NODE_G2S_GROUP::size() + INTRA_NODE_S2G_GROUP::size(), 1)
-__global__ void dispatch_kernel(const __grid_constant__ dispatch_kernel_param_t<TOKEN_DATA_TYPE, NUM_OF_RANKS_PER_NODE> param)
+__global__ void dispatch_kernel(const __grid_constant__ dispatch_kernel_param_t<TOKEN_DATA_TYPE> param)
 {
   // Compile-time check. For now, 1 G2S and 1 S2G warp should be enough.
   static_assert(INTRA_NODE_G2S_GROUP::size() == 32, "Dispatch kernel only support 1 G2S warp currently.");
@@ -1863,7 +1862,7 @@ template<// This type represent intra-node reduction warp group.
 // 3. intra-node G2S warp group(1 warp, only valid for multinode scenario). 4. inter-node G2S warp group(1 warp). 5. inter-node N2N rdma warp group(1 warp, only valid for multinode scenario). 
 // Total 5 or 11 warps per CUDA block/SM.
 __launch_bounds__(INTRA_NODE_RED_GROUP::size() + INTER_NODE_RED_GROUP::size() + INTRA_NODE_G2S_GROUP::size() + INTER_NODE_G2S_GROUP::size() + INTER_NODE_RDMA_GROUP::size(), 1)
-__global__ void combine_kernel(const __grid_constant__ combine_kernel_param_t<NUM_OF_RANKS_PER_NODE> param)
+__global__ void combine_kernel(const __grid_constant__ combine_kernel_param_t param)
 {
   // Compile-time check. For now, 1 G2S and 1 S2G warp should be enough.
   static_assert(INTER_NODE_G2S_GROUP::size() == 32, "Combine kernel only support 1 INTER_NODE_G2S warp currently.");
@@ -2383,7 +2382,7 @@ public:
            bool FORWARD_DISPATCH,
            // Whether the dispatch kernel need device-side sync before exit. 
            bool DEVICE_SIDE_SYNC>
-  static void dispatch(dispatch_kernel_param_t<TOKEN_DATA_TYPE, NUM_OF_RANKS_PER_NODE> param, cudaStream_t stream)
+  static void dispatch(dispatch_kernel_param_t<TOKEN_DATA_TYPE> param, cudaStream_t stream)
   {
     // The warp groups data type for dispatch kernel, must match the warp groups layout required by the dispatch kernel.
     using INTER_NODE_GROUP = warp_group<0, 0>;
@@ -2440,7 +2439,7 @@ public:
            bool BACKWARD_COMBINE,
            // Whether the combine kernel need device-side sync before launch.
            bool DEVICE_SIDE_SYNC>
-  static void combine(combine_kernel_param_t<NUM_OF_RANKS_PER_NODE> param, cudaStream_t stream)
+  static void combine(combine_kernel_param_t param, cudaStream_t stream)
   {
     // The warp groups data type for combine kernel, must match the warp groups layout required by the combine kernel.
     using INTRA_NODE_RED_GROUP = warp_group<0, 0>;

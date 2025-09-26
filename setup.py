@@ -25,10 +25,6 @@ def get_extension_hybrid_ep_cpp():
 
     # Basic compile arguments
     compile_args = {
-        "cxx": [
-            "-std=c++17",
-            "-O3",
-        ],
         "nvcc": [
             "-std=c++17",
             "-Xcompiler",
@@ -42,6 +38,8 @@ def get_extension_hybrid_ep_cpp():
     sources = [
         os.path.join(current_dir, "csrc/hybrid_ep/hybrid_ep.cu"),
         os.path.join(current_dir, "csrc/hybrid_ep/allocator/allocator.cu"),
+        os.path.join(current_dir, "csrc/hybrid_ep/jit/compiler.cu"),
+        os.path.join(current_dir, "csrc/hybrid_ep/pybind_hybrid_ep.cu"),
     ]
     include_dirs = [
         os.path.join(current_dir, "csrc/hybrid_ep"),
@@ -50,6 +48,12 @@ def get_extension_hybrid_ep_cpp():
         "-lnvtx3interop",
     ]
     libraries = ["cuda"]
+
+    # Add dependency for jit
+    compile_args["nvcc"].append(f'-DBASE_PATH="{current_dir}"')
+    compile_args["nvcc"].append(f'-DSM_ARCH="{os.environ["TORCH_CUDA_ARCH_LIST"]}"')
+    if enable_multinode:
+        compile_args["nvcc"].append("-DHYBRID_EP_BUILD_MULTINODE_ENABLE")
 
     print(f'Build summary:')
     print(f' > Sources: {sources}')
