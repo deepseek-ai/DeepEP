@@ -375,10 +375,8 @@ dispatch(int4* recv_x, float* recv_x_scales, topk_idx_t* recv_topk_idx, float* r
 
         // Dynamic TMA shared memory layout
         const size_t SMEM_LEN_PER_TARGET_NVL_PEER = 16384;
-        // TODO: Zero-copy: Maybe use existing constants?
-        constexpr uintptr_t TMA_SMEM_ALIGNMENT = 16384;
         extern __shared__ int4 tma_smem[];
-        char *tma_smem_aligned = reinterpret_cast<char *>(align_up(reinterpret_cast<uintptr_t>(tma_smem), TMA_SMEM_ALIGNMENT));
+        char *tma_smem_aligned = reinterpret_cast<char *>(align_up<uintptr_t>(reinterpret_cast<uintptr_t>(tma_smem), ZCOPY_TMA_SMEM_ALIGNMENT));
         __shared__ uint64_t tma_mbarrier[NUM_MAX_NVL_PEERS];
 
         // Dedicated TMA shared memory for scales
@@ -824,11 +822,11 @@ __device__ int combine_token(bool is_token_in_rank, int head_idx,
 template<bool kLowLatencyMode,
          int kNumRDMARanks, typename dtype_t,
          int kNumCombineForwarderWarps,
-         int kNumRDMAReceivers,
          int kNumTopkRDMARanks = get_num_topk_rdma_ranks(kNumRDMARanks),
          int kNumWarpsPerForwarder = (kNumCombineForwarderWarps / kNumRDMARanks > 0) ? kNumCombineForwarderWarps / kNumRDMARanks : 1,
-         int kNumForwarders = kNumRDMARanks * kNumWarpsPerForwarder>
-__global__ void __launch_bounds__((1 + kNumForwarders + kNumRDMAReceivers + 1) * 32, 1)
+         int kNumForwarders = kNumRDMARanks * kNumWarpsPerForwarder,
+         int kNumRDMAReceivers = 32 - 1 - 1 - kNumForwarders>
+__global__ void __launch_bounds__(32 * 32, 1)
 combine(int4* combined_x, float* combined_topk_weights,
         const bool* is_combined_token_in_rank,
         const int4* x, const float* topk_weights,
@@ -919,7 +917,7 @@ combine(int4* combined_x, float* combined_topk_weights,
             // Dynamic TMA shared memory layout
             const size_t SMEM_LEN_PER_WARP = 14 * 1024;
             extern __shared__ int4 tma_smem[];
-            char *tma_smem_aligned = reinterpret_cast<char *>(tma_smem);
+            char *tma_smem_aligned = reinterpret_cast<char *>(align_up<uintptr_t>(reinterpret_cast<uintptr_t>(tma_smem), ZCOPY_TMA_SMEM_ALIGNMENT));
             __shared__ uint64_t tma_mbarrier[kNumForwarders];
 
             char *smem_ptrs[kNumForwarders];
@@ -1148,13 +1146,15 @@ void combine(cudaDataType_t type,
     // TODO: Zero-copy: Add support for bias
     EP_HOST_ASSERT(bias_0 == nullptr and bias_1 == nullptr);
 
-    constexpr int kNumCombineForwarderWarps = 14;
-    constexpr int kNumRDMAReceivers = 32 - (1 + kNumCombineForwarderWarps + 1);
-    constexpr int smem_size = 14 * 1024 * kNumCombineForwarderWarps;
+    constexpr int kNumCombineForwarderWarps = 12;
+    int num_rdma_ranks = num_ranks / NUM_MAX_NVL_PEERS;
+    auto num_warps_per_forwarder = kNumCombineForwarderWarps / num_rdma_ranks;
+    int num_forwarder_warps = num_rdma_ranks * num_warps_per_forwarder;
+    size_t smem_size = 7168 * 2 * num_forwarder_warps + ZCOPY_TMA_SMEM_ALIGNMENT;
 
 #define COMBINE_LAUNCH_CASE(num_rdma_ranks) { \
     auto combine_func = low_latency_mode ? \
-        combine<true, num_rdma_ranks, nv_bfloat16, kNumCombineForwarderWarps, kNumRDMAReceivers> : combine<false, num_rdma_ranks, nv_bfloat16, kNumCombineForwarderWarps, kNumRDMAReceivers>; \
+        combine<true, num_rdma_ranks, nv_bfloat16, kNumCombineForwarderWarps> : combine<false, num_rdma_ranks, nv_bfloat16, kNumCombineForwarderWarps>; \
     SET_SHARED_MEMORY_FOR_TMA(combine_func) \
     LAUNCH_KERNEL(&cfg, combine_func, \
                   reinterpret_cast<int4*>(combined_x), combined_topk_weights, is_combined_token_in_rank, \
@@ -1167,16 +1167,13 @@ void combine(cudaDataType_t type,
                   buffer_fused_ptrs, buffer_ptrs, num_max_nvl_chunked_send_tokens, num_max_nvl_chunked_recv_tokens, \
                   rank, num_ranks); } break
 
-    int num_rdma_ranks = num_ranks / NUM_MAX_NVL_PEERS;
-    auto num_warps_per_forwarder = kNumCombineForwarderWarps / num_rdma_ranks;
-    int num_forwarder_warps = num_rdma_ranks * num_warps_per_forwarder;
     EP_HOST_ASSERT(kNumCombineForwarderWarps / num_rdma_ranks >= 1);
     EP_HOST_ASSERT(num_forwarder_warps > 0 and num_forwarder_warps % num_rdma_ranks == 0);
     EP_HOST_ASSERT(num_max_nvl_chunked_recv_tokens % num_rdma_ranks == 0);
     EP_HOST_ASSERT(num_max_nvl_chunked_recv_tokens / num_rdma_ranks > std::max(num_max_rdma_chunked_send_tokens, num_max_nvl_chunked_send_tokens));
     EP_HOST_ASSERT(type == CUDA_R_16BF);
 
-    SETUP_LAUNCH_CONFIG(num_channels, (1 + num_forwarder_warps + kNumRDMAReceivers + 1) * 32, stream);
+    SETUP_LAUNCH_CONFIG(num_channels, 32 * 32, stream);
     SWITCH_RDMA_RANKS(COMBINE_LAUNCH_CASE);
 #undef COMBINE_LAUNCH_CASE
 }

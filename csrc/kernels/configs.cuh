@@ -13,6 +13,7 @@
 // So we reserve this (heuristically large-enough) length of memory for the dispatch/combine
 // kernels and use the following space for metadata sync in notify.
 #define ZCOPY_NOTIFY_NVL_METADATA_OFFSET_INTS 65536
+#define ZCOPY_TMA_SMEM_ALIGNMENT 1024
 
 #define FINISHED_SUM_TAG 1024
 #define NUM_WAIT_NANOSECONDS 500
