@@ -248,7 +248,7 @@ struct InternodeDispatchLayout {
         total_bytes += num_bytes_source_meta;
         EP_HOST_ASSERT(total_bytes % 16 == 0);
 
-        EP_HOST_ASSERT(total_bytes <= NUM_INPUT_BYTES_PER_ZCOPY_BUFFER);
+        EP_HOST_ASSERT(total_bytes <= NUM_DISPATCH_INPUT_BYTES_PER_ZCOPY_BUFFER);
 
         for (int i=0; i<num_buffers; ++i) {
             auto tmp = rdma_fused_buffer;
@@ -259,10 +259,10 @@ struct InternodeDispatchLayout {
                 with_topk ? advance_ptr<float*>(tmp, num_bytes_topk_weights) : nullptr,  // topk_weights
                 advance_ptr(tmp, num_bytes_source_meta),  // source_meta
             });
-            advance_ptr(rdma_fused_buffer, NUM_INPUT_BYTES_PER_ZCOPY_BUFFER);
+            advance_ptr(rdma_fused_buffer, NUM_DISPATCH_INPUT_BYTES_PER_ZCOPY_BUFFER);
         }
 
-        total_bytes = NUM_INPUT_BYTES_PER_ZCOPY_BUFFER * num_buffers;
+        total_bytes = NUM_DISPATCH_INPUT_BYTES_PER_ZCOPY_BUFFER * num_buffers;
     }
 };
 
@@ -293,7 +293,7 @@ struct InternodeCombineLayout {
             total_bytes += num_bytes_topk_weights;
         }
 
-        EP_HOST_ASSERT(total_bytes <= NUM_INPUT_BYTES_PER_ZCOPY_BUFFER);
+        EP_HOST_ASSERT(total_bytes <= NUM_COMBINE_INPUT_BYTES_PER_ZCOPY_BUFFER);
 
         EP_HOST_ASSERT(total_bytes % 16 == 0);
 
@@ -303,10 +303,10 @@ struct InternodeCombineLayout {
                 tmp,
                 with_topk ? advance<float*>(tmp, num_bytes_x) : nullptr
             });
-            advance_ptr(nvl_buffer, NUM_INPUT_BYTES_PER_ZCOPY_BUFFER);
+            advance_ptr(nvl_buffer, NUM_COMBINE_INPUT_BYTES_PER_ZCOPY_BUFFER);
         }
 
-        total_bytes = NUM_INPUT_BYTES_PER_ZCOPY_BUFFER * num_buffers;
+        total_bytes = NUM_COMBINE_INPUT_BYTES_PER_ZCOPY_BUFFER * num_buffers;
     }
 };
 

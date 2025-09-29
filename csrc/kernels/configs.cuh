@@ -5,7 +5,7 @@
 #define NUM_WORKSPACE_BYTES (32 * 1024 * 1024)
 #define NUM_MAX_LOCAL_EXPERTS 1024
 #define NUM_BUFFER_ALIGNMENT_BYTES 128
-// TODO: Zero-copy: Make these configurable options
+// TODO: Zero-copy: Make these runtime configurable options
 #define NUM_MAX_SGE_PER_WQE 60 // The DS field of WQE is only 6 bits; 2^6 - 1 = 63
 // In the zero-copy variants of internode kernels, the kernel itself uses very little NVL buffer.
 // So we reserve this (heuristically large-enough) length of memory for the dispatch/combine
@@ -14,8 +14,13 @@
 #define ZCOPY_TMA_SMEM_ALIGNMENT 1024
 #define NUM_MAX_ZCOPY_DISPATCH_TOKENS 4096
 // Zero-copy: for the 8-of-256 experts case, *8 is no smaller than the average recv count.
-#define NUM_OUTPUT_BYTES_PER_ZCOPY_BUFFER ((unsigned long)NUM_MAX_ZCOPY_DISPATCH_TOKENS * 16384 * 8)
-#define NUM_INPUT_BYTES_PER_ZCOPY_BUFFER ((unsigned long)NUM_MAX_ZCOPY_DISPATCH_TOKENS * 16384 * 8)
+#define NUM_DISPATCH_INPUT_BYTES_PER_ZCOPY_BUFFER ((unsigned long)NUM_MAX_ZCOPY_DISPATCH_TOKENS * 16384)
+#define NUM_DISPATCH_OUTPUT_BYTES_PER_ZCOPY_BUFFER ((unsigned long)NUM_MAX_ZCOPY_DISPATCH_TOKENS * 16384 * 8)
+#define NUM_COMBINE_INPUT_BYTES_PER_ZCOPY_BUFFER ((unsigned long)NUM_MAX_ZCOPY_DISPATCH_TOKENS * 16384 * 8)
+static_assert(NUM_DISPATCH_INPUT_BYTES_PER_ZCOPY_BUFFER % NUM_BUFFER_ALIGNMENT_BYTES == 0 and
+    NUM_DISPATCH_OUTPUT_BYTES_PER_ZCOPY_BUFFER % NUM_BUFFER_ALIGNMENT_BYTES == 0 and
+    NUM_COMBINE_INPUT_BYTES_PER_ZCOPY_BUFFER % NUM_BUFFER_ALIGNMENT_BYTES == 0,
+    "Zero-copy buffer sizes are not properly aligned");
 
 #define FINISHED_SUM_TAG 1024
 #define NUM_WAIT_NANOSECONDS 500

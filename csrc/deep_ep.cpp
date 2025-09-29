@@ -30,7 +30,7 @@ Buffer::Buffer(int rank, int num_ranks, int64_t num_nvl_bytes, int64_t num_rdma_
     // Fused (zero-copy) NVL buffer layout is as follows (case of 2 sub-buffers):
     //   Sub-buffer 0         Sub-buffer 1         Sub-buffer 0           Sub-buffer 1
     // | Input of Combine 0 | Input of Combine 1 | Output of Dispatch 0 | Output of Dispatch 1 |
-    int64_t buffer_fused_bytes = 1l * num_zcopy_buffers * (NUM_INPUT_BYTES_PER_ZCOPY_BUFFER + NUM_OUTPUT_BYTES_PER_ZCOPY_BUFFER);
+    int64_t buffer_fused_bytes = 1l * num_zcopy_buffers * (NUM_COMBINE_INPUT_BYTES_PER_ZCOPY_BUFFER + NUM_DISPATCH_OUTPUT_BYTES_PER_ZCOPY_BUFFER);
     int64_t buffer_fused_ptr_bytes = 1l * support_zero_copy * NUM_MAX_NVL_PEERS * sizeof(void*);
     int64_t barrier_signal_ptr_bytes = NUM_MAX_NVL_PEERS * sizeof(int*);
 
@@ -41,10 +41,6 @@ Buffer::Buffer(int rank, int num_ranks, int64_t num_nvl_bytes, int64_t num_rdma_
     EP_HOST_ASSERT(num_ranks < NUM_MAX_NVL_PEERS or num_ranks % NUM_MAX_NVL_PEERS == 0);
     if (num_rdma_bytes > 0)
         EP_HOST_ASSERT(num_ranks > NUM_MAX_NVL_PEERS or low_latency_mode);
-    if (support_zero_copy) {
-        EP_HOST_ASSERT(NUM_INPUT_BYTES_PER_ZCOPY_BUFFER % NUM_BUFFER_ALIGNMENT_BYTES == 0);
-        EP_HOST_ASSERT(NUM_OUTPUT_BYTES_PER_ZCOPY_BUFFER % NUM_BUFFER_ALIGNMENT_BYTES == 0);
-    }
 
     // Get ranks
     CUDA_CHECK(cudaGetDevice(&device_id));
@@ -254,7 +250,7 @@ void Buffer::sync(const std::vector<int> &device_ids,
 
         // Allocate
         rdma_buffer_ptr = internode::alloc(num_rdma_bytes, NUM_BUFFER_ALIGNMENT_BYTES);
-        rdma_fused_buffer_ptr = support_zero_copy ? internode::alloc(NUM_INPUT_BYTES_PER_ZCOPY_BUFFER * num_zcopy_buffers, NUM_BUFFER_ALIGNMENT_BYTES) : nullptr;
+        rdma_fused_buffer_ptr = support_zero_copy ? internode::alloc(NUM_DISPATCH_INPUT_BYTES_PER_ZCOPY_BUFFER * num_zcopy_buffers, NUM_BUFFER_ALIGNMENT_BYTES) : nullptr;
 
         // Clean buffer (mainly for low-latency mode)
         CUDA_CHECK(cudaMemset(rdma_buffer_ptr, 0, num_rdma_bytes));
@@ -963,7 +959,7 @@ Buffer::internode_dispatch(const torch::Tensor& x, const std::optional<torch::Te
         auto recv_x_scales_bytes = num_recv_tokens * num_scales * sizeof(float);
         auto recv_src_meta_bytes = num_recv_tokens * internode::get_source_meta_bytes();
 
-        void* recv_x_ptr = reinterpret_cast<char*>(buffer_fused_ptrs[nvl_rank]) + NUM_INPUT_BYTES_PER_ZCOPY_BUFFER * num_zcopy_buffers + NUM_OUTPUT_BYTES_PER_ZCOPY_BUFFER * zcopy_buffer_id;
+        void* recv_x_ptr = reinterpret_cast<char*>(buffer_fused_ptrs[nvl_rank]) + NUM_COMBINE_INPUT_BYTES_PER_ZCOPY_BUFFER * num_zcopy_buffers + NUM_DISPATCH_OUTPUT_BYTES_PER_ZCOPY_BUFFER * zcopy_buffer_id;
         recv_x = torch::from_blob(recv_x_ptr, {num_recv_tokens, hidden}, torch::TensorOptions().dtype(x.scalar_type()).device(torch::kCUDA));
         if (not cached_mode) {
             recv_src_meta_ptr = reinterpret_cast<void*>(reinterpret_cast<uint8_t*>(recv_x_ptr) + recv_x_bytes + recv_topk_idx_bytes + recv_topk_weights_bytes + recv_x_scales_bytes);
@@ -1497,7 +1493,7 @@ Buffer::get_internode_dispatch_buffer(int num_tokens, int hidden, int num_topk, 
     EP_HOST_ASSERT(0 <= buffer_id and buffer_id < num_zcopy_buffers);
     auto buffer = layout.buffers[buffer_id];
 
-    EP_HOST_ASSERT(layout.total_bytes <= NUM_INPUT_BYTES_PER_ZCOPY_BUFFER * num_zcopy_buffers);
+    EP_HOST_ASSERT(layout.total_bytes <= NUM_DISPATCH_INPUT_BYTES_PER_ZCOPY_BUFFER * num_zcopy_buffers);
 
     auto x = use_fp8 ? torch::from_blob(buffer.x, {num_tokens, hidden}, torch::TensorOptions().dtype(torch::kFloat8_e4m3fn).device(torch::kCUDA)) : torch::from_blob(buffer.x, {num_tokens, hidden}, torch::TensorOptions().dtype(torch::kBFloat16).device(torch::kCUDA));
     auto x_scales = use_fp8 ? std::make_optional(torch::from_blob(buffer.x_scales, {num_tokens, hidden / 128}, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA))) : std::optional<torch::Tensor>();
@@ -1518,7 +1514,7 @@ Buffer::get_internode_combine_buffer(int num_tokens, int hidden, int num_topk, b
     EP_HOST_ASSERT(0 <= buffer_id and buffer_id < num_zcopy_buffers);
     auto buffer = layout.buffers[buffer_id];
 
-    EP_HOST_ASSERT(layout.total_bytes <= NUM_INPUT_BYTES_PER_ZCOPY_BUFFER * num_zcopy_buffers);
+    EP_HOST_ASSERT(layout.total_bytes <= NUM_COMBINE_INPUT_BYTES_PER_ZCOPY_BUFFER * num_zcopy_buffers);
 
     auto x = torch::from_blob(buffer.x, {num_tokens, hidden}, torch::TensorOptions().dtype(torch::kBFloat16).device(torch::kCUDA));
     auto topk_weights = with_topk ? std::make_optional(torch::from_blob(buffer.topk_weights, {num_tokens, num_topk}, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA))) : std::optional<torch::Tensor>();

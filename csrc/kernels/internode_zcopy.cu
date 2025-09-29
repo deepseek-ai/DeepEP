@@ -151,7 +151,7 @@ dispatch(int4* recv_x, float* recv_x_scales, topk_idx_t* recv_topk_idx, float* r
     void *ws_rr_buffer_ptr = nullptr;
     void *ws_rr_fused_buffer_ptr = nullptr;
     if (warp_role == WarpRole::kRDMAAndNVLForwarder) {
-        ws_rr_fused_buffer_ptr = shift_ptr(buffer_fused_ptrs[target_rank], NUM_INPUT_BYTES_PER_ZCOPY_BUFFER * num_zcopy_buffers + NUM_OUTPUT_BYTES_PER_ZCOPY_BUFFER * buffer_id);
+        ws_rr_fused_buffer_ptr = shift_ptr(buffer_fused_ptrs[target_rank], NUM_COMBINE_INPUT_BYTES_PER_ZCOPY_BUFFER * num_zcopy_buffers + NUM_DISPATCH_OUTPUT_BYTES_PER_ZCOPY_BUFFER * buffer_id);
         ws_rr_buffer_ptr = buffer_ptrs[target_rank];
     }
     if (warp_role == WarpRole::kNVLReceivers) {
@@ -456,7 +456,7 @@ dispatch(int4* recv_x, float* recv_x_scales, topk_idx_t* recv_topk_idx, float* r
         // NOTES: always start from the local rank
         int src_rdma_rank = sm_id % kNumRDMARanks;
         int cached_rdma_channel_head = 0, cached_rdma_channel_tail = 0;
-        const uint64_t output_buffer_size = NUM_OUTPUT_BYTES_PER_ZCOPY_BUFFER / (hidden_bytes + num_topk * sizeof(int64_t) + num_topk * sizeof(float) + num_scales * sizeof(float));
+        const uint64_t output_buffer_size = NUM_DISPATCH_OUTPUT_BYTES_PER_ZCOPY_BUFFER / (hidden_bytes + num_topk * sizeof(int64_t) + num_topk * sizeof(float) + num_scales * sizeof(float));
         while (__any_sync(0xffffffff, num_tokens_to_recv_from_rdma > 0)) {
             // Find next source RDMA rank (round-robin)
             start_time = clock64();
@@ -911,7 +911,7 @@ combine(int4* combined_x, float* combined_topk_weights,
         void* ws_rr_fused_buffer_ptr[NUM_MAX_NVL_PEERS], *rs_wr_buffer_ptr[NUM_MAX_NVL_PEERS];
         #pragma unroll
         for (int i = 0; i < NUM_MAX_NVL_PEERS; ++ i) {
-            uint64_t offset = NUM_INPUT_BYTES_PER_ZCOPY_BUFFER * buffer_id;
+            uint64_t offset = NUM_COMBINE_INPUT_BYTES_PER_ZCOPY_BUFFER * buffer_id;
             ws_rr_fused_buffer_ptr[i] = reinterpret_cast<char *>(buffer_fused_ptrs[i]) + offset;
             rs_wr_buffer_ptr[i] = buffer_ptrs[i];
         }
