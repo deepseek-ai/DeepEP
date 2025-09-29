@@ -64,6 +64,16 @@ Eager RDMA provides two ways to integrate with existing kernels:
 
 > The goal is to keep your kernel logic largely unchanged while ensuring that reads/writes respect the interleaved data+signal format and ordered visibility rules above.
 
+## Performance
+
+- **Setup:** Hopper GPU + **BlueField-3** RNIC.  
+- **Result:** Eager RDMA achieves **up to 20% latency reduction** vs. the original DeepEP path.
+
+<div style="display: flex; justify-content: space-between;">
+    <img src="figures/EP16eager.png" alt="EP16" width="49%">
+    <img src="figures/EP32eager.png" alt="EP32" width="49%">
+</div>
+
 ## Eager RDMA Roadmap
 
 - [ ] Normal kernel support
