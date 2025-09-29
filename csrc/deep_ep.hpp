@@ -42,6 +42,10 @@ private:
     // NVSHMEM Buffer
     int64_t num_rdma_bytes;
     void* rdma_buffer_ptr = nullptr;
+    void* rdma_fused_buffer_ptr = nullptr;
+
+    // Splitting buffers for multi-batch overlapping
+    int num_zcopy_buffers;
 
     // Shrink mode buffer
     bool enable_shrink = false;
@@ -86,7 +90,7 @@ private:
     int* moe_recv_rdma_counter_mapped = nullptr;
 
 public:
-    Buffer(int rank, int num_ranks, int64_t num_nvl_bytes, int64_t num_rdma_bytes, bool low_latency_mode, bool explicitly_destroy, bool enable_shrink);
+    Buffer(int rank, int num_ranks, int64_t num_nvl_bytes, int64_t num_rdma_bytes, bool low_latency_mode, bool explicitly_destroy, bool enable_shrink, int num_zcopy_buffers);
 
     ~Buffer() noexcept(false);
 
@@ -141,7 +145,7 @@ public:
                        const std::optional<torch::Tensor>& cached_rdma_channel_prefix_matrix, const std::optional<torch::Tensor>& cached_recv_rdma_rank_prefix_sum,
                        const std::optional<torch::Tensor>& cached_gbl_channel_prefix_matrix, const std::optional<torch::Tensor>& cached_recv_gbl_rank_prefix_sum,
                        const std::optional<torch::Tensor>& cached_recv_gbl_rank_prefix_sum_fwd,
-                       int expert_alignment, const Config& config, std::optional<EventHandle>& previous_event, bool zero_copy, bool async, bool allocate_on_comm_stream);
+                       int expert_alignment, const Config& config, std::optional<EventHandle>& previous_event, bool zero_copy, int zcopy_buffer_id, bool async, bool allocate_on_comm_stream);
 
     std::tuple<torch::Tensor, std::optional<torch::Tensor>, std::optional<EventHandle>>
     internode_combine(const torch::Tensor& x, const std::optional<torch::Tensor>& topk_weights,
@@ -150,7 +154,7 @@ public:
                       const torch::Tensor& rdma_channel_prefix_matrix, const torch::Tensor& rdma_rank_prefix_sum, const torch::Tensor& gbl_channel_prefix_matrix,
                       const std::optional<torch::Tensor>& gbl_rank_prefix_sum_fwd,
                       const torch::Tensor& combined_rdma_head, const torch::Tensor& combined_nvl_head,
-                      const Config& config, std::optional<EventHandle>& previous_event, bool zero_copy, bool async, bool allocate_on_comm_stream);
+                      const Config& config, std::optional<EventHandle>& previous_event, bool zero_copy, int zcopy_buffer_id, bool async, bool allocate_on_comm_stream);
 
     void clean_low_latency_buffer(int num_max_dispatch_tokens_per_rank, int hidden, int num_experts);
 
@@ -180,10 +184,10 @@ public:
     void low_latency_clean_mask_buffer();
 
     std::tuple<torch::Tensor, std::optional<torch::Tensor>, std::optional<torch::Tensor>, std::optional<torch::Tensor>>
-    get_internode_dispatch_buffer(int num_tokens, int hidden, int num_topk, bool with_topk, bool use_fp8) const;
+    get_internode_dispatch_buffer(int num_tokens, int hidden, int num_topk, bool with_topk, bool use_fp8, int buffer_id) const;
 
     std::tuple<torch::Tensor, std::optional<torch::Tensor>>
-    get_internode_combine_buffer(int num_tokens, int hidden, int num_topk, bool with_topk) const;
+    get_internode_combine_buffer(int num_tokens, int hidden, int num_topk, bool with_topk, int buffer_id) const;
 };
 
 } // namespace deep_ep

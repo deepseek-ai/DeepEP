@@ -113,7 +113,7 @@ void dispatch(void* recv_x, float* recv_x_scales, topk_idx_t* recv_topk_idx, flo
               void* rdma_buffer_ptr, int num_max_rdma_chunked_send_tokens, int num_max_rdma_chunked_recv_tokens,
               void** buffer_fused_ptrs, void** buffer_ptrs, int num_max_nvl_chunked_send_tokens, int num_max_nvl_chunked_recv_tokens,
               int rank, int num_ranks, bool is_cached_dispatch,
-              bool zero_copy,
+              bool zero_copy, int num_zcopy_buffers, int zcopy_buffer_id,
               cudaStream_t stream, int num_channels, bool low_latency_mode);
 
 void cached_notify(int hidden_int4, int num_scales, int num_topk_idx, int num_topk_weights,
@@ -136,7 +136,7 @@ void combine(cudaDataType_t type,
              int num_tokens, int num_combined_tokens, int hidden, int num_topk,
              void* rdma_buffer_ptr, int num_max_rdma_chunked_send_tokens, int num_max_rdma_chunked_recv_tokens,
              void** buffer_fused_ptrs, void** buffer_ptrs, int num_max_nvl_chunked_send_tokens, int num_max_nvl_chunked_recv_tokens,
-             int rank, int num_ranks, bool zero_copy, cudaStream_t stream, int num_channels, bool low_latency_mode);
+             int rank, int num_ranks, bool zero_copy, int zcopy_buffer_id, cudaStream_t stream, int num_channels, bool low_latency_mode);
 
 } // namespace internode
 
@@ -164,7 +164,7 @@ void dispatch(void* recv_x, float* recv_x_scales, int64_t* recv_topk_idx, float*
               const bool* is_token_in_rank,
               int num_tokens, int hidden_int4, int num_scales, int num_topk, int num_experts,
               void* rdma_buffer_ptr, int num_max_rdma_chunked_send_tokens, int num_max_rdma_chunked_recv_tokens,
-              void** buffer_fused_ptrs, void** buffer_ptrs, int num_max_nvl_chunked_send_tokens, int num_max_nvl_chunked_recv_tokens,
+              void** buffer_fused_ptrs, void** buffer_ptrs, int num_zcopy_buffers, int buffer_id, int num_max_nvl_chunked_send_tokens, int num_max_nvl_chunked_recv_tokens,
               int rank, int num_ranks, bool is_cached_dispatch,
               cudaStream_t stream, int num_channels, bool low_latency_mode);
 
@@ -178,7 +178,7 @@ void combine(cudaDataType_t type,
              const int* recv_gbl_rank_prefix_sum_fwd,
              int num_tokens, int num_combined_tokens, int hidden, int num_topk,
              void* rdma_buffer_ptr, int num_max_rdma_chunked_send_tokens, int num_max_rdma_chunked_recv_tokens,
-             void** buffer_fused_ptrs, void** buffer_ptrs, int num_max_nvl_chunked_send_tokens, int num_max_nvl_chunked_recv_tokens,
+             void** buffer_fused_ptrs, void** buffer_ptrs, int buffer_id, int num_max_nvl_chunked_send_tokens, int num_max_nvl_chunked_recv_tokens,
              int rank, int num_ranks, cudaStream_t stream, int num_channels, bool low_latency_mode);
 
 } // namespace internode_zcopy

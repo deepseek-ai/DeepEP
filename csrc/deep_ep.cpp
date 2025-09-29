@@ -13,18 +13,25 @@
 namespace deep_ep {
 
 Buffer::Buffer(int rank, int num_ranks, int64_t num_nvl_bytes, int64_t num_rdma_bytes, bool low_latency_mode, bool explicitly_destroy,
-               bool enable_shrink):
+               bool enable_shrink,
+               int num_zcopy_buffers):
         rank(rank), num_ranks(num_ranks),
         num_nvl_bytes(num_nvl_bytes), num_rdma_bytes(num_rdma_bytes),
+        num_zcopy_buffers(num_zcopy_buffers),
         enable_shrink(enable_shrink),
         low_latency_mode(low_latency_mode),
         explicitly_destroy(explicitly_destroy),
         comm_stream(at::cuda::getStreamFromPool(true)) {
+    const bool support_zero_copy = num_zcopy_buffers > 0;
+
     // Metadata memory
     int64_t barrier_signal_bytes = NUM_MAX_NVL_PEERS * sizeof(int);
     int64_t buffer_ptr_bytes = NUM_MAX_NVL_PEERS * sizeof(void*);
-    int64_t buffer_fused_bytes = 32ul * 4096 * 16384; // TODO: Zero-copy: Modify this size
-    int64_t buffer_fused_ptr_bytes = NUM_MAX_NVL_PEERS * sizeof(void*);
+    // Fused (zero-copy) NVL buffer layout is as follows (case of 2 sub-buffers):
+    //   Sub-buffer 0         Sub-buffer 1         Sub-buffer 0           Sub-buffer 1
+    // | Input of Combine 0 | Input of Combine 1 | Output of Dispatch 0 | Output of Dispatch 1 |
+    int64_t buffer_fused_bytes = 1l * num_zcopy_buffers * (NUM_INPUT_BYTES_PER_ZCOPY_BUFFER + NUM_OUTPUT_BYTES_PER_ZCOPY_BUFFER);
+    int64_t buffer_fused_ptr_bytes = 1l * support_zero_copy * NUM_MAX_NVL_PEERS * sizeof(void*);
     int64_t barrier_signal_ptr_bytes = NUM_MAX_NVL_PEERS * sizeof(int*);
 
     // Common checks
@@ -34,6 +41,10 @@ Buffer::Buffer(int rank, int num_ranks, int64_t num_nvl_bytes, int64_t num_rdma_
     EP_HOST_ASSERT(num_ranks < NUM_MAX_NVL_PEERS or num_ranks % NUM_MAX_NVL_PEERS == 0);
     if (num_rdma_bytes > 0)
         EP_HOST_ASSERT(num_ranks > NUM_MAX_NVL_PEERS or low_latency_mode);
+    if (support_zero_copy) {
+        EP_HOST_ASSERT(NUM_INPUT_BYTES_PER_ZCOPY_BUFFER % NUM_BUFFER_ALIGNMENT_BYTES == 0);
+        EP_HOST_ASSERT(NUM_OUTPUT_BYTES_PER_ZCOPY_BUFFER % NUM_BUFFER_ALIGNMENT_BYTES == 0);
+    }
 
     // Get ranks
     CUDA_CHECK(cudaGetDevice(&device_id));
@@ -239,8 +250,11 @@ void Buffer::sync(const std::vector<int> &device_ids,
         EP_HOST_ASSERT(nvshmem_rank == internode::init(root_unique_id, nvshmem_rank, num_nvshmem_ranks, low_latency_mode));
         internode::barrier();
 
+        const bool support_zero_copy = num_zcopy_buffers > 0;
+
         // Allocate
         rdma_buffer_ptr = internode::alloc(num_rdma_bytes, NUM_BUFFER_ALIGNMENT_BYTES);
+        rdma_fused_buffer_ptr = support_zero_copy ? internode::alloc(NUM_INPUT_BYTES_PER_ZCOPY_BUFFER * num_zcopy_buffers, NUM_BUFFER_ALIGNMENT_BYTES) : nullptr;
 
         // Clean buffer (mainly for low-latency mode)
         CUDA_CHECK(cudaMemset(rdma_buffer_ptr, 0, num_rdma_bytes));
@@ -685,7 +699,9 @@ Buffer::internode_dispatch(const torch::Tensor& x, const std::optional<torch::Te
                            const std::optional<torch::Tensor>& cached_rdma_channel_prefix_matrix, const std::optional<torch::Tensor>& cached_recv_rdma_rank_prefix_sum,
                            const std::optional<torch::Tensor>& cached_gbl_channel_prefix_matrix, const std::optional<torch::Tensor>& cached_recv_gbl_rank_prefix_sum,
                            const std::optional<torch::Tensor>& cached_recv_gbl_rank_prefix_sum_fwd,
-                           int expert_alignment, const Config& config, std::optional<EventHandle>& previous_event, bool zero_copy, bool async, bool allocate_on_comm_stream) {
+                           int expert_alignment, const Config& config, std::optional<EventHandle>& previous_event,
+                           bool zero_copy, int zcopy_buffer_id,
+                           bool async, bool allocate_on_comm_stream) {
 #ifndef DISABLE_NVSHMEM
     // In dispatch, CPU will busy-wait until GPU receive tensor size metadata from other ranks, which can be quite long.
     // If users of DeepEP need to execute other Python code on other threads, such as KV transfer, their code will get stuck due to GIL
@@ -785,25 +801,22 @@ Buffer::internode_dispatch(const torch::Tensor& x, const std::optional<torch::Te
         scale_hidden_stride = static_cast<int>(x_scales->stride(1));
     }
 
-    void *rdma_workspace_ptr, *rdma_x_ptr;
+    void *rdma_x_ptr;
     size_t rdma_workspace_size = config.get_rdma_buffer_size_hint(hidden_int4 * sizeof(int4), num_ranks, zero_copy);
     size_t rdma_buffer_size_needed = rdma_workspace_size;
     bool with_topk = topk_idx.has_value();
     bool with_scales = x_scales.has_value();
     if (zero_copy) {
-        InternodeDispatchLayout layout(rdma_buffer_ptr, num_tokens, hidden, num_topk, num_ranks, with_topk, with_scales);
-        rdma_workspace_ptr = layout.buffer.recv_buffer;
-        rdma_x_ptr = layout.buffer.x;
-        rdma_buffer_size_needed += layout.total_bytes;
+        InternodeDispatchLayout layout(rdma_fused_buffer_ptr, num_tokens, hidden, num_topk, num_ranks, with_topk, with_scales, num_zcopy_buffers);
+        rdma_x_ptr = layout.buffers.at(zcopy_buffer_id).x;
         if (with_topk) {
-            topk_idx_ptr = layout.buffer.topk_idx;
-            topk_weights_ptr = layout.buffer.topk_weights;
+            topk_idx_ptr = layout.buffers.at(zcopy_buffer_id).topk_idx;
+            topk_weights_ptr = layout.buffers.at(zcopy_buffer_id).topk_weights;
         }
         if (with_scales) {
-            x_scales_ptr = layout.buffer.x_scales;
+            x_scales_ptr = layout.buffers.at(zcopy_buffer_id).x_scales;
         }
     } else {
-        rdma_workspace_ptr = rdma_buffer_ptr;
         rdma_x_ptr = x.data_ptr();
         if (with_topk) {
             topk_idx_ptr = topk_idx->data_ptr<topk_idx_t>();
@@ -855,7 +868,7 @@ Buffer::internode_dispatch(const torch::Tensor& x, const std::optional<torch::Te
         internode::cached_notify(hidden_int4, num_scales, num_topk, num_topk,
                                  num_ranks, num_channels, 0, nullptr,
                                  nullptr, nullptr, nullptr,
-                                 rdma_workspace_ptr, config.num_max_rdma_chunked_recv_tokens,
+                                 rdma_buffer_ptr, config.num_max_rdma_chunked_recv_tokens,
                                  buffer_ptrs_gpu, config.num_max_nvl_chunked_recv_tokens,
                                  barrier_signal_ptrs_gpu, rank, zero_copy, comm_stream,
                                  rdma_workspace_size,
@@ -881,7 +894,7 @@ Buffer::internode_dispatch(const torch::Tensor& x, const std::optional<torch::Te
                                    rdma_channel_prefix_matrix.data_ptr<int>(), recv_rdma_rank_prefix_sum.data_ptr<int>(),
                                    gbl_channel_prefix_matrix.data_ptr<int>(), recv_gbl_rank_prefix_sum.data_ptr<int>(),
                                    zero_copy ? recv_gbl_rank_prefix_sum_fwd->data_ptr<int>() : nullptr,
-                                   rdma_workspace_ptr, config.num_max_rdma_chunked_recv_tokens,
+                                   rdma_buffer_ptr, config.num_max_rdma_chunked_recv_tokens,
                                    buffer_ptrs_gpu, config.num_max_nvl_chunked_recv_tokens,
                                    barrier_signal_ptrs_gpu, rank, zero_copy, comm_stream,
                                    rdma_workspace_size,
@@ -950,7 +963,7 @@ Buffer::internode_dispatch(const torch::Tensor& x, const std::optional<torch::Te
         auto recv_x_scales_bytes = num_recv_tokens * num_scales * sizeof(float);
         auto recv_src_meta_bytes = num_recv_tokens * internode::get_source_meta_bytes();
 
-        recv_x_ptr = buffer_fused_ptrs[nvl_rank];
+        void* recv_x_ptr = reinterpret_cast<char*>(buffer_fused_ptrs[nvl_rank]) + NUM_INPUT_BYTES_PER_ZCOPY_BUFFER * num_zcopy_buffers + NUM_OUTPUT_BYTES_PER_ZCOPY_BUFFER * zcopy_buffer_id;
         recv_x = torch::from_blob(recv_x_ptr, {num_recv_tokens, hidden}, torch::TensorOptions().dtype(x.scalar_type()).device(torch::kCUDA));
         if (not cached_mode) {
             recv_src_meta_ptr = reinterpret_cast<void*>(reinterpret_cast<uint8_t*>(recv_x_ptr) + recv_x_bytes + recv_topk_idx_bytes + recv_topk_weights_bytes + recv_x_scales_bytes);
@@ -1005,10 +1018,10 @@ Buffer::internode_dispatch(const torch::Tensor& x, const std::optional<torch::Te
                         is_token_in_rank.data_ptr<bool>(),
                         num_tokens, hidden_int4, num_scales, num_topk, num_experts,
                         scale_token_stride, scale_hidden_stride,
-                        rdma_workspace_ptr, config.num_max_rdma_chunked_send_tokens, config.num_max_rdma_chunked_recv_tokens,
+                        rdma_buffer_ptr, config.num_max_rdma_chunked_send_tokens, config.num_max_rdma_chunked_recv_tokens,
                         buffer_fused_ptrs_gpu, buffer_ptrs_gpu, config.num_max_nvl_chunked_send_tokens, config.num_max_nvl_chunked_recv_tokens,
                         rank, num_ranks, cached_mode,
-                        zero_copy,
+                        zero_copy, num_zcopy_buffers, zcopy_buffer_id,
                         comm_stream, num_channels, low_latency_mode);
 
     // Wait streams
@@ -1061,7 +1074,9 @@ Buffer::internode_combine(const torch::Tensor& x, const std::optional<torch::Ten
                           const torch::Tensor& rdma_channel_prefix_matrix, const torch::Tensor& rdma_rank_prefix_sum, const torch::Tensor& gbl_channel_prefix_matrix,
                           const std::optional<torch::Tensor>& gbl_rank_prefix_sum_fwd,
                           const torch::Tensor& combined_rdma_head, const torch::Tensor& combined_nvl_head,
-                          const Config& config, std::optional<EventHandle>& previous_event, bool zero_copy, bool async, bool allocate_on_comm_stream) {
+                          const Config& config, std::optional<EventHandle>& previous_event,
+                          bool zero_copy, int zcopy_buffer_id,
+                          bool async, bool allocate_on_comm_stream) {
 #ifndef DISABLE_NVSHMEM
     const int sms_per_channel = zero_copy ? 1 : 2;
     const int num_channels = config.num_sms / sms_per_channel;
@@ -1154,9 +1169,9 @@ Buffer::internode_combine(const torch::Tensor& x, const std::optional<torch::Ten
     void *x_ptr;
     if (zero_copy) {
         bool with_topk = topk_weights.has_value();
-        InternodeCombineLayout layout(buffer_fused_ptrs[nvl_rank], num_tokens, hidden, num_topk, with_topk);
-        x_ptr = layout.buffer.x;
-        topk_weights_ptr = layout.buffer.topk_weights;
+        InternodeCombineLayout layout(buffer_fused_ptrs[nvl_rank], num_tokens, hidden, num_topk, with_topk, num_zcopy_buffers);
+        x_ptr = layout.buffers.at(zcopy_buffer_id).x;
+        topk_weights_ptr = layout.buffers.at(zcopy_buffer_id).topk_weights;
     } else {
         x_ptr = x.data_ptr();
     }
@@ -1173,7 +1188,7 @@ Buffer::internode_combine(const torch::Tensor& x, const std::optional<torch::Ten
                        num_tokens, num_combined_tokens, hidden, num_topk,
                        rdma_buffer_ptr, config.num_max_rdma_chunked_send_tokens, config.num_max_rdma_chunked_recv_tokens,
                        buffer_fused_ptrs_gpu, buffer_ptrs_gpu, config.num_max_nvl_chunked_send_tokens, config.num_max_nvl_chunked_recv_tokens,
-                       rank, num_ranks, zero_copy, comm_stream, num_channels, low_latency_mode);
+                       rank, num_ranks, zero_copy, zcopy_buffer_id, comm_stream, num_channels, low_latency_mode);
 
     // Wait streams
     std::optional<EventHandle> event;
@@ -1476,12 +1491,13 @@ Buffer::get_next_low_latency_combine_buffer(int num_max_dispatch_tokens_per_rank
 }
 
 std::tuple<torch::Tensor, std::optional<torch::Tensor>, std::optional<torch::Tensor>, std::optional<torch::Tensor>>
-Buffer::get_internode_dispatch_buffer(int num_tokens, int hidden, int num_topk, bool with_topk, bool use_fp8) const {
+Buffer::get_internode_dispatch_buffer(int num_tokens, int hidden, int num_topk, bool with_topk, bool use_fp8, int buffer_id) const {
 #ifndef DISABLE_NVSHMEM
-    InternodeDispatchLayout layout(rdma_buffer_ptr, num_tokens, hidden, num_topk, num_ranks, with_topk, use_fp8);
-    auto buffer = layout.buffer;
+    InternodeDispatchLayout layout(rdma_fused_buffer_ptr, num_tokens, hidden, num_topk, num_ranks, with_topk, use_fp8, num_zcopy_buffers);
+    EP_HOST_ASSERT(0 <= buffer_id and buffer_id < num_zcopy_buffers);
+    auto buffer = layout.buffers[buffer_id];
 
-    EP_HOST_ASSERT(layout.total_bytes <= num_rdma_bytes);
+    EP_HOST_ASSERT(layout.total_bytes <= NUM_INPUT_BYTES_PER_ZCOPY_BUFFER * num_zcopy_buffers);
 
     auto x = use_fp8 ? torch::from_blob(buffer.x, {num_tokens, hidden}, torch::TensorOptions().dtype(torch::kFloat8_e4m3fn).device(torch::kCUDA)) : torch::from_blob(buffer.x, {num_tokens, hidden}, torch::TensorOptions().dtype(torch::kBFloat16).device(torch::kCUDA));
     auto x_scales = use_fp8 ? std::make_optional(torch::from_blob(buffer.x_scales, {num_tokens, hidden / 128}, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA))) : std::optional<torch::Tensor>();
@@ -1496,12 +1512,13 @@ Buffer::get_internode_dispatch_buffer(int num_tokens, int hidden, int num_topk, 
 }
 
 std::tuple<torch::Tensor, std::optional<torch::Tensor>>
-Buffer::get_internode_combine_buffer(int num_tokens, int hidden, int num_topk, bool with_topk) const {
+Buffer::get_internode_combine_buffer(int num_tokens, int hidden, int num_topk, bool with_topk, int buffer_id) const {
 #ifndef DISABLE_NVSHMEM
-    InternodeCombineLayout layout(buffer_fused_ptrs[nvl_rank], num_tokens, hidden, num_topk, with_topk);
-    auto buffer = layout.buffer;
+    InternodeCombineLayout layout(buffer_fused_ptrs[nvl_rank], num_tokens, hidden, num_topk, with_topk, num_zcopy_buffers);
+    EP_HOST_ASSERT(0 <= buffer_id and buffer_id < num_zcopy_buffers);
+    auto buffer = layout.buffers[buffer_id];
 
-    EP_HOST_ASSERT(layout.total_bytes <= num_nvl_bytes);
+    EP_HOST_ASSERT(layout.total_bytes <= NUM_INPUT_BYTES_PER_ZCOPY_BUFFER * num_zcopy_buffers);
 
     auto x = torch::from_blob(buffer.x, {num_tokens, hidden}, torch::TensorOptions().dtype(torch::kBFloat16).device(torch::kCUDA));
     auto topk_weights = with_topk ? std::make_optional(torch::from_blob(buffer.topk_weights, {num_tokens, num_topk}, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA))) : std::optional<torch::Tensor>();
@@ -1568,7 +1585,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         .def("current_stream_wait", &deep_ep::EventHandle::current_stream_wait);
 
     pybind11::class_<deep_ep::Buffer>(m, "Buffer")
-        .def(pybind11::init<int, int, int64_t, int64_t, bool, bool, bool>())
+        .def(pybind11::init<int, int, int64_t, int64_t, bool, bool, bool, int>())
         .def("is_available", &deep_ep::Buffer::is_available)
         .def("get_num_rdma_ranks", &deep_ep::Buffer::get_num_rdma_ranks)
         .def("get_rdma_rank", &deep_ep::Buffer::get_rdma_rank)

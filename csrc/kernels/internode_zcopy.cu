@@ -97,7 +97,7 @@ dispatch(int4* recv_x, float* recv_x_scales, topk_idx_t* recv_topk_idx, float* r
          const bool* is_token_in_rank,
          int num_tokens, int hidden_int4, int num_scales, int num_topk, int num_experts,
          void* rdma_buffer_ptr, int num_max_rdma_chunked_send_tokens, int num_max_rdma_chunked_recv_tokens,
-         void** buffer_fused_ptrs, void** buffer_ptrs, int num_max_nvl_chunked_send_tokens, int num_max_nvl_chunked_recv_tokens,
+         void** buffer_fused_ptrs, void** buffer_ptrs, int num_zcopy_buffers, int buffer_id, int num_max_nvl_chunked_send_tokens, int num_max_nvl_chunked_recv_tokens,
          int rank, int num_ranks) {
     enum class WarpRole {
         kRDMASender,
@@ -151,7 +151,7 @@ dispatch(int4* recv_x, float* recv_x_scales, topk_idx_t* recv_topk_idx, float* r
     void *ws_rr_buffer_ptr = nullptr;
     void *ws_rr_fused_buffer_ptr = nullptr;
     if (warp_role == WarpRole::kRDMAAndNVLForwarder) {
-        ws_rr_fused_buffer_ptr = buffer_fused_ptrs[target_rank];
+        ws_rr_fused_buffer_ptr = shift_ptr(buffer_fused_ptrs[target_rank], NUM_INPUT_BYTES_PER_ZCOPY_BUFFER * num_zcopy_buffers + NUM_OUTPUT_BYTES_PER_ZCOPY_BUFFER * buffer_id);
         ws_rr_buffer_ptr = buffer_ptrs[target_rank];
     }
     if (warp_role == WarpRole::kNVLReceivers) {
@@ -727,7 +727,7 @@ void dispatch(void* recv_x, float* recv_x_scales, topk_idx_t* recv_topk_idx, flo
               const bool* is_token_in_rank,
               int num_tokens, int hidden_int4, int num_scales, int num_topk, int num_experts,
               void* rdma_buffer_ptr, int num_max_rdma_chunked_send_tokens, int num_max_rdma_chunked_recv_tokens,
-              void** buffer_fused_ptrs, void** buffer_ptrs, int num_max_nvl_chunked_send_tokens, int num_max_nvl_chunked_recv_tokens,
+              void** buffer_fused_ptrs, void** buffer_ptrs, int num_zcopy_buffers, int buffer_id, int num_max_nvl_chunked_send_tokens, int num_max_nvl_chunked_recv_tokens,
               int rank, int num_ranks, bool is_cached_dispatch,
               cudaStream_t stream, int num_channels, bool low_latency_mode) {
     constexpr int smem_size = 16384 * NUM_MAX_NVL_PEERS + ZCOPY_TMA_SMEM_ALIGNMENT;
@@ -749,7 +749,7 @@ void dispatch(void* recv_x, float* recv_x_scales, topk_idx_t* recv_topk_idx, flo
                   is_token_in_rank, \
                   num_tokens, hidden_int4, num_scales, num_topk, num_experts, \
                   rdma_buffer_ptr, num_max_rdma_chunked_send_tokens, num_max_rdma_chunked_recv_tokens, \
-                  buffer_fused_ptrs, buffer_ptrs, num_max_nvl_chunked_send_tokens, num_max_nvl_chunked_recv_tokens, \
+                  buffer_fused_ptrs, buffer_ptrs, num_zcopy_buffers, buffer_id, num_max_nvl_chunked_send_tokens, num_max_nvl_chunked_recv_tokens, \
                   rank, num_ranks); } break
 
     EP_HOST_ASSERT((topk_idx == nullptr)  == (topk_weights == nullptr));
@@ -835,7 +835,7 @@ combine(int4* combined_x, float* combined_topk_weights,
         const int* recv_gbl_rank_prefix_sum_fwd,
         int num_tokens, int num_combined_tokens, int hidden, int num_topk,
         void* rdma_buffer_ptr, int num_max_rdma_chunked_send_tokens, int num_max_rdma_chunked_recv_tokens,
-        void** buffer_fused_ptrs, void** buffer_ptrs, int num_max_nvl_chunked_send_tokens, int num_max_nvl_chunked_recv_tokens,
+        void** buffer_fused_ptrs, void** buffer_ptrs, int buffer_id, int num_max_nvl_chunked_send_tokens, int num_max_nvl_chunked_recv_tokens,
         int rank, int num_ranks) {
     enum class WarpRole {
         kNVLSender,
@@ -902,7 +902,8 @@ combine(int4* combined_x, float* combined_topk_weights,
         void* ws_rr_fused_buffer_ptr[NUM_MAX_NVL_PEERS], *rs_wr_buffer_ptr[NUM_MAX_NVL_PEERS];
         #pragma unroll
         for (int i = 0; i < NUM_MAX_NVL_PEERS; ++ i) {
-            ws_rr_fused_buffer_ptr[i] = buffer_fused_ptrs[i];
+            uint64_t offset = NUM_INPUT_BYTES_PER_ZCOPY_BUFFER * buffer_id;
+            ws_rr_fused_buffer_ptr[i] = reinterpret_cast<char *>(buffer_fused_ptrs[i]) + offset;
             rs_wr_buffer_ptr[i] = buffer_ptrs[i];
         }
         auto nvl_channel_finish_signal = AsymBuffer<int, NUM_MAX_NVL_PEERS>(rs_wr_buffer_ptr, 1, NUM_MAX_NVL_PEERS, channel_id, num_channels);
@@ -1141,7 +1142,7 @@ void combine(cudaDataType_t type,
              const int* recv_gbl_rank_prefix_sum_fwd,
              int num_tokens, int num_combined_tokens, int hidden, int num_topk,
              void* rdma_buffer_ptr, int num_max_rdma_chunked_send_tokens, int num_max_rdma_chunked_recv_tokens,
-             void** buffer_fused_ptrs, void** buffer_ptrs, int num_max_nvl_chunked_send_tokens, int num_max_nvl_chunked_recv_tokens,
+             void** buffer_fused_ptrs, void** buffer_ptrs, int buffer_id, int num_max_nvl_chunked_send_tokens, int num_max_nvl_chunked_recv_tokens,
              int rank, int num_ranks, cudaStream_t stream, int num_channels, bool low_latency_mode) {
     // TODO: Zero-copy: Add support for bias
     EP_HOST_ASSERT(bias_0 == nullptr and bias_1 == nullptr);
@@ -1164,7 +1165,7 @@ void combine(cudaDataType_t type,
                   recv_gbl_rank_prefix_sum_fwd, \
                   num_tokens, num_combined_tokens, hidden, num_topk, \
                   rdma_buffer_ptr, num_max_rdma_chunked_send_tokens, num_max_rdma_chunked_recv_tokens, \
-                  buffer_fused_ptrs, buffer_ptrs, num_max_nvl_chunked_send_tokens, num_max_nvl_chunked_recv_tokens, \
+                  buffer_fused_ptrs, buffer_ptrs, buffer_id, num_max_nvl_chunked_send_tokens, num_max_nvl_chunked_recv_tokens, \
                   rank, num_ranks); } break
 
     EP_HOST_ASSERT(kNumCombineForwarderWarps / num_rdma_ranks >= 1);

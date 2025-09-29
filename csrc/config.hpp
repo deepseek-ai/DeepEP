@@ -20,6 +20,13 @@ dtype_t align_down(dtype_t a, dtype_t b) {
     return a / b * b;
 }
 
+template <typename out_ptr_t = void*, typename count_ptr_t = uint8_t*, typename in_ptr_t = void*>
+out_ptr_t advance_ptr(in_ptr_t &ptr, size_t count) {
+    out_ptr_t saved = reinterpret_cast<out_ptr_t>(ptr);
+    ptr = reinterpret_cast<out_ptr_t>(reinterpret_cast<count_ptr_t>(ptr) + count);
+    return saved;
+}
+
 struct Config {
     int num_sms;
     int num_max_nvl_chunked_send_tokens;
@@ -48,7 +55,7 @@ struct Config {
     }
 
     // TODO: Zero-copy: Fix this
-    size_t get_nvl_buffer_size_hint(size_t hidden_bytes, int num_ranks, bool zero_copy) const {
+    size_t get_nvl_buffer_size_hint(size_t hidden_bytes, int num_ranks, bool zero_copy = false) const {
         // Below are some assumptions
         // TODO: add assertions
         constexpr int kNumMaxTopK = 128;
@@ -74,7 +81,7 @@ struct Config {
     }
 
     // TODO: Zero-copy: Fix this
-    size_t get_rdma_buffer_size_hint(int64_t hidden_bytes, int num_ranks, bool zero_copy) const {
+    size_t get_rdma_buffer_size_hint(int64_t hidden_bytes, int num_ranks, bool zero_copy = false) const {
 #ifndef DISABLE_NVSHMEM
         // Legacy mode
         if (num_ranks <= NUM_MAX_NVL_PEERS)
@@ -202,20 +209,14 @@ struct InternodeDispatchBuffer {
     float* x_scales = nullptr;
     int64_t* topk_idx = nullptr;
     float* topk_weights = nullptr;
-
-    void* recv_buffer = nullptr;
+    void* source_meta = nullptr;
 };
 
 struct InternodeDispatchLayout {
     size_t total_bytes = 0;
-    InternodeDispatchBuffer buffer;
+    std::vector<InternodeDispatchBuffer> buffers;
 
-    template <typename out_ptr_t = void*, typename count_ptr_t = uint8_t*, typename in_ptr_t = void*>
-    out_ptr_t advance(const in_ptr_t& ptr, size_t count) {
-        return reinterpret_cast<out_ptr_t>(reinterpret_cast<count_ptr_t>(ptr) + count);
-    }
-
-    InternodeDispatchLayout(void* rdma_buffer, int num_tokens, int hidden, int num_topk, int num_ranks, bool with_topk, bool use_fp8) {
+    InternodeDispatchLayout(void* rdma_fused_buffer, int num_tokens, int hidden, int num_topk, int num_ranks, bool with_topk, bool use_fp8, int num_buffers) {
         size_t num_bytes_x = 0;
         size_t num_bytes_x_scales = 0;
         size_t num_bytes_topk_idx = 0;
@@ -223,14 +224,15 @@ struct InternodeDispatchLayout {
         size_t num_bytes_source_meta = 0;
 
         if (use_fp8){
-            num_bytes_x = num_tokens * hidden * sizeof(__nv_fp8_e4m3);
+            num_bytes_x = num_tokens * hidden * elementSize(torch::kFloat8_e4m3fn);
             total_bytes += num_bytes_x;
 
             int num_scales = hidden / 128;
             num_bytes_x_scales = num_tokens * num_scales * sizeof(float);
             total_bytes += num_bytes_x_scales;
-        } else {
-            num_bytes_x = num_tokens * hidden * sizeof(nv_bfloat16);
+        }
+        else {
+            num_bytes_x = num_tokens * hidden * elementSize(torch::kBFloat16);
             total_bytes += num_bytes_x;
         }
 
@@ -242,17 +244,28 @@ struct InternodeDispatchLayout {
             total_bytes += num_bytes_topk_weights;
         }
 
-        EP_HOST_ASSERT(total_bytes % sizeof(int4) == 0);
+        num_bytes_source_meta = (num_ranks / NUM_MAX_NVL_PEERS) * num_tokens * internode::get_source_meta_bytes();
+        total_bytes += num_bytes_source_meta;
+        EP_HOST_ASSERT(total_bytes % 16 == 0);
 
-        buffer = {
-            advance(rdma_buffer, 0),
-            use_fp8 ? advance<float*>(rdma_buffer, num_bytes_x) : nullptr,
-            with_topk ? advance<int64_t*>(rdma_buffer, num_bytes_x + num_bytes_x_scales) : nullptr,
-            with_topk ? advance<float*>(rdma_buffer, num_bytes_x + num_bytes_x_scales + num_bytes_topk_idx) : nullptr,
-            advance(rdma_buffer, num_bytes_x + num_bytes_x_scales + num_bytes_topk_idx + num_bytes_topk_weights + num_bytes_source_meta)
-        };
+        EP_HOST_ASSERT(total_bytes <= NUM_INPUT_BYTES_PER_ZCOPY_BUFFER);
+
+        for (int i=0; i<num_buffers; ++i) {
+            auto tmp = rdma_fused_buffer;
+            buffers.push_back({
+                advance_ptr(tmp, num_bytes_x),  // x
+                use_fp8 ? advance_ptr<float*>(tmp, num_bytes_x_scales) : nullptr,  // x_scales
+                with_topk ? advance_ptr<int64_t*>(tmp, num_bytes_topk_idx) : nullptr,  // topk_idx
+                with_topk ? advance_ptr<float*>(tmp, num_bytes_topk_weights) : nullptr,  // topk_weights
+                advance_ptr(tmp, num_bytes_source_meta),  // source_meta
+            });
+            advance_ptr(rdma_fused_buffer, NUM_INPUT_BYTES_PER_ZCOPY_BUFFER);
+        }
+
+        total_bytes = NUM_INPUT_BYTES_PER_ZCOPY_BUFFER * num_buffers;
     }
 };
+
 
 struct InternodeCombineBuffer {
     void* x = nullptr;
@@ -261,18 +274,18 @@ struct InternodeCombineBuffer {
 
 struct InternodeCombineLayout {
     size_t total_bytes = 0;
-    InternodeCombineBuffer buffer;
+    std::vector<InternodeCombineBuffer> buffers;
 
     template <typename out_ptr_t = void*, typename count_ptr_t = uint8_t*, typename in_ptr_t = void*>
     out_ptr_t advance(const in_ptr_t& ptr, size_t count) {
         return reinterpret_cast<out_ptr_t>(reinterpret_cast<count_ptr_t>(ptr) + count);
     }
 
-    InternodeCombineLayout(void* nvl_buffer, int num_tokens, int hidden, int num_topk, bool with_topk) {
+    InternodeCombineLayout(void* nvl_buffer, int num_tokens, int hidden, int num_topk, bool with_topk, int num_buffers) {
         size_t num_bytes_x = 0;
         size_t num_bytes_topk_weights = 0;
 
-        num_bytes_x = num_tokens * hidden * sizeof(nv_bfloat16);
+        num_bytes_x = num_tokens * hidden * elementSize(torch::kBFloat16);
         total_bytes += num_bytes_x;
 
         if (with_topk) {
@@ -280,12 +293,20 @@ struct InternodeCombineLayout {
             total_bytes += num_bytes_topk_weights;
         }
 
+        EP_HOST_ASSERT(total_bytes <= NUM_INPUT_BYTES_PER_ZCOPY_BUFFER);
+
         EP_HOST_ASSERT(total_bytes % 16 == 0);
 
-        buffer = {
-            advance(nvl_buffer, 0),
-            with_topk ? advance<float*>(nvl_buffer, num_bytes_x) : nullptr
-        };
+        for (int i=0; i<num_buffers; ++i) {
+            auto tmp = nvl_buffer;
+            buffers.push_back({
+                tmp,
+                with_topk ? advance<float*>(tmp, num_bytes_x) : nullptr
+            });
+            advance_ptr(nvl_buffer, NUM_INPUT_BYTES_PER_ZCOPY_BUFFER);
+        }
+
+        total_bytes = NUM_INPUT_BYTES_PER_ZCOPY_BUFFER * num_buffers;
     }
 };
 

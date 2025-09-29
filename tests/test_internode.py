@@ -118,21 +118,25 @@ def test_main(args: argparse.Namespace, num_sms: int,
             assert (check_x[check_start:check_end, :].int() - i).sum().item() == 0
             check_start = check_end
 
+    zcopy_buffer_id = -1
+
     for previous_mode in (False, True):
         for async_mode in (False, True):
             for current_x in (x_pure_rand, x, x_pure_rand_e4m3, x_e4m3):
                 for with_topk in (False, True):
                     is_rand = current_x is x_pure_rand or current_x is x_pure_rand_e4m3
+                    zcopy_buffer_id = (zcopy_buffer_id + 1) % 2
                     if local_rank == 0:
                         print(f'[testing] Running with {"FP8" if isinstance(current_x, tuple) else "BF16"}, {"with" if with_topk else "without"} top-k (async={async_mode}, previous={previous_mode}) ...', flush=True, end='')
                     dispatch_args = {'x': current_x, 'num_tokens_per_rank': num_tokens_per_rank, 'num_tokens_per_rdma_rank': num_tokens_per_rdma_rank,  'is_token_in_rank': is_token_in_rank,
-                                     'num_tokens_per_expert': num_tokens_per_expert, 'config': config, 'async_finish': async_mode, 'zero_copy': zero_copy}
+                                     'num_tokens_per_expert': num_tokens_per_expert, 'config': config, 'async_finish': async_mode,
+                                     'zero_copy': zero_copy, 'zcopy_buffer_id': zcopy_buffer_id}
                     if with_topk:
                         dispatch_args.update({'topk_idx': topk_idx, 'topk_weights': topk_weights_pure_rand if is_rand else topk_weights})
                     if zero_copy:
                         use_fp8 = True if isinstance(current_x, tuple) else False
                         current_x_hidden, current_x_scales = current_x if isinstance(current_x, tuple) else (current_x, None)
-                        dispatch_buffer_layout = buffer.get_internode_dispatch_buffer(num_tokens, hidden, num_topk, with_topk, use_fp8)
+                        dispatch_buffer_layout = buffer.get_internode_dispatch_buffer(num_tokens, hidden, num_topk, with_topk, use_fp8, zcopy_buffer_id)
                         if current_x_scales is not None:
                             dispatch_buffer_layout[0][:, :] = current_x_hidden
                             dispatch_buffer_layout[1][:, :] = current_x_scales
@@ -173,11 +177,11 @@ def test_main(args: argparse.Namespace, num_sms: int,
 
                     # Test cached dispatch (must without top-k staffs)
                     if not with_topk:
-                        dispatch_args = {'x': current_x, 'handle': handle, 'config': config, 'async_finish': async_mode, 'zero_copy': zero_copy}
+                        dispatch_args = {'x': current_x, 'handle': handle, 'config': config, 'async_finish': async_mode, 'zero_copy': zero_copy, 'zcopy_buffer_id': zcopy_buffer_id}
                         if zero_copy:
                             use_fp8 = True if isinstance(current_x, tuple) else False
                             current_x_hidden, current_x_scales = current_x if isinstance(current_x, tuple) else (current_x, None)
-                            dispatch_buffer_layout = buffer.get_internode_dispatch_buffer(num_tokens, hidden, num_topk, with_topk, use_fp8)
+                            dispatch_buffer_layout = buffer.get_internode_dispatch_buffer(num_tokens, hidden, num_topk, with_topk, use_fp8, zcopy_buffer_id)
                             if current_x_scales is not None:
                                 dispatch_buffer_layout[0][:, :] = current_x_hidden
                                 dispatch_buffer_layout[1][:, :] = current_x_scales
@@ -197,12 +201,12 @@ def test_main(args: argparse.Namespace, num_sms: int,
                     else:
                         bias_0 = torch.ones((num_tokens, hidden), dtype=torch.bfloat16, device='cuda')
                         bias_1 = torch.randn((num_tokens, hidden), dtype=torch.bfloat16, device='cuda')
-                    combine_args = {'x': recv_x, 'bias': (bias_0, bias_1), 'handle': handle, 'config': config, 'async_finish': async_mode, 'zero_copy': zero_copy}
+                    combine_args = {'x': recv_x, 'bias': (bias_0, bias_1), 'handle': handle, 'config': config, 'async_finish': async_mode, 'zero_copy': zero_copy, 'zcopy_buffer_id': zcopy_buffer_id}
                     if with_topk:
                         combine_args.update({'topk_weights': recv_topk_weights})
                     if zero_copy:
                         num_tokens_to_combine = recv_x.size(0)
-                        combine_buffer_layout = buffer.get_internode_combine_buffer(num_tokens_to_combine, hidden, num_topk, with_topk)
+                        combine_buffer_layout = buffer.get_internode_combine_buffer(num_tokens_to_combine, hidden, num_topk, with_topk, zcopy_buffer_id)
                         if with_topk:
                             combine_buffer_layout[1][:, :] = recv_topk_weights
                         combine_buffer_layout[0][:, :] = recv_x
@@ -327,7 +331,7 @@ def test_loop(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
     num_qps_per_rank = max(num_sms, ll_num_experts // num_ranks if args.test_ll_compatibility else 0)
 
     buffer = deep_ep.Buffer(group, int(2e9), int(1e9), low_latency_mode=args.test_ll_compatibility,
-                            num_qps_per_rank=num_qps_per_rank, explicitly_destroy=True, enable_zcopy=args.use_zero_copy)
+                            num_qps_per_rank=num_qps_per_rank, explicitly_destroy=True, enable_zcopy=args.use_zero_copy, num_zcopy_buffers=2)
     assert num_local_ranks == 8 and num_ranks > 8
 
     for seed in range(int(1e9)):

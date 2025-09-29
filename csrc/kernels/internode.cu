@@ -1053,8 +1053,9 @@ void dispatch(void* recv_x, float* recv_x_scales, topk_idx_t* recv_topk_idx, flo
               void* rdma_buffer_ptr, int num_max_rdma_chunked_send_tokens, int num_max_rdma_chunked_recv_tokens,
               void** buffer_fused_ptrs, void** buffer_ptrs, int num_max_nvl_chunked_send_tokens, int num_max_nvl_chunked_recv_tokens,
               int rank, int num_ranks, bool is_cached_dispatch,
-              bool zero_copy,
+              bool zero_copy, int num_zcopy_buffers, int zcopy_buffer_id,
               cudaStream_t stream, int num_channels, bool low_latency_mode) {
+    // TODO: Zero-copy: move this into zcopy.cu
     if (zero_copy) {
         // TODO: Zero-copy: Support ue8m0 scenario
         EP_HOST_ASSERT((scale_token_stride == num_scales and scale_hidden_stride == 1) or (scale_token_stride == 0 and scale_hidden_stride == 0));
@@ -1069,7 +1070,7 @@ void dispatch(void* recv_x, float* recv_x_scales, topk_idx_t* recv_topk_idx, flo
             is_token_in_rank,
             num_tokens, hidden_int4, num_scales, num_topk, num_experts,
             rdma_buffer_ptr, num_max_rdma_chunked_send_tokens, num_max_rdma_chunked_recv_tokens,
-            buffer_fused_ptrs, buffer_ptrs, num_max_nvl_chunked_send_tokens, num_max_nvl_chunked_recv_tokens,
+            buffer_fused_ptrs, buffer_ptrs, num_zcopy_buffers, zcopy_buffer_id, num_max_nvl_chunked_send_tokens, num_max_nvl_chunked_recv_tokens,
             rank, num_ranks, is_cached_dispatch,
             stream, num_channels, low_latency_mode
         );
@@ -1906,7 +1907,7 @@ void combine(cudaDataType_t type,
              int num_tokens, int num_combined_tokens, int hidden, int num_topk,
              void* rdma_buffer_ptr, int num_max_rdma_chunked_send_tokens, int num_max_rdma_chunked_recv_tokens,
              void** buffer_fused_ptrs, void** buffer_ptrs, int num_max_nvl_chunked_send_tokens, int num_max_nvl_chunked_recv_tokens,
-             int rank, int num_ranks, bool zero_copy, cudaStream_t stream, int num_channels, bool low_latency_mode) {
+             int rank, int num_ranks, bool zero_copy, int zcopy_buffer_id, cudaStream_t stream, int num_channels, bool low_latency_mode) {
     if (zero_copy) {
         return internode_zcopy::combine(
             type, combined_x, combined_topk_weights,
@@ -1918,7 +1919,7 @@ void combine(cudaDataType_t type,
             recv_gbl_rank_prefix_sum_fwd,
             num_tokens, num_combined_tokens, hidden, num_topk,
             rdma_buffer_ptr, num_max_rdma_chunked_send_tokens, num_max_rdma_chunked_recv_tokens,
-            buffer_fused_ptrs, buffer_ptrs, num_max_nvl_chunked_send_tokens, num_max_nvl_chunked_recv_tokens,
+            buffer_fused_ptrs, buffer_ptrs, zcopy_buffer_id, num_max_nvl_chunked_send_tokens, num_max_nvl_chunked_recv_tokens,
             rank, num_ranks, stream, num_channels, low_latency_mode
         );
     }

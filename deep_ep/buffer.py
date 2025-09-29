@@ -39,6 +39,7 @@ class Buffer:
                  explicitly_destroy: bool = False,
                  enable_shrink: bool = False,
                  enable_zcopy: bool = False,
+                 num_zcopy_buffers: int = 1,
                  comm: Optional["mpi4py.MPI.Comm"] = None) -> None:
         """
         Initialize the communication buffer.
@@ -87,7 +88,13 @@ class Buffer:
         self.low_latency_mode = low_latency_mode
         self.explicitly_destroy = explicitly_destroy
         self.enable_shrink = enable_shrink
-        self.runtime = deep_ep_cpp.Buffer(self.rank, self.group_size, num_nvl_bytes, num_rdma_bytes, low_latency_mode, explicitly_destroy, enable_shrink)
+        self.enable_zcopy = enable_zcopy
+        if self.enable_zcopy:
+            assert num_zcopy_buffers > 0
+        else:
+            num_zcopy_buffers = 0
+        self.num_zcopy_buffers = num_zcopy_buffers
+        self.runtime = deep_ep_cpp.Buffer(self.rank, self.group_size, num_nvl_bytes, num_rdma_bytes, low_latency_mode, explicitly_destroy, enable_shrink, num_zcopy_buffers)
 
         # Synchronize device IDs
         local_device_id = self.runtime.get_local_device_id()
@@ -321,7 +328,8 @@ class Buffer:
                  expert_alignment: int = 1, num_worst_tokens: int = 0,
                  config: Optional[Config] = None,
                  previous_event: Optional[EventOverlap] = None, async_finish: bool = False,
-                 allocate_on_comm_stream: bool = False, zero_copy: bool = False) -> \
+                 allocate_on_comm_stream: bool = False,
+                 zero_copy: bool = False, zcopy_buffer_id: int = 0) -> \
             Tuple[Union[Tuple[torch.Tensor, torch.Tensor], torch.Tensor], Optional[torch.Tensor],
                   Optional[torch.Tensor], List[int], Tuple, EventOverlap]:
         """
@@ -353,6 +361,7 @@ class Buffer:
             allocate_on_comm_stream: control whether all the allocated tensors' ownership to be on the communication stream.
             zero_copy: use zero-copy internode transfer, which requires the source tensors to be located on special
                 pre-allocated "dispatch buffers".
+            zcopy_buffer_id: the sub-buffer ID to use as zero-copy dispatch input & output (must be < num_zcopy_buffers).
 
         Returns:
             recv_x: received tokens, the same type and tuple as the input `x`, but the number of tokens equals to the
@@ -372,7 +381,7 @@ class Buffer:
         if self.runtime.get_num_rdma_ranks() > 1:
             assert num_worst_tokens == 0, 'Internode dispatch does not support `num_worst_tokens > 0`'
             return self.internode_dispatch(x, handle, num_tokens_per_rank, num_tokens_per_rdma_rank, is_token_in_rank, num_tokens_per_expert,
-                                           topk_idx, topk_weights, expert_alignment, config, previous_event, async_finish, allocate_on_comm_stream, zero_copy)
+                                           topk_idx, topk_weights, expert_alignment, config, previous_event, async_finish, allocate_on_comm_stream, zero_copy, zcopy_buffer_id)
 
         # Launch the kernel with cached or non-cached mode
         x, x_scales = x if isinstance(x, tuple) else (x, None)
@@ -402,7 +411,8 @@ class Buffer:
                 bias: Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]] = None,
                 config: Optional[Config] = None,
                 previous_event: Optional[EventOverlap] = None, async_finish: bool = False,
-                allocate_on_comm_stream: bool = False, zero_copy: bool = False) -> \
+                allocate_on_comm_stream: bool = False,
+                zero_copy: bool = False, zcopy_buffer_id: int = 0) -> \
             Tuple[torch.Tensor, Optional[torch.Tensor], EventOverlap]:
         """
         Combine (reduce) tokens (addition **without** weights) from different ranks, both intranode and internode
@@ -422,6 +432,7 @@ class Buffer:
             allocate_on_comm_stream: control whether all the allocated tensors' ownership to be on the communication stream.
             zero_copy: use zero-copy internode transfer, which requires the source tensors to be located on special
                 pre-allocated "combine buffers".
+            zcopy_buffer_id: the sub-buffer ID to use as zero-copy dispatch input & output (must be < num_zcopy_buffers).
 
         Returns:
             recv_x: the reduced token from its dispatched ranks.
@@ -433,7 +444,7 @@ class Buffer:
 
         # Internode
         if self.runtime.get_num_rdma_ranks() > 1:
-            return self.internode_combine(x, handle, topk_weights, bias, config, previous_event, async_finish, allocate_on_comm_stream, zero_copy)
+            return self.internode_combine(x, handle, topk_weights, bias, config, previous_event, async_finish, allocate_on_comm_stream, zero_copy, zcopy_buffer_id)
 
         # NOTES: the second `_` is for the sending side, so we should use the third one
         rank_prefix_matrix, _, channel_prefix_matrix, src_idx, is_recv_token_in_rank, send_head = handle
@@ -454,7 +465,8 @@ class Buffer:
                            topk_idx: Optional[torch.Tensor] = None, topk_weights: Optional[torch.Tensor] = None, expert_alignment: int = 1,
                            config: Optional[Config] = None,
                            previous_event: Optional[EventOverlap] = None, async_finish: bool = False,
-                           allocate_on_comm_stream: bool = False, zero_copy = False) -> \
+                           allocate_on_comm_stream: bool = False,
+                           zero_copy: bool = False, zcopy_buffer_id: int = 0) -> \
             Tuple[Union[Tuple[torch.Tensor, torch.Tensor], torch.Tensor], Optional[torch.Tensor],
             Optional[torch.Tensor], List[int], Tuple, EventOverlap]:
         """
@@ -462,6 +474,9 @@ class Buffer:
         Normally, you should not directly call this function.
         """
         assert config is not None
+
+        if zero_copy:
+            assert 0 <= zcopy_buffer_id < self.num_zcopy_buffers
 
         # Launch the kernel with cached or non-cached mode
         x, x_scales = x if isinstance(x, tuple) else (x, None)
@@ -480,7 +495,7 @@ class Buffer:
                 num_recv_tokens, num_rdma_recv_tokens,
                 rdma_channel_prefix_matrix, recv_rdma_rank_prefix_sum, gbl_channel_prefix_matrix, recv_gbl_rank_prefix_sum,
                 recv_gbl_rank_prefix_sum_fwd,
-                expert_alignment, config, getattr(previous_event, 'event', None), zero_copy, async_finish, allocate_on_comm_stream)
+                expert_alignment, config, getattr(previous_event, 'event', None), zero_copy, zcopy_buffer_id, async_finish, allocate_on_comm_stream)
             return (recv_x, recv_x_scales) if x_scales is not None else recv_x, None, None, None, None, EventOverlap(event)
         else:
             assert num_tokens_per_rank is not None and is_token_in_rank is not None and num_tokens_per_expert is not None
@@ -493,7 +508,7 @@ class Buffer:
                 x, x_scales, topk_idx, topk_weights,
                 num_tokens_per_rank, num_tokens_per_rdma_rank, is_token_in_rank, num_tokens_per_expert,
                 0, 0, None, None, None, None, None,
-                expert_alignment, config, getattr(previous_event, 'event', None), zero_copy, async_finish, allocate_on_comm_stream)
+                expert_alignment, config, getattr(previous_event, 'event', None), zero_copy, zcopy_buffer_id, async_finish, allocate_on_comm_stream)
             handle = (is_token_in_rank,
                       rdma_channel_prefix_matrix, gbl_channel_prefix_matrix,
                       recv_rdma_channel_prefix_matrix, recv_rdma_rank_prefix_sum, recv_gbl_channel_prefix_matrix, recv_gbl_rank_prefix_sum,
@@ -507,13 +522,17 @@ class Buffer:
                           bias: Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]] = None,
                           config: Optional[Config] = None,
                           previous_event: Optional[EventOverlap] = None, async_finish: bool = False,
-                          allocate_on_comm_stream: bool = False, zero_copy: bool = False) -> \
+                          allocate_on_comm_stream: bool = False,
+                          zero_copy: bool = False, zcopy_buffer_id: int = 0) -> \
             Tuple[torch.Tensor, Optional[torch.Tensor], EventOverlap]:
         """
         Internode combine implementation, for more details, please refer to the `combine` docs.
         Normally, you should not directly call this function.
         """
         assert config is not None
+
+        if zero_copy:
+            assert 0 <= zcopy_buffer_id < self.num_zcopy_buffers
 
         # Unpack handle and bias
         is_combined_token_in_rank, \
@@ -533,7 +552,7 @@ class Buffer:
             rdma_channel_prefix_matrix, rdma_rank_prefix_sum, gbl_channel_prefix_matrix,
             gbl_rank_prefix_sum_fwd,
             send_rdma_head, send_nvl_head, config, getattr(previous_event, 'event', None),
-            zero_copy, async_finish, allocate_on_comm_stream)
+            zero_copy, zcopy_buffer_id, async_finish, allocate_on_comm_stream)
         return combined_x, combined_topk_weights, EventOverlap(event)
 
     def clean_low_latency_buffer(self, num_max_dispatch_tokens_per_rank: int, hidden: int, num_experts: int) -> None:
@@ -713,29 +732,33 @@ class Buffer:
         src_info, layout_range, num_max_dispatch_tokens_per_rank, hidden, num_experts = handle
         return self.runtime.get_next_low_latency_combine_buffer(num_max_dispatch_tokens_per_rank, hidden, num_experts)
 
-    def get_internode_dispatch_buffer(self, num_tokens: int, hidden: int, num_topk: int, with_topk: bool, use_fp8: bool):
+    def get_internode_dispatch_buffer(self, num_tokens: int, hidden: int, num_topk: int, with_topk: bool, use_fp8: bool, zcopy_buffer_id: int = 0):
         """
         Get the raw registered RDMA buffer tensor for internode dispatch, so that the next dispatch kernel can skip the copying.
 
         Arguments:
             with_topk: whether the next dispatch kernel is with top-k or not.
             use_fp8: whether the next dispatch kernel use FP8 or not.
+            zcopy_buffer_id: which sub-buffer to use.
 
         Returns:
             buffer: the raw RDMA internode dispatch buffer as a FP8/BF16 PyTorch tensor, a scale tensor(if use_fp8),
             a topk indices and weights tensor(if with_topk) and a source meta tensor contiguously. You should fill
             this buffer by yourself.
         """
-        return self.runtime.get_internode_dispatch_buffer(num_tokens, hidden, num_topk, with_topk, use_fp8)
+        assert 0 <= zcopy_buffer_id < self.num_zcopy_buffers
+        return self.runtime.get_internode_dispatch_buffer(num_tokens, hidden, num_topk, with_topk, use_fp8, zcopy_buffer_id)
 
-    def get_internode_combine_buffer(self, num_tokens: int, hidden: int, num_topk: int, with_topk: bool):
+    def get_internode_combine_buffer(self, num_tokens: int, hidden: int, num_topk: int, with_topk: bool, zcopy_buffer_id: int = 0):
         """
         Get the raw registered NVLink buffer tensor for internode combine.
 
         Arguments:
             with_topk: whether the next combine kernel is with top-k or not.
+            zcopy_buffer_id: which sub-buffer to use.
 
         Returns:
             buffer: the raw NVLink internode combine buffer as a BF16 PyTorch tensor. You should fill this buffer by yourself.
         """
-        return self.runtime.get_internode_combine_buffer(num_tokens, hidden, num_topk, with_topk)
+        assert 0 <= zcopy_buffer_id < self.num_zcopy_buffers
+        return self.runtime.get_internode_combine_buffer(num_tokens, hidden, num_topk, with_topk, zcopy_buffer_id)
