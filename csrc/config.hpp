@@ -2,6 +2,7 @@
 
 #include "kernels/api.cuh"
 #include "kernels/exception.cuh"
+#include "kernels/eager.h"
 
 namespace deep_ep {
 
@@ -131,7 +132,7 @@ struct LowLatencyLayout {
         return reinterpret_cast<out_ptr_t>(reinterpret_cast<count_ptr_t>(ptr) + count);
     }
 
-    LowLatencyLayout(void* rdma_buffer, int num_max_dispatch_tokens_per_rank, int hidden, int num_ranks, int num_experts) {
+    LowLatencyLayout(void* rdma_buffer, int num_max_dispatch_tokens_per_rank, int hidden, int num_ranks, int num_experts, bool eager_support) {
         const int num_scales = hidden / 128;
 
         // Dispatch and combine layout:
@@ -145,6 +146,11 @@ struct LowLatencyLayout {
         EP_HOST_ASSERT(num_scales * sizeof(float) <= hidden);
         size_t num_bytes_per_dispatch_msg = sizeof(int4) + std::max(hidden * sizeof(nv_bfloat16), hidden + num_scales * sizeof(float));
         size_t num_bytes_per_combine_msg = num_scales * sizeof(nv_bfloat162) + hidden * sizeof(nv_bfloat16);
+
+        if (eager_support) {
+            num_bytes_per_dispatch_msg = EXTEND_FOR_TAG_AND_ALIGN(num_bytes_per_dispatch_msg + sizeof(int) * 4, AR_MSG_LONG_ALIGNMENT);
+            num_bytes_per_combine_msg = EXTEND_FOR_TAG_AND_ALIGN(num_bytes_per_combine_msg + sizeof(int) * 4, AR_MSG_LONG_ALIGNMENT);
+        }
 
         // Send buffer
         size_t dispatch_send_buffer_bytes = num_max_dispatch_tokens_per_rank * num_bytes_per_dispatch_msg;
@@ -187,8 +193,8 @@ struct LowLatencyLayout {
     }
 };
 
-size_t get_low_latency_rdma_size_hint(int num_max_dispatch_tokens_per_rank, int hidden, int num_ranks, int num_experts) {
-    auto num_bytes = LowLatencyLayout(nullptr, num_max_dispatch_tokens_per_rank, hidden, num_ranks, num_experts).total_bytes;
+size_t get_low_latency_rdma_size_hint(int num_max_dispatch_tokens_per_rank, int hidden, int num_ranks, int num_experts, bool eager_support) {
+    auto num_bytes = LowLatencyLayout(nullptr, num_max_dispatch_tokens_per_rank, hidden, num_ranks, num_experts, eager_support).total_bytes;
     return ((num_bytes + NUM_BUFFER_ALIGNMENT_BYTES) / NUM_BUFFER_ALIGNMENT_BYTES) * NUM_BUFFER_ALIGNMENT_BYTES;
 }
 

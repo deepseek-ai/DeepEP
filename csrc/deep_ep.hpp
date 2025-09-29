@@ -29,6 +29,7 @@ private:
     // Low-latency mode buffer
     int low_latency_buffer_idx = 0;
     bool low_latency_mode = false;
+    bool eager_support = false;
 
     // NVLink Buffer
     int64_t num_nvl_bytes;
@@ -81,8 +82,10 @@ private:
     volatile int* moe_recv_rdma_counter = nullptr;
     int* moe_recv_rdma_counter_mapped = nullptr;
 
+    int ll_dispatch_round_n, ll_combine_round_n;
+
 public:
-    Buffer(int rank, int num_ranks, int64_t num_nvl_bytes, int64_t num_rdma_bytes, bool low_latency_mode, bool explicitly_destroy, bool enable_shrink);
+    Buffer(int rank, int num_ranks, int64_t num_nvl_bytes, int64_t num_rdma_bytes, bool low_latency_mode, bool explicitly_destroy, bool enable_shrink, bool eager_support);
 
     ~Buffer() noexcept(false);
 
@@ -148,20 +151,21 @@ public:
 
     void clean_low_latency_buffer(int num_max_dispatch_tokens_per_rank, int hidden, int num_experts);
 
-    std::tuple<torch::Tensor, std::optional<torch::Tensor>, torch::Tensor, torch::Tensor, torch::Tensor, std::optional<EventHandle>, std::optional<std::function<void()>>>
+    std::tuple<torch::Tensor, std::optional<torch::Tensor>, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, std::optional<EventHandle>, std::optional<std::function<void()>>>
     low_latency_dispatch(const torch::Tensor& x, const torch::Tensor& topk_idx,
                          const std::optional<torch::Tensor>& cumulative_local_expert_recv_stats,
                          const std::optional<torch::Tensor>& dispatch_wait_recv_cost_stats,
                          int num_max_dispatch_tokens_per_rank, int num_experts,
                          bool use_fp8, bool round_scale, bool use_ue8m0,
-                         bool async, bool return_recv_hook);
+                         bool async, bool return_recv_hook, const bool use_eager);
 
     std::tuple<torch::Tensor, std::optional<EventHandle>, std::optional<std::function<void()>>>
     low_latency_combine(const torch::Tensor& x, const torch::Tensor& topk_idx, const torch::Tensor& topk_weights,
+                        const torch::Tensor& per_rank_src_count,
                         const torch::Tensor& src_info, const torch::Tensor& layout_range,
                         const std::optional<torch::Tensor>& combine_wait_recv_cost_stats,
                         int num_max_dispatch_tokens_per_rank, int num_experts,
-                        bool use_logfmt, bool zero_copy, bool async, bool return_recv_hook,
+                        bool use_logfmt, bool zero_copy, bool async, bool return_recv_hook, const bool use_eager,
                         const std::optional<torch::Tensor>& out = std::nullopt);
 
     torch::Tensor
@@ -172,6 +176,8 @@ public:
     void low_latency_query_mask_buffer(const torch::Tensor& mask_status);
 
     void low_latency_clean_mask_buffer();
+
+    bool is_eager_supported() const;
 };
 
 } // namespace deep_ep
