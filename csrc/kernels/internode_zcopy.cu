@@ -456,6 +456,7 @@ dispatch(int4* recv_x, float* recv_x_scales, topk_idx_t* recv_topk_idx, float* r
         // NOTES: always start from the local rank
         int src_rdma_rank = sm_id % kNumRDMARanks;
         int cached_rdma_channel_head = 0, cached_rdma_channel_tail = 0;
+        const uint64_t output_buffer_size = NUM_OUTPUT_BYTES_PER_ZCOPY_BUFFER / (hidden_bytes + num_topk * sizeof(int64_t) + num_topk * sizeof(float) + num_scales * sizeof(float));
         while (__any_sync(0xffffffff, num_tokens_to_recv_from_rdma > 0)) {
             // Find next source RDMA rank (round-robin)
             start_time = clock64();
@@ -488,6 +489,14 @@ dispatch(int4* recv_x, float* recv_x_scales, topk_idx_t* recv_topk_idx, float* r
             auto target_nvl_rank_topk_idx_bytes = num_recv_tokens * num_topk * sizeof(topk_idx_t);
             auto target_nvl_rank_topk_weights_bytes = num_recv_tokens * num_topk * sizeof(float);
             auto target_nvl_rank_x_scales_bytes = num_recv_tokens * num_scales * sizeof(float);
+
+            if (num_recv_tokens > output_buffer_size) {
+                if (lane_id == 0) {
+                    printf("DeepEP dispatch output buffer overflow: RDMA %d, dst_nvl_rank %d, %d > %lu\n",
+                        rdma_rank, dst_nvl_rank, num_recv_tokens, output_buffer_size);
+                }
+                trap();
+            }
 
             auto target_nvl_rank_x = ws_rr_fused_buffer_ptr;
             auto target_nvl_rank_topk_idx = reinterpret_cast<topk_idx_t*>(reinterpret_cast<uint8_t*>(ws_rr_fused_buffer_ptr) + target_nvl_rank_x_bytes);
