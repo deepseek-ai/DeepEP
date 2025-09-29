@@ -730,7 +730,7 @@ void dispatch(void* recv_x, float* recv_x_scales, topk_idx_t* recv_topk_idx, flo
               void** buffer_fused_ptrs, void** buffer_ptrs, int num_max_nvl_chunked_send_tokens, int num_max_nvl_chunked_recv_tokens,
               int rank, int num_ranks, bool is_cached_dispatch,
               cudaStream_t stream, int num_channels, bool low_latency_mode) {
-    constexpr int smem_size = 16384 * (NUM_MAX_NVL_PEERS + 1); // +1 to account for alignment
+    constexpr int smem_size = 16384 * NUM_MAX_NVL_PEERS + ZCOPY_TMA_SMEM_ALIGNMENT;
 #define DISPATCH_LAUNCH_CASE(num_rdma_ranks) { \
     const int kNumDispatchRDMASenderWarps = num_rdma_ranks; \
     SETUP_LAUNCH_CONFIG(num_channels, (kNumDispatchRDMASenderWarps + 2 + NUM_MAX_NVL_PEERS) * 32, stream); \
