@@ -314,7 +314,11 @@ def test_main(args: argparse.Namespace,
 
 # noinspection PyUnboundLocalVariable,PyShadowingNames
 def test_loop(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
-    num_nodes = int(os.getenv('WORLD_SIZE', 1))
+    if 'SLURM_NNODES' in os.environ:
+        num_nodes = int(os.environ['SLURM_NNODES'])
+    else:
+        num_nodes = int(os.getenv('WORLD_SIZE', 1))
+
     rank, num_ranks, group = init_dist(local_rank, num_local_ranks)
     if args.test_ll_compatibility:
         ll_num_tokens, ll_hidden, ll_num_experts, ll_num_topk = 16, 5120, 256, 9
@@ -386,8 +390,16 @@ if __name__ == '__main__':
 
     # Set default `num_topk_groups` if not provided
     if args.num_topk_groups is None:
-        num_nodes = int(os.getenv('WORLD_SIZE', 1))
+        if 'SLURM_NNODES' in os.environ:
+            num_nodes = int(os.environ['SLURM_NNODES'])
+        else:
+            num_nodes = int(os.getenv('WORLD_SIZE', 1))
         args.num_topk_groups = min(num_nodes, 4)
 
-    num_processes = args.num_processes
-    torch.multiprocessing.spawn(test_loop, args=(num_processes, args), nprocs=num_processes)
+    if 'SLURM_PROCID' in os.environ and 'SLURM_NTASKS_PER_NODE' in os.environ:
+        local_rank = int(os.environ['SLURM_LOCALID'])
+        num_local_ranks = int(os.environ['SLURM_NTASKS_PER_NODE'])
+        test_loop(local_rank, num_local_ranks, args)
+    else:
+        num_processes = args.num_processes
+        torch.multiprocessing.spawn(test_loop, args=(num_processes, args), nprocs=num_processes)

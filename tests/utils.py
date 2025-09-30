@@ -15,8 +15,20 @@ def init_dist(local_rank: int, num_local_ranks: int):
     # NOTES: you may rewrite this function with your own cluster settings
     ip = os.getenv('MASTER_ADDR', '127.0.0.1')
     port = int(os.getenv('MASTER_PORT', '8361'))
-    num_nodes = int(os.getenv('WORLD_SIZE', 1))
-    node_rank = int(os.getenv('RANK', 0))
+
+    # SLURM-aware environment detection
+    if 'SLURM_NNODES' in os.environ and 'SLURM_NTASKS_PER_NODE' in os.environ:
+        # SLURM environment
+        num_nodes = int(os.environ['SLURM_NNODES'])
+        world_size = int(os.environ['SLURM_NTASKS'])
+        rank = int(os.environ['SLURM_PROCID'])
+        node_rank = rank // int(os.environ['SLURM_NTASKS_PER_NODE'])
+    else:
+        # Non-SLURM environment
+        num_nodes = int(os.getenv('WORLD_SIZE', 1))
+        world_size = num_nodes * num_local_ranks
+        node_rank = int(os.getenv('RANK', 0))
+        rank = node_rank * num_local_ranks + local_rank
 
     sig = inspect.signature(dist.init_process_group)
     # Allow backend to be configured via environment variable
@@ -24,8 +36,8 @@ def init_dist(local_rank: int, num_local_ranks: int):
     params = {
         'backend': backend,
         'init_method': f'tcp://{ip}:{port}',
-        'world_size': num_nodes * num_local_ranks,
-        'rank': node_rank * num_local_ranks + local_rank,
+        'world_size': world_size,
+        'rank': rank,
     }
     if 'device_id' in sig.parameters:
         # noinspection PyTypeChecker
@@ -35,7 +47,7 @@ def init_dist(local_rank: int, num_local_ranks: int):
     torch.set_default_device('cuda')
     torch.cuda.set_device(local_rank)
 
-    return dist.get_rank(), dist.get_world_size(), dist.new_group(list(range(num_local_ranks * num_nodes)))
+    return dist.get_rank(), dist.get_world_size(), dist.new_group(list(range(world_size)))
 
 
 def backend_aware_all_gather_into_tensor(output_tensor: torch.Tensor, input_tensor: torch.Tensor, group: dist.ProcessGroup):

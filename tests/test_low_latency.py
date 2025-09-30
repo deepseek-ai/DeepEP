@@ -328,5 +328,10 @@ if __name__ == '__main__':
     parser.add_argument("--shrink-test", action='store_true', help='Whether to simulate failure and test shrink mode')
     args = parser.parse_args()
 
-    num_processes = args.num_processes
-    torch.multiprocessing.spawn(test_loop, args=(num_processes, args), nprocs=num_processes)
+    if 'SLURM_PROCID' in os.environ and 'SLURM_NTASKS_PER_NODE' in os.environ:
+        local_rank = int(os.environ['SLURM_LOCALID'])
+        num_local_ranks = int(os.environ['SLURM_NTASKS_PER_NODE'])
+        test_loop(local_rank, num_local_ranks, args)
+    else:
+        num_processes = args.num_processes
+        torch.multiprocessing.spawn(test_loop, args=(num_processes, args), nprocs=num_processes)
