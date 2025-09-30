@@ -674,7 +674,7 @@ Buffer::internode_dispatch(const torch::Tensor& x, const std::optional<torch::Te
                            int cached_num_recv_tokens, int cached_num_rdma_recv_tokens,
                            const std::optional<torch::Tensor>& cached_rdma_channel_prefix_matrix, const std::optional<torch::Tensor>& cached_recv_rdma_rank_prefix_sum,
                            const std::optional<torch::Tensor>& cached_gbl_channel_prefix_matrix, const std::optional<torch::Tensor>& cached_recv_gbl_rank_prefix_sum,
-                           int expert_alignment, const Config& config, std::optional<EventHandle>& previous_event, bool async, bool allocate_on_comm_stream) {
+                           int expert_alignment, int num_worst_tokens, const Config& config, std::optional<EventHandle>& previous_event, bool async, bool allocate_on_comm_stream) {
 #ifndef DISABLE_NVSHMEM
     // In dispatch, CPU will busy-wait until GPU receive tensor size metadata from other ranks, which can be quite long.
     // If users of DeepEP need to execute other Python code on other threads, such as KV transfer, their code will get stuck due to GIL
@@ -819,7 +819,7 @@ Buffer::internode_dispatch(const torch::Tensor& x, const std::optional<torch::Te
         internode::notify_dispatch(num_tokens_per_rank->data_ptr<int>(), moe_recv_counter_mapped, num_ranks,
                                    num_tokens_per_rdma_rank->data_ptr<int>(), moe_recv_rdma_counter_mapped,
                                    num_tokens_per_expert->data_ptr<int>(), moe_recv_expert_counter_mapped, num_experts,
-                                   is_token_in_rank.data_ptr<bool>(), num_tokens, num_channels,
+                                   is_token_in_rank.data_ptr<bool>(), num_tokens, num_worst_tokens, num_channels,
                                    hidden_int4, num_scales, num_topk, expert_alignment,
                                    rdma_channel_prefix_matrix.data_ptr<int>(), recv_rdma_rank_prefix_sum.data_ptr<int>(),
                                    gbl_channel_prefix_matrix.data_ptr<int>(), recv_gbl_rank_prefix_sum.data_ptr<int>(),
@@ -830,29 +830,34 @@ Buffer::internode_dispatch(const torch::Tensor& x, const std::optional<torch::Te
                                    num_nvl_bytes, low_latency_mode);
 
         // Synchronize total received tokens and tokens per expert
-        auto start_time = std::chrono::high_resolution_clock::now();
-        while (true) {
-            // Read total count
-            num_recv_tokens = static_cast<int>(*moe_recv_counter);
-            num_rdma_recv_tokens = static_cast<int>(*moe_recv_rdma_counter);
+        if (num_worst_tokens > 0) {
+            num_recv_tokens = num_worst_tokens;
+            num_rdma_recv_tokens = num_worst_tokens;
+        } else {
+            auto start_time = std::chrono::high_resolution_clock::now();
+            while (true) {
+                // Read total count
+                num_recv_tokens = static_cast<int>(*moe_recv_counter);
+                num_rdma_recv_tokens = static_cast<int>(*moe_recv_rdma_counter);
 
-            // Read per-expert count
-            bool ready = (num_recv_tokens >= 0) and (num_rdma_recv_tokens >= 0);
-            for (int i = 0; i < num_local_experts and ready; ++ i)
-                ready &= moe_recv_expert_counter[i] >= 0;
+                // Read per-expert count
+                bool ready = (num_recv_tokens >= 0) and (num_rdma_recv_tokens >= 0);
+                for (int i = 0; i < num_local_experts and ready; ++ i)
+                    ready &= moe_recv_expert_counter[i] >= 0;
 
-            if (ready)
-                break;
+                if (ready)
+                    break;
 
-            // Timeout check
-            if (std::chrono::duration_cast<std::chrono::seconds>(std::chrono::high_resolution_clock::now() - start_time).count() > NUM_CPU_TIMEOUT_SECS) {
-                printf("Global rank: %d, num_recv_tokens: %d, num_rdma_recv_tokens: %d\n", rank, num_recv_tokens, num_rdma_recv_tokens);
-                for (int i = 0; i < num_local_experts; ++ i)
-                    printf("moe_recv_expert_counter[%d]: %d\n", i, moe_recv_expert_counter[i]);
-                throw std::runtime_error("DeepEP error: timeout (dispatch CPU)");
+                // Timeout check
+                if (std::chrono::duration_cast<std::chrono::seconds>(std::chrono::high_resolution_clock::now() - start_time).count() > NUM_CPU_TIMEOUT_SECS) {
+                    printf("Global rank: %d, num_recv_tokens: %d, num_rdma_recv_tokens: %d\n", rank, num_recv_tokens, num_rdma_recv_tokens);
+                    for (int i = 0; i < num_local_experts; ++ i)
+                        printf("moe_recv_expert_counter[%d]: %d\n", i, moe_recv_expert_counter[i]);
+                    throw std::runtime_error("DeepEP error: timeout (dispatch CPU)");
+                }
             }
+            num_recv_tokens_per_expert_list = std::vector<int>(moe_recv_expert_counter, moe_recv_expert_counter + num_local_experts);
         }
-        num_recv_tokens_per_expert_list = std::vector<int>(moe_recv_expert_counter, moe_recv_expert_counter + num_local_experts);
     }
 
     // Allocate new tensors
@@ -899,7 +904,7 @@ Buffer::internode_dispatch(const torch::Tensor& x, const std::optional<torch::Te
                         rdma_channel_prefix_matrix.data_ptr<int>(), recv_rdma_rank_prefix_sum.data_ptr<int>(),
                         gbl_channel_prefix_matrix.data_ptr<int>(), recv_gbl_rank_prefix_sum.data_ptr<int>(),
                         is_token_in_rank.data_ptr<bool>(),
-                        num_tokens, hidden_int4, num_scales, num_topk, num_experts,
+                        num_tokens, num_worst_tokens, hidden_int4, num_scales, num_topk, num_experts,
                         scale_token_stride, scale_hidden_stride,
                         rdma_buffer_ptr, config.num_max_rdma_chunked_send_tokens, config.num_max_rdma_chunked_recv_tokens,
                         buffer_ptrs_gpu, config.num_max_nvl_chunked_send_tokens, config.num_max_nvl_chunked_recv_tokens,
@@ -952,7 +957,7 @@ Buffer::internode_combine(const torch::Tensor& x, const std::optional<torch::Ten
                           const std::optional<torch::Tensor>& bias_0, const std::optional<torch::Tensor>& bias_1,
                           const torch::Tensor& src_meta, const torch::Tensor& is_combined_token_in_rank,
                           const torch::Tensor& rdma_channel_prefix_matrix, const torch::Tensor& rdma_rank_prefix_sum, const torch::Tensor& gbl_channel_prefix_matrix,
-                          const torch::Tensor& combined_rdma_head, const torch::Tensor& combined_nvl_head,
+                          const torch::Tensor& gbl_rank_prefix_sum, const torch::Tensor& combined_rdma_head, const torch::Tensor& combined_nvl_head,
                           const Config& config, std::optional<EventHandle>& previous_event, bool async, bool allocate_on_comm_stream) {
 #ifndef DISABLE_NVSHMEM
     const int num_channels = config.num_sms / 2;
@@ -976,6 +981,7 @@ Buffer::internode_combine(const torch::Tensor& x, const std::optional<torch::Ten
     EP_HOST_ASSERT(rdma_channel_prefix_matrix.size(0) == num_rdma_ranks and rdma_channel_prefix_matrix.size(1) == num_channels);
     EP_HOST_ASSERT(rdma_rank_prefix_sum.size(0) == num_rdma_ranks);
     EP_HOST_ASSERT(gbl_channel_prefix_matrix.size(0) == num_ranks and gbl_channel_prefix_matrix.size(1) == num_channels);
+    EP_HOST_ASSERT(gbl_rank_prefix_sum.size(0) == num_ranks);
     EP_HOST_ASSERT(combined_rdma_head.dim() == 2 and combined_rdma_head.size(0) == num_combined_tokens and combined_rdma_head.size(1) == num_rdma_ranks);
     EP_HOST_ASSERT(combined_nvl_head.dim() == 2 and combined_nvl_head.size(1) == NUM_MAX_NVL_PEERS);
 
@@ -1043,7 +1049,7 @@ Buffer::internode_combine(const torch::Tensor& x, const std::optional<torch::Ten
                        x.data_ptr(), topk_weights_ptr, bias_ptrs[0], bias_ptrs[1],
                        combined_rdma_head.data_ptr<int>(), combined_nvl_head.data_ptr<int>(),
                        src_meta.data_ptr(), rdma_channel_prefix_matrix.data_ptr<int>(), rdma_rank_prefix_sum.data_ptr<int>(), gbl_channel_prefix_matrix.data_ptr<int>(),
-                       num_tokens, num_combined_tokens, hidden, num_topk,
+                       gbl_rank_prefix_sum.data_ptr<int>(), num_tokens, num_combined_tokens, hidden, num_topk,
                        rdma_buffer_ptr, config.num_max_rdma_chunked_send_tokens, config.num_max_rdma_chunked_recv_tokens,
                        buffer_ptrs_gpu, config.num_max_nvl_chunked_send_tokens, config.num_max_nvl_chunked_recv_tokens,
                        rank, num_ranks, comm_stream, num_channels, low_latency_mode);
@@ -1054,7 +1060,7 @@ Buffer::internode_combine(const torch::Tensor& x, const std::optional<torch::Ten
         event = EventHandle(comm_stream);
         for (auto& t: {x, src_meta,
                        is_combined_token_in_rank, rdma_channel_prefix_matrix, rdma_rank_prefix_sum, gbl_channel_prefix_matrix,
-                       combined_x, combined_rdma_head, combined_nvl_head}) {
+                       gbl_rank_prefix_sum, combined_x, combined_rdma_head, combined_nvl_head}) {
             t.record_stream(comm_stream);
             if (allocate_on_comm_stream)
                 t.record_stream(compute_stream);
