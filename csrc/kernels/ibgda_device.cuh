@@ -464,6 +464,15 @@ __device__ __forceinline__ uint64_t nvshmemi_get_p2p_ptr(const uint64_t& ptr, co
     return peer_base + (ptr - reinterpret_cast<uint64_t>(nvshmemi_device_state_d.heap_base));
 }
 
+__device__ __forceinline__ bool nvshmemi_is_p2p_connected(const int& rank, const int& dst_rank) {
+    // Local rank, no need for mapping
+    if (rank == dst_rank)
+        return 1;
+    auto peer_base = __ldg(reinterpret_cast<uint64_t*>(nvshmemi_device_state_d.peer_heap_base_p2p) + dst_rank);
+
+    return peer_base != 0;
+}
+
 // This is a simplified version of NVSHMEM's `ibgda_poll_cq`.
 // Note that this implementation does not guarantee thread safety,
 // so we must ensure that no other threads are concurrently using the same QP.

@@ -199,9 +199,10 @@ def bench_kineto(fn, kernel_names: Union[str, tuple], num_tests: int = 30, suppr
     # Save chrome traces
     if trace_path is not None:
         prof.export_chrome_trace(trace_path)
+        profile_data = json.loads(Path(trace_path).read_text())
 
     # Return average kernel durations
-    units = {'ms': 1e3, 'us': 1e6}
+    units = {'ms': 1e3, 'us': 1e6, 's': 1.0}
     kernel_durations = []
     for name in kernel_names:
         for line in prof_lines:
@@ -215,15 +216,17 @@ def bench_kineto(fn, kernel_names: Union[str, tuple], num_tests: int = 30, suppr
 
     # Expand the kernels by periods
     if num_kernels_per_period > 1:
-        with tempfile.NamedTemporaryFile(suffix='.json') as tmp:
-            prof.export_chrome_trace(tmp.name)
-            profile_data = json.loads(Path(tmp.name).read_text())
+        if trace_path is None:
+            with tempfile.NamedTemporaryFile(suffix='.json') as tmp:
+                prof.export_chrome_trace(tmp.name)
+                profile_data = json.loads(Path(tmp.name).read_text())
 
         for i, kernel_name in enumerate(kernel_names):
             events = [event for event in profile_data['traceEvents'] if f'::{kernel_name}' in event['name']]
             events = sorted(events, key=lambda event: event['ts'])
             durations = [event['dur'] / 1e6 for event in events]
-            assert len(durations) % num_kernels_per_period == 0
+            if len(durations) % num_kernels_per_period != 0:
+                print(f'Error: {kernel_name} durations len {len(durations)} not diveded by {num_kernels_per_period}', flush=True)
             num_kernel_patterns = len(durations) // num_kernels_per_period
             kernel_durations[i] = [sum(durations[j::num_kernels_per_period]) / num_kernel_patterns
                                for j in range(num_kernels_per_period)]
@@ -234,3 +237,57 @@ def bench_kineto(fn, kernel_names: Union[str, tuple], num_tests: int = 30, suppr
 
 def hash_tensor(t: torch.Tensor):
     return t.view(torch.int).sum().item()
+
+
+def split_range(tensor : torch.Tensor, values : set):
+    r = {v : [] for v in values}
+    cur_v = None
+    cur_start = None
+    for i in range(tensor.shape[0]):
+        if cur_v is None:
+            cur_v = tensor[i].item()
+            cur_start = i
+        elif (np.isnan(cur_v) and np.isnan(tensor[i].item())) or cur_v == tensor[i].item():
+            continue
+        else:
+            r[cur_v].append(f'{cur_start}, {i}')
+            cur_v = tensor[i].item()
+            cur_start = i
+    r[cur_v].append(f'{cur_start}, {tensor.shape[0]}')
+    return r
+
+def all_value_range(tensor : torch.Tensor, except_zero : bool = False, one_line = False):
+    fvalues = list(tensor.float().cpu().numpy())
+    values = set([v for v in fvalues if not np.isnan(v)])
+    hasnan = any([np.isnan(v) for v in fvalues])
+    if hasnan:
+        values.add(torch.nan)
+    if except_zero:
+        values.remove(0)
+    d = split_range(tensor=tensor, values=values)
+    if one_line:
+        return json.dumps({str(v): r for v, r in d.items()})
+    else:
+        return '\n' + json.dumps({str(v): r for v, r in d.items()}, indent=4) + '\n'
+
+def dump_nan_tensors(tensor : torch.Tensor):
+    r = []
+    for i in range(tensor.shape[0]):
+        if torch.isnan(tensor[i]).sum().cpu().item() != 0:
+            r.append((i, all_value_range(torch.isnan(tensor[i]), except_zero=True)))
+    return '\n'.join([str(x) for x in r])
+
+def all_value_range_m(tensors: torch.Tensor, except_zero : bool = False, one_line = False):
+    sep = ' ' if one_line else '\n'
+    return sep.join([all_value_range(tensors[i], except_zero=except_zero, one_line=one_line) for i in range(tensors.shape[0])])
+
+def non_same_tensor_layout(tensor: torch.Tensor):
+    not_same_bitmap = tensor.amax(dim=-1) != tensor.amin(dim=-1)
+    not_same_idx = [i for i in range(not_same_bitmap.shape[0]) if not_same_bitmap[i]]
+    diff_tensors = tensor[not_same_bitmap]
+    return f'diff index: {not_same_idx}, diff tensor layout: {all_value_range_m(diff_tensors, one_line=True)}'
+
+def non_same_2tensor_layout(tensor1: torch.Tensor, tensor2: torch.Tensor):
+    not_same_bitmap = tensor1 != tensor2
+    not_same_idx = [i for i in range(not_same_bitmap.shape[0]) if not_same_bitmap[i]]
+    return f'diff index: {not_same_idx}, tensor1 layout: {list(tensor1[not_same_idx].float().cpu().numpy())}, tensor2 layout: {list(tensor2[not_same_idx].float().cpu().numpy())}'
