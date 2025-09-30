@@ -4,6 +4,22 @@ import torch
 import os
 import hybrid_ep_cpp
 
+
+def indices_to_map(topk_idx: torch.Tensor, topk_weights: torch.Tensor, num_of_tokens: int, num_of_experts: int):
+    """
+    Map the map to the indices.
+    """
+    # Generate the routing map and the probs according to the topk_idx and topk_weights.
+    assert topk_idx is not None
+    routing_map = torch.zeros(num_of_tokens, num_of_experts, device="cuda", dtype=torch.bool)
+    routing_map = routing_map.scatter(1, topk_idx.to(torch.int64), 1).bool()
+    if topk_weights is not None:
+        probs = torch.zeros(num_of_tokens, num_of_experts, device="cuda", dtype=torch.float32)
+        probs = probs.scatter(1, topk_idx.to(torch.int64), topk_weights)
+    else:
+        probs = None
+    return routing_map, probs
+
 class HybridEpBuffer:
     def __init__(
         self,
@@ -88,7 +104,6 @@ class HybridEpBuffer:
         num_of_tokens_per_group_combine_api: int = None,
         num_of_additional_in_flight_s2g_combine_api: int = None,
         device_side_sync_combine_api: bool = True,
-
     ):
         """
         Initialize the HybridEpConfigInstance for the hybrid-ep kernel.
@@ -190,7 +205,7 @@ class HybridEpBuffer:
         assert self.config is not None, "Please initialize the config first."
         # Create C++ buffer - this will allocate all buffers during construction
         self.runtime = hybrid_ep_cpp.HybridEpBuffer(
-            self.config, self.local_rank, self.node_rank, self.group_size, self.num_of_ranks_per_node, self.nvlink_domain_size
+            self.config, self.local_rank, self.node_rank, self.group_size, self.num_of_ranks_per_node, self.use_fp8
         )
         
         # Exchange IPC addresses using C++ distributed communication
@@ -198,12 +213,14 @@ class HybridEpBuffer:
 
     def dispatch(
         self,
-        tensor: torch.Tensor,
+        hidden: torch.Tensor,
         scaling_factor: torch.Tensor = None,
         topk_idx: torch.Tensor = None,
         topk_weights: torch.Tensor = None,
+        probs: torch.Tensor = None,
         routing_map: torch.Tensor = None,
-        num_of_tokens_for_experts: int = -1,
+        num_dispatched_tokens_tensor: torch.Tensor = None,
+        num_dispatched_tokens: int = -1,
         handle: tuple = None,
     ):
         """
@@ -215,33 +232,26 @@ class HybridEpBuffer:
         Backward direction:
         combine_in_backward <- local_unpermute -> expert_mlp -> local_permute -> dispatch_in_backward
         """
-        num_of_tokens = tensor.shape[0]
+        num_of_tokens = hidden.shape[0]
         assert num_of_tokens <= self.max_num_of_tokens_per_rank, "The number of tokens should be less than or equal to the max number of tokens per rank."
-        routing_map_as_input_and_probs_as_output = routing_map is not None
         if routing_map is not None:
             assert routing_map.dtype == torch.bool
         else:
             # Generate the routing map and the probs according to the topk_idx and topk_weights.
-            assert topk_idx is not None
-            routing_map = torch.zeros(num_of_tokens, self.num_of_experts, device="cuda", dtype=torch.bool)
-            routing_map = routing_map.scatter(1, topk_idx.to(torch.int64), 1).bool()
-            if topk_weights is not None:
-                probs = torch.zeros(num_of_tokens, self.num_of_experts, device="cuda", dtype=torch.float32)
-                probs = probs.scatter(1, topk_idx.to(torch.int64), topk_weights)
-            else:
-                probs = None
+            if topk_idx is not None:
+                routing_map, probs = indices_to_map(topk_idx, topk_weights, num_of_tokens, self.num_of_experts)
 
-        global_routing_map = torch.empty(
-            num_of_tokens * self.group_size,
-            self.num_of_experts,
-            device="cuda",
-            dtype=torch.bool,
-        )
         assert (
             handle is not None or routing_map is not None
         ), "The handle and routing_map should be both None"
         # If the handle is not provided, we need to generate the handle using the preprocessing kernel.
         if handle is None:
+            global_routing_map = torch.empty(
+                num_of_tokens * self.group_size,
+                self.num_of_experts,
+                device="cuda",
+                dtype=torch.bool,
+            )
             torch.distributed.all_gather_into_tensor(
                 global_routing_map, routing_map, self.group
             )
@@ -249,7 +259,7 @@ class HybridEpBuffer:
                 sparse_to_dense_map,
                 rdma_to_attn_map,
                 attn_to_rdma_map,
-                num_of_tokens_for_experts_tensor,
+                num_dispatched_tokens_tensor,
                 local_expert_routing_map,
             ) = self.runtime.metadata_preprocessing(
                 routing_map=global_routing_map,
@@ -260,7 +270,7 @@ class HybridEpBuffer:
                 sparse_to_dense_map,
                 rdma_to_attn_map,
                 attn_to_rdma_map,
-                num_of_tokens_for_experts_tensor,
+                num_dispatched_tokens_tensor,
                 local_expert_routing_map,
                 num_of_tokens,
             )
@@ -269,23 +279,24 @@ class HybridEpBuffer:
                 sparse_to_dense_map,
                 rdma_to_attn_map,
                 attn_to_rdma_map,
-                num_of_tokens_for_experts_tensor,
+                num_dispatched_tokens_tensor,
                 local_expert_routing_map,
                 num_of_tokens,
             ) = handle
 
-        if num_of_tokens_for_experts < 0:
-            num_of_tokens_for_experts = num_of_tokens_for_experts_tensor.item()
+        if num_dispatched_tokens < 0:
+            num_dispatched_tokens = num_dispatched_tokens_tensor.item()
 
         dispatched_token, dispatched_probs, dispatched_scaling_factor = (
             self.runtime.dispatch(
-                hidden=tensor,
+                hidden=hidden,
                 probs=probs,
                 scaling_factor=scaling_factor,
                 sparse_to_dense_map=sparse_to_dense_map,
                 rdma_to_attn_map=rdma_to_attn_map,
                 attn_to_rdma_map=attn_to_rdma_map,
-                num_of_tokens_for_experts=num_of_tokens_for_experts,
+                num_dispatched_tokens_tensor=num_dispatched_tokens_tensor,
+                num_dispatched_tokens=num_dispatched_tokens,
                 num_of_tokens_per_rank=num_of_tokens,
                 with_probs=probs is not None,
             )
@@ -299,16 +310,16 @@ class HybridEpBuffer:
         )
 
     def combine(
-        self, tensor: torch.Tensor, probs: torch.Tensor = None, handle: tuple = None
+        self, hidden: torch.Tensor, probs: torch.Tensor = None, handle: tuple = None
     ):
         """
         Combine the data from the experts.
         Do not require preprocessing, but the handle is necessary.
         """
         assert handle is not None, "The handle is necessary for combine."
-        sparse_to_dense_map, rdma_to_attn_map, attn_to_rdma_map, num_of_tokens_for_experts_tensor, local_expert_routing_map, num_of_tokens = handle
+        sparse_to_dense_map, rdma_to_attn_map, attn_to_rdma_map, num_dispatched_tokens_tensor, local_expert_routing_map, num_of_tokens = handle
         combined_token, combined_probs = self.runtime.combine(
-            hidden=tensor,
+            hidden=hidden,
             probs=probs,
             sparse_to_dense_map=sparse_to_dense_map,
             rdma_to_attn_map=rdma_to_attn_map,
@@ -316,4 +327,173 @@ class HybridEpBuffer:
             num_of_tokens_per_rank=num_of_tokens,
             with_probs=probs is not None,
         )
+        return combined_token, combined_probs
+    
+    def dispatch_with_permute(
+        self,
+        *,
+        # Input tensors
+        hidden: torch.Tensor,
+        topk_idx: torch.Tensor = None,
+        topk_weights: torch.Tensor = None,
+        routing_map: torch.Tensor = None,
+        probs: torch.Tensor = None,
+        scaling_factor: torch.Tensor = None,
+        # Used in the sync-free permute
+        num_dispatched_tokens: int = -1,
+        num_permuted_tokens: int = -1,
+        # If we use permute kernel, the output tensor will be permuted. the result can be directly used in the gemm.
+        pad_multiple: int = 0,
+        # The handle means the cached info from the first invocation of the dispatch kernel.
+        # The handle includes:
+        # # Output of Metadata Preprocessing
+        # 1. sparse_to_dense_map
+        # 2. rdma_to_attn_map
+        # 3. attn_to_rdma_map
+        # 4. num_of_tokens_for_experts_tensor
+        # 5. local_expert_routing_map
+        # # Output of Permute Preprocessing
+        # 6. row_id_map
+        handle: tuple = None,
+        # If enable this, the produced num_dispatched_tokens will be put on the CPU pinned memory, and the tokens_per_expert will be put on the CPU, which may reduce the times of the sync
+        use_host_meta: bool = True,
+    ):
+
+        """
+        Dispatch the data to the experts with permute.
+        """
+        with torch.cuda.nvtx.range("hybrid-ep dispatch with permute phase"):
+            num_of_tokens_per_rank = hidden.shape[0]
+            assert num_of_tokens_per_rank <= self.max_num_of_tokens_per_rank, "The number of tokens should be less than or equal to the max number of tokens per rank."
+            if routing_map is not None:
+                assert routing_map.dtype == torch.bool
+            else:
+                # Generate the routing map and the probs according to the topk_idx and topk_weights.
+                if topk_idx is not None:
+                    routing_map, probs = indices_to_map(topk_idx, topk_weights, num_of_tokens_per_rank, self.num_of_experts)
+                    
+            # If the handle is not provided, we need to generate the handle in the first invocation of the dispatch kernel.
+            if handle is None:
+                assert hidden.size(0) == routing_map.size(0), "The hidden and the routing_map should have the same row number."
+                # Global routing map: the routing map for all tokens to all experts.
+                global_routing_map = torch.empty(
+                    num_of_tokens_per_rank * self.group_size,
+                    self.num_of_experts,
+                    device="cuda",
+                    dtype=torch.bool,
+                )
+                torch.distributed.all_gather_into_tensor(
+                    global_routing_map, routing_map, self.group
+                )
+                row_id_map = None
+                (
+                    sparse_to_dense_map,
+                    rdma_to_attn_map,
+                    attn_to_rdma_map,
+                    num_dispatched_tokens_tensor,
+                    local_expert_routing_map,
+                ) = self.runtime.metadata_preprocessing(
+                    routing_map=global_routing_map,
+                    num_of_tokens_per_rank=num_of_tokens_per_rank,
+                )
+            else:
+                (
+                    sparse_to_dense_map,
+                    rdma_to_attn_map,
+                    attn_to_rdma_map,
+                    num_dispatched_tokens_tensor,
+                    local_expert_routing_map,
+                    row_id_map,
+                    num_of_tokens_per_rank,
+                ) = handle
+            
+            if use_host_meta:
+                # Put the num_dispatched_tokens_tensor on the CPU pinned memory, because this tensor also will be used in the GPU kernel
+                num_dispatched_tokens_tensor = (
+                    num_dispatched_tokens_tensor.cpu().pin_memory()
+                )
+                
+            # Dispatch phase
+            (
+                dispatched_token,
+                dispatched_probs,
+                dispatched_scaling_factor,
+                row_id_map,
+                tokens_per_expert,
+            ) = self.runtime.dispatch_with_permute(
+                hidden=hidden,
+                probs=probs,
+                scaling_factor=scaling_factor,
+                sparse_to_dense_map=sparse_to_dense_map,
+                rdma_to_attn_map=rdma_to_attn_map,
+                attn_to_rdma_map=attn_to_rdma_map,
+                num_dispatched_tokens_tensor=num_dispatched_tokens_tensor,
+                local_expert_routing_map=local_expert_routing_map,
+                row_id_map=row_id_map,
+                num_dispatched_tokens=num_dispatched_tokens,
+                num_permuted_tokens=num_permuted_tokens,
+                num_of_tokens_per_rank=num_of_tokens_per_rank,
+                pad_multiple=pad_multiple,
+                use_host_meta=use_host_meta,
+                with_probs=probs is not None,
+            )
+
+            handle = (
+                sparse_to_dense_map,
+                rdma_to_attn_map,
+                attn_to_rdma_map,
+                num_dispatched_tokens_tensor,
+                local_expert_routing_map,
+                row_id_map,
+                num_of_tokens_per_rank,
+            )
+        return (
+            dispatched_token,
+            dispatched_probs,
+            dispatched_scaling_factor,
+            tokens_per_expert,
+            handle,
+        )
+
+    def combine_with_unpermute(
+        self,
+        *,
+        # Input tensors
+        hidden: torch.Tensor,
+        probs: torch.Tensor = None,
+        num_dispatched_tokens: int = -1,
+        handle: tuple = None,
+        pad_multiple: int = 0,
+    ):
+        """
+        Combine the data from the experts with unpermute.
+        Do not require the routing_map, but the handle is necessary.
+        """
+        with torch.cuda.nvtx.range("hybrid-ep combine with unpermute phase"):
+            assert self.config is not None, "Please initialize the config first."
+            assert handle is not None, "The handle is necessary in the combine pass."
+
+            (
+                sparse_to_dense_map,
+                rdma_to_attn_map,
+                attn_to_rdma_map,
+                num_dispatched_tokens_tensor,
+                _,
+                row_id_map,
+                num_of_tokens_per_rank,
+            ) = handle
+
+            combined_token, combined_probs = self.runtime.combine_with_unpermute(
+                hidden = hidden,
+                probs = probs,
+                sparse_to_dense_map = sparse_to_dense_map,
+                rdma_to_attn_map = rdma_to_attn_map,
+                attn_to_rdma_map = attn_to_rdma_map,
+                num_dispatched_tokens_tensor = num_dispatched_tokens_tensor,
+                row_id_map = row_id_map,
+                num_dispatched_tokens = num_dispatched_tokens,   
+                num_of_tokens_per_rank = num_of_tokens_per_rank,
+                pad_multiple = pad_multiple,
+                with_probs = probs is not None,
+            )
         return combined_token, combined_probs

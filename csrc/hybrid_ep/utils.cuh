@@ -35,6 +35,43 @@ inline int get_token_data_type_size(TOKEN_DATA_TYPE token_data_type) {
   return 0;
 }
 
+struct DispatchBuffers {
+  TOKEN_DATA_TYPE data_type;
+  // Output buffers to experts
+  void *expert_output_token;
+  void **expert_output_token_all_ranks;
+  float *expert_output_prob;
+  float **expert_output_prob_all_ranks;
+  float *expert_output_scaling_factor;
+  float **expert_output_scaling_factor_all_ranks;
+  // Local temp buffer for dispatch kernel.
+  void *rdma_inter_node_group_token;
+  float *rdma_inter_node_group_prob;
+  float *rdma_inter_node_group_scaling_factor;
+  uint64_t *rdma_inter_node_group_flags;
+  // Misc flags
+  uint32_t *intra_node_write_completion_flags;
+  uint64_t *expected_rdma_flag_value;
+  uint32_t *expected_intra_node_flag_value;
+};
+
+struct CombineBuffers {
+  // Input buffers from experts
+  uint16_t *expert_input_token;
+  uint16_t **expert_input_token_all_ranks;
+  float *expert_input_prob;
+  float **expert_input_prob_all_ranks;
+  // Local temp buffer for combine kernel.
+  uint16_t *rdma_intra_node_red_token; 
+  float *rdma_intra_node_red_prob;
+  uint16_t *rdma_inter_node_group_token;
+  float *rdma_inter_node_group_prob; 
+  uint64_t *rdma_inter_node_group_flags; 
+  // Misc flags
+  uint32_t *intra_node_write_completion_flags;
+  uint64_t *expected_rdma_flag_value;
+  uint32_t *expected_intra_node_flag_value; 
+};
 
 __device__ __forceinline__ bool elect_sync(uint32_t membermask) {
     uint32_t is_elected;

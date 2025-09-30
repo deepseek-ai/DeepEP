@@ -2,11 +2,9 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved
 #include "hybrid_ep.cuh"
 
-HybridEpBuffer::HybridEpBuffer(HybridEpConfigInstance config, int local_rank, int node_rank, int group_size, int num_of_ranks_per_node, int nvlink_domain_size)
+HybridEpBuffer::HybridEpBuffer(HybridEpConfigInstance config, int local_rank, int node_rank, int group_size, int num_of_ranks_per_node, bool use_fp8_dispatch)
     : config(config), local_rank(local_rank), node_rank(node_rank), group_size(group_size),
-      num_of_ranks_per_node(num_of_ranks_per_node), kernel_cache(local_rank), nvlink_domain_size(nvlink_domain_size) {
-
-    assert(config.num_of_ranks_per_node <= nvlink_domain_size);
+      num_of_ranks_per_node(num_of_ranks_per_node), executor(local_rank, node_rank), use_fp8_dispatch(use_fp8_dispatch) {
 
     if(group_size <= config.num_of_ranks_per_node) {
       // If used on only intra-node communication, the dispatch/combine can share same buffers.
@@ -398,235 +396,71 @@ void HybridEpBuffer::open_handles_from_other_ranks(
 
 std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor,
            torch::Tensor>
-HybridEpBuffer::metadata_preprocessing(torch::Tensor routing_map, int64_t num_of_tokens_per_rank) {
-  assert(routing_map.device().is_cuda());
-  assert(routing_map.is_contiguous());
+HybridEpBuffer::metadata_preprocessing(torch::Tensor global_routing_map, int64_t num_of_tokens_per_rank) {
+  // Basic checks
+  assert(global_routing_map.device().is_cuda());
+  assert(global_routing_map.is_contiguous());
 
-  // padding for the routing map
-  const int rdma_to_attn_map_size_per_node = (((num_of_tokens_per_rank - 1) / 16) + 1) * 16;
-
-  // Construt the output tensor of the metadata preprocessing kernel.
-  auto sparse_to_dense_map =
-      torch::empty({num_of_tokens_per_rank * config.num_of_nodes,
-                    config.num_of_ranks_per_node},
-                   torch::dtype(torch::kInt32).device(torch::kCUDA));
-  auto rdma_to_attn_map =
-      torch::empty({rdma_to_attn_map_size_per_node, config.num_of_nodes},
-                   torch::dtype(torch::kBool).device(torch::kCUDA));
-  auto attn_to_rdma_map =
-      torch::empty({num_of_tokens_per_rank, config.num_of_nodes - 1},
-                   torch::dtype(torch::kBool).device(torch::kCUDA));
-  auto num_of_tokens_for_experts =
-      torch::zeros({1}, torch::dtype(torch::kInt32).device(torch::kCUDA));
-  auto local_expert_routing_map = torch::empty(
-      {num_of_tokens_per_rank * config.num_of_ranks_per_node * config.num_of_nodes, config.num_of_experts_per_rank},
-      torch::dtype(torch::kBool).device(torch::kCUDA));
-  
-  kernel_cache.run_proprecess_kernel(
-      config, routing_map.data_ptr<bool>(), this->preprocessing_tmp,
-      sparse_to_dense_map.data_ptr<int32_t>(),
-      rdma_to_attn_map.data_ptr<bool>(), attn_to_rdma_map.data_ptr<bool>(),
-      num_of_tokens_for_experts.data_ptr<int32_t>(),
-      local_expert_routing_map.data_ptr<bool>(), static_cast<int>(node_rank),
-      static_cast<int>(local_rank), num_of_tokens_per_rank, at::cuda::getCurrentCUDAStream());
-
-  return std::make_tuple(sparse_to_dense_map, rdma_to_attn_map,
-                         attn_to_rdma_map, num_of_tokens_for_experts,
-                         local_expert_routing_map);
+  // Run the hybrid-ep metadata preprocessing kernel
+  return executor.metadata_preprocess_core(preprocessing_tmp, config, global_routing_map, num_of_tokens_per_rank);
 }
 
-std::tuple<torch::Tensor, torch::Tensor, torch::Tensor>
+std::tuple<torch::Tensor, c10::optional<torch::Tensor>, c10::optional<torch::Tensor>>
 HybridEpBuffer::dispatch(torch::Tensor hidden, c10::optional<torch::Tensor> probs,
                  c10::optional<torch::Tensor> scaling_factor,
                  torch::Tensor sparse_to_dense_map,
                  torch::Tensor rdma_to_attn_map, torch::Tensor attn_to_rdma_map,
-                 int64_t num_of_tokens_for_experts, 
+                 c10::optional<torch::Tensor> num_dispatched_tokens_tensor,
+                 int64_t num_dispatched_tokens,
                  int64_t num_of_tokens_per_rank,
                  bool with_probs) {
-
-  // Use exact token count if available, otherwise use maximum bound
-  auto token_count = (num_of_tokens_for_experts >= 0) ? num_of_tokens_for_experts : max_num_of_tokens_for_experts;
-
-  auto stream = at::cuda::getCurrentCUDAStream();
-
-  // Create and return output tensors
-  size_t sizeof_token_data_type = get_token_data_type_size(dispatch_buffers.data_type);
-  auto create_output_tensors = [&](int64_t token_count) -> std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> {
-    torch::Tensor dispatched_tokens, dispatched_probs, dispatched_scaling_factor;
-    
-    // Create dispatched tokens tensor and copy data
-    dispatched_tokens = torch::empty({token_count, config.hidden_dim},
-                                   torch::dtype(hidden.dtype()).device(torch::kCUDA));
-    auto res_sz = token_count * config.hidden_dim * sizeof_token_data_type;
-    CUDA_CHECK(cudaMemcpyAsync(dispatched_tokens.data_ptr(), 
-                               dispatch_buffers.expert_output_token,
-                               res_sz, cudaMemcpyDeviceToDevice, stream));
-    
-    // Create and copy probs if needed
-    if (with_probs) {
-      dispatched_probs = torch::empty({token_count,
-                                     config.num_of_experts_per_rank * config.num_of_ranks_per_node},
-                                     torch::dtype(torch::kFloat32).device(torch::kCUDA));
-      auto probs_sz = token_count * config.num_of_experts_per_rank * 
-                      config.num_of_ranks_per_node * sizeof(float);
-      CUDA_CHECK(cudaMemcpyAsync(dispatched_probs.data_ptr<float>(),
-                                 dispatch_buffers.expert_output_prob,
-                                 probs_sz, cudaMemcpyDeviceToDevice, stream));
-    }
-    
-    // Create and copy scaling factor if using UINT8
-    if (config.token_data_type == TOKEN_DATA_TYPE::UINT8) {
-      dispatched_scaling_factor = torch::empty({token_count, config.hidden_dim / 128},
-                                              torch::dtype(torch::kFloat32).device(torch::kCUDA));
-      auto scaling_factor_sz = token_count * config.hidden_dim / 128 * sizeof(float);
-      CUDA_CHECK(cudaMemcpyAsync(dispatched_scaling_factor.data_ptr<float>(),
-                                dispatch_buffers.expert_output_scaling_factor,
-                                scaling_factor_sz, cudaMemcpyDeviceToDevice, stream));
-    }
-    
-    return std::make_tuple(dispatched_tokens, dispatched_probs, dispatched_scaling_factor);
-  };
-
-  // Fast return if there are no tokens to dispatch
-  if (token_count == 0) {
-    return create_output_tensors(0);
-  }
-  
+  // Check the input tensors
   assert(hidden.device().is_cuda());
   assert(hidden.is_contiguous());
-  
-  float *probs_fp32 = nullptr;
-  float *scaling_factor_fp32 = nullptr;
   if (with_probs) {
     assert(probs.has_value());
     assert(probs.value().device().is_cuda());
     assert(probs.value().is_contiguous());
     assert(probs.value().dtype() == torch::kFloat32);
-    auto probs_tensor = probs.value().view(torch::kFloat32);
-    probs_fp32 = probs_tensor.data_ptr<float>();
   }
   if (config.token_data_type == TOKEN_DATA_TYPE::UINT8) {
     assert(scaling_factor.has_value());
     assert(scaling_factor.value().device().is_cuda());
     assert(scaling_factor.value().is_contiguous());
-    auto scaling_factor_tensor = scaling_factor.value().view(torch::kFloat32);
-    scaling_factor_fp32 = scaling_factor_tensor.data_ptr<float>();
   }
   
-  // Template function to setup and launch kernel parameters for uint8
-  auto launch_uint8_kernel = [&]() {
-    auto hidden_uint8 = hidden.view(torch::kUInt8);
-    
-    hybrid_ep::dispatch_kernel_param_t<uint8_t> param;
-    param.attn_input_token = hidden_uint8.data_ptr<uint8_t>();
-    param.attn_input_prob = probs_fp32;
-    param.attn_input_token_scaling_factor = scaling_factor_fp32;
-    
-    // Setup output pointers
-    for (int i = 0; i < config.num_of_ranks_per_node; i++) {
-      param.expert_output_token[i] = reinterpret_cast<uint8_t*>(
-          dispatch_buffers.expert_output_token_all_ranks[i]);
-      param.expert_output_prob[i] = dispatch_buffers.expert_output_prob_all_ranks[i];
-      param.expert_output_scaling_factor[i] = 
-          dispatch_buffers.expert_output_scaling_factor_all_ranks[i];
-    }
-    
-    // Setup RDMA parameters
-    param.rdma_inter_node_group_token = reinterpret_cast<uint8_t*>(
-        dispatch_buffers.rdma_inter_node_group_token);
-    param.rdma_inter_node_group_prob = dispatch_buffers.rdma_inter_node_group_prob;
-    param.rdma_inter_node_group_scaling_factor = 
-        dispatch_buffers.rdma_inter_node_group_scaling_factor;
-    param.rdma_inter_node_group_flags = dispatch_buffers.rdma_inter_node_group_flags;
-    param.intra_node_write_completion_flags = 
-        dispatch_buffers.intra_node_write_completion_flags;
-    param.rdma_to_attn_map = rdma_to_attn_map.data_ptr<bool>();
-    param.attn_to_rdma_map = attn_to_rdma_map.data_ptr<bool>();
-    param.sparse_to_dense_map = sparse_to_dense_map.data_ptr<int32_t>();
-    param.local_rank = local_rank;
-    param.node_rank = node_rank;
-    param.num_of_tokens_per_rank = num_of_tokens_per_rank;
-    param.expected_rdma_flag_value = dispatch_buffers.expected_rdma_flag_value;
-    param.expected_intra_node_flag_value = dispatch_buffers.expected_intra_node_flag_value;
-    
-    // Launch kernel
-    if (with_probs) {
-      config.forward_dispatch_api = true;
-      kernel_cache.run_dispatch_kernel<uint8_t>(config, param, stream);
-    } else {
-      config.forward_dispatch_api = false;
-      kernel_cache.run_dispatch_kernel<uint8_t>(config, param, stream);
-    }
-  };
-
-  // Template function to setup and launch kernel parameters for uint16
-  auto launch_uint16_kernel = [&]() {
-    auto hidden_uint16 = hidden.view(torch::kUInt16);
-    
-    hybrid_ep::dispatch_kernel_param_t<uint16_t> param;
-    param.attn_input_token = hidden_uint16.data_ptr<uint16_t>();
-    param.attn_input_prob = probs_fp32;
-    param.attn_input_token_scaling_factor = scaling_factor_fp32;
-    
-    // Setup output pointers
-    for (int i = 0; i < config.num_of_ranks_per_node; i++) {
-      param.expert_output_token[i] = reinterpret_cast<uint16_t*>(
-          dispatch_buffers.expert_output_token_all_ranks[i]);
-      param.expert_output_prob[i] = dispatch_buffers.expert_output_prob_all_ranks[i];
-      param.expert_output_scaling_factor[i] = 
-          dispatch_buffers.expert_output_scaling_factor_all_ranks[i];
-    }
-    
-    // Setup RDMA parameters
-    param.rdma_inter_node_group_token = reinterpret_cast<uint16_t*>(
-        dispatch_buffers.rdma_inter_node_group_token);
-    param.rdma_inter_node_group_prob = dispatch_buffers.rdma_inter_node_group_prob;
-    param.rdma_inter_node_group_scaling_factor = 
-        dispatch_buffers.rdma_inter_node_group_scaling_factor;
-    param.rdma_inter_node_group_flags = dispatch_buffers.rdma_inter_node_group_flags;
-    param.intra_node_write_completion_flags = 
-        dispatch_buffers.intra_node_write_completion_flags;
-    param.rdma_to_attn_map = rdma_to_attn_map.data_ptr<bool>();
-    param.attn_to_rdma_map = attn_to_rdma_map.data_ptr<bool>();
-    param.sparse_to_dense_map = sparse_to_dense_map.data_ptr<int32_t>();
-    param.local_rank = local_rank;
-    param.node_rank = node_rank;
-    param.num_of_tokens_per_rank = num_of_tokens_per_rank;
-    param.expected_rdma_flag_value = dispatch_buffers.expected_rdma_flag_value;
-    param.expected_intra_node_flag_value = dispatch_buffers.expected_intra_node_flag_value;
- 
-    // Launch kernel
-    if (with_probs) {
-      config.forward_dispatch_api = true;
-      kernel_cache.run_dispatch_kernel<uint16_t>(config, param, stream);
-    } else {
-      config.forward_dispatch_api = false;
-      kernel_cache.run_dispatch_kernel<uint16_t>(config, param, stream);
-    }
-  };
-
-  // Dispatch based on token data type
-  bool kernel_launched = false;
-  switch (config.token_data_type) {
-    case TOKEN_DATA_TYPE::UINT8:
-      launch_uint8_kernel();
-      kernel_launched = true;
-      break;
-    case TOKEN_DATA_TYPE::UINT16:
-      launch_uint16_kernel();
-      kernel_launched = true;
-      break;
-    default:
-      throw std::runtime_error("Invalid token data type:" + 
-                              std::to_string(static_cast<int>(config.token_data_type)));
+  // Prepare the parameters
+  Executor::DispatchArgs args;
+  args.hidden = hidden;
+  if(with_probs) args.probs = probs.value();
+  if(config.token_data_type == TOKEN_DATA_TYPE::UINT8) args.scaling_factor = scaling_factor.value();
+  args.sparse_to_dense_map = sparse_to_dense_map;
+  args.rdma_to_attn_map = rdma_to_attn_map;
+  args.attn_to_rdma_map = attn_to_rdma_map;
+  args.num_dispatched_tokens_tensor = num_dispatched_tokens_tensor;
+  if(num_dispatched_tokens < 0 ) {
+    // In this case, user will set the size of the output buffer by themselves.
+    args.num_dispatched_tokens = num_dispatched_tokens_tensor.value().item<int64_t>();
+  }else {
+    args.num_dispatched_tokens = num_dispatched_tokens;
   }
-
-  if (!kernel_launched) {
-    throw std::runtime_error("Failed to launch dispatch kernel for num_of_ranks_per_node: " +
-                             std::to_string(config.num_of_ranks_per_node));
+  args.num_of_tokens_per_rank = num_of_tokens_per_rank;
+  args.enable_permute = false;
+  args.stream = at::cuda::getCurrentCUDAStream();
+  
+  // Run the full dispatch operation
+  config.forward_dispatch_api = with_probs;
+  executor.dispatch_preprocess(config, dispatch_buffers, args);
+  if(config.token_data_type == TOKEN_DATA_TYPE::UINT8) {
+    executor.dispatch_core<uint8_t>(config, dispatch_buffers, args);
+  } else if (config.token_data_type == TOKEN_DATA_TYPE::UINT16) {
+    executor.dispatch_core<uint16_t>(config, dispatch_buffers, args);
+  }else {
+    throw std::runtime_error("Invalid token data type:" +  std::to_string(static_cast<int>(config.token_data_type)));
   }
+  auto [dispatched_tokens, dispatched_probs, dispatched_scaling_factor, row_id_map, tokens_per_expert] = executor.dispatch_postprocess(config, dispatch_buffers, args);
 
-  return create_output_tensors(token_count);
+  return std::make_tuple(dispatched_tokens, dispatched_probs, dispatched_scaling_factor);
 }
 
 std::tuple<torch::Tensor, torch::Tensor>
@@ -635,32 +469,11 @@ HybridEpBuffer::combine(torch::Tensor hidden, c10::optional<torch::Tensor> probs
                 torch::Tensor rdma_to_attn_map, torch::Tensor attn_to_rdma_map,
                 int64_t num_of_tokens_per_rank,
                 bool with_probs) {
-
-  // The result tensor of the combine kernel
-  torch::Tensor combined_tokens, combined_probs;
-  combined_tokens =
-      torch::empty({num_of_tokens_per_rank, config.hidden_dim},
-                   torch::dtype(hidden.dtype()).device(torch::kCUDA));
-  if (with_probs) {
-    combined_probs =
-        torch::empty({num_of_tokens_per_rank,
-                      config.num_of_experts_per_rank *
-                          config.num_of_ranks_per_node * config.num_of_nodes},
-                     torch::dtype(torch::kFloat32).device(torch::kCUDA));
-  }
-
-  // Fast return if there are no tokens after combine
-  if (num_of_tokens_per_rank == 0) {
-    return std::make_tuple(combined_tokens, combined_probs);
-  }
-
+  // Check the input tensors
+  assert(c10::elementSize(hidden.scalar_type()) == 2);
   assert(hidden.device().is_cuda());
   assert(hidden.dtype() != torch::kUInt8);
   assert(hidden.is_contiguous());
-
-  float *probs_fp32 = nullptr;
-  auto stream = at::cuda::getCurrentCUDAStream();
-
   if (with_probs) {
     assert(probs.has_value());
     assert(probs.value().device().is_cuda());
@@ -668,74 +481,161 @@ HybridEpBuffer::combine(torch::Tensor hidden, c10::optional<torch::Tensor> probs
     assert(probs.value().dtype() == torch::kFloat32);
     assert(probs.value().size(1) ==
            config.num_of_experts_per_rank * config.num_of_ranks_per_node);
-    auto probs_tensor = probs.value().view(torch::kFloat32);
-    probs_fp32 = probs_tensor.data_ptr<float>();
   }
 
-  // Copy the input tensor to the input buffer
-  auto input_sz = hidden.numel() * sizeof(uint16_t);
-  CUDA_CHECK(
-      cudaMemcpyAsync(combine_buffers.expert_input_token,
-                      reinterpret_cast<uint16_t *>(hidden.data_ptr()), input_sz,
-                      cudaMemcpyDeviceToDevice, stream));
+  // Construct the output tensors
+  torch::Tensor combined_tokens, combined_probs;
+  combined_tokens =torch::empty({num_of_tokens_per_rank, config.hidden_dim},
+                   torch::dtype(hidden.dtype()).device(torch::kCUDA));
   if (with_probs) {
-    auto probs_sz = probs.value().numel() * sizeof(float);
-    CUDA_CHECK(cudaMemcpyAsync(combine_buffers.expert_input_prob,
-                                         probs_fp32, probs_sz,
-                                         cudaMemcpyDeviceToDevice, stream));
+    combined_probs =
+        torch::empty({num_of_tokens_per_rank, config.num_of_experts_per_rank *  config.num_of_ranks_per_node * config.num_of_nodes}, torch::dtype(torch::kFloat32).device(torch::kCUDA));
   }
 
-  bool kernel_launched = false;
+  // Prepare the parameters
+  Executor::CombineArgs args;
+  args.hidden = hidden;
+  if(with_probs) args.probs = probs.value();
+  args.combined_tokens = reinterpret_cast<uint16_t*>(combined_tokens.data_ptr());
+  if(with_probs) args.combined_probs = reinterpret_cast<float*>(combined_probs.data_ptr());
+  args.sparse_to_dense_map = sparse_to_dense_map;
+  args.rdma_to_attn_map = rdma_to_attn_map;
+  args.attn_to_rdma_map = attn_to_rdma_map;
+  args.num_of_tokens_per_rank = num_of_tokens_per_rank;
+  args.enable_unpermute = false;
+  args.stream = at::cuda::getCurrentCUDAStream();
 
-  hybrid_ep::combine_kernel_param_t param;
-      for (int i = 0; i < config.num_of_ranks_per_node; i++) {
-        param.expert_input_token[i] =
-            combine_buffers.expert_input_token_all_ranks[i];
-        param.expert_input_prob[i] =
-            combine_buffers.expert_input_prob_all_ranks[i];
-      }
-      param.attn_output_token =
-          reinterpret_cast<uint16_t *>(combined_tokens.data_ptr());
-      param.attn_output_prob =
-          with_probs ? combined_probs.data_ptr<float>() : nullptr;
-      param.rdma_intra_node_red_token =
-          combine_buffers.rdma_intra_node_red_token;
-      param.rdma_intra_node_red_prob = combine_buffers.rdma_intra_node_red_prob;
-      param.rdma_inter_node_group_token =
-          combine_buffers.rdma_inter_node_group_token;
-      param.rdma_inter_node_group_prob =
-          combine_buffers.rdma_inter_node_group_prob;
-      param.rdma_inter_node_group_flags =
-          combine_buffers.rdma_inter_node_group_flags;
-      param.intra_node_write_completion_flags =
-          combine_buffers.intra_node_write_completion_flags;
-      param.rdma_to_attn_map = rdma_to_attn_map.data_ptr<bool>();
-      param.attn_to_rdma_map = attn_to_rdma_map.data_ptr<bool>();
-      param.sparse_to_dense_map = sparse_to_dense_map.data_ptr<int32_t>();
-      param.node_rank = this->node_rank;
-      param.num_of_tokens_per_rank = num_of_tokens_per_rank;
-      param.expected_rdma_flag_value = combine_buffers.expected_rdma_flag_value;
-      param.expected_intra_node_flag_value =
-          combine_buffers.expected_intra_node_flag_value;
-
-      //   param.dgqps = combine_buffers.dgqps;
-      //   param.mr_info = combine_buffers.mr_info;
-      // Call the combine kernel directly using template instantiation
-      if (with_probs) {
-        config.backward_combine_api = true;
-        kernel_cache.run_combine_kernel(config, param, stream);
-      } else {
-        config.backward_combine_api = false;
-        kernel_cache.run_combine_kernel(config, param, stream);
-      }
-      kernel_launched = true;
-
-  if (!kernel_launched) {
-    throw std::runtime_error(
-        "fail to launch the combine kernel, corresponding num_of_ranks_per_node:" +
-        std::to_string(config.num_of_ranks_per_node));
-  }
-
+  // Run the full combine operation
+  config.backward_combine_api = with_probs;
+  executor.combine_preprocess(config, combine_buffers, args);
+  executor.combine_core(config, combine_buffers, args);
+  executor.combine_postprocess(config, combine_buffers, args);
+  
   return std::make_tuple(combined_tokens, combined_probs);
 }
 
+
+std::tuple<torch::Tensor, c10::optional<torch::Tensor>, c10::optional<torch::Tensor>, torch::Tensor, torch::Tensor>
+HybridEpBuffer::dispatch_with_permute(torch::Tensor hidden, c10::optional<torch::Tensor> probs,
+          c10::optional<torch::Tensor> scaling_factor,
+          torch::Tensor sparse_to_dense_map, torch::Tensor rdma_to_attn_map,
+          torch::Tensor attn_to_rdma_map, 
+          c10::optional<torch::Tensor> num_dispatched_tokens_tensor,
+          c10::optional<torch::Tensor> local_expert_routing_map,
+          c10::optional<torch::Tensor> row_id_map,
+          int64_t num_dispatched_tokens,
+          int64_t num_permuted_tokens,
+          int64_t num_of_tokens_per_rank,
+          int64_t pad_multiple,
+          bool use_host_meta,
+          bool with_probs)
+{
+ // Check the input tensors
+ assert(hidden.device().is_cuda());
+ assert(hidden.is_contiguous());
+ if (with_probs) {
+   assert(probs.has_value());
+   assert(probs.value().device().is_cuda());
+   assert(probs.value().is_contiguous());
+   assert(probs.value().dtype() == torch::kFloat32);
+ }
+ if (config.token_data_type == TOKEN_DATA_TYPE::UINT8) {
+   assert(scaling_factor.has_value());
+   assert(scaling_factor.value().device().is_cuda());
+   assert(scaling_factor.value().is_contiguous());
+ }
+ 
+ // Prepare the parameters
+ Executor::DispatchArgs args;
+ args.hidden = hidden;
+ if(with_probs) args.probs = probs.value();
+ if(config.token_data_type == TOKEN_DATA_TYPE::UINT8) args.scaling_factor = scaling_factor.value();
+ args.sparse_to_dense_map = sparse_to_dense_map;
+ args.rdma_to_attn_map = rdma_to_attn_map;
+ args.attn_to_rdma_map = attn_to_rdma_map;
+ args.local_expert_routing_map = local_expert_routing_map;
+ args.num_dispatched_tokens_tensor = num_dispatched_tokens_tensor;
+ if(num_dispatched_tokens < 0 ) {
+   // In this case, user will set the size of the output buffer by themselves.
+   args.num_dispatched_tokens = num_dispatched_tokens_tensor.value().item<int64_t>();
+ }else {
+   args.num_dispatched_tokens = num_dispatched_tokens;
+ }
+ args.row_id_map = row_id_map;
+ args.num_permuted_tokens = num_permuted_tokens;
+ args.pad_multiple = pad_multiple;
+ args.use_host_meta = use_host_meta;
+ args.num_of_tokens_per_rank = num_of_tokens_per_rank;
+ args.enable_permute = true;
+ args.stream = at::cuda::getCurrentCUDAStream();
+ 
+ // Run the full dispatch operation
+ config.forward_dispatch_api = with_probs;
+ executor.dispatch_preprocess(config, dispatch_buffers, args);
+ if(config.token_data_type == TOKEN_DATA_TYPE::UINT8) {
+   executor.dispatch_core<uint8_t>(config, dispatch_buffers, args);
+ } else if (config.token_data_type == TOKEN_DATA_TYPE::UINT16) {
+   executor.dispatch_core<uint16_t>(config, dispatch_buffers, args);
+ }else {
+   throw std::runtime_error("Invalid token data type:" +  std::to_string(static_cast<int>(config.token_data_type)));
+ }
+
+ return executor.dispatch_postprocess(config, dispatch_buffers, args);
+}
+
+std::tuple<torch::Tensor, torch::Tensor>
+HybridEpBuffer::combine_with_unpermute(torch::Tensor hidden, c10::optional<torch::Tensor> probs,
+        torch::Tensor sparse_to_dense_map, torch::Tensor rdma_to_attn_map,
+        torch::Tensor attn_to_rdma_map, c10::optional<torch::Tensor> num_dispatched_tokens_tensor,
+        c10::optional<torch::Tensor> row_id_map,
+        int64_t num_dispatched_tokens,
+        int64_t num_of_tokens_per_rank,
+        int64_t pad_multiple,
+        bool with_probs)
+{
+  // Check the input tensors
+  assert(c10::elementSize(hidden.scalar_type()) == 2);
+  assert(hidden.device().is_cuda());
+  assert(hidden.dtype() != torch::kUInt8);
+  assert(hidden.is_contiguous());
+  if (with_probs) {
+    assert(probs.has_value());
+    assert(probs.value().device().is_cuda());
+    assert(probs.value().is_contiguous());
+    assert(probs.value().dtype() == torch::kFloat32);
+  }
+
+  // Construct the output tensors
+  torch::Tensor combined_tokens, combined_probs;
+  combined_tokens =torch::empty({num_of_tokens_per_rank, config.hidden_dim},
+                   torch::dtype(hidden.dtype()).device(torch::kCUDA));
+  if (with_probs) {
+    combined_probs =
+        torch::empty({num_of_tokens_per_rank, config.num_of_experts_per_rank *  config.num_of_ranks_per_node * config.num_of_nodes}, torch::dtype(torch::kFloat32).device(torch::kCUDA));
+  }
+
+  // Prepare the parameters
+  Executor::CombineArgs args;
+  args.hidden = hidden;
+  if(with_probs) args.probs = probs.value();
+  args.combined_tokens = reinterpret_cast<uint16_t*>(combined_tokens.data_ptr());
+  if(with_probs) args.combined_probs = reinterpret_cast<float*>(combined_probs.data_ptr());
+  args.sparse_to_dense_map = sparse_to_dense_map;
+  args.rdma_to_attn_map = rdma_to_attn_map;
+  args.attn_to_rdma_map = attn_to_rdma_map;
+  args.num_dispatched_tokens_tensor = num_dispatched_tokens_tensor;
+  args.row_id_map = row_id_map;
+  args.num_dispatched_tokens = num_dispatched_tokens;
+  args.pad_multiple = pad_multiple;
+  args.num_of_tokens_per_rank = num_of_tokens_per_rank;
+  args.enable_unpermute = true;
+  args.stream = at::cuda::getCurrentCUDAStream();
+
+  // Run the full combine operation
+  config.backward_combine_api = with_probs;
+  executor.combine_preprocess(config, combine_buffers, args);
+  executor.combine_core(config, combine_buffers, args);
+  executor.combine_postprocess(config, combine_buffers, args);
+  
+  return std::make_tuple(combined_tokens, combined_probs);
+}

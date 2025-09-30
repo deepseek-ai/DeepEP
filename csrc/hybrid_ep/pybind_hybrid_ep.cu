@@ -78,7 +78,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         });
   
     pybind11::class_<HybridEpBuffer>(m, "HybridEpBuffer")
-        .def(py::init<HybridEpConfigInstance, int, int, int, int, int>())
+        .def(py::init<HybridEpConfigInstance, int, int, int, int, bool>())
         .def("exchange_ipc_address", &HybridEpBuffer::exchange_ipc_address)
         .def("metadata_preprocessing", &HybridEpBuffer::metadata_preprocessing,
              py::kw_only(), py::arg("routing_map"), py::arg("num_of_tokens_per_rank"))
@@ -86,13 +86,28 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
              py::arg("probs") = c10::nullopt,
              py::arg("scaling_factor") = c10::nullopt,
              py::arg("sparse_to_dense_map"), py::arg("rdma_to_attn_map"),
-             py::arg("attn_to_rdma_map"),
-             py::arg("num_of_tokens_for_experts") = -1, py::arg("num_of_tokens_per_rank"),
+             py::arg("attn_to_rdma_map"), py::arg("num_dispatched_tokens_tensor"),
+             py::arg("num_dispatched_tokens") = -1, py::arg("num_of_tokens_per_rank"),
              py::arg("with_probs"))
         .def("combine", &HybridEpBuffer::combine, py::kw_only(), py::arg("hidden"),
              py::arg("probs") = c10::nullopt, py::arg("sparse_to_dense_map"),
              py::arg("rdma_to_attn_map"), py::arg("attn_to_rdma_map"),
              py::arg("num_of_tokens_per_rank"),
-             py::arg("with_probs"));
+             py::arg("with_probs"))
+        .def("dispatch_with_permute", &HybridEpBuffer::dispatch_with_permute, py::kw_only(), py::arg("hidden"),
+             py::arg("probs") = c10::nullopt,
+             py::arg("scaling_factor") = c10::nullopt,
+             py::arg("sparse_to_dense_map"), py::arg("rdma_to_attn_map"),
+             py::arg("attn_to_rdma_map"), py::arg("num_dispatched_tokens_tensor"),
+             py::arg("local_expert_routing_map"), py::arg("row_id_map"), py::arg("num_dispatched_tokens") = -1,
+             py::arg("num_permuted_tokens") = -1,
+             py::arg("num_of_tokens_per_rank"), py::arg("pad_multiple") = 0, py::arg("use_host_meta") = false,
+             py::arg("with_probs") = false)
+        .def("combine_with_unpermute", &HybridEpBuffer::combine_with_unpermute, py::kw_only(), py::arg("hidden"),
+             py::arg("probs") = c10::nullopt,
+             py::arg("sparse_to_dense_map"), py::arg("rdma_to_attn_map"),
+             py::arg("attn_to_rdma_map"), py::arg("num_dispatched_tokens_tensor"),
+             py::arg("row_id_map"), py::arg("num_dispatched_tokens") = -1,
+             py::arg("num_of_tokens_per_rank"), py::arg("pad_multiple") = 0,
+             py::arg("with_probs") = false);    
   }
-  

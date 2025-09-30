@@ -237,6 +237,39 @@ def hash_tensor(t: torch.Tensor):
     return t.view(torch.int).sum().item()
 
 
+def permute(
+    tokens,
+    routing_map,
+    scaling_factor: torch.Tensor = None,
+    probs: torch.Tensor = None,
+    num_out_tokens: int = None,
+):
+    num_tokens, hidden = tokens.shape
+    num_experts = routing_map.shape[1]
+    permuted_probs = None
+
+    # mask [num_tokens, num_experts] -> [num_experts, num_tokens]
+    routing_map = routing_map.bool().T.contiguous()
+
+    # Create a dense expert-to-token mapping from the sparse token-to-expert mapping
+    token_indices = (
+        torch.arange(num_tokens, device=routing_map.device)
+        .unsqueeze(0)
+        .expand(num_experts, -1)
+    )
+
+    sorted_indices = token_indices.masked_select(routing_map)
+
+    if probs is not None:
+        permuted_probs = probs.T.contiguous().masked_select(routing_map)
+
+    # use the mapping to permute the tokens
+    permuted_input = tokens.index_select(0, sorted_indices)
+    permuted_scaling_factor = scaling_factor.index_select(0, sorted_indices)
+
+    return permuted_input, permuted_probs, permuted_scaling_factor
+
+
 class TorchRef:
     def __init__(
         self,
@@ -292,6 +325,10 @@ class TorchRef:
         routing_map: torch.Tensor,
         probs: torch.Tensor = None,
         scaling_factor: torch.Tensor = None,
+        local_expert_routing_map: torch.Tensor = None,
+        out_token_num: int = None,
+        enable_permute: bool = False,
+        pad_multiple: int = 0,
     ):
         seq_len, hidden_dim = hidden.shape
         # Cache sizes for combine
@@ -353,6 +390,76 @@ class TorchRef:
             global_scaling_factor=global_scaling_factor,
             global_routing_map=global_routing_map,
         )
+
+        if enable_permute:
+            dispatched_hidden, dispatched_probs, dispatched_scaling_factor = permute(
+                dispatched_hidden,
+                local_expert_routing_map,
+                dispatched_scaling_factor,
+                dispatched_probs,
+                out_token_num,
+            )
+
+            if pad_multiple > 0:
+                token_per_expert = local_expert_routing_map.sum(dim=0)
+                padd_m_split = [
+                    (i + pad_multiple - 1) // pad_multiple * pad_multiple
+                    for i in token_per_expert
+                ]
+
+                device = dispatched_hidden.device
+                dtype = dispatched_hidden.dtype
+                hidden_dim = dispatched_hidden.shape[1]
+
+                padded_hidden_list = []
+                padded_probs_list = [] if dispatched_probs is not None else None
+                padded_scaling_list = (
+                    [] if dispatched_scaling_factor is not None else None
+                )
+
+                start_idx = 0
+                for expert_idx, (actual_tokens, padded_tokens) in enumerate(
+                    zip(token_per_expert.tolist(), padd_m_split)
+                ):
+                    end_idx = start_idx + int(actual_tokens)
+                    padding_size = padded_tokens - int(actual_tokens)
+
+                    # pad token
+                    expert_hidden = dispatched_hidden[start_idx:end_idx]
+                    pad_hidden = torch.zeros(
+                        padding_size, hidden_dim, device=device, dtype=dtype
+                    )
+                    expert_hidden = torch.cat([expert_hidden, pad_hidden], dim=0)
+                    padded_hidden_list.append(expert_hidden)
+
+                    # pad probs
+                    if dispatched_probs is not None:
+                        expert_probs = dispatched_probs[start_idx:end_idx]
+                        pad_probs = torch.zeros(
+                            padding_size, device=device, dtype=dispatched_probs.dtype
+                        )
+                        expert_probs = torch.cat([expert_probs, pad_probs], dim=0)
+                        padded_probs_list.append(expert_probs)
+
+                    # pad scaling factor
+                    if dispatched_scaling_factor is not None:
+                        expert_scaling = dispatched_scaling_factor[start_idx:end_idx]
+                        pad_scaling = torch.zeros(
+                            padding_size,
+                            hidden_dim // 128,
+                            device=device,
+                            dtype=dispatched_scaling_factor.dtype,
+                        )
+                        expert_scaling = torch.cat([expert_scaling, pad_scaling], dim=0)
+                        padded_scaling_list.append(expert_scaling)
+
+                    start_idx = end_idx
+
+                dispatched_hidden = torch.cat(padded_hidden_list, dim=0)
+                if dispatched_scaling_factor is not None:
+                    dispatched_scaling_factor = torch.cat(padded_scaling_list, dim=0)
+                if dispatched_probs is not None:
+                    dispatched_probs = torch.cat(padded_probs_list, dim=0)
 
         return (
             dispatched_hidden,
