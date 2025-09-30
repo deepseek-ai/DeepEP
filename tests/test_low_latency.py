@@ -6,7 +6,7 @@ from functools import partial
 from typing import Literal, Set
 
 import deep_ep
-from utils import init_dist, bench, bench_kineto, calc_diff, hash_tensor, per_token_cast_back
+from utils import init_dist, bench, bench_kineto, calc_diff, hash_tensor, per_token_cast_back, backend_aware_all_gather_into_tensor
 
 
 def simulate_failure_and_skip(rank: int, api: Literal["dispatch", "combine", "clean"], expected_masked_ranks: Set[int]):
@@ -75,7 +75,7 @@ def test_main(num_tokens: int,
         topk_idx[random.randint(0, num_tokens - 1), random.randint(0, num_topk - 1)] = -1
 
     all_topk_idx = torch.empty((num_ranks, num_tokens, num_topk), dtype=topk_idx.dtype, device='cuda')
-    dist.all_gather_into_tensor(all_topk_idx, topk_idx, group=group)
+    backend_aware_all_gather_into_tensor(all_topk_idx, topk_idx, group)
 
     # For failure simulation and shrink testing
     mask_status = torch.zeros((num_ranks, ), dtype=torch.int, device='cuda')
