@@ -118,19 +118,25 @@ This document introduces the Hybrid Expert Parallel (Hybrid-EP) implementation t
 
 ### New Files
 ```
-csrc/
-├── hybrid_ep.cu              # Main CUDA implementation
-├── hybrid_ep.cuh             # Header definitions
-└── kernels/
-    ├── hybrid_ep_backend.cuh        # Backend core implementation
-    └── hybrid_ep_backend_configs.hpp # Configuration parameters
+csrc/hybrid_ep/
+├── hybrid_ep.cu                   # Main CUDA implementation
+├── hybrid_ep.cuh                  # Header definitions
+├── pybind_hybrid_ep.cu            # PyBind bindings
+├── config.cuh                     # Config definitions required by hybrid-EP kernels
+├── utils.cuh                      # Utility helpers and macros
+├── allocator/                     # Allocator for memory accessible by remote ranks
+├── backend/                       # Core Hybrid-EP kernel implementations
+│   └── hybrid_ep_backend.cuh
+├── executor/                      # Kernel runner
+├── extension/                     # Useful extensions
+└── jit/                           # JIT compiler
     
 deep_ep/
-├── hybrid_ep_buffer.py       # Python interface
-└── buffer.py                 # Buffer management
+├── hybrid_ep_buffer.py            # Python interface
+└── buffer.py                      # Buffer management
 
 tests/
-└── test_mnnvlink_hybridep.py       # Multi-node NVLink testing and Intra-node testing
+└── test_hybrid_ep.py              # Hybrid-EP tests
 ```
 
 ### Build Instructions
@@ -139,33 +145,29 @@ Follow the same build process as the main branch. No additional dependencies req
 ## 🚀 Usage Guide
 
 ### Quick Start
-Refer to `tests/test_mnnvlink_hybridep.py` for comprehensive usage examples including:
-- Multi-node NVLink configuration
+Refer to `tests/test_hybrid_ep.py` for comprehensive usage examples including:
+- Multi-node configuration
 - Intra-node testing scenarios
+- Inter-node testing will come soon
 - Performance benchmarking setups
 
 ### Important Configuration Note
-**Current Limitation**: Due to template-based optimization, parameters in the Python test file must match those defined in `csrc/kernels/hybrid_ep_backend_configs.hpp`. After modifying the header file, recompilation and reinstallation are required. Here are Important parameter settings in `hybrid_ep_backend_configs.hpp`:
+Here are important parameter settings in `csrc/hybrid_ep/config.cuh`. You can modify these parameters via `HybridEpBuffer.init_config()` or by setting proper environment variables (see `deep_ep/hybrid_ep_buffer.py`) to achieve better performance/usability:
 
 - HIDDEN_DIM  
-  Must match the Python side: see `tests/test_mnnvlink_hybridep.py` (`HIDDEN_DIM`).
+  Hidden size (must match model hidden dimension).
 
-- MAX_NUM_OF_TOKENS_PER_RANK  
-  Must match the Python side: see `tests/test_mnnvlink_hybridep.py` (`MAX_NUM_OF_TOKENS_PER_RANK`).
+- MAX_NUM_OF_TOKENS_PER_RANK   
+  The largest sequence length for the input of the dispatch kernel.
 
 - NUM_OF_EXPERTS_PER_RANK  
-  Must match the Python side: see `tests/test_mnnvlink_hybridep.py` (`NUM_LOCAL_EXPERTS`).
+  Number of experts hosted by each rank.
 
 - NUM_OF_NODES  
-  Number of NVLink domains**, not the number of OS nodes / containers.
+  **Number of NVLink domains**, not the number of OS nodes / containers.
 
 - NUM_OF_RANKS_PER_NODE  
   Number of ranks within one NVLink domain.  
-  Must match the Python side: see `tests/test_mnnvlink_hybridep.py` (`NUM_OF_RANKS_PER_NODE` & `args.num_processes`).
-
-- USE_MNNVLINK  
-  `false` → single-node (pure NVLink inside one box)  
-  `true`  → multi-node NVLink domain (MNNVLINK enabled).
 
 - NUM_THREADS_PER_BLOCK_PREPROCESSING_API  
   Thread-block width for the preprocessing kernel.
@@ -181,9 +183,6 @@ Refer to `tests/test_mnnvlink_hybridep.py` for comprehensive usage examples incl
 - NUM_OF_BLOCKS_DISPATCH_API  
   Number of CTAs to launch for dispatch; controls how many SMs are used.
 
-- FORWARD_DISPATCH_API  
-  Set to `true` for forward dispatch path, `false` for backward.
-
 - NUM_OF_STAGES_G2S_COMBINE_API  
   Pipeline depth for global-to-shared (G2S) in combine.  
   Same shared-memory trade-off as dispatch.
@@ -194,12 +193,6 @@ Refer to `tests/test_mnnvlink_hybridep.py` for comprehensive usage examples incl
 
 - NUM_OF_BLOCKS_COMBINE_API  
   Number of CTAs for combine kernels.
-
-- BACKWARD_COMBINE_API  
-  Set to `true` for backward combine path, `false` for forward.
-
-**Future Enhancement**: We plan to implement Just-In-Time (JIT) compilation to eliminate this manual configuration requirement and improve developer experience.
-
 
 ---
 
@@ -215,12 +208,9 @@ Refer to `tests/test_mnnvlink_hybridep.py` for comprehensive usage examples incl
 ### 🚧 Upcoming Features
 - **Low Latency Mode**: Enhanced performance for latency-critical workloads
 - **RDMA Integration**: High-performance inter-node communication
-- **JIT Compilation**: Dynamic parameter configuration without recompilation
 
 ### ⚠️ Current Limitations
-- Template-based implementation requires recompilation for parameter changes
 - RDMA functionality not yet available (under final testing)
-- Configuration parameters must be manually synchronized between Python and C++ files
 
 ### 🎯 Migration Notes
 This implementation maintains full backward compatibility with DeepEP. Users can seamlessly integrate Hybrid-EP into existing workflows without code modifications.

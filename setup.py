@@ -39,6 +39,8 @@ def get_extension_hybrid_ep_cpp():
         os.path.join(current_dir, "csrc/hybrid_ep/hybrid_ep.cu"),
         os.path.join(current_dir, "csrc/hybrid_ep/allocator/allocator.cu"),
         os.path.join(current_dir, "csrc/hybrid_ep/jit/compiler.cu"),
+        os.path.join(current_dir, "csrc/hybrid_ep/executor/executor.cu"),
+        os.path.join(current_dir, "csrc/hybrid_ep/extension/permute.cu"),
         os.path.join(current_dir, "csrc/hybrid_ep/pybind_hybrid_ep.cu"),
     ]
     include_dirs = [
