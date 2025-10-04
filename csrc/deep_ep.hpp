@@ -35,7 +35,8 @@ private:
     void* buffer_ptrs[NUM_MAX_NVL_PEERS] = {nullptr};
     void** buffer_ptrs_gpu = nullptr;
 
-    // For zero-copy send/recv
+    // For zero-copy NVLink send/recv
+    int64_t buffer_fused_bytes;
     void* buffer_fused_ptrs[NUM_MAX_NVL_PEERS] = {nullptr};
     void** buffer_fused_ptrs_gpu = nullptr;
 
@@ -44,7 +45,7 @@ private:
     void* rdma_buffer_ptr = nullptr;
     void* rdma_fused_buffer_ptr = nullptr;
 
-    // Splitting buffers for multi-batch overlapping
+    // Splitting zero-copy buffers for multi-batch overlapping
     int num_zcopy_buffers;
 
     // Shrink mode buffer

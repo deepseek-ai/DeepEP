@@ -23,6 +23,7 @@ Buffer::Buffer(int rank, int num_ranks, int64_t num_nvl_bytes, int64_t num_rdma_
         explicitly_destroy(explicitly_destroy),
         comm_stream(at::cuda::getStreamFromPool(true)) {
     const bool support_zero_copy = num_zcopy_buffers > 0;
+    EP_HOST_ASSERT(num_zcopy_buffers >= 0);
 
     // Metadata memory
     int64_t barrier_signal_bytes = NUM_MAX_NVL_PEERS * sizeof(int);
@@ -30,7 +31,7 @@ Buffer::Buffer(int rank, int num_ranks, int64_t num_nvl_bytes, int64_t num_rdma_
     // Fused (zero-copy) NVL buffer layout is as follows (case of 2 sub-buffers):
     //   Sub-buffer 0         Sub-buffer 1         Sub-buffer 0           Sub-buffer 1
     // | Input of Combine 0 | Input of Combine 1 | Output of Dispatch 0 | Output of Dispatch 1 |
-    int64_t buffer_fused_bytes = 1l * num_zcopy_buffers * (NUM_COMBINE_INPUT_BYTES_PER_ZCOPY_BUFFER + NUM_DISPATCH_OUTPUT_BYTES_PER_ZCOPY_BUFFER);
+    buffer_fused_bytes = 1l * num_zcopy_buffers * (NUM_COMBINE_INPUT_BYTES_PER_ZCOPY_BUFFER + NUM_DISPATCH_OUTPUT_BYTES_PER_ZCOPY_BUFFER);
     int64_t buffer_fused_ptr_bytes = 1l * support_zero_copy * NUM_MAX_NVL_PEERS * sizeof(void*);
     int64_t barrier_signal_ptr_bytes = NUM_MAX_NVL_PEERS * sizeof(int*);
 
@@ -57,17 +58,22 @@ Buffer::Buffer(int rank, int num_ranks, int64_t num_nvl_bytes, int64_t num_rdma_
 
     if (num_nvl_bytes > 0) {
         // Local IPC: alloc local memory and set local IPC handles
-        CUDA_CHECK(cudaMalloc(&buffer_ptrs[nvl_rank], num_nvl_bytes + barrier_signal_bytes + buffer_fused_bytes + buffer_ptr_bytes + barrier_signal_ptr_bytes + buffer_fused_ptr_bytes));
+        // Zero-copy: Guarantee buffer_fused_ptr is aligned by placing it at buffer_ptr + num_nvl_bytes (both are aligned)
+        CUDA_CHECK(cudaMalloc(&buffer_ptrs[nvl_rank], num_nvl_bytes + buffer_fused_bytes + barrier_signal_bytes + buffer_ptr_bytes + barrier_signal_ptr_bytes + buffer_fused_ptr_bytes));
         CUDA_CHECK(cudaIpcGetMemHandle(&ipc_handles[nvl_rank], buffer_ptrs[nvl_rank]));
-        buffer_ptrs_gpu = reinterpret_cast<void**>(static_cast<uint8_t*>(buffer_ptrs[nvl_rank]) + num_nvl_bytes + barrier_signal_bytes + buffer_fused_bytes);
+        buffer_ptrs_gpu = reinterpret_cast<void**>(static_cast<uint8_t*>(buffer_ptrs[nvl_rank]) + num_nvl_bytes + buffer_fused_bytes + barrier_signal_bytes);
 
         // Set barrier signals
-        barrier_signal_ptrs[nvl_rank] = reinterpret_cast<int*>(static_cast<uint8_t*>(buffer_ptrs[nvl_rank]) + num_nvl_bytes);
-        barrier_signal_ptrs_gpu = reinterpret_cast<int**>(static_cast<uint8_t*>(buffer_ptrs[nvl_rank]) + num_nvl_bytes + barrier_signal_bytes + buffer_fused_bytes + buffer_ptr_bytes);
+        barrier_signal_ptrs[nvl_rank] = reinterpret_cast<int*>(static_cast<uint8_t*>(buffer_ptrs[nvl_rank]) + num_nvl_bytes + buffer_fused_bytes);
+        barrier_signal_ptrs_gpu = reinterpret_cast<int**>(static_cast<uint8_t*>(buffer_ptrs[nvl_rank]) + num_nvl_bytes + buffer_fused_bytes + barrier_signal_bytes + buffer_ptr_bytes);
 
         // Set NVL fused (zero-copy send/recv) buffers
-        buffer_fused_ptrs[nvl_rank] = reinterpret_cast<void*>(reinterpret_cast<uint8_t*>(buffer_ptrs[nvl_rank]) + num_nvl_bytes + barrier_signal_bytes);
-        buffer_fused_ptrs_gpu = reinterpret_cast<void**>(reinterpret_cast<uint8_t*>(buffer_ptrs[nvl_rank]) + num_nvl_bytes + barrier_signal_bytes + buffer_fused_bytes + buffer_ptr_bytes + barrier_signal_ptr_bytes);
+        buffer_fused_ptrs[nvl_rank] = support_zero_copy ?
+            reinterpret_cast<void*>(reinterpret_cast<uint8_t*>(buffer_ptrs[nvl_rank]) + num_nvl_bytes) :
+            nullptr;
+        buffer_fused_ptrs_gpu = support_zero_copy ?
+            reinterpret_cast<void**>(reinterpret_cast<uint8_t*>(buffer_ptrs[nvl_rank]) + num_nvl_bytes + buffer_fused_bytes + barrier_signal_bytes + buffer_ptr_bytes + barrier_signal_ptr_bytes) :
+            nullptr;
 
         // No need to synchronize, will do a full device sync during `sync`
         CUDA_CHECK(cudaMemsetAsync(barrier_signal_ptrs[nvl_rank], 0, barrier_signal_bytes, comm_stream));
@@ -208,6 +214,8 @@ void Buffer::sync(const std::vector<int> &device_ids,
 
     int64_t barrier_signal_bytes = NUM_MAX_NVL_PEERS * sizeof(int);
 
+    const bool support_zero_copy = num_zcopy_buffers > 0;
+
     // Sync IPC handles
     if (num_nvl_bytes > 0) {
         EP_HOST_ASSERT(num_ranks == device_ids.size());
@@ -219,8 +227,8 @@ void Buffer::sync(const std::vector<int> &device_ids,
             if (offset + i != rank) {
                 std::memcpy(ipc_handles[i].reserved, handle_str.c_str(), CUDA_IPC_HANDLE_SIZE);
                 CUDA_CHECK(cudaIpcOpenMemHandle(&buffer_ptrs[i], ipc_handles[i], cudaIpcMemLazyEnablePeerAccess));
-                barrier_signal_ptrs[i] = reinterpret_cast<int*>(static_cast<uint8_t*>(buffer_ptrs[i]) + num_nvl_bytes);
-                buffer_fused_ptrs[i] = reinterpret_cast<void*>(reinterpret_cast<uint8_t*>(buffer_ptrs[i]) + num_nvl_bytes + barrier_signal_bytes);
+                barrier_signal_ptrs[i] = reinterpret_cast<int*>(static_cast<uint8_t*>(buffer_ptrs[i]) + num_nvl_bytes + buffer_fused_bytes);
+                buffer_fused_ptrs[i] = support_zero_copy ? reinterpret_cast<void*>(reinterpret_cast<uint8_t*>(buffer_ptrs[i]) + num_nvl_bytes) : nullptr;
             } else {
                 EP_HOST_ASSERT(std::memcmp(ipc_handles[i].reserved, handle_str.c_str(), CUDA_IPC_HANDLE_SIZE) == 0);
             }
@@ -229,7 +237,9 @@ void Buffer::sync(const std::vector<int> &device_ids,
         // Copy all buffer and barrier signal pointers to GPU
         CUDA_CHECK(cudaMemcpy(buffer_ptrs_gpu, buffer_ptrs, sizeof(void*) * NUM_MAX_NVL_PEERS, cudaMemcpyHostToDevice));
         CUDA_CHECK(cudaMemcpy(barrier_signal_ptrs_gpu, barrier_signal_ptrs, sizeof(int*) * NUM_MAX_NVL_PEERS, cudaMemcpyHostToDevice));
-        CUDA_CHECK(cudaMemcpy(buffer_fused_ptrs_gpu, buffer_fused_ptrs, sizeof(void*) * NUM_MAX_NVL_PEERS, cudaMemcpyHostToDevice));
+        if (support_zero_copy) {
+            CUDA_CHECK(cudaMemcpy(buffer_fused_ptrs_gpu, buffer_fused_ptrs, sizeof(void*) * NUM_MAX_NVL_PEERS, cudaMemcpyHostToDevice));
+        }
         CUDA_CHECK(cudaDeviceSynchronize());
     }
 
@@ -245,8 +255,6 @@ void Buffer::sync(const std::vector<int> &device_ids,
         auto num_nvshmem_ranks = low_latency_mode ? num_ranks : num_rdma_ranks;
         EP_HOST_ASSERT(nvshmem_rank == internode::init(root_unique_id, nvshmem_rank, num_nvshmem_ranks, low_latency_mode));
         internode::barrier();
-
-        const bool support_zero_copy = num_zcopy_buffers > 0;
 
         // Allocate
         rdma_buffer_ptr = internode::alloc(num_rdma_bytes, NUM_BUFFER_ALIGNMENT_BYTES);
