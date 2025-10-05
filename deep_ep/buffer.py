@@ -123,7 +123,7 @@ class Buffer:
             # Disable NVLink SHArP
             os.environ['NVSHMEM_DISABLE_NVLS'] = '1'
             # NOTES: NVSHMEM initialization requires at least 256 MiB
-            os.environ['NVSHMEM_CUMEM_GRANULARITY'] = f'{2 ** 31}' if enable_zcopy else f'{2 ** 29}'
+            os.environ['NVSHMEM_CUMEM_GRANULARITY'] = f'{2 ** 29}'
 
             if not allow_mnnvl:
                 # Disable multi-node NVLink detection
