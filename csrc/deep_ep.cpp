@@ -965,7 +965,7 @@ Buffer::internode_dispatch(const torch::Tensor& x, const std::optional<torch::Te
         const size_t topk_idx_bytes_per_token = num_topk * sizeof(topk_idx_t);
         const size_t topk_weights_bytes_per_token = num_topk * sizeof(float);
         const size_t x_scales_bytes_per_token = num_scales * sizeof(float);
-        const size_t src_meta_bytes_per_token = internode::get_source_meta_bytes();
+        const size_t src_meta_bytes_per_token = internode_zcopy::get_source_meta_bytes();
 
         // TMA alignment requirements
         EP_HOST_ASSERT(x_bytes_per_token % 16 == 0);
@@ -984,7 +984,7 @@ Buffer::internode_dispatch(const torch::Tensor& x, const std::optional<torch::Te
         recv_x = torch::from_blob(recv_x_ptr, {num_recv_tokens, hidden}, torch::TensorOptions().dtype(x.scalar_type()).device(torch::kCUDA));
         if (not cached_mode) {
             recv_src_meta_ptr = reinterpret_cast<void*>(reinterpret_cast<uint8_t*>(recv_x_ptr) + recv_x_bytes + recv_topk_idx_bytes + recv_topk_weights_bytes + recv_x_scales_bytes);
-            recv_src_meta = std::make_optional(torch::from_blob(recv_src_meta_ptr, {num_recv_tokens, internode::get_source_meta_bytes()}, torch::TensorOptions().dtype(torch::kByte).device(torch::kCUDA)));
+            recv_src_meta = std::make_optional(torch::from_blob(recv_src_meta_ptr, {num_recv_tokens, internode_zcopy::get_source_meta_bytes()}, torch::TensorOptions().dtype(torch::kByte).device(torch::kCUDA)));
         }
 
         if (topk_idx.has_value()) {
@@ -1116,7 +1116,7 @@ Buffer::internode_combine(const torch::Tensor& x, const std::optional<torch::Ten
     auto num_tokens = static_cast<int>(x.size(0)), hidden = static_cast<int>(x.size(1)), hidden_int4 = static_cast<int>(x.size(1) * x.element_size() / sizeof(int4));
     auto num_combined_tokens = static_cast<int>(is_combined_token_in_rank.size(0));
     EP_HOST_ASSERT((hidden * x.element_size()) % sizeof(int4) == 0);
-    EP_HOST_ASSERT(src_meta.size(1) == internode::get_source_meta_bytes());
+    EP_HOST_ASSERT(src_meta.size(1) == internode::get_source_meta_bytes(zero_copy));
     EP_HOST_ASSERT(is_combined_token_in_rank.size(1) == num_ranks);
     EP_HOST_ASSERT(rdma_channel_prefix_matrix.size(0) == num_rdma_ranks and rdma_channel_prefix_matrix.size(1) == num_channels);
     EP_HOST_ASSERT(rdma_rank_prefix_sum.size(0) == num_rdma_ranks);
