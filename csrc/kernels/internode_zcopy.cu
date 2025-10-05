@@ -176,6 +176,8 @@ dispatch(int4* recv_x, float* recv_x_scales, topk_idx_t* recv_topk_idx, float* r
     __shared__ __align__(16) ibgda_sge_t sge_list_buf[kNumDispatchRDMASenderWarps * NUM_MAX_SGE_PER_WQE];
     ibgda_sge_t *sge_list = sge_list_buf + warp_id * NUM_MAX_SGE_PER_WQE;
 
+    const size_t scale_bytes = num_scales * sizeof(float);
+
     if (warp_role == WarpRole::kRDMASender) {
         // NOTES: in case of splitting the issued put at the end of the buffer
         EP_DEVICE_ASSERT(num_max_rdma_chunked_recv_tokens % num_max_rdma_chunked_send_tokens == 0);
@@ -289,7 +291,7 @@ dispatch(int4* recv_x, float* recv_x_scales, topk_idx_t* recv_topk_idx, float* r
                         sge_idx++;
                         if (num_scales > 0) {
                             sge_list[issue_token_idx * num_sge_per_rdma_token + sge_idx].addr = reinterpret_cast<uint64_t>(token_x_scales);
-                            sge_list[issue_token_idx * num_sge_per_rdma_token + sge_idx].length = num_scales * sizeof(float);
+                            sge_list[issue_token_idx * num_sge_per_rdma_token + sge_idx].length = scale_bytes;
                             sge_idx++;
                         }
                         if (num_topk > 0) {
@@ -374,23 +376,26 @@ dispatch(int4* recv_x, float* recv_x_scales, topk_idx_t* recv_topk_idx, float* r
         const auto dst_rank_expert_end = dst_rank_expert_begin + (num_experts / num_ranks);
 
         // Dynamic TMA shared memory layout
-        const size_t SMEM_LEN_PER_TARGET_NVL_PEER = 16384;
+        const size_t kNumHiddenTMABytesPerWarp = 16384;
         extern __shared__ int4 tma_smem[];
         char *tma_smem_aligned = reinterpret_cast<char *>(align_up<uintptr_t>(reinterpret_cast<uintptr_t>(tma_smem), ZCOPY_TMA_SMEM_ALIGNMENT));
         __shared__ uint64_t tma_mbarrier[NUM_MAX_NVL_PEERS];
 
         // Dedicated TMA shared memory for scales
-        const size_t SMEM_SCALES_LEN_PER_TARGET_NVL_PEER = 512;
-        __shared__ __align__(SMEM_SCALES_LEN_PER_TARGET_NVL_PEER) char tma_smem_scales[NUM_MAX_NVL_PEERS][SMEM_SCALES_LEN_PER_TARGET_NVL_PEER];
+        const size_t kNumScalesTMABytesPerWarp = 512;
+        __shared__ __align__(kNumScalesTMABytesPerWarp) char tma_smem_scales[NUM_MAX_NVL_PEERS][kNumScalesTMABytesPerWarp];
         __shared__ uint64_t tma_mbarrier_scales[NUM_MAX_NVL_PEERS];
+
+        EP_DEVICE_ASSERT(hidden_bytes <= kNumHiddenTMABytesPerWarp);
+        EP_DEVICE_ASSERT(scale_bytes <= kNumScalesTMABytesPerWarp);
 
         char *smem_ptrs[NUM_MAX_NVL_PEERS];
         #pragma unroll
         for (size_t i = 0; i < NUM_MAX_NVL_PEERS; ++ i) {
-            smem_ptrs[i] = tma_smem_aligned + SMEM_LEN_PER_TARGET_NVL_PEER * i;
+            smem_ptrs[i] = tma_smem_aligned + kNumHiddenTMABytesPerWarp * i;
         }
         EP_DEVICE_ASSERT(
-            reinterpret_cast<uintptr_t>(smem_ptrs[NUM_MAX_NVL_PEERS - 1]) + SMEM_LEN_PER_TARGET_NVL_PEER <=
+            reinterpret_cast<uintptr_t>(smem_ptrs[NUM_MAX_NVL_PEERS - 1]) + kNumHiddenTMABytesPerWarp <=
             reinterpret_cast<uintptr_t>(tma_smem) + kNvlFwdTMASMemLen);
 
         // Wait counters to arrive
@@ -456,7 +461,7 @@ dispatch(int4* recv_x, float* recv_x_scales, topk_idx_t* recv_topk_idx, float* r
         // NOTES: always start from the local rank
         int src_rdma_rank = sm_id % kNumRDMARanks;
         int cached_rdma_channel_head = 0, cached_rdma_channel_tail = 0;
-        const uint64_t output_buffer_size = NUM_DISPATCH_OUTPUT_BYTES_PER_ZCOPY_BUFFER / (hidden_bytes + num_topk * sizeof(int64_t) + num_topk * sizeof(float) + num_scales * sizeof(float));
+        const uint64_t output_buffer_size = NUM_DISPATCH_OUTPUT_BYTES_PER_ZCOPY_BUFFER / (hidden_bytes + num_topk * sizeof(int64_t) + num_topk * sizeof(float) + scale_bytes);
         while (__any_sync(0xffffffff, num_tokens_to_recv_from_rdma > 0)) {
             // Find next source RDMA rank (round-robin)
             start_time = clock64();
@@ -488,7 +493,7 @@ dispatch(int4* recv_x, float* recv_x_scales, topk_idx_t* recv_topk_idx, float* r
             auto target_nvl_rank_x_bytes = num_recv_tokens * hidden_bytes;
             auto target_nvl_rank_topk_idx_bytes = num_recv_tokens * num_topk * sizeof(topk_idx_t);
             auto target_nvl_rank_topk_weights_bytes = num_recv_tokens * num_topk * sizeof(float);
-            auto target_nvl_rank_x_scales_bytes = num_recv_tokens * num_scales * sizeof(float);
+            auto target_nvl_rank_x_scales_bytes = num_recv_tokens * scale_bytes;
 
             if (num_recv_tokens > output_buffer_size) {
                 if (lane_id == 0) {
@@ -563,7 +568,7 @@ dispatch(int4* recv_x, float* recv_x_scales, topk_idx_t* recv_topk_idx, float* r
                     shifted = shift_ptr(shifted, hidden_bytes);
                     shifted = shift_ptr(shifted, sizeof(SourceMeta));
                     src_scales = shifted;
-                    shifted = shift_ptr(shifted, num_scales * sizeof(float));
+                    shifted = shift_ptr(shifted, scale_bytes);
                     src_topk_idx = shifted;
                     shifted = shift_ptr(shifted, sizeof(topk_idx_t) * num_topk);
                     src_topk_weights = shifted;
@@ -583,7 +588,7 @@ dispatch(int4* recv_x, float* recv_x_scales, topk_idx_t* recv_topk_idx, float* r
                     // Load scales into shared memory
                     memcpy_tma_lane_launch_load(
                         src_scales,
-                        num_scales * sizeof(float),
+                        scale_bytes,
                         tma_smem_scales[target_rank],
                         tma_mbarrier_scales[target_rank]
                     );
@@ -610,7 +615,7 @@ dispatch(int4* recv_x, float* recv_x_scales, topk_idx_t* recv_topk_idx, float* r
                     // Store scales into target
                     memcpy_tma_lane_launch_store(
                         reinterpret_cast<void *>(target_nvl_rank_x_scales + total_offset * num_scales),
-                        num_scales * sizeof(float),
+                        scale_bytes,
                         tma_smem_scales[target_rank],
                         tma_mbarrier_scales[target_rank]
                     );
@@ -926,14 +931,14 @@ combine(int4* combined_x, float* combined_topk_weights,
 
         if (warp_role == WarpRole::kNVLAndRDMAForwarder) {
             // Dynamic TMA shared memory layout
-            const size_t SMEM_LEN_PER_WARP = 16384;
+            const size_t kNumTMABytesPerWarp = 16384;
             extern __shared__ int4 tma_smem[];
             char *tma_smem_aligned = reinterpret_cast<char *>(align_up<uintptr_t>(reinterpret_cast<uintptr_t>(tma_smem), ZCOPY_TMA_SMEM_ALIGNMENT));
             __shared__ uint64_t tma_mbarrier[kNumForwarders];
 
             char *smem_ptrs[kNumForwarders];
             for (size_t i = 0; i < kNumForwarders; ++ i) {
-                smem_ptrs[i] = tma_smem_aligned + SMEM_LEN_PER_WARP * i;
+                smem_ptrs[i] = tma_smem_aligned + kNumTMABytesPerWarp * i;
             }
 
             // Receive from NVL ranks and forward to RDMA ranks
@@ -1026,7 +1031,7 @@ combine(int4* combined_x, float* combined_topk_weights,
                         hidden_bytes,
                         lane_id,
                         smem_ptrs[warp_id],
-                        hidden_bytes,
+                        kNumTMABytesPerWarp,
                         tma_mbarrier[warp_id]
                     );
                 }
