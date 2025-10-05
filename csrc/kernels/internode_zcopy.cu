@@ -718,7 +718,7 @@ dispatch(int4* recv_x, float* recv_x_scales, topk_idx_t* recv_topk_idx, float* r
             __syncwarp();
         }
 
-        // Wait for all local ranks to finish forwarding
+        // Wait for all local ranks to finish forwarding, so that the output buffer contains the complete dispatch results
         for (int i = lane_id; i < NUM_MAX_NVL_PEERS; i += 32) {
             auto start_time = clock64();
             while (not ld_volatile_global(nvl_channel_finish_signal.buffer() + i)) {
@@ -893,7 +893,8 @@ combine(int4* combined_x, float* combined_topk_weights,
         void *rs_wr_buffer_ptr = buffer_ptrs[nvl_rank];
         auto nvl_channel_finish_signal = AsymBuffer<int>(rs_wr_buffer_ptr, 1, NUM_MAX_NVL_PEERS, channel_id, num_channels);
 
-        // Wait for all local ranks to finish forwarding
+        // In zero-copy combine, an NVLAndRDMAForwarder actively pulls data from local NVL ranks.
+        // A rank only exits combine after all local NVL ranks have finished pulling (and thus the input buffer can be reused).
         if (lane_id < NUM_MAX_NVL_PEERS) {
             auto start_time = clock64();
             while (not ld_volatile_global(nvl_channel_finish_signal.buffer() + lane_id)) {
