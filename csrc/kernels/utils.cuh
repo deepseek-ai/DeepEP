@@ -425,6 +425,15 @@ __device__ __forceinline__ void tma_store_1d(const void* smem_ptr, const void* g
     asm volatile("cp.async.bulk.commit_group;");
 }
 
+__forceinline__ __device__ void tma_reduce_add_bf16(const void* src_smem_ptr, void *dst_gmem_ptr, int num_bytes,
+                                                    bool evict_first = true) {
+    auto smem_int_ptr = static_cast<uint32_t>(__cvta_generic_to_shared(src_smem_ptr));
+    const auto cache_hint = evict_first ? kEvictFirst : kEvictNormal;
+    asm volatile("cp.reduce.async.bulk.global.shared::cta.bulk_group.L2::cache_hint.add.noftz.bf16 [%0], [%1], %2, %3;\n"
+                 :: "l"(dst_gmem_ptr), "r"(smem_int_ptr), "r"(num_bytes), "l"(cache_hint) : "memory");
+    asm volatile("cp.async.bulk.commit_group;");
+}
+
 template <int N>
 __device__ __forceinline__ void tma_store_wait() {
     asm volatile("cp.async.bulk.wait_group.read %0;" :: "n"(N) : "memory");
@@ -442,106 +451,6 @@ uint32_t cast_smem_ptr_to_uint(void const *const ptr) {
       : "l"(ptr));
 
   return smem_ptr;
-}
-
-struct SM90_TMA_LOAD_1D {
-    __forceinline__ __device__ static void
-    copy(void const *src_gmem_ptr, void *dst_smem_ptr, int32_t const &size, uint64_t cache_hint, uint64_t *mbar_ptr) {
-      // 地址转换（兼容 Hopper 寻址模式）
-      uint64_t gmem_int_desc = reinterpret_cast<uint64_t>(src_gmem_ptr);
-      uint32_t smem_int_mbar = cast_smem_ptr_to_uint(mbar_ptr);
-      uint32_t smem_int_ptr = cast_smem_ptr_to_uint(dst_smem_ptr);
-
-      // 新版 PTX 指令
-      asm volatile(
-          "cp.async.bulk.shared::cta.global.mbarrier::complete_tx::bytes.L2::cache_hint"
-          " [%0], [%1], %2, [%3], %4;"
-          :
-          : "r"(smem_int_ptr),        // dest_prt(SMEM)
-            "l"(gmem_int_desc),       // src_ptr(GMEM)
-            "r"(size),               // Size,16的整数倍
-            "r"(smem_int_mbar),      // mbarrier 地址
-            "l"(cache_hint)          // 缓存策略（例如 L2::L2_128B）
-          : "memory"
-      );
-    }
-};
-
-struct SM90_TMA_STORE_1D {
-    __forceinline__ __device__ static void
-    copy(void const *src_smem_ptr, void const *dest_gmem_prt, int32_t const &size, uint64_t cache_hint) {  // 新增缓存策略参数
-      uint64_t gmem_int_desc = reinterpret_cast<uint64_t>(dest_gmem_prt);
-      uint32_t smem_int_ptr = cast_smem_ptr_to_uint(src_smem_ptr);
-
-      // 新指令格式：添加L2缓存策略，调整操作数顺序
-      asm volatile(
-          "cp.async.bulk.global.shared::cta.bulk_group.L2::cache_hint"
-          " [%0], [%1], %2, %3;"
-          :
-          : "l"(gmem_int_desc),       // 目标：global mem
-            "r"(smem_int_ptr),      // 源：shmem
-            "r"(size),              // 数据块大小（字节数）
-            "l"(cache_hint)         // L2缓存策略
-          : "memory"
-      );
-    }
-};
-
-struct SM90_TMA_REDUCE_ADD_BF16 {
-    __forceinline__ __device__ static void
-    reduce_add(void const *src_smem_ptr, void *dst_gmem_ptr, int32_t const &size, uint64_t cache_hint) {
-      uint64_t gmem_int_desc = reinterpret_cast<uint64_t>(dst_gmem_ptr);
-      uint32_t smem_int_ptr = cast_smem_ptr_to_uint(src_smem_ptr);
-      // 使用cp.reduce.async.bulk指令进行reduce add操作
-      asm volatile(
-          "cp.reduce.async.bulk.global.shared::cta.bulk_group.add.noftz.bf16"
-          " [%0], [%1], %2;"
-          :
-          : "l"(gmem_int_desc),    // 目标：global mem
-            "r"(smem_int_ptr),    // 源：shared mem
-            "r"(size)
-          : "memory"
-      );
-    }
-};
-
-struct SM90_TMA_REDUCE_ADD_F32 {
-    __forceinline__ __device__ static void
-    reduce_add(void const *src_smem_ptr, void *dst_gmem_ptr, int32_t const &size, uint64_t cache_hint) {
-      uint64_t gmem_int_desc = reinterpret_cast<uint64_t>(dst_gmem_ptr);
-      uint32_t smem_int_ptr = cast_smem_ptr_to_uint(src_smem_ptr);
-      // 使用cp.reduce.async.bulk指令进行reduce add操作
-      asm volatile(
-          "cp.reduce.async.bulk.global.shared::cta.bulk_group.add.f32"
-          " [%0], [%1], %2;"
-          :
-          : "l"(gmem_int_desc),    // 目标：global mem
-            "r"(smem_int_ptr),    // 源：shared mem
-            "r"(size)
-          : "memory"
-      );
-    }
-};
-
-__forceinline__ __device__ void
-initialize_barrier(uint64_t& smem_barrier,                 // 64 bits user-manged barrier in smem
-                   int thread_count = 1)                   // Thread count expected to arrive/wait on this barrier
-{
-  uint32_t smem_int_ptr = cast_smem_ptr_to_uint(&smem_barrier);
-  asm volatile ("mbarrier.init.shared::cta.b64 [%0], %1;\n"
-    :: "r"(smem_int_ptr),
-       "r"(thread_count));
-}
-
-// Set the number of bytes transfered per transaction and perform an arrive operation as well
-__forceinline__ __device__ void
-set_barrier_transaction_bytes(uint64_t& smem_barrier,      // 64 bits user-manged barrier in smem
-                              uint32_t bytes)              // Number of bytes transfered by per TMA transaction
-{
-  uint32_t smem_int_ptr = cast_smem_ptr_to_uint(&smem_barrier);
-  asm volatile ("mbarrier.arrive.expect_tx.shared::cta.b64 _, [%0], %1;\n"
-    :: "r"(smem_int_ptr),
-       "r"(bytes));
 }
 
 // Barrier wait
@@ -563,68 +472,15 @@ wait_barrier(uint64_t& smem_barrier,                       // 64 bits user-mange
        "r"(phase_bit));
 }
 
-__forceinline__ __device__ static void
-tma_commit_group() {
-    asm volatile("cp.async.bulk.commit_group;");
-}
-
-// Wait until all TMA descriptor previously issued are safe to be modified after tma_desc_commit_group()
-__forceinline__ __device__ static void
-tma_wait_group() {
-    asm volatile(
-      "cp.async.bulk.wait_group %0;"
-      :
-      : "n"(0)
-      : "memory");
-}
-
-__device__ __forceinline__ void memcpy_tma_warp(
-    void *dst_ptr, 
-    const void *src_ptr,
-    size_t size, 
-    int lane_id, 
-    char* smem,
-    size_t smem_len,
-    uint64_t& tma_mbarrier
-) {
-    // TODO: Tune this value
-    int kTransactionBytes = 0;
-    if (smem_len < size) {
-        int kNumCopy = ceil_div(size, smem_len);
-        kTransactionBytes = align_up(static_cast<int>(size) / kNumCopy, 16);
-    }
-    else {
-        kTransactionBytes = size;
-    }
-
-    for (int i = 0; i < size; i += kTransactionBytes) {
-        const int chunk_size = min(kTransactionBytes, static_cast<int>(size) - i);
-        if (lane_id == 0) {
-            initialize_barrier(tma_mbarrier, 1);
-            set_barrier_transaction_bytes(tma_mbarrier, chunk_size);
-            SM90_TMA_LOAD_1D::copy((void*)(reinterpret_cast<const char *>(src_ptr) + i), smem, chunk_size, 0x0, &tma_mbarrier);
-        }
-        __syncwarp();
-        wait_barrier(tma_mbarrier, 0);
-
-        if (lane_id == 0) {
-            SM90_TMA_STORE_1D::copy(smem, (void*)(reinterpret_cast<char *>(dst_ptr) + i), chunk_size, 0x0);
-            tma_commit_group();
-        }
-        tma_wait_group();
-        __syncwarp();
-    }
-}
-
 __device__ __forceinline__ void memcpy_tma_lane_launch_load(
     const void *src_ptr,
     size_t size,
     char* smem,
     uint64_t& tma_mbarrier
 ) {
-    initialize_barrier(tma_mbarrier, 1);
-    set_barrier_transaction_bytes(tma_mbarrier, size);
-    SM90_TMA_LOAD_1D::copy(src_ptr, smem, size, 0x0, &tma_mbarrier);
+    mbarrier_init(&tma_mbarrier, 1);
+    mbarrier_arrive_and_expect_tx(&tma_mbarrier, size);
+    tma_load_1d(smem, src_ptr, &tma_mbarrier, size);
 }
 
 __device__ __forceinline__ void memcpy_tma_lane_launch_store(
@@ -634,12 +490,11 @@ __device__ __forceinline__ void memcpy_tma_lane_launch_store(
     uint64_t& tma_mbarrier
 ) {
     wait_barrier(tma_mbarrier, 0);
-    SM90_TMA_STORE_1D::copy(smem, dst_ptr, size, 0x0);
-    tma_commit_group();
+    tma_store_1d(smem, dst_ptr, size);
 }
 
 __device__ __forceinline__ void memcpy_tma_warp_finalize() {
-    tma_wait_group();
+    tma_store_wait<0>();
     __syncwarp();
 }
 
@@ -660,9 +515,9 @@ __device__ __forceinline__ void reduce_add_tma_warp(
     float topk_weight_value = 0;
     for (int i = 0; i < num_topk_ranks; i++) {
         if (lane_id == 0) {
-            initialize_barrier(tma_mbarrier, 1);
-            set_barrier_transaction_bytes(tma_mbarrier, smem_len);
-            SM90_TMA_LOAD_1D::copy((void*)(reinterpret_cast<char *>(src_ptr[i])), smem, smem_len, 0x0, &tma_mbarrier);
+            mbarrier_init(&tma_mbarrier, 1);
+            mbarrier_arrive_and_expect_tx(&tma_mbarrier, size);
+            tma_load_1d(smem, reinterpret_cast<char *>(src_ptr[i]), &tma_mbarrier, size);
         }
         __syncwarp();
 
@@ -674,73 +529,18 @@ __device__ __forceinline__ void reduce_add_tma_warp(
 
         if (lane_id == 0) {
             if (i == 0) {
-                SM90_TMA_STORE_1D::copy(smem, (void*)(reinterpret_cast<char *>(combined_row)), smem_len, 0x0);
+                tma_store_1d(smem, reinterpret_cast<char *>(combined_row), size);
+            } else {
+                tma_reduce_add_bf16(smem, reinterpret_cast<char *>(combined_row), size);
             }
-            else{
-                SM90_TMA_REDUCE_ADD_BF16::reduce_add(smem, (void*)(reinterpret_cast<char *>(combined_row)), smem_len, 0x0);
-            }
-            tma_commit_group();
         }
-        tma_wait_group();
+        tma_store_wait<0>();
         __syncwarp();
     }
 
     if (lane_id < num_topk) {
         st_na_global(reinterpret_cast<float*>(combined_row_topk_weights) + lane_id, topk_weight_value);
     }
-}
-
-
-template <typename dtype_t>
-__device__ __forceinline__ void reduce_add_regular_warp(
-    void *combined_row,
-    void *combined_row_topk_weights,
-    void **src_ptr,
-    void **src_tw_ptr,
-    int num_topk_ranks,
-    int num_topk,
-    int hidden_int4,
-    int lane_id
-) {
-    // Reduce data
-    constexpr auto kDtypePerInt4 = sizeof(int4) / sizeof(dtype_t);
-    #pragma unroll
-    for (int i = lane_id; i < hidden_int4; i += 32) {
-        // Read buffers
-        // TODO: maybe too many registers here
-        int4 recv_value_int4[NUM_MAX_NVL_PEERS];
-        #pragma unroll
-        for (int j = 0; j < num_topk_ranks; ++ j)
-            recv_value_int4[j] = ld_nc_global(reinterpret_cast<int4*>(src_ptr[j]) + i);
-
-        // Reduce all-to-all results
-        float values[kDtypePerInt4] = {0};
-        #pragma unroll
-        for (int j = 0; j < num_topk_ranks; ++ j) {
-            auto recv_value_dtypes = reinterpret_cast<const dtype_t*>(&recv_value_int4[j]);
-            #pragma unroll
-            for (int k = 0; k < kDtypePerInt4; ++ k)
-                values[k] += static_cast<float>(recv_value_dtypes[k]);
-        }
-
-        // Cast back to `dtype_t` and write
-        int4 out_int4;
-        auto out_dtypes = reinterpret_cast<dtype_t*>(&out_int4);
-        #pragma unroll
-        for (int j = 0; j < kDtypePerInt4; ++ j)
-            out_dtypes[j] = static_cast<dtype_t>(values[j]);
-        st_na_global(reinterpret_cast<int4*>(combined_row) + i, out_int4);
-    }
-
-    // Reduce `topk_weights`
-    if (lane_id < num_topk) {
-        float value = 0;
-        #pragma unroll
-        for (int i = 0; i < num_topk_ranks; ++ i)
-            value += ld_nc_global(reinterpret_cast<float*>(src_tw_ptr[i]) + lane_id);
-        st_na_global(reinterpret_cast<float*>(combined_row_topk_weights) + lane_id, value);
-    }
-    __syncwarp();
 }
 
 #endif
