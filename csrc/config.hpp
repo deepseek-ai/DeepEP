@@ -69,7 +69,10 @@ struct Config {
         size_t num_bytes = 0;
         if (zero_copy) {
             num_bytes += ZCOPY_NOTIFY_NVL_METADATA_OFFSET_INTS * sizeof(int);
-            num_bytes += num_channels * num_nvl_ranks * 1 * sizeof(int);
+            num_bytes += std::max(
+                num_channels * num_nvl_ranks * (2 * num_rdma_ranks + 2) * sizeof(int), // Dispatch
+                num_channels * num_nvl_ranks * 1 * sizeof(int) // Combine
+            );
             return num_bytes;
         }
         num_bytes += num_channels * num_nvl_ranks * (2 * num_rdma_ranks + 3) * sizeof(int);
