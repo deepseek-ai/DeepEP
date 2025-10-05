@@ -439,39 +439,6 @@ __device__ __forceinline__ void tma_store_wait() {
     asm volatile("cp.async.bulk.wait_group.read %0;" :: "n"(N) : "memory");
 }
 
-__forceinline__ __device__
-uint32_t cast_smem_ptr_to_uint(void const *const ptr) {
-// We prefer to use the new CVTA intrinsics if they are available, otherwise we
-// will fall back to the previous internal intrinsics if they are available.
-  uint32_t smem_ptr;
-
-  asm("{ .reg .u64 smem_ptr; cvta.to.shared.u64 smem_ptr, %1; cvt.u32.u64 "
-      "%0, smem_ptr; }\n"
-      : "=r"(smem_ptr)
-      : "l"(ptr));
-
-  return smem_ptr;
-}
-
-// Barrier wait
-__forceinline__ __device__ void
-wait_barrier(uint64_t& smem_barrier,                       // 64 bits user-manged barrier in smem
-             int phase_bit)                                // Current phase bit the barrier waiting to flip
-{
-  uint32_t smem_int_ptr = cast_smem_ptr_to_uint(&smem_barrier);
-  asm volatile(
-    "{\n"
-    ".reg .pred                P1;\n"
-    "LAB_WAIT:\n"
-    "mbarrier.try_wait.parity.shared::cta.b64 P1, [%0], %1;\n"
-    "@P1                       bra DONE;\n"
-    "bra                   LAB_WAIT;\n"
-    "DONE:\n"
-    "}\n"
-    :: "r"(smem_int_ptr),
-       "r"(phase_bit));
-}
-
 __device__ __forceinline__ void memcpy_tma_lane_launch_load(
     const void *src_ptr,
     size_t size,
@@ -489,7 +456,8 @@ __device__ __forceinline__ void memcpy_tma_lane_launch_store(
     char* smem,
     uint64_t& tma_mbarrier
 ) {
-    wait_barrier(tma_mbarrier, 0);
+    uint32_t tma_phase = 0;
+    mbarrier_wait(&tma_mbarrier, tma_phase);
     tma_store_1d(smem, dst_ptr, size);
 }
 
@@ -525,7 +493,8 @@ __device__ __forceinline__ void reduce_add_tma_warp(
             topk_weight_value += ld_nc_global(reinterpret_cast<float*>(src_tw_ptr[i]) + lane_id);
         }
 
-        wait_barrier(tma_mbarrier, 0);
+        uint32_t tma_phase = 0;
+        mbarrier_wait(&tma_mbarrier, tma_phase);
 
         if (lane_id == 0) {
             if (i == 0) {
