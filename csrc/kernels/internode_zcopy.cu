@@ -522,7 +522,8 @@ dispatch(int4* recv_x, float* recv_x_scales, topk_idx_t* recv_topk_idx, float* r
             // Iterate over every token from the RDMA buffer
             for (int i = src_rdma_head, num_tokens_sent = 0; i < src_rdma_tail; ++ i) {
                 // Wait for previous TMA transfers to finish, if any
-                memcpy_tma_warp_finalize();
+                tma_store_wait<0>();
+                __syncwarp();
 
                 const bool is_local_token = src_rdma_rank == rdma_rank;
                 void *shifted;
@@ -633,7 +634,7 @@ dispatch(int4* recv_x, float* recv_x_scales, topk_idx_t* recv_topk_idx, float* r
             // With the token data landed in SMEM, RDMA recv buffer can be safely overwritten without waiting for TMA store
             if (lane_id == src_rdma_rank)
                 forward_channel_head[dst_nvl_rank][src_rdma_rank] = (cached_rdma_channel_head = src_rdma_tail);
-            memcpy_tma_warp_finalize();
+            tma_store_wait<0>();
             __syncwarp();
         }
 

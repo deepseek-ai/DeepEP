@@ -461,11 +461,6 @@ __device__ __forceinline__ void memcpy_tma_lane_launch_store(
     tma_store_1d(smem, dst_ptr, size);
 }
 
-__device__ __forceinline__ void memcpy_tma_warp_finalize() {
-    tma_store_wait<0>();
-    __syncwarp();
-}
-
 __device__ __forceinline__ void reduce_add_tma_warp(
     void *combined_row,
     void *combined_row_topk_weights,
