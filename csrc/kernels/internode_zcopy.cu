@@ -926,7 +926,7 @@ combine(int4* combined_x, float* combined_topk_weights,
 
         if (warp_role == WarpRole::kNVLAndRDMAForwarder) {
             // Dynamic TMA shared memory layout
-            const size_t SMEM_LEN_PER_WARP = 14 * 1024;
+            const size_t SMEM_LEN_PER_WARP = 16384;
             extern __shared__ int4 tma_smem[];
             char *tma_smem_aligned = reinterpret_cast<char *>(align_up<uintptr_t>(reinterpret_cast<uintptr_t>(tma_smem), ZCOPY_TMA_SMEM_ALIGNMENT));
             __shared__ uint64_t tma_mbarrier[kNumForwarders];
@@ -1161,7 +1161,7 @@ void combine(cudaDataType_t type,
     int num_rdma_ranks = num_ranks / NUM_MAX_NVL_PEERS;
     auto num_warps_per_forwarder = kNumCombineForwarderWarps / num_rdma_ranks;
     int num_forwarder_warps = num_rdma_ranks * num_warps_per_forwarder;
-    size_t smem_size = 7168 * 2 * num_forwarder_warps + ZCOPY_TMA_SMEM_ALIGNMENT;
+    size_t smem_size = 16384 * num_forwarder_warps + ZCOPY_TMA_SMEM_ALIGNMENT;
 
 #define COMBINE_LAUNCH_CASE(num_rdma_ranks) { \
     auto combine_func = low_latency_mode ? \
