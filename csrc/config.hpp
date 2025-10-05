@@ -54,7 +54,6 @@ struct Config {
         EP_HOST_ASSERT(num_max_rdma_chunked_send_tokens <= num_max_rdma_chunked_recv_tokens / 2);
     }
 
-    // TODO: Zero-copy: Fix this
     size_t get_nvl_buffer_size_hint(size_t hidden_bytes, int num_ranks, bool zero_copy = false) const {
         // Below are some assumptions
         // TODO: add assertions
@@ -68,6 +67,11 @@ struct Config {
         const int num_channels = num_sms / sms_per_channel;
 
         size_t num_bytes = 0;
+        if (zero_copy) {
+            num_bytes += ZCOPY_NOTIFY_NVL_METADATA_OFFSET_INTS * sizeof(int);
+            num_bytes += num_channels * num_nvl_ranks * 1 * sizeof(int);
+            return num_bytes;
+        }
         num_bytes += num_channels * num_nvl_ranks * (2 * num_rdma_ranks + 3) * sizeof(int);
         num_bytes += num_channels * num_nvl_ranks * num_max_nvl_chunked_recv_tokens * hidden_bytes;
 #ifndef DISABLE_NVSHMEM
@@ -80,7 +84,6 @@ struct Config {
         return num_bytes;
     }
 
-    // TODO: Zero-copy: Fix this
     size_t get_rdma_buffer_size_hint(int64_t hidden_bytes, int num_ranks, bool zero_copy = false) const {
 #ifndef DISABLE_NVSHMEM
         // Legacy mode
