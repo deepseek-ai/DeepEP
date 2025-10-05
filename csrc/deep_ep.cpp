@@ -961,11 +961,24 @@ Buffer::internode_dispatch(const torch::Tensor& x, const std::optional<torch::Te
         recv_x_scales_ptr = static_cast<float*>(recv_x_scales->data_ptr());
     }
     if (zero_copy) {
-        auto recv_x_bytes = num_recv_tokens * hidden * x.element_size();
-        auto recv_topk_idx_bytes = num_recv_tokens * num_topk * sizeof(topk_idx_t);
-        auto recv_topk_weights_bytes = num_recv_tokens * num_topk * sizeof(float);
-        auto recv_x_scales_bytes = num_recv_tokens * num_scales * sizeof(float);
-        auto recv_src_meta_bytes = num_recv_tokens * internode::get_source_meta_bytes();
+        const size_t x_bytes_per_token = hidden * x.element_size();
+        const size_t topk_idx_bytes_per_token = num_topk * sizeof(topk_idx_t);
+        const size_t topk_weights_bytes_per_token = num_topk * sizeof(float);
+        const size_t x_scales_bytes_per_token = num_scales * sizeof(float);
+        const size_t src_meta_bytes_per_token = internode::get_source_meta_bytes();
+
+        // TMA alignment requirements
+        EP_HOST_ASSERT(x_bytes_per_token % 16 == 0);
+        EP_HOST_ASSERT(topk_idx_bytes_per_token % 16 == 0);
+        EP_HOST_ASSERT(topk_weights_bytes_per_token % 16 == 0);
+        EP_HOST_ASSERT(x_scales_bytes_per_token % 16 == 0);
+        EP_HOST_ASSERT(src_meta_bytes_per_token % 16 == 0);
+
+        const size_t recv_x_bytes = num_recv_tokens * x_bytes_per_token;
+        const size_t recv_topk_idx_bytes = num_recv_tokens * topk_idx_bytes_per_token;
+        const size_t recv_topk_weights_bytes = num_recv_tokens * topk_weights_bytes_per_token;
+        const size_t recv_x_scales_bytes = num_recv_tokens * x_scales_bytes_per_token;
+        const size_t recv_src_meta_bytes = num_recv_tokens * src_meta_bytes_per_token;
 
         void* recv_x_ptr = reinterpret_cast<char*>(buffer_fused_ptrs[nvl_rank]) + NUM_COMBINE_INPUT_BYTES_PER_ZCOPY_BUFFER * num_zcopy_buffers + NUM_DISPATCH_OUTPUT_BYTES_PER_ZCOPY_BUFFER * zcopy_buffer_id;
         recv_x = torch::from_blob(recv_x_ptr, {num_recv_tokens, hidden}, torch::TensorOptions().dtype(x.scalar_type()).device(torch::kCUDA));
