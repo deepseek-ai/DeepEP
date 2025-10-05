@@ -572,7 +572,7 @@ dispatch(int4* recv_x, float* recv_x_scales, topk_idx_t* recv_topk_idx, float* r
 
                 (lane_id == src_rdma_rank) ? (start_sum += 1) : 0;
 
-                if (lane_id == 0) {
+                if (elect_one_sync()) {
                     // Load hidden into shared memory
                     memcpy_tma_lane_launch_load(
                         src_x,
@@ -590,7 +590,7 @@ dispatch(int4* recv_x, float* recv_x_scales, topk_idx_t* recv_topk_idx, float* r
                 }
 
                 // Copy source meta
-                if (lane_id == 0 and not kCachedMode)
+                if (not kCachedMode and elect_one_sync())
                     st_na_global(target_nvl_rank_src_meta + total_offset, src_meta);
 
                 // Copy `topk_idx` and `topk_weights`
@@ -606,7 +606,7 @@ dispatch(int4* recv_x, float* recv_x_scales, topk_idx_t* recv_topk_idx, float* r
                     st_na_global(target_nvl_rank_topk_weights + total_offset * num_topk + lane_id, weight_value);
                 }
 
-                if (lane_id == 0) {
+                if (elect_one_sync()) {
                     // Store scales into target
                     memcpy_tma_lane_launch_store(
                         reinterpret_cast<void *>(target_nvl_rank_x_scales + total_offset * num_scales),
@@ -640,7 +640,7 @@ dispatch(int4* recv_x, float* recv_x_scales, topk_idx_t* recv_topk_idx, float* r
 
         // Retired
         __syncwarp();
-        if (lane_id == 0) {
+        if (elect_one_sync()) {
             st_relaxed_sys_global(nvl_channel_finish_signal.buffer() + nvl_rank, 1);
             forward_channel_retired[dst_nvl_rank] = true;
         };
@@ -1047,7 +1047,7 @@ combine(int4* combined_x, float* combined_topk_weights,
 
                     // Write new RDMA tail
                     __syncwarp();
-                    if (lane_id == 0) {
+                    if (elect_one_sync()) {
                         nvshmemi_ibgda_amo_nonfetch_add(rdma_channel_tail.buffer(rdma_rank), num_chunked_tokens,
                                                         translate_dst_rdma_rank<kLowLatencyMode>(dst_rdma_rank, nvl_rank), channel_id, dst_rdma_rank == rdma_rank);
                     }
@@ -1109,7 +1109,7 @@ combine(int4* combined_x, float* combined_topk_weights,
             }
             // Retired
             __syncwarp();
-            if (lane_id == 0)
+            if (elect_one_sync())
                 rdma_receiver_retired[warp_id] = true;
         } else {
             // Coordinator
