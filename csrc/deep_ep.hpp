@@ -78,6 +78,7 @@ private:
     int num_device_sms;
     int rank, rdma_rank, nvl_rank;
     int num_ranks, num_rdma_ranks, num_nvl_ranks;
+    int qps_per_rank;
     shared_memory::MemHandle ipc_handles[NUM_MAX_NVL_PEERS];
 
     // Stream for communication
@@ -120,7 +121,8 @@ public:
            bool low_latency_mode,
            bool explicitly_destroy,
            bool enable_shrink,
-           bool use_fabric);
+           bool use_fabric,
+           int qps_per_rank);
 
     ~Buffer() noexcept(false);
 

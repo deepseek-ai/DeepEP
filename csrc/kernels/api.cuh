@@ -18,7 +18,7 @@ namespace internode {
 
 std::vector<uint8_t> get_unique_id();
 
-int init(const std::vector<uint8_t>& root_unique_id_val, int rank, int num_ranks, bool low_latency_mode);
+int init(const std::vector<uint8_t>& root_unique_id_val, int rank, int num_ranks, bool low_latency_mode, int qps_per_rank);
 
 void* alloc(size_t size, size_t alignment);
 

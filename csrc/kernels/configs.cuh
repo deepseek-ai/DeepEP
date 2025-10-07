@@ -1,5 +1,12 @@
 #pragma once
 
+// Debug macro that works in both host and device code
+#ifdef DEEPEP_DEBUG
+    #define DEEPEP_DEBUG_PRINT(...) printf(__VA_ARGS__)
+#else
+    #define DEEPEP_DEBUG_PRINT(...) do {} while(0)
+#endif
+
 #define NUM_MAX_NVL_PEERS 8
 #define NUM_MAX_RDMA_PEERS 20
 #define NUM_WORKSPACE_BYTES (32 * 1024 * 1024)

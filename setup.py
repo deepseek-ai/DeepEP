@@ -37,22 +37,69 @@ if __name__ == '__main__':
 
     cxx_flags = ['-O3', '-Wno-deprecated-declarations', '-Wno-unused-variable', '-Wno-sign-compare', '-Wno-reorder', '-Wno-attributes']
     nvcc_flags = ['-O3', '-Xcompiler', '-O3']
-    sources = ['csrc/deep_ep.cpp', 'csrc/kernels/runtime.cu', 'csrc/kernels/layout.cu', 'csrc/kernels/intranode.cu']
+    sources = ['csrc/deep_ep.cpp', 'csrc/kernels/runtime.cu', 'csrc/kernels/layout.cu', 'csrc/kernels/intranode.cu', 'csrc/kernels/backend_factory.cpp']
     include_dirs = ['csrc/']
     library_dirs = []
     nvcc_dlink = []
     extra_link_args = ['-lcuda']
+
+    # NCCL Enable
+    if os.getenv('ENABLE_NCCL_GIN', '0') == '1':
+        cxx_flags.append('-DENABLE_NCCL_GIN')
+        nvcc_flags.append('-DENABLE_NCCL_GIN')
+        print('NCCL GIN backend enabled via ENABLE_NCCL_GIN=1')
+        
+        # Add NCCL GIN include paths
+        nccl_gin_home = os.getenv('NCCL_GIN_HOME', None)
+        if nccl_gin_home and os.path.exists(nccl_gin_home):
+            # Add build/include for nccl.h
+            nccl_gin_build_include = f'{nccl_gin_home}/build/include'
+            if os.path.exists(nccl_gin_build_include):
+                include_dirs.append(nccl_gin_build_include)
+                print(f'Added NCCL GIN build include: {nccl_gin_build_include}')
+            
+            # Add src/include for gin.h and device headers
+            nccl_gin_src_include = f'{nccl_gin_home}/src/include'
+            if os.path.exists(nccl_gin_src_include):
+                include_dirs.append(nccl_gin_src_include)
+                print(f'Added NCCL GIN src include: {nccl_gin_src_include}')
+                
+                # Add plugin subdirectory for nccl_tuner.h
+                # FIXME why is this needed? 
+                nccl_gin_plugin_include = f'{nccl_gin_src_include}/plugin'
+                if os.path.exists(nccl_gin_plugin_include):
+                    include_dirs.append(nccl_gin_plugin_include)
+                    print(f'Added NCCL GIN plugin include: {nccl_gin_plugin_include}')
+                        
+            # Add NCCL GIN library path
+            nccl_gin_lib = f'{nccl_gin_home}/build/lib'
+            if os.path.exists(nccl_gin_lib):
+                library_dirs.append(nccl_gin_lib)
+                print(f'Added NCCL GIN library directory: {nccl_gin_lib}')
+
+            sources.extend(['csrc/kernels/nccl_gin_backend.cu']) # FIXME: this should add internode.cu and internode_ll.cu
+            
+            # Add NCCL linking
+            extra_link_args.extend(['-lnccl', '-lnccl_static', '-Wl,--allow-multiple-definition'])
+            print('Added NCCL GIN library linking: -lnccl -lnccl_static')
+            print('Added linker flag: -Wl,--allow-multiple-definition')
+
+            if not os.path.exists(nccl_gin_build_include) and not os.path.exists(nccl_gin_src_include):
+                print(f'Warning: NCCL GIN include directories not found in {nccl_gin_home}')
+        else:
+            print('Warning: NCCL_GIN_HOME not set or invalid when ENABLE_NCCL_GIN=1')
 
     # NVSHMEM flags
     if disable_nvshmem:
         cxx_flags.append('-DDISABLE_NVSHMEM')
         nvcc_flags.append('-DDISABLE_NVSHMEM')
     else:
-        sources.extend(['csrc/kernels/internode.cu', 'csrc/kernels/internode_ll.cu'])
+        sources.extend(['csrc/kernels/internode.cu', 'csrc/kernels/internode_ll.cu', 'csrc/kernels/nvshmem_backend.cu'])
         include_dirs.extend([f'{nvshmem_dir}/include'])
         library_dirs.extend([f'{nvshmem_dir}/lib'])
         nvcc_dlink.extend(['-dlink', f'-L{nvshmem_dir}/lib', '-lnvshmem_device'])
-        extra_link_args.extend([f'-l:{nvshmem_host_lib}', '-l:libnvshmem_device.a', f'-Wl,-rpath,{nvshmem_dir}/lib'])
+        # Use --no-as-needed to ensure NVSHMEM host library is always linked
+        extra_link_args.extend(['-Wl,--no-as-needed', f'-l:{nvshmem_host_lib}', '-Wl,--as-needed', '-l:libnvshmem_device.a', f'-Wl,-rpath,{nvshmem_dir}/lib'])
 
     if int(os.getenv('DISABLE_SM90_FEATURES', 0)):
         # Prefer A100

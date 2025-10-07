@@ -132,7 +132,8 @@ Buffer::Buffer(int rank,
                bool low_latency_mode,
                bool explicitly_destroy,
                bool enable_shrink,
-               bool use_fabric)
+               bool use_fabric,
+               int qps_per_rank)
     : rank(rank),
       num_ranks(num_ranks),
       num_nvl_bytes(num_nvl_bytes),
@@ -140,6 +141,7 @@ Buffer::Buffer(int rank,
       enable_shrink(enable_shrink),
       low_latency_mode(low_latency_mode),
       explicitly_destroy(explicitly_destroy),
+      qps_per_rank(qps_per_rank),
       comm_stream(at::cuda::getStreamFromPool(true)),
       shared_memory_allocator(use_fabric) {
     // Metadata memory
@@ -361,7 +363,7 @@ void Buffer::sync(const std::vector<int>& device_ids,
         std::memcpy(root_unique_id.data(), root_unique_id_str.c_str(), root_unique_id_opt->size());
         auto nvshmem_rank = low_latency_mode ? rank : rdma_rank;
         auto num_nvshmem_ranks = low_latency_mode ? num_ranks : num_rdma_ranks;
-        EP_HOST_ASSERT(nvshmem_rank == internode::init(root_unique_id, nvshmem_rank, num_nvshmem_ranks, low_latency_mode));
+        EP_HOST_ASSERT(nvshmem_rank == internode::init(root_unique_id, nvshmem_rank, num_nvshmem_ranks, low_latency_mode, qps_per_rank));
         internode::barrier();
 
         // Allocate
@@ -1862,7 +1864,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         .def("current_stream_wait", &deep_ep::EventHandle::current_stream_wait);
 
     pybind11::class_<deep_ep::Buffer>(m, "Buffer")
-        .def(pybind11::init<int, int, int64_t, int64_t, bool, bool, bool, bool>())
+        .def(pybind11::init<int, int, int64_t, int64_t, bool, bool, bool, bool, int>())
         .def("is_available", &deep_ep::Buffer::is_available)
         .def("get_num_rdma_ranks", &deep_ep::Buffer::get_num_rdma_ranks)
         .def("get_rdma_rank", &deep_ep::Buffer::get_rdma_rank)
