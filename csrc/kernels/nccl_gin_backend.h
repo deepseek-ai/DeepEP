@@ -30,7 +30,7 @@ struct NcclGinMemHandle {
 
 class NCCLGINBackend : public CommunicationBackend {
 public:
-    NCCLGINBackend() : comm_(nullptr), rank_(-1), num_ranks_(-1), initialized_(false) {}
+    NCCLGINBackend() : rank_(-1), num_ranks_(-1), initialized_(false) {}
     ~NCCLGINBackend() override;
 
     // Required interface methods
@@ -68,9 +68,8 @@ private:
     int rank_ = -1;
     int num_ranks_ = -1;
     
-    // NCCL communicator(s) for GIN support
-    ncclComm_t comm_ = nullptr; // single-communicator path (default)
-    std::vector<ncclComm_t> comms_multi_; // multi-communicator path (size = num_gin_ctxs_)
+    // NCCL communicators for GIN support (always use vector, even for single comm)
+    std::vector<ncclComm_t> comms_multi_;
     
     NcclGinMemHandle mem_handle_;
     // Per-communicator registration (multi-communicator path)
@@ -87,8 +86,7 @@ private:
 
     // Multi-context tracking
     int num_gin_ctxs_ = 1;
-    int num_comms_ = 1; // equals num_gin_ctxs_ in multi-communicator mode
-    bool multi_mode_ = false;
+    int num_comms_ = 1;
     int signals_per_buffer_per_ctx_ = 0; // number of signals per buffer for one context
 
     // Device arrays for contexts and windows

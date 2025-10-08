@@ -258,9 +258,15 @@ pybind11::bytearray Buffer::get_local_ipc_handle() const {
 
 pybind11::bytearray Buffer::get_local_nvshmem_unique_id() const {
 #ifndef DISABLE_NVSHMEM
-    EP_HOST_ASSERT(rdma_rank == 0 and "Only RDMA rank 0 can get NVSHMEM unique ID");
-    auto unique_id = internode::get_unique_id();
-    return {reinterpret_cast<const char*>(unique_id.data()), unique_id.size()};
+    EP_HOST_ASSERT(rdma_rank == 0 and "Only RDMA rank 0 can get unique ID(s)");
+    
+    // Pass qps_per_rank to determine how many NCCL communicators are needed
+    // For NVSHMEM: returns 1 unique ID
+    // For NCCL GIN: returns qps_per_rank unique IDs (one per communicator)
+    auto unique_id_vec = internode::get_unique_id(qps_per_rank, num_ranks);
+    
+    // Return packed unique IDs as a single bytearray
+    return {reinterpret_cast<const char*>(unique_id_vec.data()), unique_id_vec.size()};
 #else
     EP_HOST_ASSERT(false and "NVSHMEM is disabled during compilation");
 #endif

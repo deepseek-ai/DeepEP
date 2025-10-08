@@ -44,23 +44,32 @@ nvshmem_team_t cpu_rdma_team = NVSHMEM_TEAM_INVALID;
 nvshmem_team_config_t cpu_rdma_team_config;
 #endif
 
-std::vector<uint8_t> get_unique_id() {
-
+std::vector<uint8_t> get_unique_id(int qps_per_rank, int num_ranks) {
+    std::vector<uint8_t> result;
+    
 #ifdef ENABLE_NCCL_GIN
-    //FIXME: this generates 1 unique id. Since we are creating multiple communicators, we will need to generate multiple unique ids.
-    ncclUniqueId unique_id;
-    ncclGetUniqueId(&unique_id);
-    std::vector<uint8_t> result(sizeof(ncclUniqueId));
-    std::memcpy(result.data(), &unique_id, sizeof(ncclUniqueId));
+    // For NCCL GIN: generate qps_per_rank unique IDs (one per communicator)
+    int num_comms = qps_per_rank;
+    
+    // Generate one unique ID per communicator and pack them
+    for (int i = 0; i < num_comms; i++) {
+        ncclUniqueId unique_id;
+        ncclGetUniqueId(&unique_id);
+        
+        size_t offset = result.size();
+        result.resize(offset + sizeof(ncclUniqueId));
+        std::memcpy(result.data() + offset, &unique_id, sizeof(ncclUniqueId));
+    }
+    
     return result;
 #else 
+    // NVSHMEM: always return exactly 1 unique ID (qps_per_rank is ignored)
     nvshmemx_uniqueid_t unique_id;
     nvshmemx_get_uniqueid(&unique_id);
-    std::vector<uint8_t> result(sizeof(nvshmemx_uniqueid_t));
+    result.resize(sizeof(nvshmemx_uniqueid_t));
     std::memcpy(result.data(), &unique_id, sizeof(nvshmemx_uniqueid_t));
     return result;
 #endif
-
 }
 
 int init(const std::vector<uint8_t>& root_unique_id_val, int rank, int num_ranks, bool low_latency_mode, int qps_per_rank) {
@@ -68,8 +77,16 @@ int init(const std::vector<uint8_t>& root_unique_id_val, int rank, int num_ranks
     //printf("runtime::init() called\n"); fflush(stdout);
 #ifdef ENABLE_NCCL_GIN
     //printf("NCCL: init()\n"); fflush(stdout);
+    
+    // For NCCL GIN: expect qps_per_rank unique IDs packed together
+    int num_comms = qps_per_rank;
+    size_t expected_size = num_comms * sizeof(ncclUniqueId);
+    
+    EP_HOST_ASSERT(root_unique_id_val.size() == expected_size && 
+                   "Unique ID size mismatch");
+    
     internode::BackendType backend_type = internode::detect_backend_type();
-    // Pass 0 for num_experts as it's not available at this point. Backend can use DEEP_EP_GIN_NUM_COMMS env var if needed.
+    // Initialize backend with packed unique IDs (backend will unpack them internally)
     internode::initialize_backend(backend_type, root_unique_id_val, rank, num_ranks, low_latency_mode, qps_per_rank);     
     internode::CommunicationBackend* backend = internode::get_backend();
     backend->barrier();

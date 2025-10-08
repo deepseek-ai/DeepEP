@@ -16,7 +16,7 @@ void barrier(int** barrier_signal_ptrs, int rank, int num_ranks, cudaStream_t st
 // Internode runtime
 namespace internode {
 
-std::vector<uint8_t> get_unique_id();
+std::vector<uint8_t> get_unique_id(int qps_per_rank, int num_ranks);
 
 int init(const std::vector<uint8_t>& root_unique_id_val, int rank, int num_ranks, bool low_latency_mode, int qps_per_rank);
 
