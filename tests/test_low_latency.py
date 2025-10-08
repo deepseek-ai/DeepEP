@@ -332,6 +332,25 @@ if __name__ == '__main__':
         local_rank = int(os.environ['SLURM_LOCALID'])
         num_local_ranks = int(os.environ['SLURM_NTASKS_PER_NODE'])
         test_loop(local_rank, num_local_ranks, args)
+    elif 'OMPI_COMM_WORLD_RANK' in os.environ or 'PMI_RANK' in os.environ or 'MV2_COMM_WORLD_RANK' in os.environ:
+        # MPI environment detected (OpenMPI, Intel MPI, or MVAPICH2)
+        if 'OMPI_COMM_WORLD_LOCAL_RANK' in os.environ:
+            # OpenMPI
+            local_rank = int(os.environ['OMPI_COMM_WORLD_LOCAL_RANK'])
+            num_local_ranks = int(os.environ['OMPI_COMM_WORLD_LOCAL_SIZE'])
+        elif 'MPI_LOCALRANKID' in os.environ:
+            # Intel MPI
+            local_rank = int(os.environ['MPI_LOCALRANKID'])
+            num_local_ranks = int(os.environ.get('MPI_LOCALNRANKS', args.num_processes))
+        elif 'MV2_COMM_WORLD_LOCAL_RANK' in os.environ:
+            # MVAPICH2
+            local_rank = int(os.environ['MV2_COMM_WORLD_LOCAL_RANK'])
+            num_local_ranks = int(os.environ['MV2_COMM_WORLD_LOCAL_SIZE'])
+        else:
+            # Fallback: try to infer from global rank
+            local_rank = 0
+            num_local_ranks = args.num_processes
+        test_loop(local_rank, num_local_ranks, args)
     else:
         num_processes = args.num_processes
         torch.multiprocessing.spawn(test_loop, args=(num_processes, args), nprocs=num_processes)

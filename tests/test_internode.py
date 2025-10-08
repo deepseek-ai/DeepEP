@@ -316,6 +316,15 @@ def test_main(args: argparse.Namespace,
 def test_loop(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
     if 'SLURM_NNODES' in os.environ:
         num_nodes = int(os.environ['SLURM_NNODES'])
+    elif 'OMPI_COMM_WORLD_SIZE' in os.environ and 'OMPI_COMM_WORLD_LOCAL_SIZE' in os.environ:
+        # OpenMPI: calculate num_nodes from world_size and local_size
+        num_nodes = int(os.environ['OMPI_COMM_WORLD_SIZE']) // int(os.environ['OMPI_COMM_WORLD_LOCAL_SIZE'])
+    elif 'PMI_SIZE' in os.environ:
+        # Intel MPI: calculate num_nodes
+        num_nodes = int(os.environ['PMI_SIZE']) // num_local_ranks
+    elif 'MV2_COMM_WORLD_SIZE' in os.environ and 'MV2_COMM_WORLD_LOCAL_SIZE' in os.environ:
+        # MVAPICH2: calculate num_nodes from world_size and local_size
+        num_nodes = int(os.environ['MV2_COMM_WORLD_SIZE']) // int(os.environ['MV2_COMM_WORLD_LOCAL_SIZE'])
     else:
         num_nodes = int(os.getenv('WORLD_SIZE', 1))
 
@@ -392,6 +401,15 @@ if __name__ == '__main__':
     if args.num_topk_groups is None:
         if 'SLURM_NNODES' in os.environ:
             num_nodes = int(os.environ['SLURM_NNODES'])
+        elif 'OMPI_COMM_WORLD_SIZE' in os.environ and 'OMPI_COMM_WORLD_LOCAL_SIZE' in os.environ:
+            # OpenMPI: calculate num_nodes from world_size and local_size
+            num_nodes = int(os.environ['OMPI_COMM_WORLD_SIZE']) // int(os.environ['OMPI_COMM_WORLD_LOCAL_SIZE'])
+        elif 'PMI_SIZE' in os.environ:
+            # Intel MPI: calculate num_nodes (assume 8 processes per node as default)
+            num_nodes = int(os.environ['PMI_SIZE']) // 8
+        elif 'MV2_COMM_WORLD_SIZE' in os.environ and 'MV2_COMM_WORLD_LOCAL_SIZE' in os.environ:
+            # MVAPICH2: calculate num_nodes from world_size and local_size
+            num_nodes = int(os.environ['MV2_COMM_WORLD_SIZE']) // int(os.environ['MV2_COMM_WORLD_LOCAL_SIZE'])
         else:
             num_nodes = int(os.getenv('WORLD_SIZE', 1))
         args.num_topk_groups = min(num_nodes, 4)
@@ -399,6 +417,25 @@ if __name__ == '__main__':
     if 'SLURM_PROCID' in os.environ and 'SLURM_NTASKS_PER_NODE' in os.environ:
         local_rank = int(os.environ['SLURM_LOCALID'])
         num_local_ranks = int(os.environ['SLURM_NTASKS_PER_NODE'])
+        test_loop(local_rank, num_local_ranks, args)
+    elif 'OMPI_COMM_WORLD_RANK' in os.environ or 'PMI_RANK' in os.environ or 'MV2_COMM_WORLD_RANK' in os.environ:
+        # MPI environment detected (OpenMPI, Intel MPI, or MVAPICH2)
+        if 'OMPI_COMM_WORLD_LOCAL_RANK' in os.environ:
+            # OpenMPI
+            local_rank = int(os.environ['OMPI_COMM_WORLD_LOCAL_RANK'])
+            num_local_ranks = int(os.environ['OMPI_COMM_WORLD_LOCAL_SIZE'])
+        elif 'MPI_LOCALRANKID' in os.environ:
+            # Intel MPI
+            local_rank = int(os.environ['MPI_LOCALRANKID'])
+            num_local_ranks = int(os.environ.get('MPI_LOCALNRANKS', args.num_processes))
+        elif 'MV2_COMM_WORLD_LOCAL_RANK' in os.environ:
+            # MVAPICH2
+            local_rank = int(os.environ['MV2_COMM_WORLD_LOCAL_RANK'])
+            num_local_ranks = int(os.environ['MV2_COMM_WORLD_LOCAL_SIZE'])
+        else:
+            # Fallback: try to infer from global rank
+            local_rank = 0
+            num_local_ranks = args.num_processes
         test_loop(local_rank, num_local_ranks, args)
     else:
         num_processes = args.num_processes

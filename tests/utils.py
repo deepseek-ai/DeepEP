@@ -23,6 +23,21 @@ def init_dist(local_rank: int, num_local_ranks: int):
         world_size = int(os.environ['SLURM_NTASKS'])
         rank = int(os.environ['SLURM_PROCID'])
         node_rank = rank // int(os.environ['SLURM_NTASKS_PER_NODE'])
+    elif 'OMPI_COMM_WORLD_RANK' in os.environ:
+        # OpenMPI environment
+        world_size = int(os.environ['OMPI_COMM_WORLD_SIZE'])
+        rank = int(os.environ['OMPI_COMM_WORLD_RANK'])
+        node_rank = rank // num_local_ranks  # Approximate node rank
+    elif 'PMI_RANK' in os.environ:
+        # Intel MPI environment
+        world_size = int(os.environ['PMI_SIZE'])
+        rank = int(os.environ['PMI_RANK'])
+        node_rank = rank // num_local_ranks  # Approximate node rank
+    elif 'MV2_COMM_WORLD_RANK' in os.environ:
+        # MVAPICH2 environment
+        world_size = int(os.environ['MV2_COMM_WORLD_SIZE'])
+        rank = int(os.environ['MV2_COMM_WORLD_RANK'])
+        node_rank = rank // num_local_ranks  # Approximate node rank
     else:
         # Non-SLURM environment
         num_nodes = int(os.getenv('WORLD_SIZE', 1))
