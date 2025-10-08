@@ -1629,6 +1629,9 @@ Buffer::low_latency_dispatch(const torch::Tensor& x,
             buffer.dispatch_rdma_recv_data_buffer,
             buffer.dispatch_rdma_recv_count_buffer,
             buffer.dispatch_rdma_send_buffer,
+            buffer.dispatch_rdma_recv_data_buffer_offset,
+            buffer.dispatch_rdma_recv_count_buffer_offset,
+            buffer.dispatch_rdma_send_buffer_offset,
             x.data_ptr(),
             topk_idx.data_ptr<topk_idx_t>(),
             next_clean_meta.first,
@@ -1646,7 +1649,8 @@ Buffer::low_latency_dispatch(const torch::Tensor& x,
             workspace,
             num_device_sms,
             launch_stream,
-            phases);
+            phases,
+            low_latency_buffer_idx);
     };
     launcher(return_recv_hook ? LOW_LATENCY_SEND_PHASE : (LOW_LATENCY_SEND_PHASE | LOW_LATENCY_RECV_PHASE));
 

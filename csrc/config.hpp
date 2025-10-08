@@ -108,12 +108,18 @@ struct LowLatencyBuffer {
     int num_clean_int = 0;
 
     void* dispatch_rdma_send_buffer = nullptr;
+    size_t dispatch_rdma_send_buffer_offset = 0;
     void* dispatch_rdma_recv_data_buffer = nullptr;
+    size_t dispatch_rdma_recv_data_buffer_offset = 0;
     int* dispatch_rdma_recv_count_buffer = nullptr;
+    size_t dispatch_rdma_recv_count_buffer_offset = 0;
 
     void* combine_rdma_send_buffer = nullptr;
+    size_t combine_rdma_send_buffer_offset = 0;
     void* combine_rdma_recv_data_buffer = nullptr;
+    size_t combine_rdma_recv_data_buffer_offset = 0;
     int* combine_rdma_recv_flag_buffer = nullptr;
+    size_t combine_rdma_recv_flag_buffer_offset = 0;
 
     void* combine_rdma_send_buffer_data_start = nullptr;
     size_t num_bytes_per_combine_msg = 0;
@@ -176,13 +182,32 @@ struct LowLatencyLayout {
         for (int i = 0; i < 2; ++i) {
             buffers[i] = {static_cast<int>(signaling_buffer_bytes / sizeof(int)),
                           advance(rdma_buffer, signaling_buffer_bytes_aligned * 2 + send_buffer_bytes * i),
+                          signaling_buffer_bytes_aligned * 2 + send_buffer_bytes * i,
                           advance(rdma_buffer, signaling_buffer_bytes_aligned * 2 + send_buffer_bytes * 2 + recv_buffer_bytes * i),
+                          signaling_buffer_bytes_aligned * 2 + send_buffer_bytes * 2 + recv_buffer_bytes * i,
                           advance<int*>(rdma_buffer, signaling_buffer_bytes_aligned * i),
+                          signaling_buffer_bytes_aligned * i,
                           advance(rdma_buffer, signaling_buffer_bytes_aligned * 2 + send_buffer_bytes * i),
+                          signaling_buffer_bytes_aligned * 2 + send_buffer_bytes * i,
                           advance(rdma_buffer, signaling_buffer_bytes_aligned * 2 + send_buffer_bytes * 2 + recv_buffer_bytes * i),
+                          signaling_buffer_bytes_aligned * 2 + send_buffer_bytes * 2 + recv_buffer_bytes * i,
                           advance<int*>(rdma_buffer, signaling_buffer_bytes_aligned * i),
+                          signaling_buffer_bytes_aligned * i,
                           advance(rdma_buffer, signaling_buffer_bytes_aligned * 2 + send_buffer_bytes * i),
                           num_bytes_per_combine_msg};
+            /*
+            if (rdma_buffer != nullptr) {
+                printf("LL Buffer [%d]: base_ptr=%p\n", i, rdma_buffer);
+                printf("  dispatch_send: ptr=%p, offset=%zu\n",
+                       buffers[i].dispatch_rdma_send_buffer,
+                       buffers[i].dispatch_rdma_send_buffer_offset);
+                printf("  dispatch_recv_data: ptr=%p, offset=%zu\n",
+                       buffers[i].dispatch_rdma_recv_data_buffer,
+                       buffers[i].dispatch_rdma_recv_data_buffer_offset);
+                printf("  dispatch_recv_count: ptr=%p, offset=%zu\n",
+                       buffers[i].dispatch_rdma_recv_count_buffer,
+                       buffers[i].dispatch_rdma_recv_count_buffer_offset);
+            }*/
         }
     }
 };

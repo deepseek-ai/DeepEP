@@ -3,6 +3,10 @@
 #include "ibgda_device.cuh"
 #include "launch.cuh"
 
+#ifdef ENABLE_NCCL_GIN
+#include "nccl_gin_backend.h"
+#endif
+
 namespace deep_ep {
 
 namespace internode_ll {
@@ -473,6 +477,7 @@ void dispatch(void* packed_recv_x,
               void* rdma_recv_x,
               int* rdma_recv_count,
               void* rdma_x,
+              size_t rdma_recv_x_offset, size_t rdma_recv_count_offset, size_t rdma_x_offset,
               const void* x,
               const topk_idx_t* topk_idx,
               int* next_clean,
@@ -490,7 +495,8 @@ void dispatch(void* packed_recv_x,
               void* workspace,
               int num_device_sms,
               cudaStream_t stream,
-              int phases) {
+              int phases,
+              int ll_buffer_idx) {
     constexpr int kNumMaxTopK = 11;
     const int num_warp_groups = ceil_div(num_experts, num_device_sms);
     const int num_warps_per_group = 32 / num_warp_groups;
@@ -509,6 +515,26 @@ void dispatch(void* packed_recv_x,
     // FP8 checks
     if (use_ue8m0)
         EP_HOST_ASSERT(round_scale and "UE8M0 SF requires `round_scale=True`");
+
+#ifdef ENABLE_NCCL_GIN
+    auto* backend = dynamic_cast<deep_ep::internode::NCCLGINBackend*>(deep_ep::internode::get_backend());
+    EP_HOST_ASSERT(backend != nullptr);
+    auto gin_ctxs = backend->get_device_gin_ctxs();
+    auto gin_windows = backend->get_device_gin_windows();
+    auto gin_signals = backend->get_gin_signals(ll_buffer_idx);
+    auto gin_base_ptr = backend->get_gin_base_ptr();
+    int num_gin_ctxs = backend->get_num_gin_ctxs();
+    
+    EP_HOST_ASSERT(gin_ctxs != nullptr);
+    EP_HOST_ASSERT(gin_windows != nullptr);
+    EP_HOST_ASSERT(num_gin_ctxs >= 1);
+#else
+    void* gin_ctxs = nullptr;
+    void* gin_windows = nullptr;
+    void* gin_signals = nullptr;
+    void* gin_base_ptr = nullptr;
+    int num_gin_ctxs = 1;
+#endif
 
 #define DISPATCH_LAUNCH_CASE(hidden)                         \
     {                                                        \
