@@ -519,21 +519,21 @@ void dispatch(void* packed_recv_x,
 #ifdef ENABLE_NCCL_GIN
     auto* backend = dynamic_cast<deep_ep::internode::NCCLGINBackend*>(deep_ep::internode::get_backend());
     EP_HOST_ASSERT(backend != nullptr);
-    auto gin_ctxs = backend->get_device_gin_ctxs();
-    auto gin_windows = backend->get_device_gin_windows();
-    auto gin_signals = backend->get_gin_signals(ll_buffer_idx);
     auto gin_base_ptr = backend->get_gin_base_ptr();
     int num_gin_ctxs = backend->get_num_gin_ctxs();
-    
-    EP_HOST_ASSERT(gin_ctxs != nullptr);
-    EP_HOST_ASSERT(gin_windows != nullptr);
+    auto dcomms = backend->get_device_communicators();
+    auto nccl_windows = backend->get_device_nccl_windows();
+    auto signals_base = backend->get_signals_base(ll_buffer_idx);
+
+    EP_HOST_ASSERT(dcomms != nullptr);
     EP_HOST_ASSERT(num_gin_ctxs >= 1);
+    EP_HOST_ASSERT(nccl_windows != nullptr);
 #else
-    void* gin_ctxs = nullptr;
-    void* gin_windows = nullptr;
-    void* gin_signals = nullptr;
     void* gin_base_ptr = nullptr;
     int num_gin_ctxs = 1;
+    void* dcomms = nullptr;
+    void* nccl_windows = nullptr;
+    unsigned signals_base = 0;
 #endif
 
 #define DISPATCH_LAUNCH_CASE(hidden)                         \

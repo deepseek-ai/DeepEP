@@ -171,11 +171,7 @@ int NCCLGINBackend::init(const std::vector<uint8_t>& root_unique_id_val,
             std::cout << "[NCCL GIN Backend] Rank " << rank << " ncclGinConnectOnce completed" << std::endl;
             //cudaGetLastError();
 
-#if NCCL_GIN_NEW_API
             num_gin_ctxs_ = comm_->sharedRes->ginState.ginCommCount;
-#else
-            num_gin_ctxs_ = comm_->ginState.ginCommCount;
-#endif
             if (num_gin_ctxs_ <= 0 || num_gin_ctxs_ > DEEP_EP_GIN_MAX_CONTEXTS) num_gin_ctxs_ = DEEP_EP_GIN_MAX_CONTEXTS;
         } else {
             /* comment out the multi-communicator path for the time being. 
@@ -216,28 +212,9 @@ int NCCLGINBackend::init(const std::vector<uint8_t>& root_unique_id_val,
         int rdma_channel_tail_signals = num_rdma_ranks * max_num_channels_;
         // Adding signals for high throughput and low latency kernels
         num_total_signals_ = rdma_channel_head_signals + rdma_channel_tail_signals + num_dispatch_signals_;
-        
-        if (num_total_signals_ > 0) {
-            std::cout << "[NCCL GIN Backend] Rank " << rank << " allocating " << num_total_signals_ 
-                      << " signals: " << num_dispatch_signals_ << " for dispatch, " 
-                      << rdma_channel_head_signals << " for RDMA heads, " 
-                      << rdma_channel_tail_signals << " for RDMA tails -- (double buffered; shared across " << num_gin_ctxs_ << " ctxs)..." << std::endl;
-            if (!multi_mode_) {
-                NCCLCHECK(ncclGinAllocSignalsCounters(comm_, num_total_signals_, &signal_base_id_,
-                                                     num_dispatch_counters_, &counter_base_id_));
-            } else {
-                // Allocate once via the first communicator
-                NCCLCHECK(ncclGinAllocSignalsCounters(comms_multi_[0], num_total_signals_, &signal_base_id_,
-                                                     num_dispatch_counters_, &counter_base_id_));
-            }
-            std::cout << "[NCCL GIN Backend] Rank " << rank << " allocation completed - signal_base_id="
-                      << signal_base_id_ << std::endl;
-        }
 
         // Build and upload device arrays for contexts; windows copied after registration
         {
-#if NCCL_GIN_NEW_API
-            // New API: Use ncclGinCtx_M<-1u> and comm->sharedRes->ginState
             std::vector<ncclGinCtx_M<-1u>> h_ctxs;
             h_ctxs.reserve(num_gin_ctxs_);
             if (!multi_mode_) {
@@ -266,54 +243,32 @@ int NCCLGINBackend::init(const std::vector<uint8_t>& root_unique_id_val,
                 cudaError_t e2 = cudaMemcpy(d_gin_ctxs_, h_ctxs.data(), h_ctxs.size() * sizeof(ncclGinCtx_M<-1u>), cudaMemcpyHostToDevice);
                 if (e2 != cudaSuccess) throw std::runtime_error("Failed to cudaMemcpy d_gin_ctxs_");
             }
-#else
-            // Old API: Use ncclGinGpuCtx and comm->ginState  
-            std::vector<ncclGinGpuCtx> h_ctxs;
-            h_ctxs.reserve(num_gin_ctxs_);
-            if (!multi_mode_) {
-                for (int i = 0; i < num_gin_ctxs_; ++i) {
-                    ncclGinGpuCtx gctx;
-                    gctx.type = comm_->ginState.ginDevHandles[i]->netDeviceType;
-                    gctx.handle = comm_->ginState.ginDevHandles[i]->handle;
-                    gctx.rank = rank;
-                    gctx.nRanks = num_ranks;
-                    h_ctxs.push_back(gctx);
-                }
-            } else {
-                // One ctx (index 0) per communicator
-                for (int c = 0; c < num_comms_; ++c) {
-                    ncclGinGpuCtx gctx;
-                    gctx.type = comms_multi_[c]->ginState.ginDevHandles[0]->netDeviceType;
-                    gctx.handle = comms_multi_[c]->ginState.ginDevHandles[0]->handle;
-                    gctx.rank = rank;
-                    gctx.nRanks = num_ranks;
-                    h_ctxs.push_back(gctx);
-                }
-            }
-            if (!h_ctxs.empty()) {
-                cudaError_t e1 = cudaMalloc(reinterpret_cast<void**>(&d_gin_ctxs_), h_ctxs.size() * sizeof(ncclGinGpuCtx));
-                if (e1 != cudaSuccess) throw std::runtime_error("Failed to cudaMalloc d_gin_ctxs_");
-                cudaError_t e2 = cudaMemcpy(d_gin_ctxs_, h_ctxs.data(), h_ctxs.size() * sizeof(ncclGinGpuCtx), cudaMemcpyHostToDevice);
-                if (e2 != cudaSuccess) throw std::runtime_error("Failed to cudaMemcpy d_gin_ctxs_");
-            }
-#endif
             if (num_gin_ctxs_ > 0) {
                 cudaError_t e3 = cudaMalloc(reinterpret_cast<void**>(&d_gin_dev_wins_), num_gin_ctxs_ * sizeof(ncclGinWindow_t));
-                if (e3 != cudaSuccess) throw std::runtime_error("Failed to cudaMalloc d_gin_dev_wins_");
+                if (e3 != cudaSuccess) {
+                    cudaFree(d_gin_dev_wins_);
+                    d_gin_dev_wins_ = nullptr;
+                    throw std::runtime_error("Failed to cudaMalloc d_gin_dev_wins_");
+                }
+                cudaError_t e4 = cudaMalloc(reinterpret_cast<void**>(&d_nccl_dev_wins_), num_gin_ctxs_ * sizeof(ncclWindow_t));
+                if (e4 != cudaSuccess) {
+                    cudaFree(d_nccl_dev_wins_);
+                    d_nccl_dev_wins_ = nullptr;
+                    throw std::runtime_error("Failed to cudaMalloc d_nccl_dev_wins_");
+                }
             }
         }
 
         // Initialize GIN barriers       
-        ncclDevCommRequirements reqs = {};
-        reqs.barrierCount = MAX_BARRIER_SESSIONS;
-        reqs.ginForceEnable = true;
-        // reqs.ginSignalCount = num_total_signals_;
-        // Allocate device communicator array based on mode
         if (multi_mode_) {
             // Multi-communicator mode: create one device comm per communicator
             dcomms_ = new ncclDevComm_t[num_comms_];
             for (int c = 0; c < num_comms_; ++c) {
                 dcomms_[c] = ncclDevComm_t{};  // Initialize to default
+                ncclDevCommRequirements reqs = {};
+                reqs.barrierCount = MAX_BARRIER_SESSIONS;
+                reqs.ginSignalCount = num_total_signals_ + MAX_BARRIER_SESSIONS;
+                reqs.ginForceEnable = true;
                 NCCLCHECK(ncclDevCommCreate(comms_multi_[c], &reqs, &dcomms_[c]));
             }
             std::cout << "[NCCL GIN Backend] Rank " << rank << " created " << num_comms_ 
@@ -322,10 +277,14 @@ int NCCLGINBackend::init(const std::vector<uint8_t>& root_unique_id_val,
             // Single-communicator mode: create one device comm
             dcomms_ = new ncclDevComm_t[1];  // Only allocate what you need
             dcomms_[0] = ncclDevComm_t{};    // Initialize to default
+            ncclDevCommRequirements reqs = {};
+            reqs.barrierCount = MAX_BARRIER_SESSIONS;
+            reqs.ginSignalCount = num_total_signals_ + MAX_BARRIER_SESSIONS;
+            reqs.ginForceEnable = true;
             NCCLCHECK(ncclDevCommCreate(comm_, &reqs, &dcomms_[0]));
             std::cout << "[NCCL GIN Backend] Rank " << rank << " created device communication with " 
                     << MAX_BARRIER_SESSIONS << " barrier sessions" << std::endl;
-        } 
+        }
         
         // Allocate device memory for dcomms and copy data
         int num_dcomms = multi_mode_ ? num_comms_ : 1;
@@ -352,24 +311,6 @@ void NCCLGINBackend::finalize() {
         std::cout << "[NCCL GIN Backend] Finalizing rank " << rank_ << std::endl;
         
         try {
-            // Free signals (use the same communicator used for allocation)
-            if (num_total_signals_ > 0) {
-                std::cout << "[NCCL GIN Backend] Rank " << rank_ << " freeing " << num_total_signals_
-                          << " signals (no counters used)..." << std::endl;
-                ncclResult_t res = ncclSuccess;
-                if (!multi_mode_) {
-                    if (comm_) res = ncclGinFreeSignalsCounters(comm_, signal_base_id_, num_total_signals_,
-                                                                counter_base_id_, num_dispatch_counters_);
-                } else {
-                    if (!comms_multi_.empty() && comms_multi_[0])
-                        res = ncclGinFreeSignalsCounters(comms_multi_[0], signal_base_id_, num_total_signals_,
-                                                         counter_base_id_, num_dispatch_counters_);
-                }
-                if (res != ncclSuccess) {
-                    std::cerr << "[NCCL GIN Backend] Warning: Failed to free signals/counters: "
-                              << ncclGetErrorString(res) << std::endl;
-                }
-            }
             // Destroy device communicators based on mode
             if (dcomms_ != nullptr) {
                 if (multi_mode_) {
@@ -425,6 +366,10 @@ void NCCLGINBackend::finalize() {
                 cudaFree(d_gin_dev_wins_);
                 d_gin_dev_wins_ = nullptr;
             }
+            if (d_nccl_dev_wins_) {
+                cudaFree(d_nccl_dev_wins_);
+                d_nccl_dev_wins_ = nullptr;
+            }
             std::cout << "[NCCL GIN Backend] Destroyed NCCL communicator" << std::endl;
         } catch (const std::exception& e) {
             std::cerr << "[NCCL GIN Backend] Error during finalization: " << e.what() << std::endl;
@@ -466,18 +411,31 @@ void* NCCLGINBackend::alloc(size_t size, size_t alignment) {
             ncclMemFree(ptr);  // Clean up on failure
             throw std::runtime_error(std::string("Failed to register GIN memory: ") + ncclGetErrorString(res));
         }
+        
+        // Also register NCCL windows (similar to multi-mode)
+        ncclResult_t res2 = ncclCommWindowRegister(comm_, ptr, size, mem_handle_.ncclWins, 0);
+        if (res2 != ncclSuccess) {
+            ncclGinDeregister(comm_, mem_handle_.ginHostWins);
+            ncclMemFree(ptr);
+            throw std::runtime_error(std::string("Failed to register NCCL comm windows: ") + ncclGetErrorString(res2));
+        }
+        
         mem_handle_.ptr = ptr;
         mem_handle_.size = size;
+        
         // Refresh device-visible windows now that registration populated mem_handle_.ginDevWins
-        if (d_gin_dev_wins_ != nullptr && num_gin_ctxs_ > 0) {
-            cudaError_t e = cudaMemcpy(d_gin_dev_wins_, mem_handle_.ginDevWins,
+        if (d_gin_dev_wins_ != nullptr && d_nccl_dev_wins_ != nullptr && num_gin_ctxs_ > 0) {
+            cudaError_t e1 = cudaMemcpy(d_gin_dev_wins_, mem_handle_.ginDevWins,
                                        num_gin_ctxs_ * sizeof(ncclGinWindow_t), cudaMemcpyHostToDevice);
-            if (e != cudaSuccess) {
+            cudaError_t e2 = cudaMemcpy(d_nccl_dev_wins_, mem_handle_.ncclWins,
+                                       num_gin_ctxs_ * sizeof(ncclWindow_t), cudaMemcpyHostToDevice);
+            if (e1 != cudaSuccess || e2 != cudaSuccess) {
                 // Best effort cleanup before throwing
+                ncclCommWindowDeregister(comm_, mem_handle_.ncclWins[0]);
                 ncclGinDeregister(comm_, mem_handle_.ginHostWins);
                 ncclMemFree(mem_handle_.ptr);
                 mem_handle_ = {};
-                throw std::runtime_error("Failed to copy GIN device windows to GPU");
+                throw std::runtime_error("Failed to copy GIN/NCCL device windows to GPU");
             }
         }
     } else {
@@ -488,6 +446,12 @@ void* NCCLGINBackend::alloc(size_t size, size_t alignment) {
         dev_wins_multi_.resize(num_comms_);
         std::vector<ncclGinWindow_t> wins0;
         wins0.reserve(num_comms_);
+        // New windows wrapper for nccl
+        dev_wins_multi_nccl_.clear();
+        dev_wins_multi_nccl_.resize(num_comms_);
+        std::vector<ncclWindow_t>  wins_nccl;
+        wins_nccl.reserve(num_comms_);
+        
         for (int c = 0; c < num_comms_; ++c) {
             ncclResult_t r = ncclGinRegister(comms_multi_[c], ptr, size, host_wins_multi_[c].data(), dev_wins_multi_[c].data());
             if (r != ncclSuccess) {
@@ -496,21 +460,36 @@ void* NCCLGINBackend::alloc(size_t size, size_t alignment) {
                 ncclMemFree(ptr);
                 throw std::runtime_error(std::string("Failed to register GIN memory (multi): ") + ncclGetErrorString(r));
             }
+            
+            // Register with ncclCommWindowRegister (symmetric to ncclGinRegister)
+            ncclResult_t r2 = ncclCommWindowRegister(comms_multi_[c], ptr, size, dev_wins_multi_nccl_[c].data(), 0);
+            if (r2 != ncclSuccess) {
+                // Best-effort rollback of registrations
+                for (int j = 0; j <= c; ++j) ncclGinDeregister(comms_multi_[j], host_wins_multi_[j].data());
+                ncclMemFree(ptr);
+                throw std::runtime_error(std::string("Failed to register NCCL comm windows (multi): ") + ncclGetErrorString(r2));
+            }
+            
             wins0.push_back(dev_wins_multi_[c][0]);
+            wins_nccl.push_back(dev_wins_multi_nccl_[c][0]);
         }
         mem_handle_.ptr = ptr;
         mem_handle_.size = size;
-        if (d_gin_dev_wins_ != nullptr && num_gin_ctxs_ > 0) {
-            cudaError_t e = cudaMemcpy(d_gin_dev_wins_, wins0.data(), wins0.size() * sizeof(ncclGinWindow_t), cudaMemcpyHostToDevice);
-            if (e != cudaSuccess) {
-                for (int c = 0; c < num_comms_; ++c) ncclGinDeregister(comms_multi_[c], host_wins_multi_[c].data());
+        if (d_gin_dev_wins_ != nullptr && d_nccl_dev_wins_ != nullptr && num_gin_ctxs_ > 0) {
+            cudaError_t e1 = cudaMemcpy(d_gin_dev_wins_, wins0.data(), wins0.size() * sizeof(ncclGinWindow_t), cudaMemcpyHostToDevice);
+            cudaError_t e2 = cudaMemcpy(d_nccl_dev_wins_, wins_nccl.data(), wins_nccl.size() * sizeof(ncclWindow_t), cudaMemcpyHostToDevice);
+            if (e1 != cudaSuccess || e2 != cudaSuccess) {
+                for (int c = 0; c < num_comms_; ++c) {
+                    ncclGinDeregister(comms_multi_[c], host_wins_multi_[c].data());
+                    ncclCommWindowDeregister(comms_multi_[c], dev_wins_multi_nccl_[c][0]);
+                }
                 ncclMemFree(mem_handle_.ptr);
                 mem_handle_ = {};
-                throw std::runtime_error("Failed to copy multi-comm GIN windows to GPU");
+                throw std::runtime_error("Failed to copy multi-comm windows to GPU");
             }
         }
     }
-    
+    printf("[NCCL GIN Backend - Memory Alloc] Rank %d: Registered windows and returning ptr=%p, size=%lu\n", rank_, ptr, size); fflush(stdout);
     return ptr;
 }
 
@@ -527,15 +506,26 @@ void NCCLGINBackend::free(void* ptr) {
             if (res1 != ncclSuccess) {
                 std::cerr << "[NCCL GIN Backend] Warning: Failed to deregister GIN memory: " << ncclGetErrorString(res1) << std::endl;
             }
+            
+            ncclResult_t res2 = ncclCommWindowDeregister(comm_, mem_handle_.ncclWins[0]);
+            if (res2 != ncclSuccess) {
+                std::cerr << "[NCCL GIN Backend] Warning: Failed to deregister NCCL comm windows: " << ncclGetErrorString(res2) << std::endl;
+            }
         } else {
             for (int c = 0; c < num_comms_; ++c) {
                 ncclResult_t r = ncclGinDeregister(comms_multi_[c], host_wins_multi_[c].data());
                 if (r != ncclSuccess) {
                     std::cerr << "[NCCL GIN Backend] Warning: Failed to deregister GIN memory (comm " << c << "): " << ncclGetErrorString(r) << std::endl;
                 }
+                
+                ncclResult_t r2 = ncclCommWindowDeregister(comms_multi_[c], dev_wins_multi_nccl_[c][0]);
+                if (r2 != ncclSuccess) {
+                    std::cerr << "[NCCL GIN Backend] Warning: Failed to deregister NCCL comm windows (comm " << c << "): " << ncclGetErrorString(r2) << std::endl;
+                }
             }
             host_wins_multi_.clear();
             dev_wins_multi_.clear();
+            dev_wins_multi_nccl_.clear();
         }
         
         // Free the memory
@@ -549,13 +539,6 @@ void NCCLGINBackend::free(void* ptr) {
     }
 }
 
-ncclGinWindow_t NCCLGINBackend::get_gin_window_handle() {
-    if (!initialized_ || mem_handle_.ptr == nullptr) {
-        throw std::runtime_error("NCCL GIN memory not allocated or backend not initialized.");
-    }
-    return mem_handle_.ginDevWins[0];  // Use first context window
-}
-
 void* NCCLGINBackend::get_gin_base_ptr() {
     if (!initialized_ || mem_handle_.ptr == nullptr) {
         throw std::runtime_error("NCCL GIN memory not allocated or backend not initialized.");
@@ -563,70 +546,19 @@ void* NCCLGINBackend::get_gin_base_ptr() {
     return mem_handle_.ptr;
 }
 
-#if !NCCL_GIN_NEW_API
-ncclGinGpuCtx NCCLGINBackend::get_gin_gpu_context() {
-    if (!initialized_) {
-        throw std::runtime_error("NCCL GIN backend not initialized");
-    }
-    
-    // Build context from communicator state (old API only - for new API use get_gin_gpu_context_new)
-    ncclGinGpuCtx gctx;
-    gctx.type = comm_->ginState.ginDevHandles[0]->netDeviceType;
-    gctx.handle = comm_->ginState.ginDevHandles[0]->handle;
-    gctx.rank = rank_;
-    gctx.nRanks = num_ranks_;
-    return gctx;
-}
-#endif
-
-ncclGinSignal_t NCCLGINBackend::get_gin_signals(int buffer_idx) const {
+unsigned NCCLGINBackend::get_signals_base(int buffer_idx) const {
     EP_HOST_ASSERT(buffer_idx == 0 || buffer_idx == 1 || buffer_idx == 2);
     if (!initialized_ || num_dispatch_signals_ == 0 || num_total_signals_ == num_dispatch_signals_) {
         throw std::runtime_error("NCCL GIN backend not initialized or no signals allocated");
     }
-    // Calculate signal ID based on buffer index and base ID 
+    // Calculate signal offset based on buffer index (without signal_base_id_)
     // It works for the high-throughput kernels, because when buffer_idx == 2 it skips all num_dispatch_signals_ 
     int signals_per_buffer = num_dispatch_signals_ / 2;  // We allocated double-buffered signals
-    return signal_base_id_ + (buffer_idx * signals_per_buffer);
+    return buffer_idx * signals_per_buffer;
 }
 
 int NCCLGINBackend::get_num_gin_ctxs() const {
     return initialized_ ? num_gin_ctxs_ : 0;
-}
-
-ncclGinWindow_t NCCLGINBackend::get_gin_window_handle(int ctx_idx) {
-    if (!initialized_ || mem_handle_.ptr == nullptr) {
-        throw std::runtime_error("NCCL GIN memory not allocated or backend not initialized.");
-    }
-    EP_HOST_ASSERT(ctx_idx >= 0 && ctx_idx < num_gin_ctxs_);
-    return mem_handle_.ginDevWins[ctx_idx];
-}
-
-#if !NCCL_GIN_NEW_API
-ncclGinGpuCtx NCCLGINBackend::get_gin_gpu_context(int ctx_idx) {
-    if (!initialized_) {
-        throw std::runtime_error("NCCL GIN backend not initialized");
-    }
-    EP_HOST_ASSERT(ctx_idx >= 0 && ctx_idx < num_gin_ctxs_);
-    // Old API only - for new API use get_gin_gpu_context_new
-    ncclGinGpuCtx gctx;
-    gctx.type = comm_->ginState.ginDevHandles[ctx_idx]->netDeviceType;
-    gctx.handle = comm_->ginState.ginDevHandles[ctx_idx]->handle;
-    gctx.rank = rank_;
-    gctx.nRanks = num_ranks_;
-    return gctx;
-}
-#endif
-
-ncclGinSignal_t NCCLGINBackend::get_gin_signals(int ctx_idx, int buffer_idx) const {
-    EP_HOST_ASSERT(buffer_idx == 0 || buffer_idx == 1);
-    if (!initialized_ || num_dispatch_signals_ == 0) {
-        throw std::runtime_error("NCCL GIN backend not initialized or no signals allocated");
-    }
-    EP_HOST_ASSERT(ctx_idx >= 0 && ctx_idx < num_gin_ctxs_);
-    // No ctx offset: signal space is per buffer and reused by contexts
-    int base = signal_base_id_ + buffer_idx * signals_per_buffer_per_ctx_;
-    return base;
 }
 
 ncclDevComm_t* NCCLGINBackend::get_device_communicators() const {
@@ -659,54 +591,10 @@ void NCCLGINBackend::get_unique_id(void* unique_id) {
     ncclGetUniqueId(static_cast<ncclUniqueId*>(unique_id));
 }
 
-#if NCCL_GIN_NEW_API
-ncclGinCtx_M<-1u>* NCCLGINBackend::get_device_gin_ctxs() {
+ncclWindow_t* NCCLGINBackend::get_device_nccl_windows() {
     EP_HOST_ASSERT(initialized_);
-    return d_gin_ctxs_;
+    return d_nccl_dev_wins_;
 }
-#else
-ncclGinGpuCtx* NCCLGINBackend::get_device_gin_ctxs() {
-    EP_HOST_ASSERT(initialized_);
-    return d_gin_ctxs_;
-}
-#endif
-
-ncclGinWindow_t* NCCLGINBackend::get_device_gin_windows() {
-    EP_HOST_ASSERT(initialized_);
-    return d_gin_dev_wins_;
-}
-
-#if NCCL_GIN_NEW_API
-// New API context methods (placeholder implementations)
-ncclGinCtx_M<-1u> NCCLGINBackend::get_gin_gpu_context_new() {
-    if (!initialized_) {
-        throw std::runtime_error("NCCL GIN backend not initialized");
-    }
-    
-    // Build new API context from communicator state
-    ncclGinCtx_M<-1u> gctx;
-    gctx.backend = comm_->sharedRes->ginState.ginDevHandles[0]->netDeviceType;
-    gctx.handle = comm_->sharedRes->ginState.ginDevHandles[0]->handle;
-    gctx.rank = rank_;
-    gctx.nRanks = num_ranks_;
-    return gctx;
-}
-
-ncclGinCtx_M<-1u> NCCLGINBackend::get_gin_gpu_context_new(int ctx_idx) {
-    if (!initialized_) {
-        throw std::runtime_error("NCCL GIN backend not initialized");
-    }
-    EP_HOST_ASSERT(ctx_idx >= 0 && ctx_idx < num_gin_ctxs_);
-    
-    // Build new API context from communicator state
-    ncclGinCtx_M<-1u> gctx;
-    gctx.backend = comm_->sharedRes->ginState.ginDevHandles[ctx_idx]->netDeviceType;
-    gctx.handle = comm_->sharedRes->ginState.ginDevHandles[ctx_idx]->handle;
-    gctx.rank = rank_;
-    gctx.nRanks = num_ranks_;
-    return gctx;
-}
-#endif
 
 // Factory function for creating NCCL GIN backend
 std::unique_ptr<CommunicationBackend> create_nccl_gin_backend() {
