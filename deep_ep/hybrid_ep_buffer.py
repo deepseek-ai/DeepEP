@@ -358,7 +358,6 @@ class HybridEpBuffer:
         # If enable this, the produced num_dispatched_tokens will be put on the CPU pinned memory, and the tokens_per_expert will be put on the CPU, which may reduce the times of the sync
         use_host_meta: bool = True,
     ):
-
         """
         Dispatch the data to the experts with permute.
         """
@@ -396,6 +395,11 @@ class HybridEpBuffer:
                     routing_map=global_routing_map,
                     num_of_tokens_per_rank=num_of_tokens_per_rank,
                 )
+                if use_host_meta:
+                    # Put the num_dispatched_tokens_tensor on the CPU pinned memory, because this tensor also will be used in the GPU kernel
+                    num_dispatched_tokens_tensor = (
+                        num_dispatched_tokens_tensor.cpu().pin_memory()
+                    )
             else:
                 (
                     sparse_to_dense_map,
@@ -406,12 +410,6 @@ class HybridEpBuffer:
                     row_id_map,
                     num_of_tokens_per_rank,
                 ) = handle
-            
-            if use_host_meta:
-                # Put the num_dispatched_tokens_tensor on the CPU pinned memory, because this tensor also will be used in the GPU kernel
-                num_dispatched_tokens_tensor = (
-                    num_dispatched_tokens_tensor.cpu().pin_memory()
-                )
                 
             # Dispatch phase
             (
