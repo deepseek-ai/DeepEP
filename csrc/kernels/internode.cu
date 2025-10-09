@@ -1055,7 +1055,6 @@ void dispatch(void* recv_x, float* recv_x_scales, topk_idx_t* recv_topk_idx, flo
               int rank, int num_ranks, bool is_cached_dispatch,
               bool zero_copy, int num_zcopy_buffers, int zcopy_buffer_id,
               cudaStream_t stream, int num_channels, bool low_latency_mode) {
-    // TODO: Zero-copy: move this into zcopy.cu
     if (zero_copy) {
         // TODO: Zero-copy: Support ue8m0 scenario
         EP_HOST_ASSERT((scale_token_stride == num_scales and scale_hidden_stride == 1) or (scale_token_stride == 0 and scale_hidden_stride == 0));

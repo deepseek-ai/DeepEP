@@ -425,7 +425,7 @@ __device__ __forceinline__ void tma_store_1d(const void* smem_ptr, const void* g
     asm volatile("cp.async.bulk.commit_group;");
 }
 
-__forceinline__ __device__ void tma_reduce_add_bf16(const void* src_smem_ptr, void *dst_gmem_ptr, int num_bytes,
+__forceinline__ __device__ void tma_reduce_add_bf16(const void* src_smem_ptr, void* dst_gmem_ptr, int num_bytes,
                                                     bool evict_first = true) {
     auto smem_int_ptr = static_cast<uint32_t>(__cvta_generic_to_shared(src_smem_ptr));
     const auto cache_hint = evict_first ? kEvictFirst : kEvictNormal;
@@ -439,72 +439,18 @@ __device__ __forceinline__ void tma_store_wait() {
     asm volatile("cp.async.bulk.wait_group.read %0;" :: "n"(N) : "memory");
 }
 
-__device__ __forceinline__ void memcpy_tma_lane_launch_load(
-    const void *src_ptr,
-    size_t size,
-    char* smem,
-    uint64_t& tma_mbarrier
-) {
+__device__ __forceinline__ void memcpy_tma_lane_launch_load(const void* src_ptr, size_t size,
+                                                            char* smem, uint64_t& tma_mbarrier) {
     mbarrier_init(&tma_mbarrier, 1);
     mbarrier_arrive_and_expect_tx(&tma_mbarrier, size);
     tma_load_1d(smem, src_ptr, &tma_mbarrier, size);
 }
 
-__device__ __forceinline__ void memcpy_tma_lane_launch_store(
-    void *dst_ptr,
-    size_t size,
-    char* smem,
-    uint64_t& tma_mbarrier
-) {
+__device__ __forceinline__ void memcpy_tma_lane_launch_store(void* dst_ptr, size_t size,
+                                                             const char* smem, uint64_t& tma_mbarrier) {
     uint32_t tma_phase = 0;
     mbarrier_wait(&tma_mbarrier, tma_phase);
     tma_store_1d(smem, dst_ptr, size);
-}
-
-__device__ __forceinline__ void reduce_add_tma_warp(
-    void *combined_row,
-    void *combined_row_topk_weights,
-    void **src_ptr,
-    void **src_tw_ptr,
-    int num_topk_ranks,
-    int num_topk,
-    size_t size,
-    int lane_id,
-    char* smem,
-    size_t smem_len,
-    uint64_t &tma_mbarrier
-) {
-    EP_DEVICE_ASSERT(size <= smem_len);
-    float topk_weight_value = 0;
-    for (int i = 0; i < num_topk_ranks; i++) {
-        if (lane_id == 0) {
-            mbarrier_init(&tma_mbarrier, 1);
-            mbarrier_arrive_and_expect_tx(&tma_mbarrier, size);
-            tma_load_1d(smem, reinterpret_cast<char *>(src_ptr[i]), &tma_mbarrier, size);
-        }
-        __syncwarp();
-
-        if (lane_id < num_topk) {
-            topk_weight_value += ld_nc_global(reinterpret_cast<float*>(src_tw_ptr[i]) + lane_id);
-        }
-
-        uint32_t tma_phase = 0;
-        mbarrier_wait(&tma_mbarrier, tma_phase);
-
-        if (lane_id == 0) {
-            if (i == 0) {
-                tma_store_1d(smem, reinterpret_cast<char *>(combined_row), size);
-            } else {
-                tma_reduce_add_bf16(smem, reinterpret_cast<char *>(combined_row), size);
-            }
-        }
-        tma_store_wait<0>();
-        __syncwarp();
-    }
-
-    if (lane_id < num_topk) {
-        st_na_global(reinterpret_cast<float*>(combined_row_topk_weights) + lane_id, topk_weight_value);
-    }
 }
 
 #endif
