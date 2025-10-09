@@ -16,7 +16,7 @@ extern nvshmem_team_t cpu_rdma_team;
 
 namespace internode_zcopy {
 
-// TODO: Zero-copy: Eliminate duplicate definitions...
+// TODO: Zero-copy: Eliminate duplicate definitions
 struct SourceMeta {
     int src_rdma_rank, is_token_in_nvl_rank_bits;
     int token_idx; // Used in local token dispatch as an indirect reference to the original token
@@ -43,7 +43,6 @@ struct SourceMeta {
 
 EP_STATIC_ASSERT(sizeof(SourceMeta) == get_source_meta_bytes(), "Invalid size of `SourceMeta`");
 
-// TODO: Zero-copy: Eliminate duplicate definitions...
 template<int SourceMetaBytes = sizeof(SourceMeta)>
 __host__ __device__ __forceinline__
 int get_num_bytes_per_token(int hidden_int4, int num_scales, int num_topk_idx, int num_topk_weights) {
@@ -137,7 +136,7 @@ dispatch(int4* recv_x, float* recv_x_scales, topk_idx_t* recv_topk_idx, float* r
     auto rdma_channel_head = SymBuffer<uint64_t, false>(rdma_buffer_ptr, 1, kNumRDMARanks, channel_id, num_channels);
     auto rdma_channel_tail = SymBuffer<uint64_t, false>(rdma_buffer_ptr, 1, kNumRDMARanks, channel_id, num_channels);
     // Each element indicates the RDMA rank has finished receiving (1) or not (0)
-    // TODO: We can replace this with polling CQ
+    // TODO: Zero-copy: Replace this with polling CQ
     auto rdma_channel_recv_finish_signal = SymBuffer<uint64_t, false>(rdma_buffer_ptr, 1, kNumRDMARanks, channel_id, num_channels);
 
     // NVL buffer layouts
@@ -425,7 +424,7 @@ dispatch(int4* recv_x, float* recv_x_scales, topk_idx_t* recv_topk_idx, float* r
                         recv_rdma_channel_prefix_matrix[lane_id * num_channels + channel_id] = src_rdma_channel_prefix_1;
                     src_rdma_channel_prefix += lane_id == 0 ? 0 : recv_rdma_rank_prefix_sum[lane_id - 1];
                     EP_DEVICE_ASSERT(num_tokens_to_recv_from_rdma >= 0);
-                    // TODO: We can check if the recv count is 0 on the sender side instead
+                    // TODO: Zero-copy: We can check if the recv count is 0 on the sender side instead
                     if (num_tokens_to_recv_from_rdma == 0 and dst_nvl_rank == lane_id % NUM_MAX_NVL_PEERS) {
                         // Need to immediately send finish signal here, as we won't receive any
                         // tokens and thus will not trigger the logic upon token reception.
@@ -513,7 +512,6 @@ dispatch(int4* recv_x, float* recv_x_scales, topk_idx_t* recv_topk_idx, float* r
                 // second condition guarantees only 1 warp (and thus 1 thread) will issue the
                 // atomic add.
                 if (src_rdma_tail == num_tokens_to_recv_from_rdma_saved and dst_nvl_rank == src_rdma_rank % NUM_MAX_NVL_PEERS) {
-                    // Send RDMA recv finish signal
                     rdma_signal_finish(lane_id, channel_id);
                 }
             }
