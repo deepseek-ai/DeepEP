@@ -102,6 +102,9 @@ private:
     ncclDevComm_t* d_dcomms_ = nullptr;  // Device array
     const int MAX_BARRIER_SESSIONS = 32;
 
+    // Barrier variable
+    int* d_barrier_var_ = nullptr;
+
 };
 
 } // namespace internode

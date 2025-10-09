@@ -255,7 +255,21 @@ int NCCLGINBackend::init(const std::vector<uint8_t>& root_unique_id_val,
         if (e1 != cudaSuccess) throw std::runtime_error("Failed to cudaMalloc d_dcomms_");
         cudaError_t e2 = cudaMemcpy(d_dcomms_, dcomms_, num_comms_ * sizeof(ncclDevComm_t), cudaMemcpyHostToDevice);
         if (e2 != cudaSuccess) throw std::runtime_error("Failed to cudaMemcpy d_dcomms_");
-                    
+
+        // Allocate barrier dummy variable
+        cudaError_t e3 = cudaMalloc(reinterpret_cast<void**>(&d_barrier_var_), sizeof(int));
+        if (e3 != cudaSuccess) {
+            throw std::runtime_error(std::string("Failed to cudaMalloc d_barrier_var_: ") +
+                                   cudaGetErrorString(e3));
+        }
+        cudaError_t e4 = cudaMemset(d_barrier_var_, 0, sizeof(int));
+        if (e4 != cudaSuccess) {
+            cudaFree(d_barrier_var_);
+            d_barrier_var_ = nullptr;
+            throw std::runtime_error(std::string("Failed to cudaMemset d_barrier_var_: ") +
+                                   cudaGetErrorString(e4));
+        }
+
         rank_ = rank;
         num_ranks_ = num_ranks;
         initialized_ = true;
@@ -293,6 +307,11 @@ void NCCLGINBackend::finalize() {
                 cudaFree(d_dcomms_);
                 d_dcomms_ = nullptr;
             }
+            // Free barrier dummy variable
+            if (d_barrier_var_ != nullptr) {
+                cudaFree(d_barrier_var_);
+                d_barrier_var_ = nullptr;
+            }
             // Destroy all communicators
             for (auto& c : comms_multi_) {
                 if (c) {
@@ -328,10 +347,34 @@ void NCCLGINBackend::barrier() {
     if (!initialized_) {
         throw std::runtime_error("NCCL GIN backend not initialized");
     }
-    
-    // For now, use MPI barrier since we're not implementing NCCL barrier yet
-    // In later phases, we can implement this with NCCL primitives
-    //MPI_Barrier(MPI_COMM_WORLD); FIXME: We don't have MPI here. Need the equivalent of nvshmem_barrier_all() here with NCCL primitives. Requested George to look into it.
+    if (d_barrier_var_ == nullptr) {
+        throw std::runtime_error("Barrier variable not allocated");
+    }
+
+    // Use default stream for barrier
+    cudaStream_t stream = 0;
+
+    // Perform AllReduce with device memory
+    ncclResult_t result = ncclAllReduce(
+        d_barrier_var_,         // sendbuff (device memory)
+        d_barrier_var_,         // recvbuff (device memory, in-place)
+        1,                        // count
+        ncclInt,                  // datatype
+        ncclSum,                  // operation
+        comms_multi_[0],          // communicator
+        stream                    // CUDA stream
+    );
+    if (result != ncclSuccess) {
+        throw std::runtime_error(std::string("NCCL barrier failed: ") +
+                                ncclGetErrorString(result));
+    }
+
+    // Wait for completion
+    cudaError_t cuda_err = cudaStreamSynchronize(stream);
+    if (cuda_err != cudaSuccess) {
+        throw std::runtime_error(std::string("cudaStreamSynchronize failed in barrier: ") +
+                                cudaGetErrorString(cuda_err));
+    }
 }
 
 void* NCCLGINBackend::alloc(size_t size, size_t alignment) {
