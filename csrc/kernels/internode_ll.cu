@@ -281,10 +281,11 @@ __global__ __launch_bounds__(1024, 1) void dispatch(void* packed_recv_x,
                 const auto dst_ptr = reinterpret_cast<uint64_t>(rdma_recv_x) +
                     dst_expert_local_idx * num_ranks * num_max_dispatch_tokens_per_rank * num_bytes_per_msg +
                     rank * num_max_dispatch_tokens_per_rank * num_bytes_per_msg + slot_idx * num_bytes_per_msg;
+
+#ifdef ENABLE_NCCL_GIN
                 const auto dst_p2p_ptr = nvshmemi_get_p2p_ptr(dst_ptr, rank, dst_rank);
                 if (not is_rank_masked<true>(mask_buffer_ptr, dst_rank)) {
-                    if (dst_p2p_ptr == 0) {
-#ifdef ENABLE_NCCL_GIN
+                    if (rank != dst_rank) {
                         if (lane_id == 0) {
 
                             size_t expected_dst_offset = rdma_recv_x_offset + dst_expert_local_idx * num_ranks * num_max_dispatch_tokens_per_rank * num_bytes_per_msg +
@@ -325,9 +326,6 @@ __global__ __launch_bounds__(1024, 1) void dispatch(void* packed_recv_x,
                                 ncclCoopThread()
                             );
                         }
-#else
-                        nvshmemi_ibgda_put_nbi_warp(dst_ptr, src_ptr, num_bytes_per_msg, dst_rank, dst_expert_local_idx, lane_id, slot_idx);
-#endif
                     } else {
                         // NOTES: only 2 load iterations for 7K hidden with 8 unrolls
                         const auto* src_int4_ptr = reinterpret_cast<const int4*>(src_ptr);
@@ -335,6 +333,19 @@ __global__ __launch_bounds__(1024, 1) void dispatch(void* packed_recv_x,
                         UNROLLED_WARP_COPY(8, lane_id, num_int4_per_msg, dst_int4_ptr, src_int4_ptr, ld_nc_global, st_na_global);
                     }
                 }
+#else
+                const auto dst_p2p_ptr = nvshmemi_get_p2p_ptr(dst_ptr, rank, dst_rank);
+                if (not is_rank_masked<true>(mask_buffer_ptr, dst_rank)) {
+                    if (dst_p2p_ptr == 0) {
+                        nvshmemi_ibgda_put_nbi_warp(dst_ptr, src_ptr, num_bytes_per_msg, dst_rank, dst_expert_local_idx, lane_id, slot_idx);
+                    } else {
+                        // NOTES: only 2 load iterations for 7K hidden with 8 unrolls
+                        const auto* src_int4_ptr = reinterpret_cast<const int4*>(src_ptr);
+                        const auto* dst_int4_ptr = reinterpret_cast<int4*>(dst_p2p_ptr);
+                        UNROLLED_WARP_COPY(8, lane_id, num_int4_per_msg, dst_int4_ptr, src_int4_ptr, ld_nc_global, st_na_global);
+                    }
+                }
+#endif
 
                 // Increase counter after finishing
                 __syncwarp();
@@ -398,17 +409,18 @@ __global__ __launch_bounds__(1024, 1) void dispatch(void* packed_recv_x,
         while (ld_acquire_global(atomic_finish_counter_per_expert + responsible_expert_idx) != FINISHED_SUM_TAG * 2)
             ;
         auto dst_ptr = reinterpret_cast<uint64_t>(rdma_recv_count + dst_expert_local_idx * num_ranks + rank);
-        auto dst_p2p_ptr = nvshmemi_get_p2p_ptr(dst_ptr, rank, dst_rank);
-        if (not is_rank_masked(mask_buffer_ptr, dst_rank)) {
-            if (dst_p2p_ptr == 0) {
+
 #ifdef ENABLE_NCCL_GIN
+        const auto dst_p2p_ptr = nvshmemi_get_p2p_ptr(dst_ptr, rank, dst_rank);
+        if (not is_rank_masked(mask_buffer_ptr, dst_rank)) {
+            if (rank != dst_rank) {
                 // Each thread writes its value to its slot in shared memory
                 size_t dst_offset = rdma_recv_count_offset + (dst_expert_local_idx * num_ranks + rank) * sizeof(int);
                 
-                if (rank == 0) {
+                //if (rank == 0) {
                     DEEPEP_DEBUG_PRINT("[Dispatch LL - GinPut] Rank %d: ncclGinPut to dst_rank=%d, dst_expert_local_idx=%d, rdma_x=%p, rdma_recv_count=%p, dst_ptr=%p, dst_offset=%lx, offset=%lx, num_tokens_sent=%d, value=%d\n", 
                        rank, dst_rank, dst_expert_local_idx, rdma_x, rdma_recv_count, (reinterpret_cast<uint8_t*>(rdma_x) + dst_offset), dst_offset, (dst_expert_local_idx * num_ranks + rank) * sizeof(int), num_tokens_sent, -num_tokens_sent - 1);
-                }
+                //}
     
                 //ncclGinCall<ncclGinApi_Put>(gin_ctxs[dst_expert_local_idx % num_gin_ctxs], thread, dst_rank,
                 //                      /*hasWins=*/true,
@@ -429,14 +441,20 @@ __global__ __launch_bounds__(1024, 1) void dispatch(void* packed_recv_x,
                     ncclGin_None{},  // no counter
                     ncclCoopThread()
                 );
-    
+            } else {
+                st_release_sys_global(reinterpret_cast<int*>(dst_p2p_ptr), -num_tokens_sent - 1);
+            }
+        }    
 #else
+        auto dst_p2p_ptr = nvshmemi_get_p2p_ptr(dst_ptr, rank, dst_rank);
+        if (not is_rank_masked(mask_buffer_ptr, dst_rank)) {
+            if (dst_p2p_ptr == 0) {
                 nvshmemi_ibgda_amo_nonfetch_add(reinterpret_cast<int*>(dst_ptr), -num_tokens_sent - 1, dst_rank, dst_expert_local_idx);
-#endif
             } else {
                 st_release_sys_global(reinterpret_cast<int*>(dst_p2p_ptr), -num_tokens_sent - 1);
             }
         }
+#endif
 
         // Clean workspace for next use
         atomic_counter_per_expert[responsible_expert_idx] = 0;
@@ -493,13 +511,18 @@ LOW_LATENCY_DISPATCH_RECV:
                     int ctx_idx_wait2 = local_expert_idx % num_gin_ctxs;
                     EP_DEVICE_ASSERT(ctx_idx_wait2 >= 0 && ctx_idx_wait2 < num_gin_ctxs);
                     ncclGin net(dcomms[ctx_idx_wait2], 0);
+                    
                     do {
                         cur_value = net.readSignal(signals_base + local_expert_idx * num_ranks + src_rank);
-                    } while (cur_value < 1);
-                    num_recv_tokens = (int)cur_value - 1;
-                    num_recv_tokens = -num_recv_tokens - 1; //FIXME: check this Aamir.
+                    } while (cur_value < 1  // data not arrived
+                             && (wait_recv_cost = clock64() - start_time) <= NUM_TIMEOUT_CYCLES    // not timeout
+                    );
+
+                    num_recv_tokens = -(int)cur_value;
+                    //num_recv_tokens = (int)cur_value - 1;
+                    //num_recv_tokens = -num_recv_tokens - 1; //FIXME: check this Aamir.
                 } else {
-                    while ((num_recv_tokens = ld_acquire_sys_global((rdma_recv_count + local_expert_idx * num_ranks + src_rank))) == 0
+                    while ((num_recv_tokens = ld_acquire_sys_global((rdma_recv_count + local_expert_idx * num_ranks + src_rank))) == 0    // data not arrived
                             && (wait_recv_cost = clock64() - start_time) <= NUM_TIMEOUT_CYCLES    // not timeout
                     );
                     //num_recv_tokens = -num_recv_tokens - 1;
@@ -1083,7 +1106,56 @@ __global__ __launch_bounds__(1024, 1) void combine(void* combined_x,
                 // Issue RDMA
                 // NOTES: for zero-copy mode, we assume the data is already in the send buffer
                 if (dst_p2p_ptr == 0)
+#ifdef ENABLE_NCCL_GIN
+                    if (lane_id == 0) {
+                        const auto expected_dst_offset = rdma_recv_x_offset + (global_expert_idx * num_max_dispatch_tokens_per_rank + src_idx) * num_bytes_per_slot;
+                        const auto expected_buf_offset = rdma_send_x_offset + (local_expert_idx * num_ranks * num_max_dispatch_tokens_per_rank * num_bytes_per_slot) + token_idx * num_bytes_per_slot;
+
+                        const size_t buf_offset = buf_ptr - reinterpret_cast<uint64_t>(rdma_send_x);
+                        const size_t dst_offset = dst_ptr - reinterpret_cast<uint64_t>(rdma_send_x); 
+
+                        //if (rank == 0) {
+                            DEEPEP_DEBUG_PRINT("[Combine LL - Offset Debug] Rank %d: token_idx=%d, src_idx=%d, global_expert_idx=%d, local_expert_idx=%d | expected_dst_offset=%llu, expected_buf_offset=%llu, buf_offset=%llu, dst_offset=%llu\n", 
+                                rank, token_idx, src_idx, global_expert_idx, local_expert_idx, 
+                                (unsigned long long)expected_dst_offset, (unsigned long long)expected_buf_offset, 
+                                (unsigned long long)buf_offset, (unsigned long long)dst_offset);
+                        //}
+
+                        if (rdma_send_x_offset == 0) { /*these assertions are only valid for buffer[0]*/
+                            EP_DEVICE_ASSERT(dst_offset == expected_dst_offset);
+                            EP_DEVICE_ASSERT(buf_offset == expected_buf_offset);
+                        }
+
+                        //if (rank == 0) {
+                            DEEPEP_DEBUG_PRINT("[Combine LL - Put] Rank %d (sm=%d,thread=%d,warp_group=%d,sub_warp=%d,lane=%d): Sending token %d (src_idx=%d) to expert %d on rank %d | src=%p+%llu, dst=%p+%llu\n", 
+                                rank, sm_id, thread_id, warp_group_id, sub_warp_id, lane_id, token_idx, src_idx, global_expert_idx, dst_rank,
+                                reinterpret_cast<void*>(buf_ptr), (unsigned long long)expected_buf_offset, reinterpret_cast<void*>(dst_ptr), (unsigned long long)expected_dst_offset);
+                        //}
+
+                        int ctx_idx = local_expert_idx % num_gin_ctxs;
+                        EP_DEVICE_ASSERT(ctx_idx >= 0 && ctx_idx < num_gin_ctxs);
+                        //ncclGinCall<ncclGinApi_Put>(gin_ctxs[ctx_idx], thread, dst_rank,
+                        //    /*hasWins=*/true,
+                        //    gin_windows[ctx_idx], expected_dst_offset,
+                        //    gin_windows[ctx_idx], expected_buf_offset, hidden * sizeof(nv_bfloat16),
+                        //    /*hasSignal=*/false, 0, ncclGinSignalAdd, 0,
+                        //    /*hasCounter=*/false, 0,
+                        //    /*hasDescriptor=*/false, nullptr,
+                        //    cuda::thread_scope_thread, cuda::thread_scope_thread); 
+                        ncclGin net(dcomms[ctx_idx], 0);
+                        net.put(
+                            ncclTeamWorld(dcomms[ctx_idx]), dst_rank,
+                            nccl_windows[ctx_idx], expected_dst_offset,
+                            nccl_windows[ctx_idx], expected_buf_offset, 
+                            hidden * sizeof(nv_bfloat16),
+                            ncclGin_None{},             // no signal
+                            ncclGin_None{},             // no counter
+                            ncclCoopThread()
+                        );
+                    }
+#else
                     nvshmemi_ibgda_put_nbi_warp(dst_ptr, buf_ptr, num_send_bytes, dst_rank, local_expert_idx, lane_id, token_idx - offset);
+#endif
             }
         }
 
@@ -1097,7 +1169,35 @@ __global__ __launch_bounds__(1024, 1) void combine(void* combined_x,
             auto dst_p2p_ptr = nvshmemi_get_p2p_ptr(dst_ptr, rank, dst_rank);
             if (not is_rank_masked(mask_buffer_ptr, dst_rank)) {
                 if (dst_p2p_ptr == 0) {
+#ifdef ENABLE_NCCL_GIN
+                    size_t dst_offset = rdma_recv_flag_offset + global_expert_idx * sizeof(int);
+                    auto signal_id = signals_base + global_expert_idx;
+
+                    //if (rank == 0) {
+                        DEEPEP_DEBUG_PRINT("[Combine LL - Flag Put] Rank %d (sm=%d,thread=%d,warp_group=%d,sub_warp=%d,lane=%d): Sending finish flag to expert %d on rank %d | dst_offset=%llu\n", 
+                            rank, sm_id, thread_id, warp_group_id, sub_warp_id, lane_id, global_expert_idx, dst_rank, (unsigned long long)dst_offset);
+                    //}
+
+                    int ctx_idx = (responsible_expert_idx % num_local_experts) % num_gin_ctxs;
+                    EP_DEVICE_ASSERT(ctx_idx >= 0 && ctx_idx < num_gin_ctxs);
+                    //ncclGinCall<ncclGinApi_PutValue>(gin_ctxs[ctx_idx], thread, dst_rank,
+                    //    gin_windows[ctx_idx], dst_offset,
+                    //    1,
+                    //    /*hasSignal=*/true, gin_signals + global_expert_idx, ncclGinSignalAdd, 1,
+                    //    /*hasDescriptor=*/false, nullptr,
+                    //    cuda::thread_scope_thread, cuda::thread_scope_thread);
+                    ncclGin net(dcomms[ctx_idx], 0);
+                    net.putValue(
+                        ncclTeamWorld(dcomms[ctx_idx]), dst_rank,
+                        nccl_windows[ctx_idx], dst_offset,
+                        (uint32_t)1,  // immediate value to write
+                        ncclGin_SignalAdd{signal_id, 1},
+                        ncclCoopThread()
+                    );
+#else
                     nvshmemi_ibgda_amo_nonfetch_add(reinterpret_cast<int*>(dst_ptr), 1, dst_rank, local_expert_idx);
+#endif
+
                 } else {
                     st_release_sys_global(reinterpret_cast<int*>(dst_p2p_ptr), 1);
                 }
@@ -1131,6 +1231,27 @@ LOW_LATENCY_COMBINE_RECV:
                        && (wait_recv_cost = clock64() - start_time) <= NUM_TIMEOUT_CYCLES   // not timeout
                 )
                     ;
+#ifdef ENABLE_NCCL_GIN
+                if (src_rank != rank) {    
+    
+                    DEEPEP_DEBUG_PRINT("[Combine LL - Signal Wait] Rank %d (sm=%d,thread=%d,warp_group=%d,sub_warp=%d,lane=%d): Starting signal wait for expert %d\n", 
+                        rank, sm_id, thread_id, warp_group_id, sub_warp_id, lane_id, responsible_expert_idx);
+                    
+                    uint64_t cur_value;
+                    int ctx_idx_wait = (responsible_expert_idx % num_local_experts) % num_gin_ctxs;
+                    EP_DEVICE_ASSERT(ctx_idx_wait >= 0 && ctx_idx_wait < num_gin_ctxs);
+                    ncclGin net(dcomms[ctx_idx_wait], 0);
+                    do {
+                        cur_value = net.readSignal(signals_base + responsible_expert_idx);
+                    } while (cur_value < 1);
+                    
+                    DEEPEP_DEBUG_PRINT("[Combine LL - Signal Wait] Rank %d (sm=%d,thread=%d,warp_group=%d,sub_warp=%d,lane=%d): Completed signal wait for expert %d\n", 
+                        rank, sm_id, thread_id, warp_group_id, sub_warp_id, lane_id, responsible_expert_idx);           
+    
+                }
+#else
+                //do nothing for NVSHMEM
+#endif
             }
             // Mask rank if timeout
             if (wait_recv_cost > NUM_TIMEOUT_CYCLES) {
@@ -1310,6 +1431,34 @@ LOW_LATENCY_COMBINE_RECV:
             }
         }
     }
+
+#ifdef ENABLE_NCCL_GIN
+    /*
+    if (threadIdx.x == 0 && blockIdx.x == 0) {
+        const int signals_per_buffer = num_experts;
+        for (int signal_idx = 0; signal_idx < signals_per_buffer; ++signal_idx) {
+            ncclGinResetSignal(&gin_ctxs[signal_idx % num_gin_ctxs], gin_signals + signal_idx, false);
+        }
+    } 
+    */
+
+    {
+        const int signals_per_buffer = num_experts;
+        const int total_resets = signals_per_buffer * num_gin_ctxs;
+        const int linear_tid = blockIdx.x * blockDim.x + threadIdx.x;
+        const int linear_stride = gridDim.x * blockDim.x;
+
+        for (int idx = linear_tid; idx < total_resets; idx += linear_stride) {
+            const int signal_idx = idx / num_gin_ctxs;
+            const int ctx_id = idx % num_gin_ctxs;
+            ncclGin net(dcomms[ctx_id], 0);
+            net.resetSignal(signals_base + signal_idx);
+        }
+    }
+#else
+    /* do nothing for NVSHMEM*/
+#endif
+
 }
 
 void combine(void* combined_x,
