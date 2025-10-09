@@ -1759,6 +1759,7 @@ std::tuple<torch::Tensor, std::optional<EventHandle>, std::optional<std::functio
                               buffer.combine_rdma_recv_data_buffer,
                               buffer.combine_rdma_recv_flag_buffer,
                               buffer.combine_rdma_send_buffer,
+                              buffer.combine_rdma_recv_data_buffer_offset, buffer.combine_rdma_recv_flag_buffer_offset, buffer.combine_rdma_send_buffer_offset,
                               x.data_ptr(),
                               topk_idx.data_ptr<topk_idx_t>(),
                               topk_weights.data_ptr<float>(),
@@ -1780,7 +1781,7 @@ std::tuple<torch::Tensor, std::optional<EventHandle>, std::optional<std::functio
                               num_device_sms,
                               launch_stream,
                               phases,
-                              zero_copy);
+                              zero_copy, low_latency_buffer_idx);
     };
     launcher(return_recv_hook ? LOW_LATENCY_SEND_PHASE : (LOW_LATENCY_SEND_PHASE | LOW_LATENCY_RECV_PHASE));
 

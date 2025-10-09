@@ -142,7 +142,8 @@ __global__ __launch_bounds__(1024, 1) void dispatch(void* packed_recv_x,
                                                     void* rdma_recv_x,
                                                     int* rdma_recv_count,
                                                     void* rdma_x,
-                                                    const void* x,
+                                                    size_t rdma_recv_x_offset, size_t rdma_recv_count_offset, size_t rdma_x_offset,
+         const void* x,
                                                     const topk_idx_t* topk_idx,
                                                     int* atomic_counter_per_expert,
                                                     int* atomic_finish_counter_per_expert,
@@ -157,7 +158,12 @@ __global__ __launch_bounds__(1024, 1) void dispatch(void* packed_recv_x,
                                                     int num_warp_groups,
                                                     int num_warps_per_group,
                                                     bool round_scale,
-                                                    int phases) {
+                                                    int phases,
+#ifdef ENABLE_NCCL_GIN
+         int num_gin_ctxs, void* gin_base_ptr, ncclDevComm* dcomms, const ncclWindow_t* nccl_windows, unsigned signals_base) {
+#else
+         int num_gin_ctxs, void* gin_base_ptr, void* dcomms, void* nccl_windows, unsigned signals_base) {
+#endif
     const auto sm_id = static_cast<int>(blockIdx.x);
     const auto thread_id = static_cast<int>(threadIdx.x);
     const auto warp_id = thread_id / 32, lane_id = get_lane_id();
@@ -556,6 +562,7 @@ void dispatch(void* packed_recv_x,
                       rdma_recv_x,                           \
                       rdma_recv_count,                       \
                       rdma_x,                                \
+                      rdma_recv_x_offset, rdma_recv_count_offset, rdma_x_offset, \
                       x,                                     \
                       topk_idx,                              \
                       atomic_counter_per_expert,             \
@@ -571,7 +578,8 @@ void dispatch(void* packed_recv_x,
                       num_warp_groups,                       \
                       num_warps_per_group,                   \
                       round_scale,                           \
-                      phases);                               \
+                      phases, \
+                      num_gin_ctxs, gin_base_ptr, dcomms, nccl_windows, signals_base);                               \
     }                                                        \
     break
 
@@ -743,6 +751,9 @@ __global__ __launch_bounds__(1024, 1) void combine(void* combined_x,
                                                    void* rdma_recv_x,
                                                    int* rdma_recv_flag,
                                                    void* rdma_send_x,
+                                                   size_t rdma_recv_x_offset,
+                                                   size_t rdma_recv_flag_offset,
+                                                   size_t rdma_send_x_offset,
                                                    const void* x,
                                                    const topk_idx_t* topk_idx,
                                                    const float* topk_weights,
@@ -763,7 +774,12 @@ __global__ __launch_bounds__(1024, 1) void combine(void* combined_x,
                                                    int num_warp_groups,
                                                    int num_warps_per_group,
                                                    int phases,
-                                                   bool zero_copy) {
+                                                   bool zero_copy,
+#ifdef ENABLE_NCCL_GIN
+        int num_gin_ctxs, ncclDevComm* dcomms, const ncclWindow_t* nccl_windows, unsigned signals_base) {
+#else
+        int num_gin_ctxs, void* dcomms, void* nccl_windows, unsigned signals_base) {
+#endif
     const auto sm_id = __shfl_sync(0xffffffff, static_cast<int>(blockIdx.x), 0);
     const auto num_sms = __shfl_sync(0xffffffff, static_cast<int>(gridDim.x), 0);
     const auto thread_id = static_cast<int>(threadIdx.x);
@@ -1168,6 +1184,9 @@ void combine(void* combined_x,
              void* rdma_recv_x,
              int* rdma_recv_flag,
              void* rdma_send_x,
+             size_t rdma_recv_x_offset,
+             size_t rdma_recv_flag_offset,
+             size_t rdma_send_x_offset,
              const void* x,
              const topk_idx_t* topk_idx,
              const float* topk_weights,
@@ -1189,7 +1208,8 @@ void combine(void* combined_x,
              int num_device_sms,
              cudaStream_t stream,
              int phases,
-             bool zero_copy) {
+             bool zero_copy,
+             int ll_buffer_idx) {
     constexpr int kNumMaxTopk = 11;
     const int num_warp_groups = ceil_div(num_experts, num_device_sms);
     const int num_warps_per_group = 32 / num_warp_groups;
@@ -1224,6 +1244,44 @@ void combine(void* combined_x,
     // Total requirement
     const int smem_size = max(smem_send_size, smem_recv_size);
 
+#ifdef ENABLE_NCCL_GIN
+    auto* backend = dynamic_cast<deep_ep::internode::NCCLGINBackend*>(deep_ep::internode::get_backend());
+    EP_HOST_ASSERT(backend != nullptr);
+    //printf("COMBINE: ll_buffer_idx=%d\n", ll_buffer_idx);
+    auto dcomms = backend->get_device_communicators();
+    int num_gin_ctxs = backend->get_num_gin_ctxs();
+    auto nccl_windows = backend->get_device_nccl_windows();
+    auto signals_base = backend->get_signals_base(ll_buffer_idx);;
+
+    EP_HOST_ASSERT(dcomms != nullptr);
+    EP_HOST_ASSERT(nccl_windows != nullptr);
+#else
+    void* dcomms = nullptr;
+    void* nccl_windows = nullptr;
+    unsigned signals_base = 0;
+    int num_gin_ctxs = 1;
+#endif
+
+#define COMBINE_LAUNCH_CASE(hidden) { \
+auto combine_func = use_logfmt ? \
+    combine<true, hidden, kNumMaxTopk, kNumMaxUnrolls> : \
+    combine<false, hidden, kNumMaxTopk, kNumMaxUnrolls>; \
+SET_SHARED_MEMORY_FOR_TMA(combine_func); \
+LAUNCH_KERNEL(&cfg, combine_func, \
+              combined_x, \
+              rdma_recv_x, rdma_recv_flag, rdma_send_x, \
+              rdma_recv_x_offset, rdma_recv_flag_offset, rdma_send_x_offset, \
+              x, topk_idx, topk_weights, src_info, layout_range, \
+              mask_buffer_ptr, \
+              combine_wait_recv_cost_stats, \
+              next_clean, num_next_clean_int, \
+              atomic_clean_flag, \
+              num_combined_tokens, hidden, num_topk, \
+              num_max_dispatch_tokens_per_rank, \
+              num_experts, rank, num_ranks, \
+              num_warp_groups, num_warps_per_group, \
+              phases, zero_copy, \
+              num_gin_ctxs, dcomms, nccl_windows, signals_base); } break
 #define COMBINE_LAUNCH_CASE(hidden)                                                                                                \
     {                                                                                                                              \
         auto combine_func =                                                                                                        \
@@ -1235,6 +1293,7 @@ void combine(void* combined_x,
                       rdma_recv_x,                                                                                                 \
                       rdma_recv_flag,                                                                                              \
                       rdma_send_x,                                                                                                 \
+                      rdma_recv_x_offset, rdma_recv_flag_offset, rdma_send_x_offset,                                              \
                       x,                                                                                                           \
                       topk_idx,                                                                                                    \
                       topk_weights,                                                                                                \
@@ -1255,7 +1314,8 @@ void combine(void* combined_x,
                       num_warp_groups,                                                                                             \
                       num_warps_per_group,                                                                                         \
                       phases,                                                                                                      \
-                      zero_copy);                                                                                                  \
+                      zero_copy                                                                                                    \
+                      num_gin_ctxs, dcomms, nccl_windows, signals_base);                                                           \
     }                                                                                                                              \
     break
 

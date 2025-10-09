@@ -320,6 +320,9 @@ void combine(void* combined_x,
              void* rdma_recv_x,
              int* rdma_recv_flag,
              void* rdma_send_x,
+             size_t rdma_recv_x_offset,
+             size_t rdma_recv_flag_offset,
+             size_t rdma_send_x_offset,
              const void* x,
              const topk_idx_t* topk_idx,
              const float* topk_weights,
@@ -341,7 +344,8 @@ void combine(void* combined_x,
              int num_device_sms,
              cudaStream_t stream,
              int phases,
-             bool zero_copy);
+             bool zero_copy,
+             int ll_buffer_idx);
 
 void query_mask_buffer(int* mask_buffer_ptr, int num_ranks, int* output_mask_tensor, cudaStream_t stream);
 
