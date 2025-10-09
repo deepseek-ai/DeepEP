@@ -107,8 +107,8 @@ __forceinline__ __device__ void sync_with_same_gpu_idx(const nvshmem_team_t& rdm
 #else
                                                         void* dcomms) {
 #endif
-#if defined(ENABLE_NCCL_GIN)
     // Barrier before cleaning (in case of unfinished chunked EP)
+#if defined(ENABLE_NCCL_GIN)
     auto dcomm = dcomms[0];
     ncclGin net(dcomm, 0);
 
@@ -194,9 +194,9 @@ __global__ void notify_dispatch(const int* num_tokens_per_rank,
         // Flush all contexts
         EP_DEVICE_ASSERT(num_gin_ctxs <= num_threads);
         if (thread_id < num_gin_ctxs) {
-            auto ctx_id = thread_id;
-            ncclGin net(dcomms[ctx_id], 0);
-            net.flush(ncclCoopThread(), cuda::std::memory_order_acquire);
+            auto comm_id = thread_id;
+            ncclGin net(dcomms[comm_id], 0);
+            net.flush(ncclCoopThread(), cuda::std::memory_order_acquire); // We even flush for QPs not used
         }
 #else
         auto qps_per_rdma_rank = ibgda_get_state()->num_rc_per_pe * ibgda_get_state()->num_devices_initialized;
@@ -240,8 +240,8 @@ __global__ void notify_dispatch(const int* num_tokens_per_rank,
                 ? signal_offset / kNumRDMARanks
                 : (signal_offset - head_signal_count) / kNumRDMARanks;
             // Only reset for the context assigned to this channel
-            auto ctx_id = channel_id % num_gin_ctxs;
-            ncclGin net(dcomms[ctx_id], 0);
+            auto comm_id = channel_id % num_gin_ctxs;
+            ncclGin net(dcomms[comm_id], 0);
             net.resetSignal(signal_id);
         }
         __syncthreads();
@@ -267,7 +267,7 @@ __global__ void notify_dispatch(const int* num_tokens_per_rank,
                 // GIN put is not warp-collective, so only one thread should execute it
                 if (lane_id == 0) {
                     // Distribute work across GIN contexts
-                    auto ctx_id = i % num_gin_ctxs;
+                    auto comm_id = i % num_gin_ctxs;
                     int dst_rank = translate_dst_rdma_rank<kLowLatencyMode>(i, nvl_rank);
                     size_t src_offset = reinterpret_cast<size_t>(rdma_recv_num_tokens_mixed.send_buffer(i)) -
                                     reinterpret_cast<size_t>(gin_base_ptr);
@@ -275,9 +275,9 @@ __global__ void notify_dispatch(const int* num_tokens_per_rank,
                                     reinterpret_cast<size_t>(gin_base_ptr);
                     size_t bytes = (NUM_MAX_NVL_PEERS + num_rdma_experts + 1) * sizeof(int);
 
-                    ncclGin net(dcomms[ctx_id], 0);
-                    ncclTeam world = ncclTeamWorld(dcomms[ctx_id]);
-                    ncclWindow_t nccl_window = nccl_windows[ctx_id];
+                    ncclGin net(dcomms[comm_id], 0);
+                    ncclTeam world = ncclTeamWorld(dcomms[comm_id]);
+                    ncclWindow_t nccl_window = nccl_windows[comm_id];
                     net.put(
                         world, dst_rank,
                         nccl_window, dst_offset,
@@ -315,15 +315,15 @@ __global__ void notify_dispatch(const int* num_tokens_per_rank,
         // Flush all contexts
         EP_DEVICE_ASSERT(num_gin_ctxs <= num_threads);
         if (thread_id < num_gin_ctxs) {
-            auto ctx_id = thread_id;
-            ncclGin net(dcomms[ctx_id], 0);
+            auto comm_id = thread_id;
+            ncclGin net(dcomms[comm_id], 0);
             net.flush(ncclCoopThread(), cuda::std::memory_order_acquire);
         }   
 #else
         if (thread_id < kNumRDMARanks and thread_id != rdma_rank)
             nvshmemi_ibgda_quiet(translate_dst_rdma_rank<kLowLatencyMode>(thread_id, nvl_rank), 0);
 #endif
-            __syncthreads();
+        __syncthreads();
 
         // Barrier
         if (thread_id == 0)
@@ -706,10 +706,10 @@ __global__ void __launch_bounds__(((kNumDispatchRDMASenderWarps + 1 + NUM_MAX_NV
     auto gin_signals_tail = signals_base + kNumRDMARanks * num_channels + kNumRDMARanks * channel_id; // move the signals to the corresponding channel after passing all head signals
     
     // Use a diff GIN context and window for each channel/SM
-    auto ctx_id = channel_id % num_gin_ctxs;
-    ncclGin net(dcomms[ctx_id], 0);
-    auto nccl_window = nccl_windows[ctx_id];
-    ncclTeam world = ncclTeamWorld(dcomms[ctx_id]);
+    auto comm_id = channel_id % num_gin_ctxs;
+    ncclGin net(dcomms[comm_id], 0);
+    auto nccl_window = nccl_windows[comm_id];
+    ncclTeam world = ncclTeamWorld(dcomms[comm_id]);
 #endif
 
     // NVL buffer layouts
@@ -1697,8 +1697,8 @@ __global__ void cached_notify(const int rdma_clean_offset,
         // Flush all contexts
         EP_DEVICE_ASSERT(num_gin_ctxs <= num_threads);
         if (thread_id < num_gin_ctxs) {
-            auto ctx_id = thread_id;
-            ncclGin net(dcomms[ctx_id], 0);
+            auto comm_id = thread_id;
+            ncclGin net(dcomms[comm_id], 0);
             net.flush(ncclCoopThread(), cuda::std::memory_order_acquire);
         }
 #else
@@ -1744,8 +1744,8 @@ __global__ void cached_notify(const int rdma_clean_offset,
                 ? signal_offset / num_rdma_ranks
                 : (signal_offset - head_signal_count) / num_rdma_ranks;
             // Only reset for the context assigned to this channel
-            auto ctx_id = channel_id % num_gin_ctxs;
-            ncclGin net(dcomms[ctx_id], 0);
+            auto comm_id = channel_id % num_gin_ctxs;
+            ncclGin net(dcomms[comm_id], 0);
             net.resetSignal(signal_id);
         }
         __syncthreads();
@@ -2185,10 +2185,10 @@ __global__ void __launch_bounds__((kNumForwarders + 1) * 32, 1) combine(int4* co
 
 #if defined(ENABLE_NCCL_GIN)
     // Use a diff GIN context and window for each channel/SM
-    auto ctx_id = channel_id % num_gin_ctxs;
-    auto nccl_window = nccl_windows[ctx_id];
-    ncclGin net(dcomms[ctx_id], 0);
-    ncclTeam world = ncclTeamWorld(dcomms[ctx_id]);
+    auto comm_id = channel_id % num_gin_ctxs;
+    auto nccl_window = nccl_windows[comm_id];
+    ncclGin net(dcomms[comm_id], 0);
+    ncclTeam world = ncclTeamWorld(dcomms[comm_id]);
 #endif    
 
     // NOTES: we decouple a channel into 2 SMs
