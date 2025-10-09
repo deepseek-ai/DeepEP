@@ -73,8 +73,6 @@ private:
     
     NcclGinMemHandle mem_handle_;
     // Per-communicator registration (multi-communicator path)
-    std::vector<std::array<void*, DEEP_EP_GIN_MAX_CONTEXTS>> host_wins_multi_;
-    std::vector<std::array<ncclGinWindow_t, DEEP_EP_GIN_MAX_CONTEXTS>> dev_wins_multi_;
     std::vector<std::array<ncclWindow_t, DEEP_EP_GIN_MAX_CONTEXTS>> dev_wins_multi_nccl_;
 
     // GIN signal and counter management (new API)
@@ -91,7 +89,6 @@ private:
 
     // Device arrays for contexts and windows
     ncclGinCtx_M<-1u>* d_gin_ctxs_ = nullptr;  // New API contexts
-    ncclGinWindow_t* d_gin_dev_wins_ = nullptr;
     ncclWindow_t* d_nccl_dev_wins_ = nullptr;
 
     // The assumption is that DeepSeek (256 experts) runs on at least 8 GPUs, hence 32 channels
