@@ -143,7 +143,7 @@ void clean_low_latency_buffer(int* clean_0, int num_clean_int_0,
                               cudaStream_t stream);
 
 void dispatch(void* packed_recv_x, void* packed_recv_x_scales,
-              int* packed_recv_src_info, int64_t* packed_recv_layout_range,
+              int64_t* packed_recv_src_info, int64_t* packed_recv_layout_range,
               int* packed_recv_count,
               int* mask_buffer,
               int* cumulative_local_expert_recv_stats,
@@ -160,14 +160,15 @@ void dispatch(void* packed_recv_x, void* packed_recv_x_scales,
 void combine(void* combined_x,
              void* rdma_recv_x, int* rdma_recv_flag, void* rdma_send_x,
              const void* x, const topk_idx_t* topk_idx, const float* topk_weights,
-             const int* src_info, const int64_t* layout_range,
+             const int64_t* src_info, const int64_t* layout_range,
+             bool overlap, int* packed_recv_count, int* comp_signal, int block_m, int threshold,
              int* mask_buffer,
              int64_t* combine_wait_recv_cost_stats,
              int* next_clean, int num_next_clean_int,
              int num_combined_tokens, int hidden, int num_max_dispatch_tokens_per_rank,
              int num_topk, int num_experts, int rank, int num_ranks,
              bool use_logfmt,
-             void* workspace, int num_device_sms,
+             void* workspace, int num_device_sms, int num_sms,
              cudaStream_t stream, int phases, bool zero_copy);
 
 void query_mask_buffer(int* mask_buffer_ptr, int num_ranks, int* output_mask_tensor, cudaStream_t stream);
