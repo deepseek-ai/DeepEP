@@ -12,9 +12,11 @@
 
 namespace deep_ep {
 
-Buffer::Buffer(int rank, int num_ranks, int64_t num_nvl_bytes, int64_t num_rdma_bytes, bool low_latency_mode, bool explicitly_destroy):
+Buffer::Buffer(int rank, int num_ranks, int64_t num_nvl_bytes, int64_t num_rdma_bytes, bool low_latency_mode, bool explicitly_destroy,
+               bool enable_shrink):
         rank(rank), num_ranks(num_ranks),
         num_nvl_bytes(num_nvl_bytes), num_rdma_bytes(num_rdma_bytes),
+        enable_shrink(enable_shrink),
         low_latency_mode(low_latency_mode),
         explicitly_destroy(explicitly_destroy),
         comm_stream(at::cuda::getStreamFromPool(true)) {
@@ -167,6 +169,10 @@ void Buffer::destroy() {
         CUDA_CHECK(cudaDeviceSynchronize());
         internode::barrier();
         internode::free(rdma_buffer_ptr);
+        if (enable_shrink) {
+            internode::free(mask_buffer_ptr);
+            internode::free(sync_buffer_ptr);
+        }
         internode::finalize();
     }
 #endif
@@ -229,6 +235,16 @@ void Buffer::sync(const std::vector<int> &device_ids,
         // Clean buffer (mainly for low-latency mode)
         CUDA_CHECK(cudaMemset(rdma_buffer_ptr, 0, num_rdma_bytes));
 
+        // Allocate and clean shrink buffer
+        if(enable_shrink) {
+            int num_mask_buffer_bytes = num_ranks * sizeof(int);
+            int num_sync_buffer_bytes = num_ranks * sizeof(int);
+            mask_buffer_ptr = reinterpret_cast<int*>(internode::alloc(num_mask_buffer_bytes, NUM_BUFFER_ALIGNMENT_BYTES));
+            sync_buffer_ptr = reinterpret_cast<int*>(internode::alloc(num_sync_buffer_bytes, NUM_BUFFER_ALIGNMENT_BYTES));
+            CUDA_CHECK(cudaMemset(mask_buffer_ptr, 0, num_mask_buffer_bytes));
+            CUDA_CHECK(cudaMemset(sync_buffer_ptr, 0, num_sync_buffer_bytes));
+        }
+
         // Barrier
         internode::barrier();
         CUDA_CHECK(cudaDeviceSynchronize());
@@ -269,7 +285,7 @@ Buffer::get_dispatch_layout(const torch::Tensor& topk_idx, int num_experts,
     if (is_internode_available())
         num_tokens_per_rdma_rank = torch::empty({num_rdma_ranks}, dtype(torch::kInt32).device(torch::kCUDA));
 
-    layout::get_dispatch_layout(topk_idx.data_ptr<int64_t>(),
+    layout::get_dispatch_layout(topk_idx.data_ptr<topk_idx_t>(),
                                 num_tokens_per_rank.data_ptr<int>(),
                                 num_tokens_per_rdma_rank.has_value() ? num_tokens_per_rdma_rank.value().data_ptr<int>() : nullptr,
                                 num_tokens_per_expert.data_ptr<int>(),
@@ -355,7 +371,7 @@ Buffer::intranode_dispatch(const torch::Tensor& x, const std::optional<torch::Te
 
     // Top-k checks
     int num_topk = 0;
-    int64_t* topk_idx_ptr = nullptr;
+    topk_idx_t* topk_idx_ptr = nullptr;
     float* topk_weights_ptr = nullptr;
     EP_HOST_ASSERT(topk_idx.has_value() == topk_weights.has_value());
     if (topk_idx.has_value()) {
@@ -366,7 +382,7 @@ Buffer::intranode_dispatch(const torch::Tensor& x, const std::optional<torch::Te
         EP_HOST_ASSERT(num_tokens == topk_idx->size(0) and num_tokens == topk_weights->size(0));
         EP_HOST_ASSERT(num_topk == topk_weights->size(1));
         EP_HOST_ASSERT(topk_weights->scalar_type() == torch::kFloat32);
-        topk_idx_ptr = topk_idx->data_ptr<int64_t>();
+        topk_idx_ptr = topk_idx->data_ptr<topk_idx_t>();
         topk_weights_ptr = topk_weights->data_ptr<float>();
     }
 
@@ -476,13 +492,13 @@ Buffer::intranode_dispatch(const torch::Tensor& x, const std::optional<torch::Te
     auto send_head = torch::empty({num_tokens, num_ranks}, dtype(torch::kInt32).device(torch::kCUDA));
 
     // Assign pointers
-    int64_t* recv_topk_idx_ptr = nullptr;
+    topk_idx_t* recv_topk_idx_ptr = nullptr;
     float* recv_topk_weights_ptr = nullptr;
     float* recv_x_scales_ptr = nullptr;
     if (topk_idx.has_value()) {
         recv_topk_idx = torch::empty({num_recv_tokens, num_topk}, topk_idx->options());
         recv_topk_weights = torch::empty({num_recv_tokens, num_topk}, topk_weights->options());
-        recv_topk_idx_ptr = recv_topk_idx->data_ptr<int64_t>();
+        recv_topk_idx_ptr = recv_topk_idx->data_ptr<topk_idx_t>();
         recv_topk_weights_ptr = recv_topk_weights->data_ptr<float>();
     }
     if (x_scales.has_value()) {
@@ -499,7 +515,7 @@ Buffer::intranode_dispatch(const torch::Tensor& x, const std::optional<torch::Te
                    num_channels * num_ranks * sizeof(int) * 2 +                                                             // Queue head and tail
                    num_channels * num_ranks * config.num_max_nvl_chunked_recv_tokens * hidden * recv_x.element_size() +     // Data buffer
                    num_channels * num_ranks * config.num_max_nvl_chunked_recv_tokens * sizeof(int) +                        // Source index buffer
-                   num_channels * num_ranks * config.num_max_nvl_chunked_recv_tokens * num_topk * sizeof(int64_t) +         // Top-k index buffer
+                   num_channels * num_ranks * config.num_max_nvl_chunked_recv_tokens * num_topk * sizeof(topk_idx_t) +      // Top-k index buffer
                    num_channels * num_ranks * config.num_max_nvl_chunked_recv_tokens * num_topk * sizeof(float) +           // Top-k weight buffer
                    num_channels * num_ranks * config.num_max_nvl_chunked_recv_tokens * sizeof(float) * num_scales           // FP8 scale buffer
                    <= num_nvl_bytes);
@@ -720,7 +736,7 @@ Buffer::internode_dispatch(const torch::Tensor& x, const std::optional<torch::Te
 
     // Top-k checks
     int num_topk = 0;
-    int64_t* topk_idx_ptr = nullptr;
+    topk_idx_t* topk_idx_ptr = nullptr;
     float* topk_weights_ptr = nullptr;
     EP_HOST_ASSERT(topk_idx.has_value() == topk_weights.has_value());
     if (topk_idx.has_value()) {
@@ -731,7 +747,7 @@ Buffer::internode_dispatch(const torch::Tensor& x, const std::optional<torch::Te
         EP_HOST_ASSERT(num_tokens == topk_idx->size(0) and num_tokens == topk_weights->size(0));
         EP_HOST_ASSERT(num_topk == topk_weights->size(1));
         EP_HOST_ASSERT(topk_weights->scalar_type() == torch::kFloat32);
-        topk_idx_ptr = topk_idx->data_ptr<int64_t>();
+        topk_idx_ptr = topk_idx->data_ptr<topk_idx_t>();
         topk_weights_ptr = topk_weights->data_ptr<float>();
     }
 
@@ -856,13 +872,13 @@ Buffer::internode_dispatch(const torch::Tensor& x, const std::optional<torch::Te
     }
 
     // Assign pointers
-    int64_t* recv_topk_idx_ptr = nullptr;
+    topk_idx_t* recv_topk_idx_ptr = nullptr;
     float* recv_topk_weights_ptr = nullptr;
     float* recv_x_scales_ptr = nullptr;
     if (topk_idx.has_value()) {
         recv_topk_idx = torch::empty({num_recv_tokens, num_topk}, topk_idx->options());
         recv_topk_weights = torch::empty({num_recv_tokens, num_topk}, topk_weights->options());
-        recv_topk_idx_ptr = recv_topk_idx->data_ptr<int64_t>();
+        recv_topk_idx_ptr = recv_topk_idx->data_ptr<topk_idx_t>();
         recv_topk_weights_ptr = recv_topk_weights->data_ptr<float>();
     }
     if (x_scales.has_value()) {
@@ -1081,6 +1097,7 @@ void Buffer::clean_low_latency_buffer(int num_max_dispatch_tokens_per_rank, int 
 
     internode_ll::clean_low_latency_buffer(clean_meta_0.first, clean_meta_0.second,
                                            clean_meta_1.first, clean_meta_1.second,
+                                           rank, num_ranks, mask_buffer_ptr, sync_buffer_ptr,
                                            at::cuda::getCurrentCUDAStream());
 #else
     EP_HOST_ASSERT(false and "NVSHMEM is disabled during compilation");
@@ -1103,7 +1120,7 @@ Buffer::low_latency_dispatch(const torch::Tensor& x, const torch::Tensor& topk_i
     EP_HOST_ASSERT(x.size(1) % sizeof(int4) == 0 and x.size(1) % 128 == 0);
     EP_HOST_ASSERT(topk_idx.dim() == 2 and topk_idx.is_contiguous());
     EP_HOST_ASSERT(x.size(0) == topk_idx.size(0) and x.size(0) <= num_max_dispatch_tokens_per_rank);
-    EP_HOST_ASSERT(topk_idx.scalar_type() == torch::kInt64);
+    EP_HOST_ASSERT(topk_idx.scalar_type() == c10::CppTypeToScalarType<topk_idx_t>::value);
     EP_HOST_ASSERT(num_experts % num_ranks == 0);
 
     // Diagnosis tensors
@@ -1169,11 +1186,12 @@ Buffer::low_latency_dispatch(const torch::Tensor& x, const torch::Tensor& topk_i
         internode_ll::dispatch(packed_recv_x.data_ptr(), packed_recv_x_scales_ptr,
                                packed_recv_src_info.data_ptr<int64_t>(), packed_recv_layout_range.data_ptr<int64_t>(),
                                packed_recv_count.data_ptr<int>(),
+                               mask_buffer_ptr,
                                cumulative_local_expert_recv_stats.has_value() ? cumulative_local_expert_recv_stats->data_ptr<int>() : nullptr,
                                dispatch_wait_recv_cost_stats.has_value() ? dispatch_wait_recv_cost_stats->data_ptr<int64_t>() : nullptr,
                                buffer.dispatch_rdma_recv_data_buffer, buffer.dispatch_rdma_recv_count_buffer,
                                buffer.dispatch_rdma_send_buffer,
-                               x.data_ptr(), topk_idx.data_ptr<int64_t>(),
+                               x.data_ptr(), topk_idx.data_ptr<topk_idx_t>(),
                                next_clean_meta.first, next_clean_meta.second,
                                num_tokens, hidden, num_max_dispatch_tokens_per_rank,
                                num_topk, num_experts, rank, num_ranks,
@@ -1226,7 +1244,7 @@ Buffer::low_latency_combine(const torch::Tensor& x, const torch::Tensor& topk_id
     EP_HOST_ASSERT(x.size(2) % sizeof(int4) == 0 and x.size(2) % 128 == 0);
     EP_HOST_ASSERT(topk_idx.dim() == 2 and topk_idx.is_contiguous());
     EP_HOST_ASSERT(topk_idx.size(0) == topk_weights.size(0) and topk_idx.size(1) == topk_weights.size(1));
-    EP_HOST_ASSERT(topk_idx.scalar_type() == torch::kInt64);
+    EP_HOST_ASSERT(topk_idx.scalar_type() == c10::CppTypeToScalarType<topk_idx_t>::value);
     EP_HOST_ASSERT(topk_weights.dim() == 2 and topk_weights.is_contiguous());
     EP_HOST_ASSERT(topk_weights.size(0) <= num_max_dispatch_tokens_per_rank);
     EP_HOST_ASSERT(topk_weights.scalar_type() == torch::kFloat32);
@@ -1283,10 +1301,11 @@ Buffer::low_latency_combine(const torch::Tensor& x, const torch::Tensor& topk_id
         internode_ll::combine(combined_x.data_ptr(),
                               buffer.combine_rdma_recv_data_buffer, buffer.combine_rdma_recv_flag_buffer,
                               buffer.combine_rdma_send_buffer,
-                              x.data_ptr(), topk_idx.data_ptr<int64_t>(), topk_weights.data_ptr<float>(),
+                              x.data_ptr(), topk_idx.data_ptr<topk_idx_t>(), topk_weights.data_ptr<float>(),
                               src_info.data_ptr<int64_t>(), layout_range.data_ptr<int64_t>(),
                               overlap, packed_recv_count.has_value() ? packed_recv_count->data_ptr<int>() : nullptr,
                               comp_signal.has_value() ? comp_signal->data_ptr<int>() : nullptr, block_m, threshold,
+                              mask_buffer_ptr,
                               combine_wait_recv_cost_stats.has_value() ? combine_wait_recv_cost_stats->data_ptr<int64_t>() : nullptr,
                               next_clean_meta.first, next_clean_meta.second,
                               num_combined_tokens, hidden, num_max_dispatch_tokens_per_rank,
@@ -1348,6 +1367,26 @@ bool is_sm90_compiled() {
 #endif
 }
 
+void Buffer::low_latency_update_mask_buffer(int rank_to_mask, bool mask) {
+    EP_HOST_ASSERT(mask_buffer_ptr != nullptr and "Shrink mode must be enabled");
+    EP_HOST_ASSERT(rank_to_mask >= 0 and rank_to_mask < num_ranks);
+    internode_ll::update_mask_buffer(mask_buffer_ptr, rank_to_mask, mask, at::cuda::getCurrentCUDAStream());
+}
+
+void Buffer::low_latency_query_mask_buffer(const torch::Tensor& mask_status) {
+    EP_HOST_ASSERT(mask_buffer_ptr != nullptr and "Shrink mode must be enabled");
+    EP_HOST_ASSERT(mask_status.numel() == num_ranks && mask_status.scalar_type() == torch::kInt32);
+
+    internode_ll::query_mask_buffer(mask_buffer_ptr, num_ranks,
+                                    reinterpret_cast<int*>(mask_status.data_ptr()),
+                                    at::cuda::getCurrentCUDAStream());
+}
+
+void Buffer::low_latency_clean_mask_buffer() {
+    EP_HOST_ASSERT(mask_buffer_ptr != nullptr and "Shrink mode must be enabled");
+    internode_ll::clean_mask_buffer(mask_buffer_ptr, num_ranks, at::cuda::getCurrentCUDAStream());
+}
+
 } // namespace deep_ep
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
@@ -1367,7 +1406,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         .def("current_stream_wait", &deep_ep::EventHandle::current_stream_wait);
 
     pybind11::class_<deep_ep::Buffer>(m, "Buffer")
-        .def(pybind11::init<int, int, int64_t, int64_t, bool, bool>())
+        .def(pybind11::init<int, int, int64_t, int64_t, bool, bool, bool>())
         .def("is_available", &deep_ep::Buffer::is_available)
         .def("get_num_rdma_ranks", &deep_ep::Buffer::get_num_rdma_ranks)
         .def("get_rdma_rank", &deep_ep::Buffer::get_rdma_rank)
@@ -1387,7 +1426,11 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         .def("clean_low_latency_buffer", &deep_ep::Buffer::clean_low_latency_buffer)
         .def("low_latency_dispatch", &deep_ep::Buffer::low_latency_dispatch)
         .def("low_latency_combine", &deep_ep::Buffer::low_latency_combine)
+        .def("low_latency_update_mask_buffer", &deep_ep::Buffer::low_latency_update_mask_buffer)
+        .def("low_latency_query_mask_buffer", &deep_ep::Buffer::low_latency_query_mask_buffer)
+        .def("low_latency_clean_mask_buffer", &deep_ep::Buffer::low_latency_clean_mask_buffer)
         .def("get_next_low_latency_combine_buffer", &deep_ep::Buffer::get_next_low_latency_combine_buffer);
 
     m.def("is_sm90_compiled", deep_ep::is_sm90_compiled);
+    m.attr("topk_idx_t") = py::cast(c10::CppTypeToScalarType<deep_ep::topk_idx_t>::value);
 }

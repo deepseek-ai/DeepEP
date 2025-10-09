@@ -62,8 +62,11 @@ cfg.dynamicSmemBytes = smem_size;
 #define SWITCH_RDMA_RANKS(case_macro) \
     switch (num_ranks / NUM_MAX_NVL_PEERS) { \
         case 2: case_macro(2); \
+        case 3: case_macro(3); \
         case 4: case_macro(4); \
+        case 6: case_macro(6); \
         case 8: case_macro(8); \
+        case 12: case_macro(12); \
         case 16: case_macro(16); \
         case 18: case_macro(18); \
         case 20: case_macro(20); \

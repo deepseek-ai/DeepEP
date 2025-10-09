@@ -6,15 +6,37 @@ import torch
 import torch.distributed as dist
 import numpy as np
 from functools import partial
-from typing import Optional
+from typing import Optional, Literal
 
 import deep_ep
 from utils import init_dist, bench, bench_kineto, calc_diff, hash_tensor, per_token_cast_back, ceil_div
 
 
+def simulate_failure_and_skip(rank: int, api: Literal["dispatch", "combine", "clean"], expected_masked_ranks: set[int]):
+    # Simulates rank failure when the rank first calls the corresponding communication API
+    failed_api_ranks = {
+        # API -> rank to fail (rank fails when it first calls the corresponding communication API)
+        'dispatch': 1, 'combine': 3, 'clean': 5
+    }
+    if rank in expected_masked_ranks:
+        # Rank already failed
+        return True
+    if api in failed_api_ranks.keys():
+        expected_masked_ranks.add(failed_api_ranks[api])
+        if failed_api_ranks[api] == rank:
+            print(f"Rank {rank} failed when first calling {api} communication API, exit...", flush=True)
+            return True
+    return False
+
+
+def query_mask_buffer_and_check(api: Literal["dispatch", "combine", "clean"], buffer: deep_ep.Buffer, mask_status: torch.Tensor, expected_masked_ranks: set[int]):
+    buffer.low_latency_query_mask_buffer(mask_status)
+    assert set(mask_status.nonzero().squeeze(-1).tolist()) == expected_masked_ranks
+
+
 def test_main(num_tokens: int, hidden: int, num_experts: int, num_topk: int,
               rank: int, num_ranks: int, group: dist.ProcessGroup, buffer: deep_ep.Buffer,
-              use_logfmt: bool = False, seed: int = 0):
+              use_logfmt: bool = False, shrink_test: bool = False, seed: int = 0):
     torch.manual_seed(seed + rank)
     random.seed(seed + rank)
 
@@ -37,11 +59,19 @@ def test_main(num_tokens: int, hidden: int, num_experts: int, num_topk: int,
 
     scores = torch.randn((num_tokens, num_experts), dtype=torch.float32, device='cuda').abs() + 1
     topk_idx = torch.topk(scores, num_topk, dim=-1, largest=True, sorted=True)[1]
+    topk_idx = topk_idx.to(deep_ep.topk_idx_t)
     topk_weights = torch.randn((num_tokens, num_topk), dtype=torch.float32, device='cuda').abs()
 
     # Randomly mask some positions
     for i in range(10):
         topk_idx[random.randint(0, num_tokens - 1), random.randint(0, num_topk - 1)] = -1
+
+    all_topk_idx = torch.empty((num_ranks, num_tokens, num_topk), dtype=topk_idx.dtype, device='cuda')
+    dist.all_gather_into_tensor(all_topk_idx, topk_idx, group=group)
+
+    # For failure simulation and shrink testing
+    mask_status = torch.zeros((num_ranks, ), dtype=torch.int, device='cuda')
+    expected_masked_ranks = set()
 
     # Check dispatch correctness
     do_check = True
@@ -51,6 +81,8 @@ def test_main(num_tokens: int, hidden: int, num_experts: int, num_topk: int,
             for dispatch_use_fp8 in (False, True):
                 for round_scale in (False, True) if dispatch_use_fp8 else (False, ):
                     for use_ue8m0 in (False, True) if round_scale else (False, ):
+                        if shrink_test and simulate_failure_and_skip(rank, "dispatch", expected_masked_ranks):
+                            break
                         num_times += 1
                         for i in range((num_times % 2) + 1):
                             cumulative_local_expert_recv_stats = torch.zeros((num_local_experts, ), dtype=torch.int, device='cuda')
@@ -60,11 +92,11 @@ def test_main(num_tokens: int, hidden: int, num_experts: int, num_topk: int,
                                                             cumulative_local_expert_recv_stats=cumulative_local_expert_recv_stats,
                                                             async_finish=not return_recv_hook, return_recv_hook=return_recv_hook)
                             hook() if return_recv_hook else event.current_stream_wait()
+                        if shrink_test:
+                            query_mask_buffer_and_check("dispatch", buffer, mask_status, expected_masked_ranks)
                         packed_recv_x = (packed_recv_x[0], packed_recv_x[1].contiguous()) if dispatch_use_fp8 else packed_recv_x
                         simulated_gemm_x = per_token_cast_back(packed_recv_x[0].view(-1, hidden), packed_recv_x[1].view(-1, hidden // 128)).view(packed_recv_x[0].shape) \
                             if dispatch_use_fp8 else packed_recv_x.clone()
-                        all_topk_idx = torch.empty((num_ranks, num_tokens, num_topk), dtype=topk_idx.dtype, device='cuda')
-                        dist.all_gather_into_tensor(all_topk_idx, topk_idx, group=group)
                         for i in range(num_local_experts if do_check else 0):
                             expert_id = rank * num_local_experts + i
                             recv_x = per_token_cast_back(packed_recv_x[0][i], packed_recv_x[1][i]) if dispatch_use_fp8 else packed_recv_x[i]
@@ -75,7 +107,7 @@ def test_main(num_tokens: int, hidden: int, num_experts: int, num_topk: int,
                             num_valid_tokens = recv_count.item()
                             assert cumulative_local_expert_recv_stats[i].item() == num_valid_tokens, f'{cumulative_local_expert_recv_stats[i].item()} != {num_valid_tokens}'
                             assert num_valid_tokens == (recv_layout_range & int_mask).sum().item(), f'{num_valid_tokens} != {recv_layout_range & int_mask}.sum().item()'
-                            assert num_valid_tokens == (all_topk_idx == expert_id).sum().item(), f'{num_valid_tokens} != {(all_topk_idx == expert_id).sum().item()}'
+                            assert num_valid_tokens == (all_topk_idx == expert_id).sum(dim=[1, 2])[mask_status==0].sum().item(), f'{num_valid_tokens} != {(all_topk_idx == expert_id).sum(dim=[1, 2])[mask_status==0].sum().item()}'
 
                             if num_valid_tokens == 0:
                                 continue
@@ -90,6 +122,8 @@ def test_main(num_tokens: int, hidden: int, num_experts: int, num_topk: int,
                                 else:
                                     assert (recv_x[:, -128:] - src_token_idx.view(-1, 1) % num_tokens).sum().item() == 0
                                 for j in range(num_ranks):
+                                    if shrink_test and mask_status[j]:
+                                        continue
                                     begin_idx, count = (recv_layout_range[j] >> 32).item(), (recv_layout_range[j] & int_mask).item()
                                     if not round_scale:
                                         assert (recv_x_amin == j - rank_offset).sum().item() == (all_topk_idx[j] == expert_id).sum().item()
@@ -101,6 +135,8 @@ def test_main(num_tokens: int, hidden: int, num_experts: int, num_topk: int,
                                 hash_value ^= hash_tensor(packed_recv_x[i, :num_valid_tokens])
 
                         # Check combine correctness
+                        if shrink_test and simulate_failure_and_skip(rank, "combine", expected_masked_ranks):
+                            break
                         for zero_copy in (False, ) if use_logfmt else (False, True):
                             for overlap in (False, True) if return_recv_hook else (False, ):
                                 if zero_copy:
@@ -114,22 +150,43 @@ def test_main(num_tokens: int, hidden: int, num_experts: int, num_topk: int,
                                         vaild_num = ceil_div(packed_recv_count[i], block_m)
                                         comp_signal[i * total_num_per_expert : i * total_num_per_expert + vaild_num] = threshold
                                     combined_x, event, hook = buffer.low_latency_combine(simulated_gemm_x, topk_idx, topk_weights, handle,
-                                                                                        overlap = overlap, packed_recv_count = packed_recv_count,
+                                                                                        overlap = True, packed_recv_count = packed_recv_count,
                                                                                         comp_signal = comp_signal, block_m = block_m, threshold = threshold, num_sms = num_sms,
                                                                                         use_logfmt=use_logfmt,
-                                                                                        async_finish=not return_recv_hook, zero_copy=zero_copy,
-                                                                                        return_recv_hook=return_recv_hook, out=out)
+                                                                                        async_finish=False, zero_copy=zero_copy,
+                                                                                        return_recv_hook=True, out=out)
                                 else:
                                     combined_x, event, hook = buffer.low_latency_combine(simulated_gemm_x, topk_idx, topk_weights, handle,
                                                                                         use_logfmt=use_logfmt,
                                                                                         async_finish=not return_recv_hook, zero_copy=zero_copy,
                                                                                         return_recv_hook=return_recv_hook, out=out)
                                 hook() if return_recv_hook else event.current_stream_wait()
+                                if shrink_test:
+                                    query_mask_buffer_and_check("combine", buffer, mask_status, expected_masked_ranks)
                                 if do_check:
+                                    if shrink_test:
+                                        owner_by_expert = (torch.arange(num_experts, device='cuda') // num_local_experts)
+                                        fail_owner_mask = (mask_status==1).index_select(0, owner_by_expert)
+                                        valid_topk_idx = topk_idx >= 0
+                                        failed_topk_idx = torch.zeros_like(topk_idx, device='cuda', dtype=torch.bool)
+                                        failed_topk_idx[valid_topk_idx] = fail_owner_mask.index_select(0, topk_idx[valid_topk_idx])
+                                        topk_idx[failed_topk_idx] = -1
                                     diff = calc_diff(current_x * topk_weights.masked_fill(topk_idx == -1, 0).sum(dim=1).view(-1, 1), combined_x)
                                     assert torch.isnan(combined_x).sum().item() == 0
-                                    assert diff < (9e-4 if dispatch_use_fp8 else 1e-5), f'Error: {diff=}, {dispatch_use_fp8=}, {zero_copy=}'
+                                    if not round_scale:
+                                        assert diff < (9e-4 if dispatch_use_fp8 else 1e-5), f'Error: {diff=}, {dispatch_use_fp8=}, {zero_copy=}'
                                     hash_value ^= hash_tensor(combined_x)
+
+                        # Clean buffer API
+                        if shrink_test:
+                            if simulate_failure_and_skip(rank, "clean", expected_masked_ranks):
+                                break
+
+                            buffer.clean_low_latency_buffer(num_tokens, hidden, num_experts)
+                            query_mask_buffer_and_check("clean", buffer, mask_status, expected_masked_ranks)
+
+    if shrink_test:
+        return
 
     # noinspection PyShadowingNames
     def large_gemm_with_hook(hook):
@@ -190,9 +247,9 @@ def test_loop(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
     buffer = deep_ep.Buffer(group, num_rdma_bytes=num_rdma_bytes, low_latency_mode=True,
                             num_qps_per_rank=num_experts // num_ranks,
                             allow_nvlink_for_low_latency_mode=not args.disable_nvlink, explicitly_destroy=True,
-                            allow_mnnvl=args.allow_mnnvl)
+                            allow_mnnvl=args.allow_mnnvl, enable_shrink=args.shrink_test)
     test_main(num_tokens, hidden, num_experts, num_topk, rank, num_ranks, group, buffer,
-              use_logfmt=args.use_logfmt, seed=1)
+              use_logfmt=args.use_logfmt, shrink_test=args.shrink_test, seed=1)
 
     do_pressure_test = args.pressure_test
     for seed in range(int(1e9) if do_pressure_test else 0):
@@ -232,6 +289,8 @@ if __name__ == '__main__':
                         help='Whether to test LogFMT combine')
     parser.add_argument("--pressure-test", action='store_true',
                         help='Whether to do pressure test')
+    parser.add_argument("--shrink-test", action='store_true',
+                        help='Whether to simulate failure and test shrink mode')
     args = parser.parse_args()
 
     num_processes = args.num_processes

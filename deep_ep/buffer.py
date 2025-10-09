@@ -35,6 +35,7 @@ class Buffer:
                  allow_nvlink_for_low_latency_mode: bool = True,
                  allow_mnnvl: bool = False,
                  explicitly_destroy: bool = False,
+                 enable_shrink: bool = False,
                  comm: Optional["mpi4py.MPI.Comm"] = None) -> None:
         """
         Initialize the communication buffer.
@@ -51,6 +52,7 @@ class Buffer:
                 Warning: PCIe connections may lead to errors due to memory ordering issues,
                 please make sure all connections are via NVLink.
             allow_mnnvl: whether to allow MNNVL
+            enable_shrink: whether to enable shrink mode. The enable mode allocates a mask buffer to support masking ranks dynamically.
             explicitly_destroy: If this flag is set to True, you need to explicitly call `destroy()` to release resources;
                 otherwise, the resources will be released by the destructor.
                 Note: Releasing resources in the destructor may cause Python's exception handling process to hang.
@@ -81,7 +83,8 @@ class Buffer:
         self.num_rdma_bytes = num_rdma_bytes
         self.low_latency_mode = low_latency_mode
         self.explicitly_destroy = explicitly_destroy
-        self.runtime = deep_ep_cpp.Buffer(self.rank, self.group_size, num_nvl_bytes, num_rdma_bytes, low_latency_mode, explicitly_destroy)
+        self.enable_shrink = enable_shrink
+        self.runtime = deep_ep_cpp.Buffer(self.rank, self.group_size, num_nvl_bytes, num_rdma_bytes, low_latency_mode, explicitly_destroy, enable_shrink)
 
         # Synchronize device IDs
         local_device_id = self.runtime.get_local_device_id()
@@ -99,8 +102,10 @@ class Buffer:
             os.environ['NVSHMEM_DISABLE_P2P'] = '0' if allow_nvlink_for_low_latency_mode else '1'
             os.environ['NVSHMEM_IB_ENABLE_IBGDA'] = '1'
             os.environ['NVSHMEM_IBGDA_NUM_RC_PER_PE'] = f'{num_qps_per_rank}'
+
             # Make sure QP depth is always larger than the number of on-flight WRs, so that we can skip WQ slot check
-            os.environ['NVSHMEM_QP_DEPTH'] = os.environ.get('NVSHMEM_QP_DEPTH', '1024')
+            self.nvshmem_qp_depth = int(os.environ.get('NVSHMEM_QP_DEPTH', '1024'))
+            os.environ['NVSHMEM_QP_DEPTH'] = str(self.nvshmem_qp_depth)
 
             # Reduce gpu memory usage
             # 6 default teams + 1 extra team
@@ -134,7 +139,6 @@ class Buffer:
 
         self.runtime.destroy()
         self.runtime = None
-
 
     @staticmethod
     def is_sm90_compiled():
@@ -234,10 +238,12 @@ class Buffer:
             4: Config(Buffer.num_sms, 6, 256, 6, 128),
             8: Config(Buffer.num_sms, 6, 256, 6, 128),
             16: Config(Buffer.num_sms, 36, 288, 20, 128),
-            24: Config(Buffer.num_sms, 8, 288, 32, 128),
-            32: Config(Buffer.num_sms, 32, 288, 32, 128),
-            64: Config(Buffer.num_sms, 20, 288, 28, 128),
-            128: Config(Buffer.num_sms, 20, 560, 32, 128),
+            24: Config(Buffer.num_sms, 32, 288, 8, 128),
+            32: Config(Buffer.num_sms, 32, 288, 8, 128),
+            48: Config(Buffer.num_sms, 32, 288, 8, 128),
+            64: Config(Buffer.num_sms, 32, 288, 8, 128),
+            96: Config(Buffer.num_sms, 20, 480, 12, 128),
+            128: Config(Buffer.num_sms, 20, 560, 12, 128),
             144: Config(Buffer.num_sms, 32, 720, 12, 128),
             160: Config(Buffer.num_sms, 28, 720, 12, 128),
         }
@@ -264,8 +270,10 @@ class Buffer:
             16: Config(Buffer.num_sms, 4, 288, 12, 128),
             24: Config(Buffer.num_sms, 1, 288, 8, 128),
             32: Config(Buffer.num_sms, 1, 288, 8, 128),
-            64: Config(Buffer.num_sms, 1, 288, 20, 128),
-            128: Config(Buffer.num_sms, 1, 560, 12, 128),
+            48: Config(Buffer.num_sms, 1, 288, 8, 128),
+            64: Config(Buffer.num_sms, 1, 288, 8, 128),
+            96: Config(Buffer.num_sms, 1, 480, 8, 128),
+            128: Config(Buffer.num_sms, 1, 560, 8, 128),
             144: Config(Buffer.num_sms, 2, 720, 8, 128),
             160: Config(Buffer.num_sms, 2, 720, 8, 128),
         }
@@ -281,8 +289,8 @@ class Buffer:
         Calculate the layout required for later communication.
 
         Arguments:
-            topk_idx: `[num_tokens, num_topk]`, dtype must be `torch.int64`, the expert indices selected by each token,
-                `-1` means no selections.
+            topk_idx: `[num_tokens, num_topk]`, dtype must be `deep_ep.topk_idx_t` (typically `torch.int64`), the expert
+                indices selected by each token, `-1` means no selections.
             num_experts: the number of experts.
             previous_event: the event to wait before actually executing the kernel.
             async_finish: the current stream will not wait for the communication kernels to be finished if set.
@@ -330,8 +338,8 @@ class Buffer:
                 rank (with the same GPU index), return `None` for intranode settings.
             is_token_in_rank: `[num_tokens, num_ranks]` with `torch.bool`, whether a token be sent to a rank.
             num_tokens_per_expert: `[num_experts]` with `torch.int`, the number of tokens to be sent to each expert.
-            topk_idx: `[num_tokens, num_topk]` with `torch.int64`, the expert indices selected by each token,
-                `-1` means no selections.
+            topk_idx: `[num_tokens, num_topk]` with `deep_ep.topk_idx_t` (typically `torch.int64`), the expert indices
+                selected by each token, `-1` means no selections.
             topk_weights: `[num_tokens, num_topk]` with `torch.float`, the expert weights of each token to dispatch.
             expert_alignment: align the number of tokens received by each local expert to this variable.
             num_worst_tokens: the worst number of tokens to receive, if specified, there will be no CPU sync, and it
@@ -544,8 +552,8 @@ class Buffer:
         Arguments:
             x: `torch.Tensor` with `torch.bfloat16`, shaped as `[num_tokens, hidden]`, only several hidden shapes are
                 supported. The number of tokens to be dispatched must be less than `num_max_dispatch_tokens_per_rank`.
-            topk_idx: `torch.Tensor` with `torch.int64`, shaped as `[num_tokens, num_topk]`, only several top-k shapes
-                are supported. `-1` indices (not selecting any expert) are supported.
+            topk_idx: `torch.Tensor` with `deep_ep.topk_idx_t` (typically `torch.int64`), shaped as `[num_tokens, num_topk]`,
+                only several top-k shapes are supported. `-1` indices (not selecting any expert) are supported.
             num_max_dispatch_tokens_per_rank: the maximum number of tokens to dispatch, all the ranks must hold the same value.
             num_experts: the number of all experts.
             cumulative_local_expert_recv_stats: a cumulative expert count tensor for statistics, which should have shape
@@ -581,6 +589,7 @@ class Buffer:
             event: the event after executing the kernel (valid only if `async_finish` is set).
             hook: the receiving hook function (valid only if `return_recv_hook` is set).
         """
+        assert self.nvshmem_qp_depth >= (num_max_dispatch_tokens_per_rank + 1) * 2
         packed_recv_x, packed_recv_x_scales, packed_recv_count, packed_recv_src_info, packed_recv_layout_range, event, hook = \
             self.runtime.low_latency_dispatch(x, topk_idx,
                                               cumulative_local_expert_recv_stats,
@@ -614,9 +623,9 @@ class Buffer:
         Arguments:
             x: `[num_local_experts, num_max_dispatch_tokens_per_rank * num_ranks, hidden]` with `torch.bfloat16`,
                 the local calculated tokens to be sent to this original rank and reduced.
-            topk_idx: `[num_combined_tokens, num_topk]` with `torch.int64`, the expert indices selected by the dispatched
-                tokens. `-1` indices (not selecting any expert) are supported. Note that, `num_combined_tokens` equals
-                to the number of dispatched tokens.
+            topk_idx: `[num_combined_tokens, num_topk]` with `deep_ep.topk_idx_t` (typically `torch.int64`), the expert
+                indices selected by the dispatched tokens. `-1` indices (not selecting any expert) are supported. Note that,
+                `num_combined_tokens` equals to the number of dispatched tokens.
             topk_weights: `[num_combined_tokens, num_topk]` with `torch.float`, the expert weights selected by the dispatched
                 tokens. The received tokens will be reduced with the weights in this tensor.
             handle: the communication handle given by the `dispatch` function.
@@ -649,6 +658,7 @@ class Buffer:
             hook: the receiving hook function (valid only if `return_recv_hook` is set).
         """
         src_info, layout_range, num_max_dispatch_tokens_per_rank, hidden, num_experts = handle
+        assert self.nvshmem_qp_depth >= (num_max_dispatch_tokens_per_rank + 1) * 2
         combined_x, event, hook = self.runtime.low_latency_combine(x, topk_idx, topk_weights, src_info, layout_range,
                                                                    overlap, packed_recv_count, comp_signal, block_m, threshold, num_sms,
                                                                    combine_wait_recv_cost_stats,
@@ -657,6 +667,34 @@ class Buffer:
                                                                    out)
         tensors_to_record = (x, topk_idx, topk_weights, src_info, layout_range, combined_x)
         return combined_x, EventOverlap(event, tensors_to_record if async_finish else None), hook
+
+    def low_latency_update_mask_buffer(self, rank_to_mask: int, mask: bool = False):
+        """
+        Mask (unmask) a rank during communication (dispatch, combine, and clean)
+
+        Arguments: 
+            rank: the rank to mask (unmask).
+            mask: if True, will mask the rank (do not recvfrom/sendto the rank), otherwise will unmask the rank.
+
+        """
+        self.runtime.low_latency_update_mask_buffer(rank_to_mask, mask)
+
+    def low_latency_query_mask_buffer(self, mask_status: torch.Tensor):
+        """
+        Query the mask status of all ranks
+
+        Arguments: 
+            mask_status: `[num_ranks]` with `torch.int`, the mask status of each rank. `1` means mask and `0` means unmasked.
+
+        """
+        self.runtime.low_latency_query_mask_buffer(mask_status)
+
+    def low_latency_clean_mask_buffer(self):
+        """
+        Clean the mask buffer
+
+        """
+        self.runtime.low_latency_clean_mask_buffer()
 
     def get_next_low_latency_combine_buffer(self, handle: object):
         """
