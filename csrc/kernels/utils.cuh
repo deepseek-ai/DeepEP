@@ -439,18 +439,19 @@ __device__ __forceinline__ void tma_store_wait() {
     asm volatile("cp.async.bulk.wait_group.read %0;" :: "n"(N) : "memory");
 }
 
-__device__ __forceinline__ void memcpy_tma_lane_launch_load(const void* src_ptr, size_t size,
-                                                            char* smem, uint64_t& tma_mbarrier) {
-    mbarrier_init(&tma_mbarrier, 1);
-    mbarrier_arrive_and_expect_tx(&tma_mbarrier, size);
-    tma_load_1d(smem, src_ptr, &tma_mbarrier, size);
+__device__ __forceinline__ void tma_load_1d_launch(char* smem_ptr, const void* gmem_ptr,
+                                                   uint64_t* mbar_ptr, size_t num_bytes) {
+    constexpr int arrive_count = 1;
+    mbarrier_init(mbar_ptr, arrive_count);
+    mbarrier_arrive_and_expect_tx(mbar_ptr, num_bytes);
+    tma_load_1d(smem_ptr, gmem_ptr, mbar_ptr, num_bytes);
 }
 
-__device__ __forceinline__ void memcpy_tma_lane_launch_store(void* dst_ptr, size_t size,
-                                                             const char* smem, uint64_t& tma_mbarrier) {
+__device__ __forceinline__ void tma_store_1d_launch(const char* smem_ptr, void* gmem_ptr,
+                                                    uint64_t* mbar_ptr, size_t num_bytes) {
     uint32_t tma_phase = 0;
-    mbarrier_wait(&tma_mbarrier, tma_phase);
-    tma_store_1d(smem, dst_ptr, size);
+    mbarrier_wait(mbar_ptr, tma_phase);
+    tma_store_1d(smem_ptr, gmem_ptr, num_bytes);
 }
 
 #endif

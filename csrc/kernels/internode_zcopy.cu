@@ -573,19 +573,9 @@ dispatch(int4* recv_x, float* recv_x_scales, topk_idx_t* recv_topk_idx, float* r
 
                 if (elect_one_sync()) {
                     // Load hidden into shared memory
-                    memcpy_tma_lane_launch_load(
-                        src_x,
-                        hidden_bytes,
-                        smem_ptrs[target_rank],
-                        tma_mbarrier[target_rank]
-                    );
+                    tma_load_1d_launch(smem_ptrs[target_rank], src_x, tma_mbarrier + target_rank, hidden_bytes);
                     // Load scales into shared memory
-                    memcpy_tma_lane_launch_load(
-                        src_scales,
-                        scale_bytes,
-                        tma_smem_scales[target_rank],
-                        tma_mbarrier_scales[target_rank]
-                    );
+                    tma_load_1d_launch(tma_smem_scales[target_rank], src_scales, tma_mbarrier_scales + target_rank, scale_bytes);
                 }
 
                 // Copy source meta
@@ -607,19 +597,9 @@ dispatch(int4* recv_x, float* recv_x_scales, topk_idx_t* recv_topk_idx, float* r
 
                 if (elect_one_sync()) {
                     // Store scales into target
-                    memcpy_tma_lane_launch_store(
-                        reinterpret_cast<void *>(target_nvl_rank_x_scales + total_offset * num_scales),
-                        scale_bytes,
-                        tma_smem_scales[target_rank],
-                        tma_mbarrier_scales[target_rank]
-                    );
+                    tma_store_1d_launch(tma_smem_scales[target_rank], reinterpret_cast<void *>(target_nvl_rank_x_scales + total_offset * num_scales), tma_mbarrier_scales + target_rank, scale_bytes);
                     // Store hidden into target
-                    memcpy_tma_lane_launch_store(
-                        shift_ptr(target_nvl_rank_x, total_offset * hidden_bytes),
-                        hidden_bytes,
-                        smem_ptrs[target_rank],
-                        tma_mbarrier[target_rank]
-                    );
+                    tma_store_1d_launch(smem_ptrs[target_rank], shift_ptr(target_nvl_rank_x, total_offset * hidden_bytes), tma_mbarrier + target_rank, hidden_bytes);
                 }
 
                 total_offset++;
