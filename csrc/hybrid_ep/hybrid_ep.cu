@@ -341,8 +341,9 @@ void HybridEpBuffer::open_handles_from_other_ranks(
                              &expert_output_token_handle);
       remote_allocator.open_handle((void**)(&dispatch_buffers.expert_output_prob_all_ranks[i]),
                              &expert_output_prob_handle);
-      remote_allocator.open_handle((void**)(&dispatch_buffers.expert_output_scaling_factor_all_ranks[i]),
-                             &expert_output_scaling_factor_handle);
+      if (use_fp8_dispatch) {
+        remote_allocator.open_handle((void**)(&dispatch_buffers.expert_output_scaling_factor_all_ranks[i]), &expert_output_scaling_factor_handle);
+      }
     } else {
       // For local rank, use direct pointer assignment (more efficient, no IPC overhead)
       dispatch_buffers.expert_output_token_all_ranks[i] =
