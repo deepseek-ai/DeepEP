@@ -154,8 +154,8 @@ std::pair<int, int> get_rdma_clean_meta(int hidden_int4, int num_scales, int num
                                         int num_topk_weights, int num_rdma_ranks, int num_rdma_recv_buffer_tokens,
                                         int num_channels, bool is_dispatch);
 
-void dispatch(void* recv_x, float* recv_x_scales, int64_t* recv_topk_idx, float* recv_topk_weights, void* recv_src_meta,
-              const void* x, const float* x_scales, const int64_t* topk_idx, const float* topk_weights,
+void dispatch(void* recv_x, float* recv_x_scales, topk_idx_t* recv_topk_idx, float* recv_topk_weights, void* recv_src_meta,
+              const void* x, const float* x_scales, const topk_idx_t* topk_idx, const float* topk_weights,
               int* send_rdma_head, int* send_nvl_head,
               int* recv_rdma_channel_prefix_matrix, int* recv_gbl_channel_prefix_matrix,
               const int* rdma_channel_prefix_matrix, const int* recv_rdma_rank_prefix_sum,

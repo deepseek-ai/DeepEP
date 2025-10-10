@@ -62,6 +62,7 @@ def test_main(args: argparse.Namespace, num_sms: int,
 
     # RDMA dispatch counts
     rdma_idx = topk_idx // (num_experts // num_nodes)
+    rdma_idx = rdma_idx.to(torch.int64)
     rdma_idx.masked_fill_(topk_idx == -1, -1)
     inplace_unique(rdma_idx, num_nodes)
     num_rdma_token_sent = rdma_idx.ne(-1).sum().item()

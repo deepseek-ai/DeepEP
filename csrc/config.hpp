@@ -213,7 +213,7 @@ size_t get_low_latency_rdma_size_hint(int num_max_dispatch_tokens_per_rank, int 
 struct InternodeDispatchBuffer {
     void* x = nullptr;
     float* x_scales = nullptr;
-    int64_t* topk_idx = nullptr;
+    topk_idx_t* topk_idx = nullptr;
     float* topk_weights = nullptr;
     void* source_meta = nullptr;
 };
@@ -243,7 +243,7 @@ struct InternodeDispatchLayout {
         }
 
         if (with_topk) {
-            num_bytes_topk_idx = num_tokens * num_topk * sizeof(int64_t);
+            num_bytes_topk_idx = num_tokens * num_topk * sizeof(topk_idx_t);
             total_bytes += num_bytes_topk_idx;
 
             num_bytes_topk_weights = num_tokens * num_topk * sizeof(float);
@@ -261,7 +261,7 @@ struct InternodeDispatchLayout {
             buffers.push_back({
                 advance_ptr(tmp, num_bytes_x),  // x
                 use_fp8 ? advance_ptr<float*>(tmp, num_bytes_x_scales) : nullptr,  // x_scales
-                with_topk ? advance_ptr<int64_t*>(tmp, num_bytes_topk_idx) : nullptr,  // topk_idx
+                with_topk ? advance_ptr<topk_idx_t*>(tmp, num_bytes_topk_idx) : nullptr,  // topk_idx
                 with_topk ? advance_ptr<float*>(tmp, num_bytes_topk_weights) : nullptr,  // topk_weights
                 advance_ptr(tmp, num_bytes_source_meta),  // source_meta
             });

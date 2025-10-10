@@ -1518,7 +1518,7 @@ Buffer::get_internode_dispatch_buffer(int num_tokens, int hidden, int num_topk, 
 
     auto x = use_fp8 ? torch::from_blob(buffer.x, {num_tokens, hidden}, torch::TensorOptions().dtype(torch::kFloat8_e4m3fn).device(torch::kCUDA)) : torch::from_blob(buffer.x, {num_tokens, hidden}, torch::TensorOptions().dtype(torch::kBFloat16).device(torch::kCUDA));
     auto x_scales = use_fp8 ? std::make_optional(torch::from_blob(buffer.x_scales, {num_tokens, hidden / 128}, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA))) : std::optional<torch::Tensor>();
-    auto topk_idx = with_topk ? std::make_optional(torch::from_blob(buffer.topk_idx, {num_tokens, num_topk}, torch::TensorOptions().dtype(torch::kInt64).device(torch::kCUDA))) : std::optional<torch::Tensor>();
+    auto topk_idx = with_topk ? std::make_optional(torch::from_blob(buffer.topk_idx, {num_tokens, num_topk}, torch::TensorOptions().dtype(c10::CppTypeToScalarType<deep_ep::topk_idx_t>::value).device(torch::kCUDA))) : std::optional<torch::Tensor>();
     auto topk_weights = with_topk ? std::make_optional(torch::from_blob(buffer.topk_weights, {num_tokens, num_topk}, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA))) : std::optional<torch::Tensor>();
 
     return {x, x_scales, topk_idx, topk_weights};
