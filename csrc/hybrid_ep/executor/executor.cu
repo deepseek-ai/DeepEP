@@ -112,7 +112,16 @@ Executor::dispatch_postprocess(HybridEpConfigInstance config, DispatchBuffers& d
     torch::Tensor row_id_map, tokens_per_expert;
 
     if(args.num_dispatched_tokens == 0 ) {
-        // Fast return if there are no tokens to dispatch
+        // Fast return empty tensors if there are no tokens to dispatch
+        dispatched_tokens = torch::empty({0, config.hidden_dim}, torch::dtype(args.hidden.dtype()).device(torch::kCUDA));
+        if(config.forward_dispatch_api) {
+            dispatched_probs = torch::empty({0}, torch::dtype(torch::kFloat32).device(torch::kCUDA));
+        }
+        if(config.token_data_type == TOKEN_DATA_TYPE::UINT8) {
+            dispatched_scaling_factor = torch::empty({0, config.hidden_dim / 128}, torch::dtype(torch::kFloat32).device(torch::kCUDA));
+        }
+        row_id_map = torch::empty({0, config.num_of_experts_per_rank}, torch::dtype(torch::kInt32).device(torch::kCUDA));
+        tokens_per_expert = torch::full({config.num_of_experts_per_rank}, 0, torch::dtype(torch::kInt32).device(torch::kCUDA));
         return std::make_tuple(dispatched_tokens, dispatched_probs, dispatched_scaling_factor, row_id_map, tokens_per_expert);
     }
 
@@ -123,12 +132,7 @@ Executor::dispatch_postprocess(HybridEpConfigInstance config, DispatchBuffers& d
         int num_dispatched_tokens = args.num_dispatched_tokens;
         int num_permuted_tokens = args.num_permuted_tokens;
         torch::Tensor num_dispatched_tokens_tensor = args.num_dispatched_tokens_tensor.value();
-        // If args.num_dispatched_tokens >= 0, which means that the sync-free model is used.
-        // Otherwise, we will use the values in args.num_dispatched_tokens_tensor.
-        if (num_dispatched_tokens < 0) {
-          num_dispatched_tokens = num_dispatched_tokens_tensor.item<int32_t>();
-        }
-    
+
         if (args.row_id_map.has_value()) {
           // The row_id_map is valid, which means that the cached model is used.
           // Then we will use the values in args directly.
