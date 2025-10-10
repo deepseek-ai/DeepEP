@@ -816,8 +816,6 @@ __global__ void __launch_bounds__(((kNumDispatchRDMASenderWarps + 1 + NUM_MAX_NV
                         ncclGin_None{},             // no counter
                         ncclCoopThread()
                     );
-
-                    // Do we need to flush to imitate <true> in nvshmemi_ibgda_put_nbi_warp?
                 }
                 __syncwarp(); // Synchronize all warp threads
 #else
@@ -1052,8 +1050,7 @@ __global__ void __launch_bounds__(((kNumDispatchRDMASenderWarps + 1 + NUM_MAX_NV
                             ncclGin_None{},             // no signal
                             ncclGin_None{},             // no counter
                             ncclCoopThread()
-                        );                                
-                        // Do we need to flush to imitate <true> in nvshmemi_ibgda_put_nbi_warp?
+                        );
                     }
                     __syncwarp(); // Synchronize all warp threads                    
 #else
@@ -1089,8 +1086,6 @@ __global__ void __launch_bounds__(((kNumDispatchRDMASenderWarps + 1 + NUM_MAX_NV
                         cuda::thread_scope_thread,                      // alreadyReleased (default)
                         cuda::thread_scope_thread                       // expected_scope (default)
                     );
-                    
-                    // Flush to ensure signal operation completes?
 #else
                     nvshmemi_ibgda_amo_nonfetch_add(rdma_channel_tail.buffer(rdma_rank),
                                                     num_tokens_to_issue,
@@ -1330,11 +1325,7 @@ __global__ void __launch_bounds__(((kNumDispatchRDMASenderWarps + 1 + NUM_MAX_NV
                     cuda::thread_scope_thread,                      // alreadyReleased (default)
                     cuda::thread_scope_thread                       // expected_scope (default)
                 );
-                
-                // Flush to ensure signal operation completes?
 #else
-                //nvshmemi_ibgda_amo_nonfetch_add(rdma_channel_head.buffer(rdma_rank), min_head - last_head,
-                //                                translate_dst_rdma_rank<kLowLatencyMode>(lane_id, nvl_rank), channel_id, lane_id == rdma_rank);
                 nvshmemi_ibgda_amo_nonfetch_add(rdma_channel_head.buffer(rdma_rank),
                                                 min_head - last_head,
                                                 translate_dst_rdma_rank<kLowLatencyMode>(lane_id, nvl_rank),
@@ -2593,8 +2584,6 @@ __global__ void __launch_bounds__((kNumForwarders + 1) * 32, 1) combine(int4* co
                                 ncclGin_None{},             // no counter
                                 ncclCoopThread()
                             );
-
-                            // do we need to flush to imitate <true> in nvshmemi_ibgda_put_nbi_warp?
                         }
                         __syncwarp(); // Synchronize all warp threads
 
@@ -2626,8 +2615,6 @@ __global__ void __launch_bounds__((kNumForwarders + 1) * 32, 1) combine(int4* co
                             cuda::thread_scope_thread,                      // alreadyReleased (default)
                             cuda::thread_scope_thread                       // expected_scope (default)
                         );
-                        
-                        // Flush to ensure signal operation completes?
 #else
                         nvshmemi_ibgda_amo_nonfetch_add(rdma_channel_tail.buffer(rdma_rank),
                                                         num_chunked_tokens,
@@ -2768,7 +2755,6 @@ __global__ void __launch_bounds__((kNumForwarders + 1) * 32, 1) combine(int4* co
                             cuda::thread_scope_thread,                      // alreadyReleased (default)
                             cuda::thread_scope_thread                       // expected_scope (default)
                         );
-
 #else
                         nvshmemi_ibgda_amo_nonfetch_add(rdma_channel_head.buffer(rdma_rank),
                                                         min_head - last_rdma_head,

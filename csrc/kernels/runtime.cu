@@ -86,6 +86,18 @@ int init(const std::vector<uint8_t>& root_unique_id_val, int rank, int num_ranks
                    "Unique ID size mismatch");
     
     internode::BackendType backend_type = internode::detect_backend_type();
+    
+    // NCCL-GIN requires low_latency_mode to be enabled
+    // NCCL-GIN has 1:1 mapping between GPU and rank with no concept of "shared PE"
+    if (backend_type == internode::BackendType::NCCL_GIN && !low_latency_mode) {
+        throw std::runtime_error(
+            "NCCL-GIN backend requires low_latency_mode=True. "
+            "The NCCL-GIN backend uses a 1:1 GPU-to-rank mapping without shared PE support, "
+            "which is incompatible with the high-throughput (HT) kernels used when low_latency_mode=False. "
+            "Please set low_latency_mode=True when using NCCL-GIN."
+        );
+    }
+    
     // Initialize backend with packed unique IDs (backend will unpack them internally)
     internode::initialize_backend(backend_type, root_unique_id_val, rank, num_ranks, low_latency_mode, qps_per_rank);     
     internode::CommunicationBackend* backend = internode::get_backend();
