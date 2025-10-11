@@ -1,5 +1,5 @@
-#include <vector>
 #include <cstring>
+#include <vector>
 
 #include "configs.cuh"
 #include "exception.cuh"
@@ -7,21 +7,21 @@
 #include "utils.cuh"
 
 #ifndef DISABLE_NVSHMEM
-#include "nvshmem.h"
 #include "ibgda_device.cuh"
+#include "nvshmem.h"
 #endif
 
 namespace deep_ep {
 
 namespace intranode {
 
-template<int kNumRanks>
+template <int kNumRanks>
 __global__ void barrier(int** barrier_signal_ptrs, int rank) {
     barrier_block<kNumRanks>(barrier_signal_ptrs, rank);
 }
 
 void barrier(int** barrier_signal_ptrs, int rank, int num_ranks, cudaStream_t stream) {
-#define BARRIER_LAUNCH_CASE(ranks) \
+#define BARRIER_LAUNCH_CASE(ranks)                                  \
     LAUNCH_KERNEL(&cfg, barrier<ranks>, barrier_signal_ptrs, rank); \
     break
 
@@ -30,7 +30,7 @@ void barrier(int** barrier_signal_ptrs, int rank, int num_ranks, cudaStream_t st
 #undef BARRIER_LAUNCH_CASE
 }
 
-} // namespace intranode
+}  // namespace intranode
 
 namespace internode {
 
@@ -46,7 +46,7 @@ std::vector<uint8_t> get_unique_id() {
     return result;
 }
 
-int init(const std::vector<uint8_t> &root_unique_id_val, int rank, int num_ranks, bool low_latency_mode) {
+int init(const std::vector<uint8_t>& root_unique_id_val, int rank, int num_ranks, bool low_latency_mode) {
     nvshmemx_uniqueid_t root_unique_id;
     nvshmemx_init_attr_t attr;
     std::memcpy(&root_unique_id, root_unique_id_val.data(), sizeof(nvshmemx_uniqueid_t));
@@ -58,8 +58,13 @@ int init(const std::vector<uint8_t> &root_unique_id_val, int rank, int num_ranks
     if (low_latency_mode and num_ranks > NUM_MAX_NVL_PEERS) {
         EP_HOST_ASSERT(cpu_rdma_team == NVSHMEM_TEAM_INVALID);
         EP_HOST_ASSERT(num_ranks % NUM_MAX_NVL_PEERS == 0);
-        EP_HOST_ASSERT(nvshmem_team_split_strided(NVSHMEM_TEAM_WORLD, rank % NUM_MAX_NVL_PEERS, NUM_MAX_NVL_PEERS,
-                                                  num_ranks / NUM_MAX_NVL_PEERS, &cpu_rdma_team_config, 0, &cpu_rdma_team) == 0);
+        EP_HOST_ASSERT(nvshmem_team_split_strided(NVSHMEM_TEAM_WORLD,
+                                                  rank % NUM_MAX_NVL_PEERS,
+                                                  NUM_MAX_NVL_PEERS,
+                                                  num_ranks / NUM_MAX_NVL_PEERS,
+                                                  &cpu_rdma_team_config,
+                                                  0,
+                                                  &cpu_rdma_team) == 0);
         EP_HOST_ASSERT(cpu_rdma_team != NVSHMEM_TEAM_INVALID);
     }
 
@@ -88,6 +93,6 @@ void finalize() {
 }
 #endif
 
-} // namespace internode
+}  // namespace internode
 
-} // namespace deep_ep
+}  // namespace deep_ep

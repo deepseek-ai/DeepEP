@@ -54,7 +54,8 @@ def per_token_cast_to_fp8(x: torch.Tensor):
     x_padded = torch.nn.functional.pad(x, (0, aligned_n - n), mode='constant', value=0)
     x_padded_view = x_padded.view(m, -1, 128)
     x_amax = x_padded_view.abs().float().amax(dim=2).view(m, -1).clamp(1e-4)
-    return (x_padded_view * (448.0 / x_amax.unsqueeze(2))).to(torch.float8_e4m3fn).view(m, aligned_n)[:, :n].contiguous(), (x_amax / 448.0).view(m, -1)
+    return (x_padded_view * (448.0 / x_amax.unsqueeze(2))).to(torch.float8_e4m3fn).view(
+        m, aligned_n)[:, :n].contiguous(), (x_amax / 448.0).view(m, -1)
 
 
 def per_token_cast_back(x_fp8: torch.Tensor, x_scales: torch.Tensor):
@@ -70,7 +71,7 @@ def per_token_cast_back(x_fp8: torch.Tensor, x_scales: torch.Tensor):
         x_scales = x_scales.view(dtype=torch.float)
     x_fp32_padded = x_fp8_padded.to(torch.float32).view(x_fp8.size(0), -1, 128)
     x_scales = x_scales.view(x_fp8.size(0), -1, 1)
-    return (x_fp32_padded * x_scales).view(x_fp8_padded.shape).to(torch.bfloat16)[:,:n].contiguous()
+    return (x_fp32_padded * x_scales).view(x_fp8_padded.shape).to(torch.bfloat16)[:, :n].contiguous()
 
 
 def inplace_unique(x: torch.Tensor, num_slots: int):
@@ -125,6 +126,7 @@ def bench(fn, num_warmups: int = 50, num_tests: int = 50, post_fn=None):
 
 
 class empty_suppress:
+
     def __enter__(self):
         return self
 
@@ -133,6 +135,7 @@ class empty_suppress:
 
 
 class suppress_stdout_stderr:
+
     def __enter__(self):
         self.outnull_file = open(os.devnull, 'w')
         self.errnull_file = open(os.devnull, 'w')
@@ -167,8 +170,12 @@ class suppress_stdout_stderr:
         self.errnull_file.close()
 
 
-def bench_kineto(fn, kernel_names: Union[str, tuple], num_tests: int = 30, suppress_kineto_output: bool = False,
-                 trace_path: Optional[str] = None, barrier_comm_profiling: bool = False,
+def bench_kineto(fn,
+                 kernel_names: Union[str, tuple],
+                 num_tests: int = 30,
+                 suppress_kineto_output: bool = False,
+                 trace_path: Optional[str] = None,
+                 barrier_comm_profiling: bool = False,
                  num_kernels_per_period: int = 1):
     # Profile
     suppress = suppress_stdout_stderr if suppress_kineto_output else empty_suppress
@@ -225,8 +232,7 @@ def bench_kineto(fn, kernel_names: Union[str, tuple], num_tests: int = 30, suppr
             durations = [event['dur'] / 1e6 for event in events]
             assert len(durations) % num_kernels_per_period == 0
             num_kernel_patterns = len(durations) // num_kernels_per_period
-            kernel_durations[i] = [sum(durations[j::num_kernels_per_period]) / num_kernel_patterns
-                               for j in range(num_kernels_per_period)]
+            kernel_durations[i] = [sum(durations[j::num_kernels_per_period]) / num_kernel_patterns for j in range(num_kernels_per_period)]
 
     # Return execution durations
     return kernel_durations if is_tuple else kernel_durations[0]

@@ -1,4 +1,5 @@
 #include <ATen/cuda/CUDAContext.h>
+
 #include <memory>
 
 #include "kernels/exception.cuh"
@@ -20,12 +21,10 @@ struct EventHandle {
 
     EventHandle(const EventHandle& other) = default;
 
-    void current_stream_wait() const {
-        at::cuda::getCurrentCUDAStream().unwrap().wait(*event);
-    }
+    void current_stream_wait() const { at::cuda::getCurrentCUDAStream().unwrap().wait(*event); }
 };
 
-torch::Event create_event(const at::cuda::CUDAStream &s) {
+torch::Event create_event(const at::cuda::CUDAStream& s) {
     auto event = torch::Event(torch::kCUDA);
     event.record(s);
     return event;
@@ -40,4 +39,4 @@ void stream_wait(const at::cuda::CUDAStream& s, const EventHandle& event) {
     s.unwrap().wait(*event.event);
 }
 
-} // namespace deep_ep
+}  // namespace deep_ep

@@ -29,14 +29,17 @@ class Buffer:
 
     num_sms: int = 20
 
-    def __init__(self, group: Optional[dist.ProcessGroup],
-                 num_nvl_bytes: int = 0, num_rdma_bytes: int = 0,
-                 low_latency_mode: bool = False, num_qps_per_rank: int = 24,
+    def __init__(self,
+                 group: Optional[dist.ProcessGroup],
+                 num_nvl_bytes: int = 0,
+                 num_rdma_bytes: int = 0,
+                 low_latency_mode: bool = False,
+                 num_qps_per_rank: int = 24,
                  allow_nvlink_for_low_latency_mode: bool = True,
                  allow_mnnvl: bool = False,
                  explicitly_destroy: bool = False,
                  enable_shrink: bool = False,
-                 comm: Optional["mpi4py.MPI.Comm"] = None) -> None:
+                 comm: Optional["mpi4py.MPI.Comm"] = None) -> None:  # noqa: F821
         """
         Initialize the communication buffer.
 
@@ -84,7 +87,8 @@ class Buffer:
         self.low_latency_mode = low_latency_mode
         self.explicitly_destroy = explicitly_destroy
         self.enable_shrink = enable_shrink
-        self.runtime = deep_ep_cpp.Buffer(self.rank, self.group_size, num_nvl_bytes, num_rdma_bytes, low_latency_mode, explicitly_destroy, enable_shrink)
+        self.runtime = deep_ep_cpp.Buffer(self.rank, self.group_size, num_nvl_bytes, num_rdma_bytes, low_latency_mode, explicitly_destroy,
+                                          enable_shrink)
 
         # Synchronize device IDs
         local_device_id = self.runtime.get_local_device_id()
@@ -192,8 +196,11 @@ class Buffer:
         ts: torch.Stream = self.runtime.get_comm_stream()
         return torch.cuda.Stream(stream_id=ts.stream_id, device_index=ts.device_index, device_type=ts.device_type)
 
-    def get_local_buffer_tensor(self, dtype: torch.dtype, size: Optional[torch.Size] = None,
-                                offset: int = 0, use_rdma_buffer: bool = False) -> torch.Tensor:
+    def get_local_buffer_tensor(self,
+                                dtype: torch.dtype,
+                                size: Optional[torch.Size] = None,
+                                offset: int = 0,
+                                use_rdma_buffer: bool = False) -> torch.Tensor:
         """
         Get the raw buffer (slice supported) as a PyTorch tensor.
 
@@ -366,8 +373,9 @@ class Buffer:
         # Internode
         if self.runtime.get_num_rdma_ranks() > 1:
             assert num_worst_tokens == 0, 'Internode dispatch does not support `num_worst_tokens > 0`'
-            return self.internode_dispatch(x, handle, num_tokens_per_rank, num_tokens_per_rdma_rank, is_token_in_rank, num_tokens_per_expert,
-                                           topk_idx, topk_weights, expert_alignment, config, previous_event, async_finish, allocate_on_comm_stream)
+            return self.internode_dispatch(x, handle, num_tokens_per_rank, num_tokens_per_rdma_rank, is_token_in_rank,
+                                           num_tokens_per_expert, topk_idx, topk_weights, expert_alignment, config, previous_event,
+                                           async_finish, allocate_on_comm_stream)
 
         # Launch the kernel with cached or non-cached mode
         x, x_scales = x if isinstance(x, tuple) else (x, None)
@@ -376,10 +384,8 @@ class Buffer:
             rank_prefix_matrix, channel_prefix_matrix, recv_channel_prefix_matrix, recv_src_idx, is_token_in_rank, send_head = handle
             num_recv_tokens = recv_src_idx.size(0)
             recv_x, recv_x_scales, _, _, _, _, _, _, _, _, event = self.runtime.intranode_dispatch(
-                x, x_scales, None, None,
-                None, is_token_in_rank, None, num_recv_tokens, rank_prefix_matrix, channel_prefix_matrix,
-                expert_alignment, num_worst_tokens, config,
-                getattr(previous_event, 'event', None), async_finish, allocate_on_comm_stream)
+                x, x_scales, None, None, None, is_token_in_rank, None, num_recv_tokens, rank_prefix_matrix, channel_prefix_matrix,
+                expert_alignment, num_worst_tokens, config, getattr(previous_event, 'event', None), async_finish, allocate_on_comm_stream)
             return (recv_x, recv_x_scales) if x_scales is not None else recv_x, None, None, None, None, EventOverlap(event)
         else:
             assert num_tokens_per_rank is not None and is_token_in_rank is not None and num_tokens_per_expert is not None
@@ -389,7 +395,10 @@ class Buffer:
                                                 expert_alignment, num_worst_tokens, config,
                                                 getattr(previous_event, 'event', None), async_finish, allocate_on_comm_stream)
             handle = (rank_prefix_matrix, channel_prefix_matrix, recv_channel_prefix_matrix, recv_src_idx, is_token_in_rank, send_head)
-            return (recv_x, recv_x_scales) if x_scales is not None else recv_x, recv_topk_idx, recv_topk_weights, num_recv_tokens_per_expert_list, handle, EventOverlap(event)
+            return (
+                recv_x, recv_x_scales
+            ) if x_scales is not None else recv_x, recv_topk_idx, recv_topk_weights, num_recv_tokens_per_expert_list, handle, EventOverlap(
+                event)
 
     # noinspection PyTypeChecker
     def combine(self, x: torch.Tensor, handle: Tuple,
@@ -433,10 +442,10 @@ class Buffer:
         bias_0, bias_1 = Buffer._unpack_bias(bias)
 
         # Launch the kernel
-        recv_x, recv_topk_weights, event = self.runtime.intranode_combine(
-            x, topk_weights, bias_0, bias_1,
-            src_idx, rank_prefix_matrix, channel_prefix_matrix, send_head, config,
-            getattr(previous_event, 'event', None), async_finish, allocate_on_comm_stream)
+        recv_x, recv_topk_weights, event = self.runtime.intranode_combine(x, topk_weights, bias_0, bias_1, src_idx, rank_prefix_matrix,
+                                                                          channel_prefix_matrix, send_head, config,
+                                                                          getattr(previous_event, 'event',
+                                                                                  None), async_finish, allocate_on_comm_stream)
         return recv_x, recv_topk_weights, EventOverlap(event)
 
     # noinspection PyTypeChecker
@@ -467,9 +476,7 @@ class Buffer:
             num_recv_tokens = recv_src_meta.size(0)
             num_rdma_recv_tokens = send_nvl_head.size(0)
             recv_x, recv_x_scales, _, _, _, _, _, _, _, _, _, _, _, _, event = self.runtime.internode_dispatch(
-                x, x_scales, topk_idx, topk_weights,
-                None, None, is_token_in_rank, None,
-                num_recv_tokens, num_rdma_recv_tokens,
+                x, x_scales, topk_idx, topk_weights, None, None, is_token_in_rank, None, num_recv_tokens, num_rdma_recv_tokens,
                 rdma_channel_prefix_matrix, recv_rdma_rank_prefix_sum, gbl_channel_prefix_matrix, recv_gbl_rank_prefix_sum,
                 expert_alignment, config, getattr(previous_event, 'event', None), async_finish, allocate_on_comm_stream)
             return (recv_x, recv_x_scales) if x_scales is not None else recv_x, None, None, None, None, EventOverlap(event)
@@ -484,11 +491,13 @@ class Buffer:
                 num_tokens_per_rank, num_tokens_per_rdma_rank, is_token_in_rank, num_tokens_per_expert,
                 0, 0, None, None, None, None,
                 expert_alignment, config, getattr(previous_event, 'event', None), async_finish, allocate_on_comm_stream)
-            handle = (is_token_in_rank,
-                      rdma_channel_prefix_matrix, gbl_channel_prefix_matrix,
-                      recv_rdma_channel_prefix_matrix, recv_rdma_rank_prefix_sum, recv_gbl_channel_prefix_matrix, recv_gbl_rank_prefix_sum,
-                      recv_src_meta, send_rdma_head, send_nvl_head)
-            return (recv_x, recv_x_scales) if x_scales is not None else recv_x, recv_topk_idx, recv_topk_weights, num_recv_tokens_per_expert_list, handle, EventOverlap(event)
+            handle = (is_token_in_rank, rdma_channel_prefix_matrix, gbl_channel_prefix_matrix, recv_rdma_channel_prefix_matrix,
+                      recv_rdma_rank_prefix_sum, recv_gbl_channel_prefix_matrix, recv_gbl_rank_prefix_sum, recv_src_meta, send_rdma_head,
+                      send_nvl_head)
+            return (
+                recv_x, recv_x_scales
+            ) if x_scales is not None else recv_x, recv_topk_idx, recv_topk_weights, num_recv_tokens_per_expert_list, handle, EventOverlap(
+                event)
 
     # noinspection PyTypeChecker
     def internode_combine(self, x: torch.Tensor, handle: Union[tuple, list],
@@ -512,12 +521,12 @@ class Buffer:
         bias_0, bias_1 = Buffer._unpack_bias(bias)
 
         # Launch the kernel
-        combined_x, combined_topk_weights, event = self.runtime.internode_combine(
-            x, topk_weights, bias_0, bias_1,
-            src_meta, is_combined_token_in_rank,
-            rdma_channel_prefix_matrix, rdma_rank_prefix_sum, gbl_channel_prefix_matrix,
-            send_rdma_head, send_nvl_head, config, getattr(previous_event, 'event', None),
-            async_finish, allocate_on_comm_stream)
+        combined_x, combined_topk_weights, event = self.runtime.internode_combine(x, topk_weights, bias_0, bias_1, src_meta,
+                                                                                  is_combined_token_in_rank, rdma_channel_prefix_matrix,
+                                                                                  rdma_rank_prefix_sum, gbl_channel_prefix_matrix,
+                                                                                  send_rdma_head, send_nvl_head, config,
+                                                                                  getattr(previous_event, 'event',
+                                                                                          None), async_finish, allocate_on_comm_stream)
         return combined_x, combined_topk_weights, EventOverlap(event)
 
     def clean_low_latency_buffer(self, num_max_dispatch_tokens_per_rank: int, hidden: int, num_experts: int) -> None:
@@ -598,10 +607,8 @@ class Buffer:
                                               use_fp8, round_scale, use_ue8m0,
                                               async_finish, return_recv_hook)
         handle = (packed_recv_src_info, packed_recv_layout_range, num_max_dispatch_tokens_per_rank, x.size(1), num_experts)
-        tensors_to_record = (x, topk_idx,
-                             packed_recv_x, packed_recv_x_scales, packed_recv_count,
-                             packed_recv_src_info, packed_recv_layout_range,
-                             cumulative_local_expert_recv_stats)
+        tensors_to_record = (x, topk_idx, packed_recv_x, packed_recv_x_scales, packed_recv_count, packed_recv_src_info,
+                             packed_recv_layout_range, cumulative_local_expert_recv_stats)
         return (packed_recv_x, packed_recv_x_scales) if use_fp8 else packed_recv_x, packed_recv_count, handle, \
             EventOverlap(event, tensors_to_record if async_finish else None), hook
 
@@ -647,10 +654,8 @@ class Buffer:
         src_info, layout_range, num_max_dispatch_tokens_per_rank, hidden, num_experts = handle
         assert self.nvshmem_qp_depth >= (num_max_dispatch_tokens_per_rank + 1) * 2
         combined_x, event, hook = self.runtime.low_latency_combine(x, topk_idx, topk_weights, src_info, layout_range,
-                                                                   combine_wait_recv_cost_stats,
-                                                                   num_max_dispatch_tokens_per_rank, num_experts,
-                                                                   use_logfmt, zero_copy, async_finish, return_recv_hook,
-                                                                   out)
+                                                                   combine_wait_recv_cost_stats, num_max_dispatch_tokens_per_rank,
+                                                                   num_experts, use_logfmt, zero_copy, async_finish, return_recv_hook, out)
         tensors_to_record = (x, topk_idx, topk_weights, src_info, layout_range, combined_x)
         return combined_x, EventOverlap(event, tensors_to_record if async_finish else None), hook
 
@@ -658,7 +663,7 @@ class Buffer:
         """
         Mask (unmask) a rank during communication (dispatch, combine, and clean)
 
-        Arguments: 
+        Arguments:
             rank: the rank to mask (unmask).
             mask: if True, will mask the rank (do not recvfrom/sendto the rank), otherwise will unmask the rank.
 
@@ -669,7 +674,7 @@ class Buffer:
         """
         Query the mask status of all ranks
 
-        Arguments: 
+        Arguments:
             mask_status: `[num_ranks]` with `torch.int`, the mask status of each rank. `1` means mask and `0` means unmasked.
 
         """

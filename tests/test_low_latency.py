@@ -16,7 +16,9 @@ def simulate_failure_and_skip(rank: int, api: Literal["dispatch", "combine", "cl
     # Simulates rank failure when the rank first calls the corresponding communication API
     failed_api_ranks = {
         # API -> rank to fail (rank fails when it first calls the corresponding communication API)
-        'dispatch': 1, 'combine': 3, 'clean': 5
+        'dispatch': 1,
+        'combine': 3,
+        'clean': 5
     }
     if rank in expected_masked_ranks:
         # Rank already failed
@@ -29,14 +31,23 @@ def simulate_failure_and_skip(rank: int, api: Literal["dispatch", "combine", "cl
     return False
 
 
-def query_mask_buffer_and_check(api: Literal["dispatch", "combine", "clean"], buffer: deep_ep.Buffer, mask_status: torch.Tensor, expected_masked_ranks: set[int]):
+def query_mask_buffer_and_check(api: Literal["dispatch", "combine", "clean"], buffer: deep_ep.Buffer, mask_status: torch.Tensor,
+                                expected_masked_ranks: set[int]):
     buffer.low_latency_query_mask_buffer(mask_status)
     assert set(mask_status.nonzero().squeeze(-1).tolist()) == expected_masked_ranks
 
 
-def test_main(num_tokens: int, hidden: int, num_experts: int, num_topk: int,
-              rank: int, num_ranks: int, group: dist.ProcessGroup, buffer: deep_ep.Buffer,
-              use_logfmt: bool = False, shrink_test: bool = False, seed: int = 0):
+def test_main(num_tokens: int,
+              hidden: int,
+              num_experts: int,
+              num_topk: int,
+              rank: int,
+              num_ranks: int,
+              group: dist.ProcessGroup,
+              buffer: deep_ep.Buffer,
+              use_logfmt: bool = False,
+              shrink_test: bool = False,
+              seed: int = 0):
     torch.manual_seed(seed + rank)
     random.seed(seed + rank)
 
@@ -103,11 +114,15 @@ def test_main(num_tokens: int, hidden: int, num_experts: int, num_topk: int,
                             recv_count, recv_src_info, recv_layout_range = packed_recv_count[i], handle[0][i], handle[1][i]
 
                             # Check expert indices
-                            int_mask = (2 ** 32) - 1
+                            int_mask = (2**32) - 1
                             num_valid_tokens = recv_count.item()
-                            assert cumulative_local_expert_recv_stats[i].item() == num_valid_tokens, f'{cumulative_local_expert_recv_stats[i].item()} != {num_valid_tokens}'
-                            assert num_valid_tokens == (recv_layout_range & int_mask).sum().item(), f'{num_valid_tokens} != {recv_layout_range & int_mask}.sum().item()'
-                            assert num_valid_tokens == (all_topk_idx == expert_id).sum(dim=[1, 2])[mask_status==0].sum().item(), f'{num_valid_tokens} != {(all_topk_idx == expert_id).sum(dim=[1, 2])[mask_status==0].sum().item()}'
+                            assert cumulative_local_expert_recv_stats[i].item(
+                            ) == num_valid_tokens, f'{cumulative_local_expert_recv_stats[i].item()} != {num_valid_tokens}'
+                            assert num_valid_tokens == (
+                                recv_layout_range
+                                & int_mask).sum().item(), f'{num_valid_tokens} != {recv_layout_range & int_mask}.sum().item()'
+                            assert num_valid_tokens == (all_topk_idx == expert_id).sum(dim=[1, 2])[mask_status == 0].sum().item(
+                            ), f'{num_valid_tokens} != {(all_topk_idx == expert_id).sum(dim=[1, 2])[mask_status==0].sum().item()}'
 
                             if num_valid_tokens == 0:
                                 continue
@@ -141,17 +156,22 @@ def test_main(num_tokens: int, hidden: int, num_experts: int, num_topk: int,
                             if zero_copy:
                                 buffer.get_next_low_latency_combine_buffer(handle)[:, :, :] = simulated_gemm_x
                             out = torch.empty((num_tokens, hidden), dtype=torch.bfloat16, device='cuda')
-                            combined_x, event, hook = buffer.low_latency_combine(simulated_gemm_x, topk_idx, topk_weights, handle,
-                                                                                use_logfmt=use_logfmt,
-                                                                                async_finish=not return_recv_hook, zero_copy=zero_copy,
-                                                                                return_recv_hook=return_recv_hook, out=out)
+                            combined_x, event, hook = buffer.low_latency_combine(simulated_gemm_x,
+                                                                                 topk_idx,
+                                                                                 topk_weights,
+                                                                                 handle,
+                                                                                 use_logfmt=use_logfmt,
+                                                                                 async_finish=not return_recv_hook,
+                                                                                 zero_copy=zero_copy,
+                                                                                 return_recv_hook=return_recv_hook,
+                                                                                 out=out)
                             hook() if return_recv_hook else event.current_stream_wait()
                             if shrink_test:
                                 query_mask_buffer_and_check("combine", buffer, mask_status, expected_masked_ranks)
                             if do_check:
                                 if shrink_test:
                                     owner_by_expert = (torch.arange(num_experts, device='cuda') // num_local_experts)
-                                    fail_owner_mask = (mask_status==1).index_select(0, owner_by_expert)
+                                    fail_owner_mask = (mask_status == 1).index_select(0, owner_by_expert)
                                     valid_topk_idx = topk_idx >= 0
                                     failed_topk_idx = torch.zeros_like(topk_idx, device='cuda', dtype=torch.bool)
                                     failed_topk_idx[valid_topk_idx] = fail_owner_mask.index_select(0, topk_idx[valid_topk_idx])
@@ -187,8 +207,12 @@ def test_main(num_tokens: int, hidden: int, num_experts: int, num_topk: int,
                                         cumulative_local_expert_recv_stats=cumulative_local_expert_recv_stats,
                                         use_fp8=True, async_finish=False, return_recv_hook=return_recv_hook)
         large_gemm_with_hook(hook) if return_recv_hook else None
-        combined_x, event, hook = buffer.low_latency_combine(simulated_gemm_x, topk_idx, topk_weights, handle,
-                                                             use_logfmt=use_logfmt, return_recv_hook=return_recv_hook)
+        combined_x, event, hook = buffer.low_latency_combine(simulated_gemm_x,
+                                                             topk_idx,
+                                                             topk_weights,
+                                                             handle,
+                                                             use_logfmt=use_logfmt,
+                                                             return_recv_hook=return_recv_hook)
         large_gemm_with_hook(hook) if return_recv_hook else None
 
     # Calculate bandwidth
@@ -202,21 +226,29 @@ def test_main(num_tokens: int, hidden: int, num_experts: int, num_topk: int,
 
     # Dispatch + combine testing
     avg_t, min_t, max_t = bench(partial(test_func, return_recv_hook=False))
-    print(f'[rank {rank}] Dispatch + combine bandwidth: {(num_dispatch_comm_bytes + num_combine_comm_bytes) / 1e9 / avg_t:.2f} GB/s, '
-          f'avg_t={avg_t * 1e6:.2f} us, min_t={min_t * 1e6:.2f} us, max_t={max_t * 1e6:.2f} us', flush=True)
+    print(
+        f'[rank {rank}] Dispatch + combine bandwidth: {(num_dispatch_comm_bytes + num_combine_comm_bytes) / 1e9 / avg_t:.2f} GB/s, '
+        f'avg_t={avg_t * 1e6:.2f} us, min_t={min_t * 1e6:.2f} us, max_t={max_t * 1e6:.2f} us',
+        flush=True)
 
     # Separate profiling
     for return_recv_hook in (False, True):
         group.barrier()
         dispatch_t, combine_t = bench_kineto(partial(test_func, return_recv_hook=return_recv_hook),
-                                             kernel_names=('dispatch', 'combine'), barrier_comm_profiling=True,
-                                             suppress_kineto_output=True, num_kernels_per_period=2 if return_recv_hook else 1)
+                                             kernel_names=('dispatch', 'combine'),
+                                             barrier_comm_profiling=True,
+                                             suppress_kineto_output=True,
+                                             num_kernels_per_period=2 if return_recv_hook else 1)
         if not return_recv_hook:
-            print(f'[rank {rank}] Dispatch bandwidth: {num_dispatch_comm_bytes / 1e9 / dispatch_t:.2f} GB/s, avg_t={dispatch_t * 1e6:.2f} us | '
-                  f'Combine bandwidth: {num_combine_comm_bytes / 1e9 / combine_t:.2f} GB/s, avg_t={combine_t * 1e6:.2f} us', flush=True)
+            print(
+                f'[rank {rank}] Dispatch bandwidth: {num_dispatch_comm_bytes / 1e9 / dispatch_t:.2f} GB/s, avg_t={dispatch_t * 1e6:.2f} us | '
+                f'Combine bandwidth: {num_combine_comm_bytes / 1e9 / combine_t:.2f} GB/s, avg_t={combine_t * 1e6:.2f} us',
+                flush=True)
         else:
-            print(f'[rank {rank}] Dispatch send/recv time: {dispatch_t[0] * 1e6:.2f} + {dispatch_t[1] * 1e6:.2f} us | '
-                  f'Combine send/recv time: {combine_t[0] * 1e6:.2f} + {combine_t[1] * 1e6:.2f} us', flush=True)
+            print(
+                f'[rank {rank}] Dispatch send/recv time: {dispatch_t[0] * 1e6:.2f} + {dispatch_t[1] * 1e6:.2f} us | '
+                f'Combine send/recv time: {combine_t[0] * 1e6:.2f} + {combine_t[1] * 1e6:.2f} us',
+                flush=True)
     return hash_value
 
 
@@ -229,22 +261,51 @@ def test_loop(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
     num_rdma_bytes = deep_ep.Buffer.get_low_latency_rdma_size_hint(num_tokens, hidden, num_ranks, num_experts)
     if local_rank == 0:
         print(f'Allocating buffer size: {num_rdma_bytes / 1e6} MB ...', flush=True)
-    buffer = deep_ep.Buffer(group, num_rdma_bytes=num_rdma_bytes, low_latency_mode=True,
+    buffer = deep_ep.Buffer(group,
+                            num_rdma_bytes=num_rdma_bytes,
+                            low_latency_mode=True,
                             num_qps_per_rank=num_experts // num_ranks,
-                            allow_nvlink_for_low_latency_mode=not args.disable_nvlink, explicitly_destroy=True,
-                            allow_mnnvl=args.allow_mnnvl, enable_shrink=args.shrink_test)
-    test_main(num_tokens, hidden, num_experts, num_topk, rank, num_ranks, group, buffer,
-              use_logfmt=args.use_logfmt, shrink_test=args.shrink_test, seed=1)
+                            allow_nvlink_for_low_latency_mode=not args.disable_nvlink,
+                            explicitly_destroy=True,
+                            allow_mnnvl=args.allow_mnnvl,
+                            enable_shrink=args.shrink_test)
+    test_main(num_tokens,
+              hidden,
+              num_experts,
+              num_topk,
+              rank,
+              num_ranks,
+              group,
+              buffer,
+              use_logfmt=args.use_logfmt,
+              shrink_test=args.shrink_test,
+              seed=1)
 
     do_pressure_test = args.pressure_test
     for seed in range(int(1e9) if do_pressure_test else 0):
         if local_rank == 0:
             print(f'Testing with seed {seed} ...', flush=True)
-        ref_hash = test_main(num_tokens, hidden, num_experts, num_topk, rank, num_ranks, group, buffer,
-                             use_logfmt=args.use_logfmt, seed=seed)
+        ref_hash = test_main(num_tokens,
+                             hidden,
+                             num_experts,
+                             num_topk,
+                             rank,
+                             num_ranks,
+                             group,
+                             buffer,
+                             use_logfmt=args.use_logfmt,
+                             seed=seed)
         for i in range(20):
-            assert test_main(num_tokens, hidden, num_experts, num_topk, rank, num_ranks, group, buffer,
-                             use_logfmt=args.use_logfmt, seed=seed) == ref_hash, f'Error: seed={seed}'
+            assert test_main(num_tokens,
+                             hidden,
+                             num_experts,
+                             num_topk,
+                             rank,
+                             num_ranks,
+                             group,
+                             buffer,
+                             use_logfmt=args.use_logfmt,
+                             seed=seed) == ref_hash, f'Error: seed={seed}'
 
     # Destroy the buffer runtime and communication group
     buffer.destroy()
@@ -256,26 +317,16 @@ if __name__ == '__main__':
     # TODO: you may modify NUMA binding for less CPU overhead
     # TODO: buggy with `num_tokens=512`
     parser = argparse.ArgumentParser(description='Test low-latency EP kernels')
-    parser.add_argument('--num-processes', type=int, default=8,
-                       help='Number of processes to spawn (default: 8)')
-    parser.add_argument('--num-tokens', type=int, default=128,
-                       help='Number of tokens (default: 128)')
-    parser.add_argument('--hidden', type=int, default=7168,
-                       help='Hidden dimension size (default: 7168)')
-    parser.add_argument('--num-topk', type=int, default=8,
-                       help='Number of top-k experts (default: 8)')
-    parser.add_argument('--num-experts', type=int, default=288,
-                       help='Number of experts (default: 288)')
-    parser.add_argument('--allow-mnnvl', action="store_true",
-                        help='Allow MNNVL for communication')
-    parser.add_argument('--disable-nvlink', action='store_true',
-                        help='Whether to disable NVLink for testing')
-    parser.add_argument('--use-logfmt', action='store_true',
-                        help='Whether to test LogFMT combine')
-    parser.add_argument("--pressure-test", action='store_true',
-                        help='Whether to do pressure test')
-    parser.add_argument("--shrink-test", action='store_true',
-                        help='Whether to simulate failure and test shrink mode')
+    parser.add_argument('--num-processes', type=int, default=8, help='Number of processes to spawn (default: 8)')
+    parser.add_argument('--num-tokens', type=int, default=128, help='Number of tokens (default: 128)')
+    parser.add_argument('--hidden', type=int, default=7168, help='Hidden dimension size (default: 7168)')
+    parser.add_argument('--num-topk', type=int, default=8, help='Number of top-k experts (default: 8)')
+    parser.add_argument('--num-experts', type=int, default=288, help='Number of experts (default: 288)')
+    parser.add_argument('--allow-mnnvl', action="store_true", help='Allow MNNVL for communication')
+    parser.add_argument('--disable-nvlink', action='store_true', help='Whether to disable NVLink for testing')
+    parser.add_argument('--use-logfmt', action='store_true', help='Whether to test LogFMT combine')
+    parser.add_argument("--pressure-test", action='store_true', help='Whether to do pressure test')
+    parser.add_argument("--shrink-test", action='store_true', help='Whether to simulate failure and test shrink mode')
     args = parser.parse_args()
 
     num_processes = args.num_processes

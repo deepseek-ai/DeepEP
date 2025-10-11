@@ -25,7 +25,9 @@ if __name__ == '__main__':
             nvshmem_host_lib = get_nvshmem_host_lib_name(nvshmem_dir)
             import nvidia.nvshmem as nvshmem
         except (ModuleNotFoundError, AttributeError, IndexError):
-            print('Warning: `NVSHMEM_DIR` is not specified, and the NVSHMEM module is not installed. All internode and low-latency features are disabled\n')
+            print(
+                'Warning: `NVSHMEM_DIR` is not specified, and the NVSHMEM module is not installed. All internode and low-latency features are disabled\n'
+            )
             disable_nvshmem = True
     else:
         disable_nvshmem = False
@@ -33,8 +35,7 @@ if __name__ == '__main__':
     if not disable_nvshmem:
         assert os.path.exists(nvshmem_dir), f'The specified NVSHMEM directory does not exist: {nvshmem_dir}'
 
-    cxx_flags = ['-O3', '-Wno-deprecated-declarations', '-Wno-unused-variable',
-                 '-Wno-sign-compare', '-Wno-reorder', '-Wno-attributes']
+    cxx_flags = ['-O3', '-Wno-deprecated-declarations', '-Wno-unused-variable', '-Wno-sign-compare', '-Wno-reorder', '-Wno-attributes']
     nvcc_flags = ['-O3', '-Xcompiler', '-O3']
     sources = ['csrc/deep_ep.cpp', 'csrc/kernels/runtime.cu', 'csrc/kernels/layout.cu', 'csrc/kernels/intranode.cu']
     include_dirs = ['csrc/']
@@ -112,23 +113,15 @@ if __name__ == '__main__':
     except Exception as _:
         revision = ''
 
-    setuptools.setup(
-        name='deep_ep',
-        version='1.2.1' + revision,
-        packages=setuptools.find_packages(
-            include=['deep_ep']
-        ),
-        ext_modules=[
-            CUDAExtension(
-                name='deep_ep_cpp',
-                include_dirs=include_dirs,
-                library_dirs=library_dirs,
-                sources=sources,
-                extra_compile_args=extra_compile_args,
-                extra_link_args=extra_link_args
-            )
-        ],
-        cmdclass={
-            'build_ext': BuildExtension
-        }
-    )
+    setuptools.setup(name='deep_ep',
+                     version='1.2.1' + revision,
+                     packages=setuptools.find_packages(include=['deep_ep']),
+                     ext_modules=[
+                         CUDAExtension(name='deep_ep_cpp',
+                                       include_dirs=include_dirs,
+                                       library_dirs=library_dirs,
+                                       sources=sources,
+                                       extra_compile_args=extra_compile_args,
+                                       extra_link_args=extra_link_args)
+                     ],
+                     cmdclass={'build_ext': BuildExtension})

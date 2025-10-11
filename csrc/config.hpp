@@ -28,13 +28,15 @@ struct Config {
     int num_max_rdma_chunked_recv_tokens;
 
     Config(int num_sms,
-           int num_max_nvl_chunked_send_tokens, int num_max_nvl_chunked_recv_tokens,
-           int num_max_rdma_chunked_send_tokens, int num_max_rdma_chunked_recv_tokens) :
-            num_sms(num_sms),
-            num_max_nvl_chunked_send_tokens(num_max_nvl_chunked_send_tokens),
-            num_max_nvl_chunked_recv_tokens(num_max_nvl_chunked_recv_tokens),
-            num_max_rdma_chunked_send_tokens(num_max_rdma_chunked_send_tokens),
-            num_max_rdma_chunked_recv_tokens(num_max_rdma_chunked_recv_tokens) {
+           int num_max_nvl_chunked_send_tokens,
+           int num_max_nvl_chunked_recv_tokens,
+           int num_max_rdma_chunked_send_tokens,
+           int num_max_rdma_chunked_recv_tokens)
+        : num_sms(num_sms),
+          num_max_nvl_chunked_send_tokens(num_max_nvl_chunked_send_tokens),
+          num_max_nvl_chunked_recv_tokens(num_max_nvl_chunked_recv_tokens),
+          num_max_rdma_chunked_send_tokens(num_max_rdma_chunked_send_tokens),
+          num_max_rdma_chunked_recv_tokens(num_max_rdma_chunked_recv_tokens) {
         EP_HOST_ASSERT(num_sms >= 0);
         EP_HOST_ASSERT(num_max_nvl_chunked_send_tokens > 0 and num_max_nvl_chunked_recv_tokens > 0);
         EP_HOST_ASSERT(num_max_nvl_chunked_send_tokens < num_max_nvl_chunked_recv_tokens);
@@ -171,18 +173,16 @@ struct LowLatencyLayout {
         // Assign pointers
         // NOTES: we still leave some space for distinguishing dispatch/combine buffer,
         // so you may see some parameters are duplicated
-        for (int i = 0; i < 2; ++ i) {
-            buffers[i] = {
-                static_cast<int>(signaling_buffer_bytes / sizeof(int)),
-                advance(rdma_buffer, signaling_buffer_bytes_aligned * 2 + send_buffer_bytes * i),
-                advance(rdma_buffer, signaling_buffer_bytes_aligned * 2 + send_buffer_bytes * 2 + recv_buffer_bytes * i),
-                advance<int*>(rdma_buffer, signaling_buffer_bytes_aligned * i),
-                advance(rdma_buffer, signaling_buffer_bytes_aligned * 2 + send_buffer_bytes * i),
-                advance(rdma_buffer, signaling_buffer_bytes_aligned * 2 + send_buffer_bytes * 2 + recv_buffer_bytes * i),
-                advance<int*>(rdma_buffer, signaling_buffer_bytes_aligned * i),
-                advance(rdma_buffer, signaling_buffer_bytes_aligned * 2 + send_buffer_bytes * i),
-                num_bytes_per_combine_msg
-            };
+        for (int i = 0; i < 2; ++i) {
+            buffers[i] = {static_cast<int>(signaling_buffer_bytes / sizeof(int)),
+                          advance(rdma_buffer, signaling_buffer_bytes_aligned * 2 + send_buffer_bytes * i),
+                          advance(rdma_buffer, signaling_buffer_bytes_aligned * 2 + send_buffer_bytes * 2 + recv_buffer_bytes * i),
+                          advance<int*>(rdma_buffer, signaling_buffer_bytes_aligned * i),
+                          advance(rdma_buffer, signaling_buffer_bytes_aligned * 2 + send_buffer_bytes * i),
+                          advance(rdma_buffer, signaling_buffer_bytes_aligned * 2 + send_buffer_bytes * 2 + recv_buffer_bytes * i),
+                          advance<int*>(rdma_buffer, signaling_buffer_bytes_aligned * i),
+                          advance(rdma_buffer, signaling_buffer_bytes_aligned * 2 + send_buffer_bytes * i),
+                          num_bytes_per_combine_msg};
         }
     }
 };
@@ -192,4 +192,4 @@ size_t get_low_latency_rdma_size_hint(int num_max_dispatch_tokens_per_rank, int 
     return ((num_bytes + NUM_BUFFER_ALIGNMENT_BYTES) / NUM_BUFFER_ALIGNMENT_BYTES) * NUM_BUFFER_ALIGNMENT_BYTES;
 }
 
-} // namespace deep_ep
+}  // namespace deep_ep
