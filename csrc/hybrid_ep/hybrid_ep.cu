@@ -412,7 +412,7 @@ HybridEpBuffer::dispatch(torch::Tensor hidden, c10::optional<torch::Tensor> prob
                  torch::Tensor sparse_to_dense_map,
                  torch::Tensor rdma_to_attn_map, torch::Tensor attn_to_rdma_map,
                  c10::optional<torch::Tensor> num_dispatched_tokens_tensor,
-                 int64_t num_dispatched_tokens,
+                 c10::optional<int64_t> num_dispatched_tokens,
                  int64_t num_of_tokens_per_rank,
                  bool with_probs) {
   // Check the input tensors
@@ -439,12 +439,9 @@ HybridEpBuffer::dispatch(torch::Tensor hidden, c10::optional<torch::Tensor> prob
   args.rdma_to_attn_map = rdma_to_attn_map;
   args.attn_to_rdma_map = attn_to_rdma_map;
   args.num_dispatched_tokens_tensor = num_dispatched_tokens_tensor;
-  if(num_dispatched_tokens < 0 ) {
-    // In this case, user will set the size of the output buffer by themselves.
-    args.num_dispatched_tokens = num_dispatched_tokens_tensor.value().item<int64_t>();
-  }else {
-    args.num_dispatched_tokens = num_dispatched_tokens;
-  }
+  args.num_dispatched_tokens = (num_dispatched_tokens.has_value()) ? 
+                                num_dispatched_tokens.value() : 
+                                num_dispatched_tokens_tensor.value().item<int64_t>();
   args.num_of_tokens_per_rank = num_of_tokens_per_rank;
   args.enable_permute = false;
   args.stream = at::cuda::getCurrentCUDAStream();
@@ -524,10 +521,10 @@ HybridEpBuffer::dispatch_with_permute(torch::Tensor hidden, c10::optional<torch:
           c10::optional<torch::Tensor> num_dispatched_tokens_tensor,
           c10::optional<torch::Tensor> local_expert_routing_map,
           c10::optional<torch::Tensor> row_id_map,
-          int64_t num_dispatched_tokens,
-          int64_t num_permuted_tokens,
+          c10::optional<int64_t> num_dispatched_tokens,
+          c10::optional<int64_t> num_permuted_tokens,
           int64_t num_of_tokens_per_rank,
-          int64_t pad_multiple,
+          c10::optional<int64_t> pad_multiple,
           bool use_host_meta,
           bool with_probs)
 {
@@ -556,15 +553,12 @@ HybridEpBuffer::dispatch_with_permute(torch::Tensor hidden, c10::optional<torch:
  args.attn_to_rdma_map = attn_to_rdma_map;
  args.local_expert_routing_map = local_expert_routing_map;
  args.num_dispatched_tokens_tensor = num_dispatched_tokens_tensor;
- if(num_dispatched_tokens < 0 ) {
-   // In this case, user will set the size of the output buffer by themselves.
-   args.num_dispatched_tokens = num_dispatched_tokens_tensor.value().item<int64_t>();
- }else {
-   args.num_dispatched_tokens = num_dispatched_tokens;
- }
+ args.num_dispatched_tokens = (num_dispatched_tokens.has_value()) ? 
+                                num_dispatched_tokens.value() : 
+                                num_dispatched_tokens_tensor.value().item<int64_t>();
  args.row_id_map = row_id_map;
- args.num_permuted_tokens = num_permuted_tokens;
- args.pad_multiple = pad_multiple;
+ args.num_permuted_tokens = (num_permuted_tokens.has_value()) ? num_permuted_tokens.value() : -1;
+ args.pad_multiple = (pad_multiple.has_value()) ? pad_multiple.value() : 0;
  args.use_host_meta = use_host_meta;
  args.num_of_tokens_per_rank = num_of_tokens_per_rank;
  args.enable_permute = true;
@@ -589,9 +583,9 @@ HybridEpBuffer::combine_with_unpermute(torch::Tensor hidden, c10::optional<torch
         torch::Tensor sparse_to_dense_map, torch::Tensor rdma_to_attn_map,
         torch::Tensor attn_to_rdma_map, c10::optional<torch::Tensor> num_dispatched_tokens_tensor,
         c10::optional<torch::Tensor> row_id_map,
-        int64_t num_dispatched_tokens,
+        c10::optional<int64_t> num_dispatched_tokens,
         int64_t num_of_tokens_per_rank,
-        int64_t pad_multiple,
+        c10::optional<int64_t> pad_multiple,
         bool with_probs)
 {
   // Check the input tensors
@@ -625,9 +619,11 @@ HybridEpBuffer::combine_with_unpermute(torch::Tensor hidden, c10::optional<torch
   args.rdma_to_attn_map = rdma_to_attn_map;
   args.attn_to_rdma_map = attn_to_rdma_map;
   args.num_dispatched_tokens_tensor = num_dispatched_tokens_tensor;
+  args.num_dispatched_tokens = (num_dispatched_tokens.has_value()) ? 
+                                num_dispatched_tokens.value() : 
+                                num_dispatched_tokens_tensor.value().item<int64_t>();
   args.row_id_map = row_id_map;
-  args.num_dispatched_tokens = num_dispatched_tokens;
-  args.pad_multiple = pad_multiple;
+  args.pad_multiple = (pad_multiple.has_value()) ? pad_multiple.value() : 0;
   args.num_of_tokens_per_rank = num_of_tokens_per_rank;
   args.enable_unpermute = true;
   args.stream = at::cuda::getCurrentCUDAStream();

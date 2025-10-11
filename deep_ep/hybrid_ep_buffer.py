@@ -220,7 +220,7 @@ class HybridEpBuffer:
         probs: torch.Tensor = None,
         routing_map: torch.Tensor = None,
         num_dispatched_tokens_tensor: torch.Tensor = None,
-        num_dispatched_tokens: int = -1,
+        num_dispatched_tokens: int = None,
         handle: tuple = None,
     ):
         """
@@ -284,7 +284,7 @@ class HybridEpBuffer:
                 num_of_tokens,
             ) = handle
 
-        if num_dispatched_tokens < 0:
+        if num_dispatched_tokens is None:
             num_dispatched_tokens = num_dispatched_tokens_tensor.item()
 
         dispatched_token, dispatched_probs, dispatched_scaling_factor = (
@@ -340,10 +340,10 @@ class HybridEpBuffer:
         probs: torch.Tensor = None,
         scaling_factor: torch.Tensor = None,
         # Used in the sync-free permute
-        num_dispatched_tokens: int = -1,
-        num_permuted_tokens: int = -1,
+        num_dispatched_tokens: int = None,
+        num_permuted_tokens: int = None,
         # If we use permute kernel, the output tensor will be permuted. the result can be directly used in the gemm.
-        pad_multiple: int = 0,
+        pad_multiple: int = None,
         # The handle means the cached info from the first invocation of the dispatch kernel.
         # The handle includes:
         # # Output of Metadata Preprocessing
@@ -459,9 +459,9 @@ class HybridEpBuffer:
         # Input tensors
         hidden: torch.Tensor,
         probs: torch.Tensor = None,
-        num_dispatched_tokens: int = -1,
+        num_dispatched_tokens: int = None,
         handle: tuple = None,
-        pad_multiple: int = 0,
+        pad_multiple: int = None,
     ):
         """
         Combine the data from the experts with unpermute.

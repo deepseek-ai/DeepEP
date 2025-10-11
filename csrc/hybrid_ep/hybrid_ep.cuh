@@ -29,7 +29,7 @@ public:
            c10::optional<torch::Tensor> scaling_factor,
            torch::Tensor sparse_to_dense_map, torch::Tensor rdma_to_attn_map,
            torch::Tensor attn_to_rdma_map, c10::optional<torch::Tensor> num_dispatched_tokens_tensor,
-           int64_t num_dispatched_tokens,
+           c10::optional<int64_t> num_dispatched_tokens,
            int64_t num_of_tokens_per_rank,
            bool with_probs);
 
@@ -47,10 +47,10 @@ public:
             c10::optional<torch::Tensor> num_dispatched_tokens_tensor,
             c10::optional<torch::Tensor> local_expert_routing_map,
             c10::optional<torch::Tensor> row_id_map,
-            int64_t num_dispatched_tokens,
-            int64_t num_permuted_tokens,
+            c10::optional<int64_t> num_dispatched_tokens,
+            c10::optional<int64_t> num_permuted_tokens,
             int64_t num_of_tokens_per_rank,
-            int64_t pad_multiple,
+            c10::optional<int64_t> pad_multiple,
             bool use_host_meta,
             bool with_probs);
 
@@ -59,9 +59,9 @@ public:
           torch::Tensor sparse_to_dense_map, torch::Tensor rdma_to_attn_map,
           torch::Tensor attn_to_rdma_map, c10::optional<torch::Tensor> num_dispatched_tokens_tensor,
           c10::optional<torch::Tensor> row_id_map,
-          int64_t num_dispatched_tokens,
+          c10::optional<int64_t> num_dispatched_tokens,
           int64_t num_of_tokens_per_rank,
-          int64_t pad_multiple,
+          c10::optional<int64_t> pad_multiple,
           bool with_probs);       
 
 private:
