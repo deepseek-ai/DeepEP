@@ -108,7 +108,7 @@ lint_changed() {
 # If `--all` is passed, then any further arguments are ignored and the
 # entire python directory is linted.
 if [[ "$1" == '--all' ]]; then
-   lint deep_ep
+   lint . 
 else
    # Check only the files that changed in last commit.
    lint_changed

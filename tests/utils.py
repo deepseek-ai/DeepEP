@@ -182,7 +182,7 @@ def bench_kineto(fn,
     with suppress():
         schedule = torch.profiler.schedule(wait=1, warmup=0, active=1, repeat=1)
         with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CUDA], schedule=schedule) as prof:
-            for i in range(2):
+            for _ in range(2):
                 # NOTES: use a large kernel and a barrier to eliminate the unbalanced CPU launch overhead
                 if barrier_comm_profiling:
                     lhs = torch.randn((8192, 8192), dtype=torch.float, device='cuda')
@@ -195,7 +195,7 @@ def bench_kineto(fn,
                 prof.step()
 
     # Parse the profiling table
-    assert isinstance(kernel_names, str) or isinstance(kernel_names, tuple)
+    assert isinstance(kernel_names, (str, tuple))
     is_tuple = isinstance(kernel_names, tuple)
     prof_lines = prof.key_averages().table(sort_by='cuda_time_total', max_name_column_width=100).split('\n')
     kernel_names = (kernel_names, ) if isinstance(kernel_names, str) else kernel_names

@@ -149,8 +149,8 @@ def test_main(args: argparse.Namespace,
 
                     # Checks
                     recv_gbl_rank_prefix_sum = handle[-4]
-                    assert gbl_num_tokens_per_rank[rank].item() == recv_x.size(
-                        0), f'{gbl_num_tokens_per_rank[rank].item()} != {recv_x.size(0)}'
+                    assert gbl_num_tokens_per_rank[rank].item() == recv_x.size(0), \
+                        f'{gbl_num_tokens_per_rank[rank].item()} != {recv_x.size(0)}'
                     assert gbl_num_tokens_per_expert.view(num_ranks, -1)[rank].tolist() == recv_num_tokens_per_expert_list
                     if not is_rand:
                         check_data(recv_x, recv_gbl_rank_prefix_sum)
@@ -225,7 +225,10 @@ def test_main(args: argparse.Namespace,
             for rdma_chunk_size in range(4, 33, 4):
                 config = deep_ep.Config(num_sms, nvl_chunk_size, nvl_buffer_size, rdma_chunk_size, rdma_buffer_size)
                 tune_args = {'x': current_x, 'handle': handle, 'config': config}
-                t, notify_t = bench_kineto(lambda: buffer.dispatch(**tune_args), ('dispatch', 'notify'), suppress_kineto_output=True)
+                t, notify_t = bench_kineto(
+                    lambda: buffer.dispatch(**tune_args),  # noqa: B023
+                    ('dispatch', 'notify'),
+                    suppress_kineto_output=True)
                 if t < best_time:
                     best_time, best_results = t, (num_sms, nvl_chunk_size, rdma_chunk_size, notify_t)
                 if local_rank == 0:
@@ -267,7 +270,10 @@ def test_main(args: argparse.Namespace,
         for rdma_chunk_size in range(12 if num_nodes == 2 else 8, 33, 4):
             config = deep_ep.Config(num_sms, nvl_chunk_size, nvl_buffer_size, rdma_chunk_size, rdma_buffer_size)
             tune_args = {'x': recv_x, 'handle': handle, 'config': config}
-            t, notify_t = bench_kineto(lambda: buffer.combine(**tune_args), ('combine', 'notify'), suppress_kineto_output=True)
+            t, notify_t = bench_kineto(
+                lambda: buffer.combine(**tune_args),  # noqa: B023
+                ('combine', 'notify'),
+                suppress_kineto_output=True)
             if local_rank == 0:
                 print(
                     f'[tuning] SMs {num_sms}, NVL chunk {nvl_chunk_size}, RDMA chunk {rdma_chunk_size}: '
@@ -323,7 +329,7 @@ def test_loop(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
             print(f'{ref_hash=}')
             print('', flush=True)
 
-        for j in range(20):
+        for _ in range(20):
             torch.manual_seed(rank + seed)
             current_hash = 0
             for i in (num_sms, ):

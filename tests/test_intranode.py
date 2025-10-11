@@ -205,7 +205,7 @@ def test_main(args: argparse.Namespace, num_sms: int, local_rank: int, num_ranks
                 deep_ep.Buffer.set_num_sms(num_sms)
                 config = deep_ep.Buffer.get_dispatch_config(num_ranks)
             tune_args = {'x': current_x, 'handle': handle, 'config': config}
-            t = bench(lambda: buffer.dispatch(**tune_args))[0]
+            t = bench(lambda: buffer.dispatch(**tune_args))[0]  # noqa: B023
             if t < best_time and nvl_chunk_size > 0:
                 best_time, best_results = t, (num_sms, nvl_chunk_size)
             if local_rank == 0:
@@ -246,7 +246,7 @@ def test_main(args: argparse.Namespace, num_sms: int, local_rank: int, num_ranks
             deep_ep.Buffer.set_num_sms(num_sms)
             config = deep_ep.Buffer.get_combine_config(num_ranks)
         tune_args = {'x': recv_x, 'handle': handle, 'config': config}
-        t = bench(lambda: buffer.combine(**tune_args))[0]
+        t = bench(lambda: buffer.combine(**tune_args))[0]  # noqa: B023
         if local_rank == 0:
             print(
                 f'[tuning] SMs {num_sms}, NVL chunk {nvl_chunk_size if nvl_chunk_size else "default"}: '

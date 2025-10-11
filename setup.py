@@ -23,7 +23,7 @@ if __name__ == '__main__':
         try:
             nvshmem_dir = importlib.util.find_spec("nvidia.nvshmem").submodule_search_locations[0]
             nvshmem_host_lib = get_nvshmem_host_lib_name(nvshmem_dir)
-            import nvidia.nvshmem as nvshmem
+            import nvidia.nvshmem as nvshmem  # noqa: F401
         except (ModuleNotFoundError, AttributeError, IndexError):
             print(
                 'Warning: `NVSHMEM_DIR` is not specified, and the NVSHMEM module is not installed. All internode and low-latency features are disabled\n'
@@ -96,7 +96,7 @@ if __name__ == '__main__':
         extra_compile_args['nvcc_dlink'] = nvcc_dlink
 
     # Summary
-    print(f'Build summary:')
+    print('Build summary:')
     print(f' > Sources: {sources}')
     print(f' > Includes: {include_dirs}')
     print(f' > Libraries: {library_dirs}')

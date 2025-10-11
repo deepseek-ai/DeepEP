@@ -1,12 +1,9 @@
 import argparse
 import random
-import time
-import os
 import torch
 import torch.distributed as dist
-import numpy as np
 from functools import partial
-from typing import Optional, Literal
+from typing import Literal
 
 import deep_ep
 from utils import init_dist, bench, bench_kineto, calc_diff, hash_tensor, per_token_cast_back
@@ -61,7 +58,7 @@ def test_main(num_tokens: int,
     x = torch.ones((num_tokens, hidden), dtype=torch.bfloat16, device='cuda') * (rank - rank_offset)
     x[:, -128:] = torch.arange(num_tokens, device='cuda').to(torch.bfloat16).view(-1, 1)
     x_list = [x]
-    for i in range(4 if use_logfmt else 0):
+    for _ in range(4 if use_logfmt else 0):
         # NOTES: make more LogFMT casts and also with some BF16
         x_list.append(torch.randn((num_tokens, hidden), dtype=torch.bfloat16, device='cuda') * 0.5 * random.random())
     # NOTES: the last one is for performance testing
@@ -74,7 +71,7 @@ def test_main(num_tokens: int,
     topk_weights = torch.randn((num_tokens, num_topk), dtype=torch.float32, device='cuda').abs()
 
     # Randomly mask some positions
-    for i in range(10):
+    for _ in range(10):
         topk_idx[random.randint(0, num_tokens - 1), random.randint(0, num_topk - 1)] = -1
 
     all_topk_idx = torch.empty((num_ranks, num_tokens, num_topk), dtype=topk_idx.dtype, device='cuda')
@@ -95,7 +92,7 @@ def test_main(num_tokens: int,
                         if shrink_test and simulate_failure_and_skip(rank, "dispatch", expected_masked_ranks):
                             break
                         num_times += 1
-                        for i in range((num_times % 2) + 1):
+                        for _ in range((num_times % 2) + 1):
                             cumulative_local_expert_recv_stats = torch.zeros((num_local_experts, ), dtype=torch.int, device='cuda')
                             packed_recv_x, packed_recv_count, handle, event, hook = \
                                 buffer.low_latency_dispatch(current_x, topk_idx, num_tokens, num_experts,
@@ -295,7 +292,7 @@ def test_loop(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
                              buffer,
                              use_logfmt=args.use_logfmt,
                              seed=seed)
-        for i in range(20):
+        for _ in range(20):
             assert test_main(num_tokens,
                              hidden,
                              num_experts,
