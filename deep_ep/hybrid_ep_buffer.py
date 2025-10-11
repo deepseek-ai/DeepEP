@@ -86,17 +86,59 @@ class HybridEpBuffer:
         self.num_sms_dispatch_api = num_sms_dispatch_api
         self.num_sms_combine_api = num_sms_combine_api
 
-        self.init_config()
-        self.init_buffer()
+        self.init_buffer_config()
+        # Create C++ buffer - this will allocate all buffers during construction
+        self.runtime = hybrid_ep_cpp.HybridEpBuffer(
+            self.config, self.local_rank, self.node_rank, self.group_size, self.num_of_ranks_per_node, self.use_fp8
+        )
+        # Exchange IPC addresses using C++ distributed communication
+        self.runtime.exchange_ipc_address(self.group)
 
-    def init_config(
+    def init_buffer_config(
         self,
+        # Basic Config
+        hidden_dim: int = None,
+        max_num_of_tokens_per_rank: int = None,
+        num_local_experts: int = None,
+        num_of_experts: int = None,
+    ):
+        """
+        Initialize the BufferConfig for the hybrid-ep buffer allocation.
+        """
+        config = hybrid_ep_cpp.BufferConfig()
+
+        config.hidden_dim = self.hidden_dim
+        config.max_num_of_tokens_per_rank = self.max_num_of_tokens_per_rank
+        config.num_of_experts_per_rank = self.num_local_experts
+        config.num_of_ranks_per_node = self.num_of_ranks_per_node
+        config.num_of_nodes = self.num_of_nodes
+        config.num_of_blocks_preprocessing_api = self.num_sms_preprocessing_api
+
+        # Dispatch API Config
+        if self.use_fp8:
+            # The fp8 data is communicated in the uint8 format.
+            config.token_data_type = hybrid_ep_cpp.UINT8
+        else:
+            # The bf16 data is communicated in the uint16 format.
+            config.token_data_type = hybrid_ep_cpp.UINT16
+        self.config = config
+
+    def init_kernel_config(
+        self,
+        # Basic Config
+        hidden_dim: int = None,
+        max_num_of_tokens_per_rank: int = None,
+        num_local_experts: int = None,
+        num_of_experts: int = None,
+        num_of_nodes: int = None,
         # Metadata-preprocessing API Config
         num_of_threads_per_block_preprocessing_api: int = None,
+        num_of_blocks_preprocessing_api: int = None,
         # Dispatch API Config
         num_of_stages_dispatch_api: int = None,
         num_of_tokens_per_chunk_dispatch_api: int = None,
         device_side_sync_dispatch_api: bool = True,
+        num_of_blocks_dispatch_api: int = None,
         # Combine API Config
         num_of_stages_g2s_combine_api: int = None,
         num_of_stages_s2g_combine_api: int = None,
@@ -104,6 +146,7 @@ class HybridEpBuffer:
         num_of_tokens_per_group_combine_api: int = None,
         num_of_additional_in_flight_s2g_combine_api: int = None,
         device_side_sync_combine_api: bool = True,
+        num_of_blocks_combine_api: int = None,
     ):
         """
         Initialize the HybridEpConfigInstance for the hybrid-ep kernel.
@@ -114,23 +157,17 @@ class HybridEpBuffer:
 
         # Initialize the ConfigInstance
         # Hybrid-ep Config
-        config.hidden_dim = self.hidden_dim
-        config.max_num_of_tokens_per_rank = self.max_num_of_tokens_per_rank
-        config.num_of_experts_per_rank = self.num_local_experts
-        config.num_of_ranks_per_node = self.num_of_ranks_per_node
-        config.num_of_nodes = self.num_of_nodes
+        config.hidden_dim = self.hidden_dim if hidden_dim is not None else self.hidden_dim
+        config.max_num_of_tokens_per_rank = self.max_num_of_tokens_per_rank if max_num_of_tokens_per_rank is not None else self.max_num_of_tokens_per_rank
+        config.num_of_experts_per_rank = self.num_local_experts if num_local_experts is not None else self.num_local_experts
+        config.num_of_ranks_per_node = self.num_of_ranks_per_node if num_of_ranks_per_node is not None else self.num_of_ranks_per_node
+        config.num_of_nodes = self.num_of_nodes if num_of_nodes is not None else self.num_of_nodes
 
         # Metadata-preprocessing API Config
-        config.num_of_blocks_preprocessing_api = self.num_sms_preprocessing_api
-        # 1. Try to get the value from the environment variable, Default value: 512
-        # 2. If the value is provided, use the provided value.
+        config.num_of_blocks_preprocessing_api = self.num_sms_preprocessing_api if num_of_blocks_preprocessing_api is not None else self.num_sms_preprocessing_api
         config.num_of_threads_per_block_preprocessing_api = int(
             os.getenv("NUM_OF_THREADS_PER_BLOCK_PREPROCESSING_API", "512")
         )
-        if num_of_threads_per_block_preprocessing_api is not None:
-            config.num_of_threads_per_block_preprocessing_api = (
-                num_of_threads_per_block_preprocessing_api
-            )
 
         # Dispatch API Config
         if self.use_fp8:
@@ -139,7 +176,7 @@ class HybridEpBuffer:
         else:
             # The bf16 data is communicated in the uint16 format.
             config.token_data_type = hybrid_ep_cpp.UINT16
-        config.num_of_blocks_dispatch_api = self.num_sms_dispatch_api
+        config.num_of_blocks_dispatch_api = self.num_sms_dispatch_api if num_of_blocks_dispatch_api is not None else self.num_sms_dispatch_api
         config.device_side_sync_dispatch_api = device_side_sync_dispatch_api
         # Dispatch stages config:
         # 1. Try to get the value from the environment variable
@@ -158,7 +195,7 @@ class HybridEpBuffer:
             )
 
         # Combine API Config
-        config.num_of_blocks_combine_api = self.num_sms_combine_api
+        config.num_of_blocks_combine_api = self.num_sms_combine_api if num_of_blocks_combine_api is not None else self.num_sms_combine_api
         config.device_side_sync_combine_api = device_side_sync_combine_api
         # Combine stages config:
         # 1. Try to get the value from the environment variable
@@ -194,22 +231,15 @@ class HybridEpBuffer:
             config.num_of_additional_in_flight_s2g_combine_api = (
                 num_of_additional_in_flight_s2g_combine_api
             )
-
-        self.config = config
-
-    def init_buffer(self):
+        return config
+    
+    def update_kernel_config(self):
         """
-        Initialize the buffer for the hybrid-ep kernel.
-        Creates the C++ buffer (which allocates buffers) and exchanges IPC addresses.
+        Use the runtime kernel config to update the buffer.
         """
-        assert self.config is not None, "Please initialize the config first."
-        # Create C++ buffer - this will allocate all buffers during construction
-        self.runtime = hybrid_ep_cpp.HybridEpBuffer(
-            self.config, self.local_rank, self.node_rank, self.group_size, self.num_of_ranks_per_node, self.use_fp8
-        )
-        
-        # Exchange IPC addresses using C++ distributed communication
-        self.runtime.exchange_ipc_address(self.group)
+        reallocate = self.runtime.update_buffer(self.config)
+        if reallocate:
+            self.runtime.exchange_ipc_address(self.group)
 
     def dispatch(
         self,
@@ -246,6 +276,7 @@ class HybridEpBuffer:
         ), "The handle and routing_map should be both None"
         # If the handle is not provided, we need to generate the handle using the preprocessing kernel.
         if handle is None:
+            config = self.init_kernel_config(max_num_of_tokens_per_rank=num_of_tokens)
             global_routing_map = torch.empty(
                 num_of_tokens * self.group_size,
                 self.num_of_experts,
@@ -262,6 +293,7 @@ class HybridEpBuffer:
                 num_dispatched_tokens_tensor,
                 local_expert_routing_map,
             ) = self.runtime.metadata_preprocessing(
+                
                 routing_map=global_routing_map,
                 num_of_tokens_per_rank=num_of_tokens,
             )

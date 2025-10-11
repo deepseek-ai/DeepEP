@@ -2,11 +2,10 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved
 #include "hybrid_ep.cuh"
 
-HybridEpBuffer::HybridEpBuffer(HybridEpConfigInstance config, int local_rank, int node_rank, int group_size, int num_of_ranks_per_node, bool use_fp8_dispatch)
+HybridEpBuffer::HybridEpBuffer(BufferConfig config, int local_rank, int node_rank, int group_size, int num_of_ranks_per_node, bool use_fp8_dispatch)
     : config(config), local_rank(local_rank), node_rank(node_rank), group_size(group_size),
-      num_of_ranks_per_node(num_of_ranks_per_node), executor(local_rank, node_rank), use_fp8_dispatch(use_fp8_dispatch) {
-
-    if(group_size <= config.num_of_ranks_per_node) {
+    num_of_ranks_per_node(num_of_ranks_per_node), executor(local_rank, node_rank), use_fp8_dispatch(use_fp8_dispatch) {
+    if(group_size <= num_of_ranks_per_node) {
       // If used on only intra-node communication, the dispatch/combine can share same buffers.
       use_shared_buffer = true;
     }else{
@@ -19,6 +18,10 @@ HybridEpBuffer::HybridEpBuffer(HybridEpConfigInstance config, int local_rank, in
 }
 
 HybridEpBuffer::~HybridEpBuffer() {
+    release_buffer();
+}
+
+void HybridEpBuffer::release_buffer() {
   auto free_buffer = [this](void *ptr, bool remote_memory) {
     if (ptr != nullptr) {
       if (remote_memory) {
@@ -52,7 +55,7 @@ HybridEpBuffer::~HybridEpBuffer() {
   }else{
     remote_allocator.close_handle(dispatch_buffers.intra_node_write_completion_flags);
   }
-  for (int i = 0; i < config.num_of_ranks_per_node; i++) {
+  for (int i = 0; i < num_of_ranks_per_node; i++) {
     if (i != local_rank) {
       remote_allocator.close_handle(dispatch_buffers.expert_output_token_all_ranks[i]);
       remote_allocator.close_handle(dispatch_buffers.expert_output_prob_all_ranks[i]);
@@ -80,7 +83,7 @@ HybridEpBuffer::~HybridEpBuffer() {
   }else{
     remote_allocator.close_handle(combine_buffers.intra_node_write_completion_flags);
   }
-  for (int i = 0; i < config.num_of_ranks_per_node; i++) {
+  for (int i = 0; i < num_of_ranks_per_node; i++) {
     if (i != local_rank) {
       remote_allocator.close_handle(combine_buffers.expert_input_token_all_ranks[i]);
       remote_allocator.close_handle(combine_buffers.expert_input_prob_all_ranks[i]);
@@ -293,6 +296,35 @@ void HybridEpBuffer::exchange_ipc_address(py::object process_group) {
   }
 }
 
+bool HybridEpBuffer::update_buffer(HybridEpConfigInstance config) {
+  // If new config requires bigger buffer, we will release the old buffer and allocate a new one.
+  bool need_reallocate = false;
+
+  template <typename T>
+  inline bool grow_to(T& dst, const T& src) {
+    if (dst < src) { dst = src; return true; }
+    return false;
+  }
+  
+  bool need_reallocate = false;
+  need_reallocate |= grow_to(this->config.hidden_dim,             config.hidden_dim);
+  need_reallocate |= grow_to(this->config.num_of_experts_per_rank,config.num_of_experts_per_rank);
+  need_reallocate |= grow_to(this->config.num_of_ranks_per_node,  config.num_of_ranks_per_node);
+  need_reallocate |= grow_to(this->config.num_of_nodes,           config.num_of_nodes);
+  need_reallocate |= grow_to(this->config.num_of_blocks_preprocessing_api, config.num_of_blocks_preprocessing_api);
+  
+  // Special case for token data type.
+  if(get_token_data_type_size(this->config.token_data_type) < get_token_data_type_size(config.token_data_type)) {
+    need_reallocate = true;
+    this->config.token_data_type = config.token_data_type;
+  }
+  
+  if(need_reallocate) {
+    release_buffer();
+    allocate_buffer();
+  }
+  return need_reallocate;
+}
 
 void HybridEpBuffer::open_handles_from_other_ranks(
     std::vector<torch::Tensor> dispatch_handles,
@@ -407,7 +439,8 @@ HybridEpBuffer::metadata_preprocessing(torch::Tensor global_routing_map, int64_t
 }
 
 std::tuple<torch::Tensor, c10::optional<torch::Tensor>, c10::optional<torch::Tensor>>
-HybridEpBuffer::dispatch(torch::Tensor hidden, c10::optional<torch::Tensor> probs,
+HybridEpBuffer::dispatch(HybridEpConfigInstance config, 
+                 torch::Tensor hidden, c10::optional<torch::Tensor> probs,
                  c10::optional<torch::Tensor> scaling_factor,
                  torch::Tensor sparse_to_dense_map,
                  torch::Tensor rdma_to_attn_map, torch::Tensor attn_to_rdma_map,
@@ -462,7 +495,8 @@ HybridEpBuffer::dispatch(torch::Tensor hidden, c10::optional<torch::Tensor> prob
 }
 
 std::tuple<torch::Tensor, torch::Tensor>
-HybridEpBuffer::combine(torch::Tensor hidden, c10::optional<torch::Tensor> probs,
+HybridEpBuffer::combine(HybridEpConfigInstance config, 
+                torch::Tensor hidden, c10::optional<torch::Tensor> probs,
                 torch::Tensor sparse_to_dense_map,
                 torch::Tensor rdma_to_attn_map, torch::Tensor attn_to_rdma_map,
                 int64_t num_of_tokens_per_rank,
@@ -514,7 +548,8 @@ HybridEpBuffer::combine(torch::Tensor hidden, c10::optional<torch::Tensor> probs
 
 
 std::tuple<torch::Tensor, c10::optional<torch::Tensor>, c10::optional<torch::Tensor>, torch::Tensor, torch::Tensor>
-HybridEpBuffer::dispatch_with_permute(torch::Tensor hidden, c10::optional<torch::Tensor> probs,
+HybridEpBuffer::dispatch_with_permute(HybridEpConfigInstance config, 
+          torch::Tensor hidden, c10::optional<torch::Tensor> probs,
           c10::optional<torch::Tensor> scaling_factor,
           torch::Tensor sparse_to_dense_map, torch::Tensor rdma_to_attn_map,
           torch::Tensor attn_to_rdma_map, 
@@ -579,7 +614,8 @@ HybridEpBuffer::dispatch_with_permute(torch::Tensor hidden, c10::optional<torch:
 }
 
 std::tuple<torch::Tensor, torch::Tensor>
-HybridEpBuffer::combine_with_unpermute(torch::Tensor hidden, c10::optional<torch::Tensor> probs,
+HybridEpBuffer::combine_with_unpermute(HybridEpConfigInstance config, 
+        torch::Tensor hidden, c10::optional<torch::Tensor> probs,
         torch::Tensor sparse_to_dense_map, torch::Tensor rdma_to_attn_map,
         torch::Tensor attn_to_rdma_map, c10::optional<torch::Tensor> num_dispatched_tokens_tensor,
         c10::optional<torch::Tensor> row_id_map,

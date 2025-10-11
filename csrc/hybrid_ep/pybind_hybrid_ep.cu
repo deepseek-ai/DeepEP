@@ -22,6 +22,27 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         .def("__str__",
              [](const TOKEN_DATA_TYPE &type) { return type_to_string(type); });
   
+    pybind11::class_<BufferConfig>(m, "BufferConfig")
+        .def(py::init<>())
+        .def_readwrite("hidden_dim", &BufferConfig::hidden_dim)
+        .def_readwrite("max_num_of_tokens_per_rank", &BufferConfig::max_num_of_tokens_per_rank)
+        .def_readwrite("num_of_experts_per_rank", &BufferConfig::num_of_experts_per_rank)
+        .def_readwrite("num_of_ranks_per_node", &BufferConfig::num_of_ranks_per_node)
+        .def_readwrite("num_of_nodes", &BufferConfig::num_of_nodes)
+        .def_readwrite("token_data_type", &BufferConfig::token_data_type)
+        .def_readwrite("num_of_blocks_preprocessing_api", &BufferConfig::num_of_blocks_preprocessing_api);
+        .def("__repr__", [](const BufferConfig &config) {
+          return "<BufferConfig hidden_dim=" +
+                 std::to_string(config.hidden_dim) + " max_num_of_tokens_per_rank=" +
+                 std::to_string(config.max_num_of_tokens_per_rank) +
+                 " num_of_experts_per_rank=" + std::to_string(config.num_of_experts_per_rank) +
+                 " num_of_ranks_per_node=" + std::to_string(config.num_of_ranks_per_node) +
+                 " num_of_nodes=" + std::to_string(config.num_of_nodes) +
+                 " token_data_type=" + type_to_string(config.token_data_type) +
+                 " num_of_blocks_preprocessing_api=" + std::to_string(config.num_of_blocks_preprocessing_api) +
+                 ">";
+        });
+
     pybind11::class_<HybridEpConfigInstance>(m, "HybridEpConfigInstance")
         .def(py::init<>())
         // Hybrid-ep Config
@@ -78,23 +99,27 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         });
   
     pybind11::class_<HybridEpBuffer>(m, "HybridEpBuffer")
-        .def(py::init<HybridEpConfigInstance, int, int, int, int, bool>())
+        .def(py::init<BufferConfig, int, int, int, int, bool>())
+        .def("update_buffer", &HybridEpBuffer::update_buffer, py::arg("config"))
         .def("exchange_ipc_address", &HybridEpBuffer::exchange_ipc_address)
         .def("metadata_preprocessing", &HybridEpBuffer::metadata_preprocessing,
              py::kw_only(), py::arg("routing_map"), py::arg("num_of_tokens_per_rank"))
-        .def("dispatch", &HybridEpBuffer::dispatch, py::kw_only(), py::arg("hidden"),
+        .def("dispatch", &HybridEpBuffer::dispatch, py::kw_only(), 
+             py::arg("config"), py::arg("hidden"),
              py::arg("probs") = c10::nullopt,
              py::arg("scaling_factor") = c10::nullopt,
              py::arg("sparse_to_dense_map"), py::arg("rdma_to_attn_map"),
              py::arg("attn_to_rdma_map"), py::arg("num_dispatched_tokens_tensor"),
              py::arg("num_dispatched_tokens") = -1, py::arg("num_of_tokens_per_rank"),
              py::arg("with_probs"))
-        .def("combine", &HybridEpBuffer::combine, py::kw_only(), py::arg("hidden"),
+        .def("combine", &HybridEpBuffer::combine, py::kw_only(), 
+             py::arg("config"), py::arg("hidden"),
              py::arg("probs") = c10::nullopt, py::arg("sparse_to_dense_map"),
              py::arg("rdma_to_attn_map"), py::arg("attn_to_rdma_map"),
              py::arg("num_of_tokens_per_rank"),
              py::arg("with_probs"))
-        .def("dispatch_with_permute", &HybridEpBuffer::dispatch_with_permute, py::kw_only(), py::arg("hidden"),
+        .def("dispatch_with_permute", &HybridEpBuffer::dispatch_with_permute, py::kw_only(), 
+             py::arg("config"), py::arg("hidden"),
              py::arg("probs") = c10::nullopt,
              py::arg("scaling_factor") = c10::nullopt,
              py::arg("sparse_to_dense_map"), py::arg("rdma_to_attn_map"),
@@ -103,7 +128,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
              py::arg("num_permuted_tokens") = -1,
              py::arg("num_of_tokens_per_rank"), py::arg("pad_multiple") = 0, py::arg("use_host_meta") = false,
              py::arg("with_probs") = false)
-        .def("combine_with_unpermute", &HybridEpBuffer::combine_with_unpermute, py::kw_only(), py::arg("hidden"),
+        .def("combine_with_unpermute", &HybridEpBuffer::combine_with_unpermute, py::kw_only(), 
+             py::arg("config"), py::arg("hidden"),
              py::arg("probs") = c10::nullopt,
              py::arg("sparse_to_dense_map"), py::arg("rdma_to_attn_map"),
              py::arg("attn_to_rdma_map"), py::arg("num_dispatched_tokens_tensor"),
