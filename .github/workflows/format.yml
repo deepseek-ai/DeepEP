@@ -1,0 +1,28 @@
+name: Code Format Check
+
+on:
+  push:
+    branches: [ main, add-workflow ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  format-check:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout source
+      uses: actions/checkout@v3
+      with:
+        fetch-depth: 0   # 保留历史记录，避免某些格式化工具需要全部历史
+
+    - name: Setup environment
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y bash
+
+    - name: Run format.sh
+      run: |
+        bash ./format.sh
+
+    # 如果 format.sh 返回非零状态，GitHub Actions 会自动标记为 fail
