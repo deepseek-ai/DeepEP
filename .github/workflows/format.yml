@@ -2,7 +2,7 @@ name: Code Format Check
 
 on:
   push:
-    branches: [ main, add-workflow ]
+    branches: [ main ]
   pull_request:
     branches: [ main ]
 
@@ -14,7 +14,7 @@ jobs:
     - name: Checkout source
       uses: actions/checkout@v3
       with:
-        fetch-depth: 0   # 保留历史记录，避免某些格式化工具需要全部历史
+        fetch-depth: 0 
 
     - name: Setup environment
       run: |
@@ -25,4 +25,4 @@ jobs:
       run: |
         bash ./format.sh
 
-    # 如果 format.sh 返回非零状态，GitHub Actions 会自动标记为 fail
+    # If format.sh return non-zero, GitHub Actions will mark it as failure.
