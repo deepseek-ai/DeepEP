@@ -1,17 +1,17 @@
 /*
 
-#include <vector>
 #include <cstring>
-#include <stdexcept>
 #include <iostream>
+#include <stdexcept>
+#include <vector>
 
 #include "configs.cuh"
 #include "exception.cuh"
-#include "launch.cuh"
-#include "utils.cuh"
 #include "ibgda_device.cuh"
-#include "nvshmem_backend.h"
+#include "launch.cuh"
 #include "mpi.h"
+#include "nvshmem_backend.h"
+#include "utils.cuh"
 
 // Forward declaration for global team variable (for internode.cu compatibility)
 extern nvshmem_team_t cpu_rdma_team;
@@ -26,7 +26,7 @@ NVSHMEMBackend::~NVSHMEMBackend() {
     }
 }
 
-int NVSHMEMBackend::init(const std::vector<uint8_t>& root_unique_id_val, 
+int NVSHMEMBackend::init(const std::vector<uint8_t>& root_unique_id_val,
                          int rank, int num_ranks, bool low_latency_mode, int qps_per_rank) {
     if (initialized_) {
         return rank_;
@@ -46,27 +46,27 @@ int NVSHMEMBackend::init(const std::vector<uint8_t>& root_unique_id_val,
     rank_ = nvshmem_my_pe();
     num_ranks_ = nvshmem_n_pes();
     initialized_ = true;
-    
+
     std::cout << "[NVSHMEM Backend] Initialized rank " << rank_ << "/" << num_ranks_ << std::endl;
-    
+
     return rank_;
 }
 
 void NVSHMEMBackend::finalize() {
     if (initialized_) {
         std::cout << "[NVSHMEM Backend] Finalizing rank " << rank_ << std::endl;
-        
+
         // Clean up teams if they exist
         if (low_latency_mode_ && cpu_rdma_team_ != NVSHMEM_TEAM_INVALID) {
             nvshmem_team_destroy(cpu_rdma_team_);
             cpu_rdma_team_ = NVSHMEM_TEAM_INVALID;
-            
+
             // Update global variables for internode.cu compatibility
             cpu_rdma_team = NVSHMEM_TEAM_INVALID;
-            
+
             std::cout << "[NVSHMEM Backend] Destroyed NVSHMEM teams" << std::endl;
         }
-        
+
         nvshmem_finalize();
         initialized_ = false;
         low_latency_mode_ = false;
@@ -119,39 +119,39 @@ void NVSHMEMBackend::setup_low_latency_mode(int rank, int num_ranks) {
     if (!initialized_) {
         throw std::runtime_error("NVSHMEM backend not initialized");
     }
-    
+
     if (num_ranks <= NUM_MAX_NVL_PEERS) {
         // No team creation needed for small number of ranks
         return;
     }
-    
+
     // Validate preconditions
     EP_HOST_ASSERT(cpu_rdma_team_ == NVSHMEM_TEAM_INVALID);
     EP_HOST_ASSERT(num_ranks % NUM_MAX_NVL_PEERS == 0);
-    
+
     // Create NVSHMEM team for low-latency mode
-    EP_HOST_ASSERT(nvshmem_team_split_strided(NVSHMEM_TEAM_WORLD, 
-                                              rank % NUM_MAX_NVL_PEERS, 
+    EP_HOST_ASSERT(nvshmem_team_split_strided(NVSHMEM_TEAM_WORLD,
+                                              rank % NUM_MAX_NVL_PEERS,
                                               NUM_MAX_NVL_PEERS,
-                                              num_ranks / NUM_MAX_NVL_PEERS, 
-                                              &cpu_rdma_team_config_, 
-                                              0, 
+                                              num_ranks / NUM_MAX_NVL_PEERS,
+                                              &cpu_rdma_team_config_,
+                                              0,
                                               &cpu_rdma_team_) == 0);
     EP_HOST_ASSERT(cpu_rdma_team_ != NVSHMEM_TEAM_INVALID);
-    
+
     // Update global variables for internode.cu compatibility
     cpu_rdma_team = cpu_rdma_team_;
     cpu_rdma_team_config = cpu_rdma_team_config_;
-    
+
     // Device state manipulation for IBGDA mode
     nvshmemi_device_host_state_t* dev_state_ptr = nullptr;
     CUDA_CHECK(cudaGetSymbolAddress(reinterpret_cast<void**>(&dev_state_ptr), nvshmemi_device_state_d));
-    
+
     bool ibgda_is_initialized = false;
     CUDA_CHECK(cudaMemcpy(&dev_state_ptr->ibgda_is_initialized, &ibgda_is_initialized, sizeof(bool), cudaMemcpyHostToDevice));
-    
+
     low_latency_mode_ = true;
-    
+
     std::cout << "[NVSHMEM Backend] Created teams and applied device state for low-latency mode" << std::endl;
 }
 

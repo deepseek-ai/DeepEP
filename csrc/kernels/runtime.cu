@@ -7,8 +7,9 @@
 #include "utils.cuh"
 
 #ifdef ENABLE_NCCL_GIN
-#include "nccl_gin_backend.h"
 #include <nccl.h>
+
+#include "nccl_gin_backend.h"
 #endif
 
 #ifndef DISABLE_NVSHMEM
@@ -46,7 +47,7 @@ nvshmem_team_config_t cpu_rdma_team_config;
 
 std::vector<uint8_t> get_unique_id(int qps_per_rank, int num_ranks) {
     std::vector<uint8_t> result;
-    
+
 #ifdef ENABLE_NCCL_GIN
     // For NCCL GIN: Generate enough IDs for both LL and HT modes
     // At this stage, we don't know which mode will be used, so generate for worst case (HT mode)
@@ -60,14 +61,14 @@ std::vector<uint8_t> get_unique_id(int qps_per_rank, int num_ranks) {
     for (int i = 0; i < num_total_ids; i++) {
         ncclUniqueId unique_id;
         ncclGetUniqueId(&unique_id);
-        
+
         size_t offset = result.size();
         result.resize(offset + sizeof(ncclUniqueId));
         std::memcpy(result.data() + offset, &unique_id, sizeof(ncclUniqueId));
     }
-    
+
     return result;
-#else 
+#else
     // NVSHMEM: always return exactly 1 unique ID (qps_per_rank is ignored)
     nvshmemx_uniqueid_t unique_id;
     nvshmemx_get_uniqueid(&unique_id);
@@ -78,26 +79,24 @@ std::vector<uint8_t> get_unique_id(int qps_per_rank, int num_ranks) {
 }
 
 int init(const std::vector<uint8_t>& root_unique_id_val, int rank, int num_ranks, bool low_latency_mode, int qps_per_rank) {
-
-    //printf("runtime::init() called\n"); fflush(stdout);
+    // printf("runtime::init() called\n"); fflush(stdout);
 #ifdef ENABLE_NCCL_GIN
-    //printf("NCCL: init()\n"); fflush(stdout);
-    
+    // printf("NCCL: init()\n"); fflush(stdout);
+
     // For NCCL GIN: Verify we received the correct number of unique IDs
     // We always receive NUM_MAX_NVL_PEERS * qps_per_rank IDs (generated for HT mode worst case)
     // LL mode uses only the first qps_per_rank IDs, HT mode uses all of them
     size_t expected_size = NUM_MAX_NVL_PEERS * qps_per_rank * sizeof(ncclUniqueId);
-    EP_HOST_ASSERT(root_unique_id_val.size() == expected_size && 
-                   "Unique ID size mismatch");
-    
+    EP_HOST_ASSERT(root_unique_id_val.size() == expected_size && "Unique ID size mismatch");
+
     // Initialize backend with packed unique IDs (backend will unpack based on mode)
     internode::BackendType backend_type = internode::detect_backend_type();
-    internode::initialize_backend(backend_type, root_unique_id_val, rank, num_ranks, low_latency_mode, qps_per_rank);     
+    internode::initialize_backend(backend_type, root_unique_id_val, rank, num_ranks, low_latency_mode, qps_per_rank);
     internode::CommunicationBackend* backend = internode::get_backend();
     backend->barrier();
     return backend->get_rank();
 #else
-    //printf("NVSHMEM: init()\n"); fflush(stdout);
+    // printf("NVSHMEM: init()\n"); fflush(stdout);
     nvshmemx_uniqueid_t root_unique_id;
     nvshmemx_init_attr_t attr;
     std::memcpy(&root_unique_id, root_unique_id_val.data(), sizeof(nvshmemx_uniqueid_t));
@@ -122,12 +121,11 @@ int init(const std::vector<uint8_t>& root_unique_id_val, int rank, int num_ranks
     nvshmem_barrier_all();
     return nvshmem_my_pe();
 #endif
-
 }
 
 void* alloc(size_t size, size_t alignment) {
 #ifdef ENABLE_NCCL_GIN
-    //printf("NCCL: alloc()\n");
+    // printf("NCCL: alloc()\n");
     internode::CommunicationBackend* backend = internode::get_backend();
     if (backend == nullptr) {
         throw std::runtime_error("Backend not initialized");
@@ -140,7 +138,7 @@ void* alloc(size_t size, size_t alignment) {
 
 void free(void* ptr) {
 #ifdef ENABLE_NCCL_GIN
-    //printf("NCCL: free()\n");
+    // printf("NCCL: free()\n");
     internode::CommunicationBackend* backend = internode::get_backend();
     if (backend == nullptr) {
         throw std::runtime_error("Backend not initialized");
@@ -163,7 +161,7 @@ void barrier() {
 
 void finalize() {
 #ifdef ENABLE_NCCL_GIN
-    //printf("NCCL: finalize()\n");
+    // printf("NCCL: finalize()\n");
     internode::CommunicationBackend* backend = internode::get_backend();
     if (backend) {
         backend->finalize();

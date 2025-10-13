@@ -1,6 +1,7 @@
 from enum import Enum, auto
 import os
 
+
 class BackendType(Enum):
     NVSHMEM = auto()
     NCCL_GIN = auto()
@@ -25,9 +26,9 @@ class BackendType(Enum):
         if env_backend:
             try:
                 return cls.from_str(env_backend)
-            except ValueError as e:
+            except ValueError:
                 print(f"Warning: Invalid DEEP_EP_BACKEND value: {env_backend}, falling back to auto-detection")
-        
+
         # Auto-detection logic: Default to NVSHMEM for backward compatibility
         return cls.NVSHMEM
 
@@ -39,4 +40,4 @@ class BackendType(Enum):
         elif self == BackendType.AUTO:
             return "AUTO"
         else:
-            return "UNKNOWN" 
+            return "UNKNOWN"

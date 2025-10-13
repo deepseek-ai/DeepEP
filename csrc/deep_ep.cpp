@@ -2,12 +2,12 @@
 
 #include <ATen/cuda/CUDAContext.h>
 #include <ATen/cuda/CUDADataType.h>
-#include <cstdlib>
 #include <cuda_runtime.h>
 #include <pybind11/functional.h>
 #include <torch/python.h>
 
 #include <chrono>
+#include <cstdlib>
 #include <memory>
 
 #include "kernels/api.cuh"
@@ -260,12 +260,12 @@ pybind11::bytearray Buffer::get_local_ipc_handle() const {
 pybind11::bytearray Buffer::get_local_nvshmem_unique_id() const {
 #ifndef DISABLE_NVSHMEM
     EP_HOST_ASSERT(rdma_rank == 0 and "Only RDMA rank 0 can get unique ID(s)");
-    
+
     // Pass qps_per_rank to determine how many NCCL communicators are needed
     // For NVSHMEM: returns 1 unique ID
     // For NCCL GIN: returns qps_per_rank unique IDs (one per communicator)
     auto unique_id_vec = internode::get_unique_id(qps_per_rank, num_ranks);
-    
+
     // Return packed unique IDs as a single bytearray
     return {reinterpret_cast<const char*>(unique_id_vec.data()), unique_id_vec.size()};
 #else
@@ -1776,7 +1776,9 @@ std::tuple<torch::Tensor, std::optional<EventHandle>, std::optional<std::functio
                               buffer.combine_rdma_recv_data_buffer,
                               buffer.combine_rdma_recv_flag_buffer,
                               buffer.combine_rdma_send_buffer,
-                              buffer.combine_rdma_recv_data_buffer_offset, buffer.combine_rdma_recv_flag_buffer_offset, buffer.combine_rdma_send_buffer_offset,
+                              buffer.combine_rdma_recv_data_buffer_offset,
+                              buffer.combine_rdma_recv_flag_buffer_offset,
+                              buffer.combine_rdma_send_buffer_offset,
                               x.data_ptr(),
                               topk_idx.data_ptr<topk_idx_t>(),
                               topk_weights.data_ptr<float>(),
@@ -1798,7 +1800,8 @@ std::tuple<torch::Tensor, std::optional<EventHandle>, std::optional<std::functio
                               num_device_sms,
                               launch_stream,
                               phases,
-                              zero_copy, low_latency_buffer_idx);
+                              zero_copy,
+                              low_latency_buffer_idx);
     };
     launcher(return_recv_hook ? LOW_LATENCY_SEND_PHASE : (LOW_LATENCY_SEND_PHASE | LOW_LATENCY_RECV_PHASE));
 

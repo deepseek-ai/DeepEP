@@ -68,7 +68,7 @@ def init_dist(local_rank: int, num_local_ranks: int):
 def backend_aware_all_gather_into_tensor(output_tensor: torch.Tensor, input_tensor: torch.Tensor, group: dist.ProcessGroup):
     """
     Backend-aware wrapper for all_gather_into_tensor that handles shape requirements.
-    
+
     Args:
         output_tensor: Output tensor with shape (world_size, *input_shape)
         input_tensor: Input tensor to gather
@@ -88,7 +88,7 @@ def backend_aware_all_gather_into_tensor(output_tensor: torch.Tensor, input_tens
 def backend_aware_all_reduce(tensor: torch.Tensor, op=dist.ReduceOp.SUM, group: dist.ProcessGroup = None):
     """
     Backend-aware wrapper for all_reduce that ensures compatibility.
-    
+
     Args:
         tensor: Tensor to reduce (modified in-place)
         op: Reduction operation
@@ -101,7 +101,7 @@ def backend_aware_all_reduce(tensor: torch.Tensor, op=dist.ReduceOp.SUM, group: 
 def backend_aware_all_gather(tensor_list: list, tensor: torch.Tensor, group: dist.ProcessGroup = None):
     """
     Backend-aware wrapper for all_gather that handles backend differences.
-    
+
     Args:
         tensor_list: List of tensors to store gathered results
         tensor: Input tensor to gather
@@ -114,7 +114,7 @@ def backend_aware_all_gather(tensor_list: list, tensor: torch.Tensor, group: dis
         for i, t in enumerate(tensor_list):
             if t.device != device:
                 tensor_list[i] = t.to(device)
-    
+
     dist.all_gather(tensor_list, tensor, group=group)
 
 

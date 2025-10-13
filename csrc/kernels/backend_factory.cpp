@@ -1,9 +1,11 @@
-#include "communication_backend.h"
-#include <stdexcept>
-#include <iostream>
+#include "backend_factory.h"
+
 #include <cstdlib>
 #include <cstring>
-#include "backend_factory.h"
+#include <iostream>
+#include <stdexcept>
+
+#include "communication_backend.h"
 #include "nvshmem_backend.h"
 #ifdef ENABLE_NCCL_GIN
 #include "nccl_gin_backend.h"
@@ -22,11 +24,11 @@ std::unique_ptr<CommunicationBackend> CommunicationBackend::create(BackendType t
 
 // Backend selection utilities
 BackendType parse_backend_type(const std::string& backend_str) {
-    //printf("parse_backend_type[1]: %s\n", backend_str.c_str()); fflush(stdout);
+    // printf("parse_backend_type[1]: %s\n", backend_str.c_str()); fflush(stdout);
     if (backend_str == "nvshmem") {
         return BackendType::NVSHMEM;
     } else if (backend_str == "nccl_gin") {
-        //printf("parse_backend_type[2]: %s\n", backend_str.c_str()); fflush(stdout);
+        // printf("parse_backend_type[2]: %s\n", backend_str.c_str()); fflush(stdout);
         return BackendType::NCCL_GIN;
     } else if (backend_str == "auto") {
         return BackendType::AUTO;
@@ -36,20 +38,19 @@ BackendType parse_backend_type(const std::string& backend_str) {
 }
 
 BackendType detect_backend_type() {
-    //printf("detect_backend_type[1]\n"); fflush(stdout);
+    // printf("detect_backend_type[1]\n"); fflush(stdout);
     const char* env_backend = std::getenv("DEEP_EP_BACKEND");
-    
+
     if (env_backend) {
         try {
-            //printf("detect_backend_type[2]: %s\n", env_backend); fflush(stdout);
+            // printf("detect_backend_type[2]: %s\n", env_backend); fflush(stdout);
             return parse_backend_type(env_backend);
         } catch (const std::exception& e) {
-            std::cerr << "Warning: Invalid DEEP_EP_BACKEND value: " << env_backend 
-                      << ". Falling back to NVSHMEM." << std::endl;
+            std::cerr << "Warning: Invalid DEEP_EP_BACKEND value: " << env_backend << ". Falling back to NVSHMEM." << std::endl;
         }
     }
 
-    return BackendType::NVSHMEM; // Default to NVSHMEM
+    return BackendType::NVSHMEM;  // Default to NVSHMEM
 }
 
 std::string backend_type_to_string(BackendType type) {
@@ -66,9 +67,9 @@ std::string backend_type_to_string(BackendType type) {
 }
 
 // Global backend management
-void initialize_backend(BackendType type, const std::vector<uint8_t>& root_unique_id_val,
-                       int rank, int num_ranks, bool low_latency_mode, int qps_per_rank) {
-    //printf("initialize_backend: %s\n", backend_type_to_string(type).c_str()); fflush(stdout);
+void initialize_backend(
+    BackendType type, const std::vector<uint8_t>& root_unique_id_val, int rank, int num_ranks, bool low_latency_mode, int qps_per_rank) {
+    // printf("initialize_backend: %s\n", backend_type_to_string(type).c_str()); fflush(stdout);
     if (g_backend) {
         throw std::runtime_error("Backend already initialized");
     }
@@ -85,7 +86,7 @@ void initialize_backend(BackendType type, const std::vector<uint8_t>& root_uniqu
 }
 
 CommunicationBackend* get_backend() {
-    //printf("get_backend\n"); fflush(stdout);
+    // printf("get_backend\n"); fflush(stdout);
     if (!g_backend) {
         throw std::runtime_error("Backend not initialized");
     }
@@ -93,7 +94,7 @@ CommunicationBackend* get_backend() {
 }
 
 void finalize_backend() {
-    //printf("finalize_backend\n"); fflush(stdout);
+    // printf("finalize_backend\n"); fflush(stdout);
     if (g_backend) {
         g_backend->finalize();
         g_backend.reset();
@@ -101,10 +102,11 @@ void finalize_backend() {
 }
 
 std::unique_ptr<CommunicationBackend> create_backend(BackendType type) {
-    printf("create_backend: %s\n", backend_type_to_string(type).c_str()); fflush(stdout);
+    printf("create_backend: %s\n", backend_type_to_string(type).c_str());
+    fflush(stdout);
     switch (type) {
         case BackendType::NVSHMEM:
-            //return std::make_unique<NVSHMEMBackend>(); FIXME: the backend implementation code is disabled for NVSHMEM right now. 
+            // return std::make_unique<NVSHMEMBackend>(); FIXME: the backend implementation code is disabled for NVSHMEM right now.
             return nullptr;
         case BackendType::NCCL_GIN:
 #ifdef ENABLE_NCCL_GIN
@@ -114,12 +116,12 @@ std::unique_ptr<CommunicationBackend> create_backend(BackendType type) {
 #endif
         case BackendType::AUTO:
             // For now, default to NVSHMEM
-            //return std::make_unique<NVSHMEMBackend>(); FIXME: make auto option work. 
+            // return std::make_unique<NVSHMEMBackend>(); FIXME: make auto option work.
             return nullptr;
         default:
             throw std::runtime_error("Unknown backend type");
     }
 }
 
-} // namespace internode
-} // namespace deep_ep 
+}  // namespace internode
+}  // namespace deep_ep

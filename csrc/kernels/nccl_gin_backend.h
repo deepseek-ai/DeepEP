@@ -1,14 +1,16 @@
 #pragma once
 
 #include <cuda_runtime.h>
+#include <nccl.h>
+
+#include <array>
 #include <mutex>
 #include <vector>
-#include <array>
-#include <nccl.h>
+
 #include "nccl_device.h"
 #include "nccl_device/gin.h"
-#include "nccl_device/gin/gin_device_host_common.h"  // For type definitions
 #include "nccl_device/gin/gin_device_common.h"       // For new API types
+#include "nccl_device/gin/gin_device_host_common.h"  // For type definitions
 // Note: gin_device_api.h is only included in .cu files for device compilation
 
 #include "communication_backend.h"
@@ -23,9 +25,9 @@ namespace internode {
 struct NcclGinMemHandle {
     void* ptr = nullptr;
     size_t size = 0;
-    void* ginHostWins[DEEP_EP_GIN_MAX_CONTEXTS] = {}; // Array of host window handles
-    ncclGinWindow_t ginDevWins[DEEP_EP_GIN_MAX_CONTEXTS] = {}; // Array of device window handles
-    ncclWindow_t ncclWins[DEEP_EP_GIN_MAX_CONTEXTS] = {}; // Array of NCCL window handles
+    void* ginHostWins[DEEP_EP_GIN_MAX_CONTEXTS] = {};           // Array of host window handles
+    ncclGinWindow_t ginDevWins[DEEP_EP_GIN_MAX_CONTEXTS] = {};  // Array of device window handles
+    ncclWindow_t ncclWins[DEEP_EP_GIN_MAX_CONTEXTS] = {};       // Array of NCCL window handles
 };
 
 class NCCLGINBackend : public CommunicationBackend {
@@ -34,15 +36,14 @@ public:
     ~NCCLGINBackend() override;
 
     // Required interface methods
-    int init(const std::vector<uint8_t>& root_unique_id_val, 
-             int rank, int num_ranks, bool low_latency_mode, int qps_per_rank) override;
+    int init(const std::vector<uint8_t>& root_unique_id_val, int rank, int num_ranks, bool low_latency_mode, int qps_per_rank) override;
     void finalize() override;
     void barrier() override;
-    
+
     // Memory management interface methods
     void* alloc(size_t size, size_t alignment) override;
     void free(void* ptr) override;
-    
+
     int get_rank() const override;
     int get_num_ranks() const override;
     BackendType get_backend_type() const override;
@@ -65,14 +66,14 @@ public:
 
 private:
     bool initialized_ = false;
-    int rank_ = -1;              // Global rank (for external API)
-    int num_ranks_ = -1;         // Global num_ranks (for external API)
-    int comm_rank_ = -1;         // Rank within NCCL communicator
-    int comm_nranks_ = -1;       // Number of ranks in NCCL communicator
-    
+    int rank_ = -1;         // Global rank (for external API)
+    int num_ranks_ = -1;    // Global num_ranks (for external API)
+    int comm_rank_ = -1;    // Rank within NCCL communicator
+    int comm_nranks_ = -1;  // Number of ranks in NCCL communicator
+
     // NCCL communicators for GIN support (always use vector, even for single comm)
     std::vector<ncclComm_t> comms_multi_;
-    
+
     NcclGinMemHandle mem_handle_;
     // Per-communicator registration (multi-communicator path)
     std::vector<std::array<ncclWindow_t, DEEP_EP_GIN_MAX_CONTEXTS>> dev_wins_multi_nccl_;
@@ -80,33 +81,32 @@ private:
     // GIN signal and counter management (new API)
     uint32_t signal_base_id_ = 0;
     uint32_t counter_base_id_ = 0;
-    int num_dispatch_signals_ = 0;   // total allocated signals across all contexts and buffers
+    int num_dispatch_signals_ = 0;  // total allocated signals across all contexts and buffers
     int num_total_signals_ = 0;
     int num_dispatch_counters_ = 0;  // currently unused
 
     // Multi-context tracking
     int num_gin_ctxs_ = 1;
     int num_comms_ = 1;
-    int signals_per_buffer_per_ctx_ = 0; // number of signals per buffer for one context
+    int signals_per_buffer_per_ctx_ = 0;  // number of signals per buffer for one context
 
     // Device arrays for contexts and windows
     ncclGinCtx_M<-1u>* d_gin_ctxs_ = nullptr;  // New API contexts
     ncclWindow_t* d_nccl_dev_wins_ = nullptr;
 
     // The assumption is that DeepSeek (256 experts) runs on at least 8 GPUs, hence 32 channels
-    const int max_num_channels_ = 32; // Max number of local experts per GPU
+    const int max_num_channels_ = 32;  // Max number of local experts per GPU
 
     // GIN barriers -- assume 32 rdma ranks
-    ncclDevComm_t* dcomms_ = nullptr;  // Host array
+    ncclDevComm_t* dcomms_ = nullptr;    // Host array
     ncclDevComm_t* d_dcomms_ = nullptr;  // Device array
     const int MAX_BARRIER_SESSIONS = 32;
 
     // Barrier variable
     int* d_barrier_var_ = nullptr;
-
 };
 
-} // namespace internode
-} // namespace deep_ep 
+}  // namespace internode
+}  // namespace deep_ep
 
-#endif // ENABLE_NCCL_GIN 
+#endif  // ENABLE_NCCL_GIN

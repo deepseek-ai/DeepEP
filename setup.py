@@ -38,7 +38,16 @@ if __name__ == '__main__':
     cxx_flags = ['-O3', '-Wno-deprecated-declarations', '-Wno-unused-variable', '-Wno-sign-compare', '-Wno-reorder', '-Wno-attributes']
     #nvcc_flags = ['-O3', '-Xcompiler', '-O3', '-DDEEPEP_DEBUG']
     nvcc_flags = ['-O3', '-Xcompiler', '-O3']
-    sources = ['csrc/deep_ep.cpp', 'csrc/kernels/runtime.cu', 'csrc/kernels/layout.cu', 'csrc/kernels/intranode.cu', 'csrc/kernels/backend_factory.cpp']
+    # Allow half and bfloat16 operators for NVSHMEM and internode.cu compatibility
+    # PyTorch automatically defines these NO_* flags but we need the operators enabled
+    nvcc_flags.extend([
+        '-U__CUDA_NO_HALF_OPERATORS__', '-U__CUDA_NO_HALF_CONVERSIONS__', '-U__CUDA_NO_BFLOAT16_CONVERSIONS__',
+        '-U__CUDA_NO_HALF2_OPERATORS__'
+    ])
+    sources = [
+        'csrc/deep_ep.cpp', 'csrc/kernels/runtime.cu', 'csrc/kernels/layout.cu', 'csrc/kernels/intranode.cu',
+        'csrc/kernels/backend_factory.cpp'
+    ]
     include_dirs = ['csrc/']
     library_dirs = []
     nvcc_dlink = []
@@ -49,7 +58,7 @@ if __name__ == '__main__':
         cxx_flags.append('-DENABLE_NCCL_GIN')
         nvcc_flags.append('-DENABLE_NCCL_GIN')
         print('NCCL GIN backend enabled via ENABLE_NCCL_GIN=1')
-        
+
         # Add NCCL GIN include paths
         nccl_gin_home = os.getenv('NCCL_GIN_HOME', None)
         if nccl_gin_home and os.path.exists(nccl_gin_home):
@@ -58,28 +67,28 @@ if __name__ == '__main__':
             if os.path.exists(nccl_gin_build_include):
                 include_dirs.append(nccl_gin_build_include)
                 print(f'Added NCCL GIN build include: {nccl_gin_build_include}')
-            
+
             # Add src/include for gin.h and device headers
             nccl_gin_src_include = f'{nccl_gin_home}/src/include'
             if os.path.exists(nccl_gin_src_include):
                 include_dirs.append(nccl_gin_src_include)
                 print(f'Added NCCL GIN src include: {nccl_gin_src_include}')
-                
+
                 # Add plugin subdirectory for nccl_tuner.h
-                # FIXME why is this needed? 
+                # FIXME why is this needed?
                 nccl_gin_plugin_include = f'{nccl_gin_src_include}/plugin'
                 if os.path.exists(nccl_gin_plugin_include):
                     include_dirs.append(nccl_gin_plugin_include)
                     print(f'Added NCCL GIN plugin include: {nccl_gin_plugin_include}')
-                        
+
             # Add NCCL GIN library path
             nccl_gin_lib = f'{nccl_gin_home}/build/lib'
             if os.path.exists(nccl_gin_lib):
                 library_dirs.append(nccl_gin_lib)
                 print(f'Added NCCL GIN library directory: {nccl_gin_lib}')
 
-            sources.extend(['csrc/kernels/nccl_gin_backend.cu']) # FIXME: this should add internode.cu and internode_ll.cu
-            
+            sources.extend(['csrc/kernels/nccl_gin_backend.cu'])  # FIXME: this should add internode.cu and internode_ll.cu
+
             # Add NCCL linking
             extra_link_args.extend(['-lnccl', '-lnccl_static', '-Wl,--allow-multiple-definition'])
             print('Added NCCL GIN library linking: -lnccl -lnccl_static')
@@ -100,7 +109,8 @@ if __name__ == '__main__':
         library_dirs.extend([f'{nvshmem_dir}/lib'])
         nvcc_dlink.extend(['-dlink', f'-L{nvshmem_dir}/lib', '-lnvshmem_device'])
         # Use --no-as-needed to ensure NVSHMEM host library is always linked
-        extra_link_args.extend(['-Wl,--no-as-needed', f'-l:{nvshmem_host_lib}', '-Wl,--as-needed', '-l:libnvshmem_device.a', f'-Wl,-rpath,{nvshmem_dir}/lib'])
+        extra_link_args.extend(
+            ['-Wl,--no-as-needed', f'-l:{nvshmem_host_lib}', '-Wl,--as-needed', '-l:libnvshmem_device.a', f'-Wl,-rpath,{nvshmem_dir}/lib'])
 
     if int(os.getenv('DISABLE_SM90_FEATURES', 0)):
         # Prefer A100

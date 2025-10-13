@@ -2,9 +2,11 @@
 
 // Debug macro that works in both host and device code
 #ifdef DEEPEP_DEBUG
-    #define DEEPEP_DEBUG_PRINT(...) printf(__VA_ARGS__)
+#define DEEPEP_DEBUG_PRINT(...) printf(__VA_ARGS__)
 #else
-    #define DEEPEP_DEBUG_PRINT(...) do {} while(0)
+#define DEEPEP_DEBUG_PRINT(...) \
+    do {                        \
+    } while (0)
 #endif
 
 #define NUM_MAX_NVL_PEERS 8
