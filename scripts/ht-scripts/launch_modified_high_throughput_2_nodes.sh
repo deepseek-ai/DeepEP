@@ -136,7 +136,7 @@ for ((i=1; i<=${NUM_ITERATIONS}; i++)); do
     
     # Force Python to use the pre-built deep_ep installation
     # The package is installed in dist-packages, not site-packages
-    export PYTHONPATH=${DEEP_EP_DIR}/deepep_custom_install/local/lib/python3.12/dist-packages/deep_ep-1.2.1+6708893-py3.12-linux-x86_64.egg:$PYTHONPATH
+    export PYTHONPATH=${DEEP_EP_DIR}/deepep_custom_install/local/lib/python3.12/dist-packages/deep_ep-1.2.1+b14df36-py3.12-linux-x86_64.egg:$PYTHONPATH
     
     echo '=== Using pre-built deep_ep installation ===';
     echo \"PYTHONPATH: \$PYTHONPATH\";

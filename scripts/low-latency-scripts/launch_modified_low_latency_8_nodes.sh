@@ -136,7 +136,7 @@ for ((i=1; i<=${NUM_ITERATIONS}; i++)); do
     
     # Force Python to use the pre-built deep_ep installation
     # The package is installed in dist-packages, not site-packages
-    export PYTHONPATH=${DEEP_EP_DIR}/deepep_custom_install/local/lib/python3.12/dist-packages/deep_ep-1.2.1+6708893-py3.12-linux-x86_64.egg:$PYTHONPATH
+    export PYTHONPATH=${DEEP_EP_DIR}/deepep_custom_install/local/lib/python3.12/dist-packages/deep_ep-1.2.1+b14df36-py3.12-linux-x86_64.egg:$PYTHONPATH
     
     echo '=== Using pre-built deep_ep installation ===';
     echo \"PYTHONPATH: \$PYTHONPATH\";
@@ -166,12 +166,12 @@ except ImportError as e:
     if [[ \"\${ENABLE_NCCL_GIN}\" == \"1\" ]]; then
         echo '=== Running with NCCL GIN backend ===';
 
-        LD_LIBRARY_PATH=\$MPI_HOME/lib/:\$HPCX_UCX_DIR/lib/:\$NCCL_GIN_HOME/build/lib:\$NCCL_GIN_HOME/src/gin/transport/gdaki/doca-gpunetio-lite/lib:\$LD_LIBRARY_PATH DEEP_EP_BACKEND=nccl_gin NCCL_GIN_TYPE=3 NCCL_GIN_ENABLE=1 UCX_IB_DM_COUNT=0 NCCL_SHM_DISABLE=1 NCCL_P2P_DISABLE=1 NCCL_NET_PLUGIN=none NCCL_DEBUG=0 DOCA_GPUNETIO_LITE_DEBUG=0 python tests/test_low_latency.py --disable-nvlink;
+        LD_LIBRARY_PATH=\$MPI_HOME/lib/:\$HPCX_UCX_DIR/lib/:\$NCCL_GIN_HOME/build/lib:\$NCCL_GIN_HOME/src/gin/transport/gdaki/doca-gpunetio-lite/lib:\$LD_LIBRARY_PATH DEEP_EP_BACKEND=nccl_gin NCCL_GIN_TYPE=3 NCCL_GIN_ENABLE=1 UCX_IB_DM_COUNT=0 NCCL_SHM_DISABLE=1 NCCL_P2P_DISABLE=1 NCCL_NET_PLUGIN=none NCCL_DEBUG=0 DOCA_GPUNETIO_LITE_DEBUG=0 python tests/test_low_latency.py --disable-nvlink --num-experts 256;
 
     else
         echo '=== Running with NVSHMEM backend ===';
         export DEEP_EP_BACKEND=nvshmem;
-        python tests/test_low_latency.py --disable-nvlink;
+        python tests/test_low_latency.py --disable-nvlink --num-experts 256;
     fi"
     
     # Add delay between iterations (except for the last one)
