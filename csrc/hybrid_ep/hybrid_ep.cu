@@ -2,10 +2,10 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved
 #include "hybrid_ep.cuh"
 
-HybridEpBuffer::HybridEpBuffer(BufferConfig config, int local_rank, int node_rank, int group_size, int num_of_ranks_per_node, bool use_fp8_dispatch)
-    : config(config), local_rank(local_rank), node_rank(node_rank), group_size(group_size),
-    num_of_ranks_per_node(num_of_ranks_per_node), executor(local_rank, node_rank), use_fp8_dispatch(use_fp8_dispatch) {
-    if(group_size <= num_of_ranks_per_node) {
+HybridEpBuffer::HybridEpBuffer(BufferConfig config, int local_rank, int node_rank, int group_size)
+    : buffer_config(config), local_rank(local_rank), node_rank(node_rank), group_size(group_size),
+    executor(local_rank, node_rank) {
+    if(group_size <= buffer_config.num_of_ranks_per_node) {
       // If used on only intra-node communication, the dispatch/combine can share same buffers.
       use_shared_buffer = true;
     }else{
@@ -22,6 +22,9 @@ HybridEpBuffer::~HybridEpBuffer() {
 }
 
 void HybridEpBuffer::release_buffer() {
+  // Synchronize the device to ensure all operations are completed.
+  CUDA_CHECK(cudaDeviceSynchronize());
+
   auto free_buffer = [this](void *ptr, bool remote_memory) {
     if (ptr != nullptr) {
       if (remote_memory) {
@@ -41,10 +44,8 @@ void HybridEpBuffer::release_buffer() {
     free_buffer(dispatch_buffers.expert_output_token, true);
     free_buffer(dispatch_buffers.expert_output_prob, true);
   }
-  if (use_fp8_dispatch) {
-    free_buffer(dispatch_buffers.expert_output_scaling_factor, true);
-    free_buffer(dispatch_buffers.rdma_inter_node_group_scaling_factor, false);
-  }
+  free_buffer(dispatch_buffers.expert_output_scaling_factor, true);
+  free_buffer(dispatch_buffers.rdma_inter_node_group_scaling_factor, false);
   free_buffer(dispatch_buffers.rdma_inter_node_group_token,false);
   free_buffer(dispatch_buffers.rdma_inter_node_group_prob, false);
   free_buffer(dispatch_buffers.rdma_inter_node_group_flags, false);
@@ -55,13 +56,11 @@ void HybridEpBuffer::release_buffer() {
   }else{
     remote_allocator.close_handle(dispatch_buffers.intra_node_write_completion_flags);
   }
-  for (int i = 0; i < num_of_ranks_per_node; i++) {
+  for (int i = 0; i < buffer_config.num_of_ranks_per_node; i++) {
     if (i != local_rank) {
       remote_allocator.close_handle(dispatch_buffers.expert_output_token_all_ranks[i]);
       remote_allocator.close_handle(dispatch_buffers.expert_output_prob_all_ranks[i]);
-      if (use_fp8_dispatch) {
-        remote_allocator.close_handle(dispatch_buffers.expert_output_scaling_factor_all_ranks[i]);
-      }
+      remote_allocator.close_handle(dispatch_buffers.expert_output_scaling_factor_all_ranks[i]);
     }
   }
   delete[] dispatch_buffers.expert_output_token_all_ranks;
@@ -83,7 +82,7 @@ void HybridEpBuffer::release_buffer() {
   }else{
     remote_allocator.close_handle(combine_buffers.intra_node_write_completion_flags);
   }
-  for (int i = 0; i < num_of_ranks_per_node; i++) {
+  for (int i = 0; i < buffer_config.num_of_ranks_per_node; i++) {
     if (i != local_rank) {
       remote_allocator.close_handle(combine_buffers.expert_input_token_all_ranks[i]);
       remote_allocator.close_handle(combine_buffers.expert_input_prob_all_ranks[i]);
@@ -95,31 +94,31 @@ void HybridEpBuffer::release_buffer() {
 
 void HybridEpBuffer::allocate_buffer_for_preprocessing() {
   auto preprocessing_tmp_elts =
-      config.num_of_blocks_preprocessing_api * config.num_of_ranks_per_node;
+    buffer_config.num_of_blocks_preprocessing_api * buffer_config.num_of_ranks_per_node;
   CUDA_CHECK(
       cudaMalloc((void **)&this->preprocessing_tmp,
                  preprocessing_tmp_elts * sizeof(hybrid_ep::tmp_state_t)));
 }
 
 void HybridEpBuffer::allocate_buffer_for_dispatch() {
-  dispatch_buffers.data_type = config.token_data_type;
+  dispatch_buffers.data_type = buffer_config.token_data_type;
   size_t sizeof_token_data_type = get_token_data_type_size(dispatch_buffers.data_type);
 
   // Calculate buffer sizes
-  auto expert_output_token_elts = max_num_of_tokens_for_experts * config.hidden_dim;
+  auto expert_output_token_elts = max_num_of_tokens_for_experts * buffer_config.hidden_dim;
   auto expert_output_prob_elts = max_num_of_tokens_for_experts * 
-                                 (config.num_of_experts_per_rank * config.num_of_ranks_per_node);
-  auto expert_output_scaling_factor_elts = max_num_of_tokens_for_experts * (config.hidden_dim / 128);
+                                 (buffer_config.num_of_experts_per_rank * buffer_config.num_of_ranks_per_node);
+  auto expert_output_scaling_factor_elts = max_num_of_tokens_for_experts * (buffer_config.hidden_dim / 128);
   // Calculate local temp buffer sizes  
-  auto rdma_inter_node_group_token_elts = config.max_num_of_tokens_per_rank * 
-                                          (config.num_of_nodes - 1) * config.hidden_dim;
-  auto rdma_inter_node_group_prob_elts = config.max_num_of_tokens_per_rank * (config.num_of_nodes - 1) *
-                                         (config.num_of_experts_per_rank * config.num_of_ranks_per_node);
-  auto rdma_inter_node_group_scaling_factor_elts = config.max_num_of_tokens_per_rank * 
-                                                    (config.num_of_nodes - 1) * (config.hidden_dim / 128);
-  auto rdma_inter_node_group_flags_elts = (config.max_num_of_tokens_per_rank /
-                                           config.num_of_tokens_per_chunk_dispatch_api) *
-                                          (config.num_of_nodes - 1);
+  auto rdma_inter_node_group_token_elts = buffer_config.max_num_of_tokens_per_rank * 
+                                          (buffer_config.num_of_nodes - 1) * buffer_config.hidden_dim;
+  auto rdma_inter_node_group_prob_elts = buffer_config.max_num_of_tokens_per_rank * (buffer_config.num_of_nodes - 1) *
+                                         (buffer_config.num_of_experts_per_rank * buffer_config.num_of_ranks_per_node);
+  auto rdma_inter_node_group_scaling_factor_elts = buffer_config.max_num_of_tokens_per_rank * 
+                                                    (buffer_config.num_of_nodes - 1) * (buffer_config.hidden_dim / 128);
+  auto rdma_inter_node_group_flags_elts = (buffer_config.max_num_of_tokens_per_rank /
+                                           buffer_config.num_of_tokens_per_chunk_dispatch_api) *
+                                          (buffer_config.num_of_nodes - 1);
 
   // Allocate main buffers
   if (use_shared_buffer) {
@@ -127,24 +126,19 @@ void HybridEpBuffer::allocate_buffer_for_dispatch() {
     assert(combine_buffers.expert_input_prob != nullptr);
     dispatch_buffers.expert_output_token = combine_buffers.expert_input_token;
     dispatch_buffers.expert_output_prob = combine_buffers.expert_input_prob;
-  }
-  else {
+  } else {
     remote_allocator.allocate((void**)&dispatch_buffers.expert_output_token, expert_output_token_elts * sizeof_token_data_type);
     remote_allocator.allocate((void**)&dispatch_buffers.expert_output_prob, expert_output_prob_elts * sizeof(float));
   }
-  if (use_fp8_dispatch) {
-    remote_allocator.allocate((void**)&dispatch_buffers.expert_output_scaling_factor, expert_output_scaling_factor_elts * sizeof(float));
-  }
+  remote_allocator.allocate((void**)&dispatch_buffers.expert_output_scaling_factor, expert_output_scaling_factor_elts * sizeof(float));
 
   // Allocate RDMA buffers
   CUDA_CHECK(cudaMalloc((void**)&dispatch_buffers.rdma_inter_node_group_token,
                         rdma_inter_node_group_token_elts * sizeof_token_data_type));
   CUDA_CHECK(cudaMalloc((void**)&dispatch_buffers.rdma_inter_node_group_prob,
                         rdma_inter_node_group_prob_elts * sizeof(float)));
-  if (use_fp8_dispatch) {
-    CUDA_CHECK(cudaMalloc((void**)&dispatch_buffers.rdma_inter_node_group_scaling_factor,
-                          rdma_inter_node_group_scaling_factor_elts * sizeof(float)));
-  }
+  CUDA_CHECK(cudaMalloc((void**)&dispatch_buffers.rdma_inter_node_group_scaling_factor,
+                        rdma_inter_node_group_scaling_factor_elts * sizeof(float)));
   CUDA_CHECK(cudaMalloc((void**)&dispatch_buffers.rdma_inter_node_group_flags,
                         rdma_inter_node_group_flags_elts * sizeof(uint64_t)));
 
@@ -162,9 +156,7 @@ void HybridEpBuffer::allocate_buffer_for_dispatch() {
   MemHandle handles[4];
   remote_allocator.get_handle(&handles[0], dispatch_buffers.expert_output_token);
   remote_allocator.get_handle(&handles[1], dispatch_buffers.expert_output_prob);
-  if (use_fp8_dispatch) {
-    remote_allocator.get_handle(&handles[2], dispatch_buffers.expert_output_scaling_factor);
-  }
+  remote_allocator.get_handle(&handles[2], dispatch_buffers.expert_output_scaling_factor);
   if (local_rank == 0) {
     remote_allocator.get_handle(&handles[3], dispatch_buffers.intra_node_write_completion_flags);
   }
@@ -180,21 +172,21 @@ void HybridEpBuffer::allocate_buffer_for_dispatch() {
 
 void HybridEpBuffer::allocate_buffer_for_combine() {
   // Calculate buffer sizes
-  auto expert_input_token_elts = max_num_of_tokens_for_experts * config.hidden_dim;
+  auto expert_input_token_elts = max_num_of_tokens_for_experts * buffer_config.hidden_dim;
   auto expert_input_prob_elts = max_num_of_tokens_for_experts *
-                                (config.num_of_experts_per_rank * config.num_of_ranks_per_node);
+                                (buffer_config.num_of_experts_per_rank * buffer_config.num_of_ranks_per_node);
   // Calculate local temp buffer sizes
-  auto rdma_intra_node_red_token_elts = config.max_num_of_tokens_per_rank *
-                                        (config.num_of_nodes - 1) * config.hidden_dim;
-  auto rdma_intra_node_red_prob_elts = config.max_num_of_tokens_per_rank * (config.num_of_nodes - 1) *
-                                       (config.num_of_experts_per_rank * config.num_of_ranks_per_node);
-  auto rdma_inter_node_group_token_elts = config.max_num_of_tokens_per_rank *
-                                          (config.num_of_nodes - 1) * config.hidden_dim;
-  auto rdma_inter_node_group_prob_elts = config.max_num_of_tokens_per_rank * (config.num_of_nodes - 1) *
-                                         (config.num_of_experts_per_rank * config.num_of_ranks_per_node);
-  auto rdma_inter_node_group_flags_elts = (config.max_num_of_tokens_per_rank /
-                                           config.num_of_tokens_per_chunk_combine_api) *
-                                          (config.num_of_nodes - 1);
+  auto rdma_intra_node_red_token_elts = buffer_config.max_num_of_tokens_per_rank *
+                                        (buffer_config.num_of_nodes - 1) * buffer_config.hidden_dim;
+  auto rdma_intra_node_red_prob_elts = buffer_config.max_num_of_tokens_per_rank * (buffer_config.num_of_nodes - 1) *
+                                       (buffer_config.num_of_experts_per_rank * buffer_config.num_of_ranks_per_node);
+  auto rdma_inter_node_group_token_elts = buffer_config.max_num_of_tokens_per_rank *
+                                          (buffer_config.num_of_nodes - 1) * buffer_config.hidden_dim;
+  auto rdma_inter_node_group_prob_elts = buffer_config.max_num_of_tokens_per_rank * (buffer_config.num_of_nodes - 1) *
+                                         (buffer_config.num_of_experts_per_rank * buffer_config.num_of_ranks_per_node);
+  auto rdma_inter_node_group_flags_elts = (buffer_config.max_num_of_tokens_per_rank /
+                                           buffer_config.num_of_tokens_per_chunk_combine_api) *
+                                          (buffer_config.num_of_nodes - 1);
 
   // Allocate main buffers
   remote_allocator.allocate((void**)&combine_buffers.expert_input_token, expert_input_token_elts * sizeof(uint16_t));
@@ -241,9 +233,9 @@ void HybridEpBuffer::allocate_buffer_for_combine() {
 
 void HybridEpBuffer::allocate_buffer() {
   // Token number at the worst case, all tokens are routed to the same expert.
-  this->max_num_of_tokens_for_experts = config.max_num_of_tokens_per_rank *
-                                        config.num_of_ranks_per_node *
-                                        config.num_of_nodes;
+  this->max_num_of_tokens_for_experts = buffer_config.max_num_of_tokens_per_rank *
+                                        buffer_config.num_of_ranks_per_node *
+                                        buffer_config.num_of_nodes;
   assert(this->max_num_of_tokens_for_experts % 4 ==
          0); // The number of tokens for experts should be divisible by 4, this
              // is required by the permute make_row_id_map kernel
@@ -296,50 +288,20 @@ void HybridEpBuffer::exchange_ipc_address(py::object process_group) {
   }
 }
 
-bool HybridEpBuffer::update_buffer(HybridEpConfigInstance config) {
-  // If new config requires bigger buffer, we will release the old buffer and allocate a new one.
-  bool need_reallocate = false;
-
-  template <typename T>
-  inline bool grow_to(T& dst, const T& src) {
-    if (dst < src) { dst = src; return true; }
-    return false;
-  }
-  
-  bool need_reallocate = false;
-  need_reallocate |= grow_to(this->config.hidden_dim,             config.hidden_dim);
-  need_reallocate |= grow_to(this->config.num_of_experts_per_rank,config.num_of_experts_per_rank);
-  need_reallocate |= grow_to(this->config.num_of_ranks_per_node,  config.num_of_ranks_per_node);
-  need_reallocate |= grow_to(this->config.num_of_nodes,           config.num_of_nodes);
-  need_reallocate |= grow_to(this->config.num_of_blocks_preprocessing_api, config.num_of_blocks_preprocessing_api);
-  
-  // Special case for token data type.
-  if(get_token_data_type_size(this->config.token_data_type) < get_token_data_type_size(config.token_data_type)) {
-    need_reallocate = true;
-    this->config.token_data_type = config.token_data_type;
-  }
-  
-  if(need_reallocate) {
-    release_buffer();
-    allocate_buffer();
-  }
-  return need_reallocate;
-}
 
 void HybridEpBuffer::open_handles_from_other_ranks(
     std::vector<torch::Tensor> dispatch_handles,
     std::vector<torch::Tensor> combine_handles) {
-
   // Malloc the pointer arrays used in the dispatch kernel.
   dispatch_buffers.expert_output_token_all_ranks =
-      (void **)malloc(config.num_of_ranks_per_node * sizeof(void *));
+      (void **)malloc(buffer_config.num_of_ranks_per_node * sizeof(void *));
   dispatch_buffers.expert_output_prob_all_ranks =
-      (float **)malloc(config.num_of_ranks_per_node * sizeof(float *));
+      (float **)malloc(buffer_config.num_of_ranks_per_node * sizeof(float *));
   dispatch_buffers.expert_output_scaling_factor_all_ranks =
-      (float **)malloc(config.num_of_ranks_per_node * sizeof(float *));
+      (float **)malloc(buffer_config.num_of_ranks_per_node * sizeof(float *));
 
   // Global offset means the position in the multi-node case.
-  auto global_offset = node_rank * num_of_ranks_per_node;
+  auto global_offset = node_rank * buffer_config.num_of_ranks_per_node;
 
   // Open the dispatch handles for intra_node_write_completion_flags
   if (local_rank != 0) {
@@ -354,7 +316,7 @@ void HybridEpBuffer::open_handles_from_other_ranks(
   }
 
   // Open the handles for export_output
-  for (int i = 0; i < num_of_ranks_per_node; i++) {
+  for (int i = 0; i < buffer_config.num_of_ranks_per_node; i++) {
     MemHandle expert_output_token_handle, expert_output_prob_handle,
         expert_output_scaling_factor_handle;
 
@@ -373,9 +335,8 @@ void HybridEpBuffer::open_handles_from_other_ranks(
                              &expert_output_token_handle);
       remote_allocator.open_handle((void**)(&dispatch_buffers.expert_output_prob_all_ranks[i]),
                              &expert_output_prob_handle);
-      if (use_fp8_dispatch) {
-        remote_allocator.open_handle((void**)(&dispatch_buffers.expert_output_scaling_factor_all_ranks[i]), &expert_output_scaling_factor_handle);
-      }
+      remote_allocator.open_handle((void**)(&dispatch_buffers.expert_output_scaling_factor_all_ranks[i]), 
+                             &expert_output_scaling_factor_handle);
     } else {
       // For local rank, use direct pointer assignment (more efficient, no IPC overhead)
       dispatch_buffers.expert_output_token_all_ranks[i] =
@@ -389,9 +350,9 @@ void HybridEpBuffer::open_handles_from_other_ranks(
 
   // Malloc the pointer arrays used in the combine kernel.
   combine_buffers.expert_input_token_all_ranks =
-      (uint16_t **)malloc(config.num_of_ranks_per_node * sizeof(uint16_t *));
+      (uint16_t **)malloc(buffer_config.num_of_ranks_per_node * sizeof(uint16_t *));
   combine_buffers.expert_input_prob_all_ranks =
-      (float **)malloc(config.num_of_ranks_per_node * sizeof(float *));
+      (float **)malloc(buffer_config.num_of_ranks_per_node * sizeof(float *));
   // Open the combine handles for intra_node_write_completion_flags
   if (local_rank != 0) {
     MemHandle intra_node_write_completion_flags_handle;
@@ -404,7 +365,7 @@ void HybridEpBuffer::open_handles_from_other_ranks(
                            &intra_node_write_completion_flags_handle);
   }
   // Open the handles for expert_input
-  for (int i = 0; i < num_of_ranks_per_node; i++) {
+  for (int i = 0; i < buffer_config.num_of_ranks_per_node; i++) {
     MemHandle expert_input_token_handle, expert_input_prob_handle;
     auto base_ptr = combine_handles[i + global_offset].data_ptr<uint8_t>();
     // Extract the handles from the tensor.
@@ -427,15 +388,41 @@ void HybridEpBuffer::open_handles_from_other_ranks(
   }
 }
 
+bool HybridEpBuffer::update_buffer(HybridEpConfigInstance config) {
+  // If new config requires bigger buffer, we will release the old buffer and allocate a new one.
+  bool need_reallocate = false;
+  
+  need_reallocate |= grow_to(buffer_config.hidden_dim,             config.hidden_dim);
+  need_reallocate |= grow_to(buffer_config.num_of_experts_per_rank,config.num_of_experts_per_rank);
+  need_reallocate |= grow_to(buffer_config.num_of_ranks_per_node,  config.num_of_ranks_per_node);
+  need_reallocate |= grow_to(buffer_config.num_of_nodes,           config.num_of_nodes);
+  need_reallocate |= grow_to(buffer_config.num_of_blocks_preprocessing_api, config.num_of_blocks_preprocessing_api);
+  need_reallocate |= grow_to(buffer_config.num_of_tokens_per_chunk_dispatch_api, config.num_of_tokens_per_chunk_dispatch_api);
+  need_reallocate |= grow_to(buffer_config.num_of_tokens_per_chunk_combine_api, config.num_of_tokens_per_chunk_combine_api);
+  
+  // Special case for token data type.
+  if(get_token_data_type_size(buffer_config.token_data_type) < get_token_data_type_size(config.token_data_type)
+      && !use_shared_buffer) {
+    need_reallocate = true;
+    buffer_config.token_data_type = config.token_data_type;
+  }
+
+  if(need_reallocate) {
+    release_buffer();
+    allocate_buffer();
+  }
+  return need_reallocate;
+}
+
 std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor,
            torch::Tensor>
-HybridEpBuffer::metadata_preprocessing(torch::Tensor global_routing_map, int64_t num_of_tokens_per_rank) {
+HybridEpBuffer::metadata_preprocessing(HybridEpConfigInstance config, torch::Tensor global_routing_map, int64_t num_of_tokens_per_rank) {
   // Basic checks
   assert(global_routing_map.device().is_cuda());
   assert(global_routing_map.is_contiguous());
 
   // Run the hybrid-ep metadata preprocessing kernel
-  return executor.metadata_preprocess_core(preprocessing_tmp, config, global_routing_map, num_of_tokens_per_rank);
+  return executor.metadata_preprocess_core(config, preprocessing_tmp, global_routing_map, num_of_tokens_per_rank);
 }
 
 std::tuple<torch::Tensor, c10::optional<torch::Tensor>, c10::optional<torch::Tensor>>

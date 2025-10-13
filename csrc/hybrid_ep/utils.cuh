@@ -162,3 +162,41 @@ inline std::string convert_to_nvcc_arch_flags(std::string torch_arch_list) {
 
   return nvcc_arch_flags;
 }
+
+template <typename T>
+inline bool grow_to(T& dst, const T& src) {
+  if (dst < src) { dst = src; return true; }
+  return false;
+}
+
+inline void print_ptr_info(void* p) {
+  cudaPointerAttributes attr{};
+  cudaError_t err = cudaPointerGetAttributes(&attr, p);
+  if (err != cudaSuccess) {
+    printf("cudaPointerGetAttributes failed: %s\n", cudaGetErrorString(err));
+    return;
+  }
+  cudaMemoryType memory_type;
+#if CUDART_VERSION >= 10000
+  memory_type = attr.type;
+#else
+  memory_type = attr.memoryType;
+#endif
+  std::string memory_type_str;
+  switch (memory_type) {
+    case cudaMemoryTypeHost: memory_type_str = "Host"; break;
+    case cudaMemoryTypeDevice: memory_type_str = "Device"; break;
+    case cudaMemoryTypeManaged: memory_type_str = "Managed"; break;
+    default: memory_type_str = "Unregistered/Unknown"; break;
+  }
+  printf("type=%s, device=%d\n", memory_type_str.c_str(), attr.device);
+
+  // If this is a device/managed pointer, try to query its allocation range (base + size)
+  if (memory_type == cudaMemoryTypeDevice || memory_type == cudaMemoryTypeManaged) {
+    cuInit(0);
+    CUdeviceptr base = 0;
+    size_t size = 0;
+    CUresult r = cuMemGetAddressRange(&base, &size, reinterpret_cast<CUdeviceptr>(p));
+    printf("alloc_base=%p, alloc_size=%zu bytes\n", reinterpret_cast<void*>(base), size);
+  }
+}

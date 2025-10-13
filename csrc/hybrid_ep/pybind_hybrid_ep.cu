@@ -30,7 +30,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         .def_readwrite("num_of_ranks_per_node", &BufferConfig::num_of_ranks_per_node)
         .def_readwrite("num_of_nodes", &BufferConfig::num_of_nodes)
         .def_readwrite("token_data_type", &BufferConfig::token_data_type)
-        .def_readwrite("num_of_blocks_preprocessing_api", &BufferConfig::num_of_blocks_preprocessing_api);
+        .def_readwrite("num_of_blocks_preprocessing_api", &BufferConfig::num_of_blocks_preprocessing_api)
+        .def_readwrite("num_of_tokens_per_chunk_dispatch_api", &BufferConfig::num_of_tokens_per_chunk_dispatch_api)
+        .def_readwrite("num_of_tokens_per_chunk_combine_api", &BufferConfig::num_of_tokens_per_chunk_combine_api)
         .def("__repr__", [](const BufferConfig &config) {
           return "<BufferConfig hidden_dim=" +
                  std::to_string(config.hidden_dim) + " max_num_of_tokens_per_rank=" +
@@ -99,11 +101,11 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         });
   
     pybind11::class_<HybridEpBuffer>(m, "HybridEpBuffer")
-        .def(py::init<BufferConfig, int, int, int, int, bool>())
+        .def(py::init<BufferConfig, int, int, int>())
         .def("update_buffer", &HybridEpBuffer::update_buffer, py::arg("config"))
         .def("exchange_ipc_address", &HybridEpBuffer::exchange_ipc_address)
         .def("metadata_preprocessing", &HybridEpBuffer::metadata_preprocessing,
-             py::kw_only(), py::arg("routing_map"), py::arg("num_of_tokens_per_rank"))
+             py::kw_only(), py::arg("config"), py::arg("routing_map"), py::arg("num_of_tokens_per_rank"))
         .def("dispatch", &HybridEpBuffer::dispatch, py::kw_only(), 
              py::arg("config"), py::arg("hidden"),
              py::arg("probs") = c10::nullopt,

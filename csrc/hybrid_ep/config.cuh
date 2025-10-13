@@ -18,6 +18,8 @@ struct BufferConfig {
   int num_of_nodes;
   TOKEN_DATA_TYPE token_data_type;
   int num_of_blocks_preprocessing_api;
+  int num_of_tokens_per_chunk_dispatch_api;
+  int num_of_tokens_per_chunk_combine_api;
 
   /*
    *  Validation check

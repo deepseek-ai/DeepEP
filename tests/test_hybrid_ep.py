@@ -89,7 +89,7 @@ def test_hybrid_ep_correctness(buffer: deep_ep.HybridEpBuffer, ref: TorchRef, us
             dispatched_scaling_factor,
             handle,
         ) = buffer.dispatch(
-            hidden=hidden, scaling_factor=scaling_factor, topk_idx=topk_idx, topk_weights=topk_weights if with_probs else None
+            hidden=hidden, scaling_factor=scaling_factor, topk_idx=topk_idx, topk_weights=topk_weights if with_probs else None, num_of_experts=NUM_OF_EXPERTS,
         )
         assert torch.allclose(dispatched_hidden_ref, dispatched_hidden)
         if dispatched_probs is not None and dispatched_probs_ref is not None:
@@ -106,7 +106,7 @@ def test_hybrid_ep_correctness(buffer: deep_ep.HybridEpBuffer, ref: TorchRef, us
                 dispatched_scaling_factor_ref, dispatched_scaling_factor
             )
 
-        _, _, _, num_dispatched_tokens, local_expert_routing_map, _ = handle
+        _, _, _, num_dispatched_tokens, local_expert_routing_map, _, _ = handle
         num_dispatched_tokens = num_dispatched_tokens.cpu()
         local_expert_routing_map = local_expert_routing_map[
             : num_dispatched_tokens.item()
@@ -148,7 +148,7 @@ def test_hybrid_ep_correctness(buffer: deep_ep.HybridEpBuffer, ref: TorchRef, us
             scaling_factor=scaling_factor,
             pad_multiple=PAD_MULTIPLE,
         )
-        _, _, _, num_dispatched_tokens_tensor, local_expert_routing_map, _, _ = (
+        _, _, _, num_dispatched_tokens_tensor, local_expert_routing_map, _, _, _ = (
             handle
         )
         num_dispatched_tokens_tensor = num_dispatched_tokens_tensor.cpu()
@@ -223,7 +223,7 @@ def test_hybrid_ep_benchmark(buffer: deep_ep.HybridEpBuffer, group: dist.Process
     # warmup
     for _ in range(10):
         dispatched_hidden, dispatched_probs, _, handle = (
-            buffer.dispatch(hidden=hidden, scaling_factor=scaling_factor, topk_idx=topk_idx, topk_weights=topk_weights)
+            buffer.dispatch(hidden=hidden, scaling_factor=scaling_factor, topk_idx=topk_idx, topk_weights=topk_weights, num_of_experts=NUM_OF_EXPERTS)
         )
         # The combine only support bf16
         dispatched_hidden_bf16 = dispatched_hidden.to(torch.bfloat16)
@@ -235,14 +235,14 @@ def test_hybrid_ep_benchmark(buffer: deep_ep.HybridEpBuffer, group: dist.Process
     dispatch_bf16_nvl_recv_bytes = dispatched_hidden.numel() * 2
     combine_bf16_nvl_send_bytes = dispatch_bf16_nvl_recv_bytes
 
-    dispatch_args = {'hidden': hidden, 'scaling_factor': scaling_factor, 'topk_idx': topk_idx, 'topk_weights': topk_weights}
+    dispatch_args = {'hidden': hidden, 'scaling_factor': scaling_factor, 'topk_idx': topk_idx, 'topk_weights': topk_weights, 'num_of_experts': NUM_OF_EXPERTS}
     t = bench(lambda: buffer.dispatch(**dispatch_args))[0]
     nvl_recv_bytes = (dispatch_bf16_nvl_recv_bytes * fp8_factor) if hidden.dtype == torch.uint8 else dispatch_bf16_nvl_recv_bytes
     print(f'[rank {rank}] HybridEP dispatch torch API ({"FP8" if hidden.dtype == torch.uint8 else "BF16"}): '
             f'{nvl_recv_bytes / 1e9 / t:.2f} GB/s (NVL), t: {t * 1e6:.2f} us, nvl_recv_bytes: {nvl_recv_bytes / 1e6:.2f} MB', flush=True)
 
     dispatched_hidden, dispatched_probs, _, handle= (
-        buffer.dispatch(hidden=hidden, scaling_factor=scaling_factor, topk_idx=topk_idx, topk_weights=topk_weights)
+        buffer.dispatch(hidden=hidden, scaling_factor=scaling_factor, topk_idx=topk_idx, topk_weights=topk_weights, num_of_experts=NUM_OF_EXPERTS)
     )
     dispatched_hidden_bf16 = dispatched_hidden.to(torch.bfloat16)
     combine_args = {'hidden': dispatched_hidden_bf16, 'probs': dispatched_probs, 'handle': handle}
@@ -273,7 +273,7 @@ def test_hybrid_ep_benchmark(buffer: deep_ep.HybridEpBuffer, group: dist.Process
         # noinspection PyShadowingNames
         def test_func():
             dispatched_hidden, dispatched_probs, _, handle = (
-                buffer.dispatch(hidden=hidden, scaling_factor=scaling_factor, topk_idx=topk_idx, topk_weights=topk_weights)
+                buffer.dispatch(hidden=hidden, scaling_factor=scaling_factor, topk_idx=topk_idx, topk_weights=topk_weights, num_of_experts=NUM_OF_EXPERTS)
             )
             # The combine only support bf16
             dispatched_hidden_bf16 = dispatched_hidden.to(torch.bfloat16)
@@ -291,7 +291,7 @@ def test_hybrid_ep_benchmark(buffer: deep_ep.HybridEpBuffer, group: dist.Process
         with torch.cuda.nvtx.range(f"hybrid-ep dispatch ({"FP8" if hidden.dtype == torch.uint8 else "BF16"})"):
             if rank == 0:
                 print(f"profile hybrid-ep dispatch ({"FP8" if hidden.dtype == torch.uint8 else "BF16"})", flush=True)
-            dispatch_args = {'tensor': hidden, 'scaling_factor': scaling_factor, 'topk_idx': topk_idx, 'topk_weights': topk_weights}
+            dispatch_args = {'tensor': hidden, 'scaling_factor': scaling_factor, 'topk_idx': topk_idx, 'topk_weights': topk_weights, 'num_of_experts': NUM_OF_EXPERTS}
             bench(lambda: buffer.dispatch(**dispatch_args))
         with torch.cuda.nvtx.range("hybrid-ep combine"):
             if rank == 0:
@@ -311,7 +311,6 @@ def test_main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
                 hidden_dim=HIDDEN_DIM,
                 max_num_of_tokens_per_rank=MAX_NUM_OF_TOKENS_PER_RANK,
                 num_local_experts=NUM_LOCAL_EXPERTS,
-                num_of_experts=NUM_OF_EXPERTS,
                 use_fp8=use_fp8,
             )
             

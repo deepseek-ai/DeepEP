@@ -14,7 +14,7 @@
 
 class HybridEpBuffer {
 public:
-  HybridEpBuffer(BufferConfig config, int local_rank, int node_rank, int group_size, int num_of_ranks_per_node, bool use_fp8_dispatch);
+  HybridEpBuffer(BufferConfig config, int local_rank, int node_rank, int group_size);
   ~HybridEpBuffer();
   bool update_buffer(HybridEpConfigInstance config); // True means the buffer is reallocated.
 
@@ -72,7 +72,7 @@ public:
 
 private:
   ExtendedMemoryAllocator remote_allocator;
-  BufferConfig config;
+  BufferConfig buffer_config;
   Executor executor;
 
   void allocate_buffer();
@@ -84,15 +84,11 @@ private:
                                      std::vector<torch::Tensor> combine_handles);
 
   // Meta data of communication group.
-  int rank;
   int local_rank;
   int node_rank;
-  int num_of_ranks_per_node;
   int group_size;
-  int nvlink_domain_size;
   // Maximum number of tokens for experts.
   int64_t max_num_of_tokens_for_experts; 
-  bool use_fp8_dispatch;
   // Only valid on intra-node communication. In this case, the dispatch/combine can share same buffers.
   bool use_shared_buffer;
 
