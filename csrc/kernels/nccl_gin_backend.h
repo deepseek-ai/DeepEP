@@ -65,8 +65,10 @@ public:
 
 private:
     bool initialized_ = false;
-    int rank_ = -1;
-    int num_ranks_ = -1;
+    int rank_ = -1;              // Global rank (for external API)
+    int num_ranks_ = -1;         // Global num_ranks (for external API)
+    int comm_rank_ = -1;         // Rank within NCCL communicator
+    int comm_nranks_ = -1;       // Number of ranks in NCCL communicator
     
     // NCCL communicators for GIN support (always use vector, even for single comm)
     std::vector<ncclComm_t> comms_multi_;

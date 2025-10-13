@@ -2,6 +2,7 @@
 
 #include <ATen/cuda/CUDAContext.h>
 #include <ATen/cuda/CUDADataType.h>
+#include <cstdlib>
 #include <cuda_runtime.h>
 #include <pybind11/functional.h>
 #include <torch/python.h>
@@ -367,9 +368,25 @@ void Buffer::sync(const std::vector<int>& device_ids,
         std::vector<uint8_t> root_unique_id(root_unique_id_opt->size());
         auto root_unique_id_str = root_unique_id_opt->cast<std::string>();
         std::memcpy(root_unique_id.data(), root_unique_id_str.c_str(), root_unique_id_opt->size());
-        auto nvshmem_rank = low_latency_mode ? rank : rdma_rank;
-        auto num_nvshmem_ranks = low_latency_mode ? num_ranks : num_rdma_ranks;
-        EP_HOST_ASSERT(nvshmem_rank == internode::init(root_unique_id, nvshmem_rank, num_nvshmem_ranks, low_latency_mode, qps_per_rank));
+
+        // Determine the rank and num_ranks to pass to internode::init()
+        // For NCCL-GIN: always use rank and num_ranks (the backend handles comm splitting)
+        // For NVSHMEM: use rdma_rank and num_rdma_ranks in HT mode, rank and num_ranks in LL mode
+        int init_rank, init_num_ranks;
+        const char* backend_env = std::getenv("DEEP_EP_BACKEND");
+        bool is_nccl_gin = (backend_env && std::string(backend_env) == "nccl_gin");
+
+        if (is_nccl_gin) {
+            // NCCL-GIN: always pass global rank and num_ranks
+            init_rank = rank;
+            init_num_ranks = num_ranks;
+        } else {
+            // NVSHMEM: use rdma_rank/num_rdma_ranks in HT mode
+            init_rank = low_latency_mode ? rank : rdma_rank;
+            init_num_ranks = low_latency_mode ? num_ranks : num_rdma_ranks;
+        }
+
+        EP_HOST_ASSERT(init_rank == internode::init(root_unique_id, init_rank, init_num_ranks, low_latency_mode, qps_per_rank));
         internode::barrier();
 
         // Allocate

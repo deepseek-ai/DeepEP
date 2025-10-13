@@ -109,18 +109,48 @@ int NCCLGINBackend::init(const std::vector<uint8_t>& root_unique_id_val,
             throw std::runtime_error("Failed to set CUDA device " + std::to_string(localRank) + 
                                    ": " + std::string(cudaGetErrorString(cuda_result)));
         }
-        */                           
+        */
+
+        // Determine communication topology based on mode
+        const int gpus_per_server = NUM_MAX_NVL_PEERS;
+        int comm_rank;           // Rank to use for NCCL initialization
+        int comm_nranks;         // Number of ranks in communicator
+        int color = -1;          // Symmetric group ID (only for high throughput mode)
+        int group_rank = -1;     // Rank within symmetric group
+
+        if (low_latency_mode) {
+            // LOW LATENCY MODE: Connect to all ranks
+            comm_rank = rank;
+            comm_nranks = num_ranks;
+            printf("[NCCL GIN Backend] LOW LATENCY MODE: Rank %d connecting to all %d ranks\n",
+                   rank, num_ranks);
+        } else {
+            // HIGH THROUGHPUT MODE: Connect only to symmetric RDMA ranks
+            color = rank % gpus_per_server;
+            group_rank = rank / gpus_per_server;
+            comm_nranks = (num_ranks + gpus_per_server - 1) / gpus_per_server;
+            comm_rank = group_rank;
+
+            printf("[NCCL GIN Backend] HIGH THROUGHPUT MODE: Rank %d (color=%d, group_rank=%d) "
+                   "connecting to %d symmetric ranks [",
+                   rank, color, group_rank, comm_nranks);
+            for (int s = 0; s < comm_nranks; s++) {
+                printf("%d%s", color + s * gpus_per_server, s < comm_nranks-1 ? ", " : "");
+            }
+            printf("]\n");
+        }
 
         // Number of communicators equals qps_per_rank
         num_comms_ = qps_per_rank;
         num_gin_ctxs_ = num_comms_;
         
         // Verify we received the right number of unique IDs
+        // We always receive NUM_MAX_NVL_PEERS * qps_per_rank IDs from runtime.cu
+        // (generated for worst-case HT mode, LL mode uses only the first qps_per_rank IDs)
         size_t single_id_size = sizeof(ncclUniqueId);
-        EP_HOST_ASSERT(root_unique_id_val.size() % single_id_size == 0 && 
-                       "Invalid unique ID vector size");
-        EP_HOST_ASSERT(root_unique_id_val.size() == num_comms_ * single_id_size &&
-                       "Number of unique IDs doesn't match qps_per_rank");
+        size_t expected_ids = gpus_per_server * num_comms_;  // Always NUM_MAX_NVL_PEERS * qps_per_rank
+        EP_HOST_ASSERT(root_unique_id_val.size() == expected_ids * single_id_size &&
+                       "Number of unique IDs doesn't match NUM_MAX_NVL_PEERS * qps_per_rank");
         
         printf("[NCCL GIN Backend] Initializing %d communicator(s) (qps_per_rank=%d) for rank %d/%d\n", 
                num_comms_, qps_per_rank, rank, num_ranks);
@@ -144,9 +174,15 @@ int NCCLGINBackend::init(const std::vector<uint8_t>& root_unique_id_val,
         comms_multi_.resize(num_comms_);
         for (int i = 0; i < num_comms_; i++) {
             ncclUniqueId id;
-            std::memcpy(&id, 
-                       root_unique_id_val.data() + i * single_id_size, 
-                       single_id_size);
+            size_t id_offset;
+            if (low_latency_mode) {
+                // Low latency: IDs are sequential
+                id_offset = i * single_id_size;
+            } else {
+                // High throughput: IDs are organized by color group
+                id_offset = (color * num_comms_ + i) * single_id_size;
+            }
+            std::memcpy(&id, root_unique_id_val.data() + id_offset, single_id_size);
             
             //printf("[NCCL GIN Backend] Rank %d, Device %d: initializing communicator %d/%d (ID first 8 bytes: %02x%02x%02x%02x%02x%02x%02x%02x)\n", 
             //       rank, current_device, i, num_comms_,
@@ -154,7 +190,7 @@ int NCCLGINBackend::init(const std::vector<uint8_t>& root_unique_id_val,
             //       id.internal[4], id.internal[5], id.internal[6], id.internal[7]); 
             //fflush(stdout);
             
-            ncclResult_t nccl_result = ncclCommInitRankConfig(&comms_multi_[i], num_ranks, id, rank, &config);
+            ncclResult_t nccl_result = ncclCommInitRankConfig(&comms_multi_[i], comm_nranks, id, comm_rank, &config);
             //printf("[Rank %d] Comm %d: ncclCommInitRankConfig returned: %d (%s)\n", rank, i, nccl_result, ncclGetErrorString(nccl_result));
             //fflush(stdout);
             
@@ -173,7 +209,7 @@ int NCCLGINBackend::init(const std::vector<uint8_t>& root_unique_id_val,
             //fflush(stdout);
         }
         
-        printf("[NCCL GIN Backend] Rank %d successfully initialized %d communicator(s)\n", rank, num_comms_);
+        printf("[NCCL GIN Backend] Rank %d successfully initialized %d communicator(s)\n", comm_rank, num_comms_);
         
         // Get num_gin_ctxs_ from first communicator
         if (num_comms_ > 0) {
@@ -184,14 +220,21 @@ int NCCLGINBackend::init(const std::vector<uint8_t>& root_unique_id_val,
         }
 
         // Allocate signals per context per buffer (double buffered total)
-        int num_local_experts = qps_per_rank; //num_experts / num_ranks;
-        signals_per_buffer_per_ctx_ = num_local_experts * num_ranks; // dispatch path (and combine uses num_experts equal to this)
-        int signals_per_ctx_total = signals_per_buffer_per_ctx_ * 2;  // double buffered (per buffer)
-        // One shared signal range per buffer reused across contexts
-        num_dispatch_signals_ = signals_per_ctx_total;
+        // Only Low Latency mode uses dispatch signals
+        if (low_latency_mode) {
+            int num_local_experts = qps_per_rank;
+            signals_per_buffer_per_ctx_ = num_local_experts * comm_nranks; // dispatch path (and combine uses num_experts equal to this)
+            int signals_per_ctx_total = signals_per_buffer_per_ctx_ * 2;  // double buffered (per buffer)
+            num_dispatch_signals_ = signals_per_ctx_total;
+        } else {
+            // High Throughput mode doesn't use dispatch signals
+            num_dispatch_signals_ = 0;
+            signals_per_buffer_per_ctx_ = 0;
+        }
         num_dispatch_counters_ = 0;    // We don't use NCCL GIN counters - only signals
 
         // The assumption is that kDecoupled is false when initializing SymBuffers in internode.cu
+        // IMPORTANT: Use global num_ranks, not comm_nranks, because kernels use global topology
         const auto num_rdma_ranks = std::max(num_ranks / NUM_MAX_NVL_PEERS, 1);
         int rdma_channel_head_signals = num_rdma_ranks * max_num_channels_;
         int rdma_channel_tail_signals = num_rdma_ranks * max_num_channels_;
@@ -209,8 +252,8 @@ int NCCLGINBackend::init(const std::vector<uint8_t>& root_unique_id_val,
                 ncclGinCtx_M<-1u> gctx;
                 gctx.backend = comms_multi_[0]->sharedRes->ginState.ginDevHandles[i]->netDeviceType;
                 gctx.handle = comms_multi_[0]->sharedRes->ginState.ginDevHandles[i]->handle;
-                gctx.rank = rank;
-                gctx.nRanks = num_ranks;
+                gctx.rank = comm_rank;
+                gctx.nRanks = comm_nranks;
                 h_ctxs.push_back(gctx);
             }
             if (!h_ctxs.empty()) {
@@ -231,7 +274,7 @@ int NCCLGINBackend::init(const std::vector<uint8_t>& root_unique_id_val,
             }
         }
 
-        // Initialize GIN barriers - always use vector approach
+        // Initialize Device Communicators
         dcomms_ = new ncclDevComm_t[num_comms_];
         for (int c = 0; c < num_comms_; ++c) {
             dcomms_[c] = ncclDevComm_t{};  // Initialize to default
@@ -241,7 +284,7 @@ int NCCLGINBackend::init(const std::vector<uint8_t>& root_unique_id_val,
             reqs.ginForceEnable = true;
             NCCLCHECK(ncclDevCommCreate(comms_multi_[c], &reqs, &dcomms_[c]));
         }
-        std::cout << "[NCCL GIN Backend] Rank " << rank << " created " << num_comms_ 
+        std::cout << "[NCCL GIN Backend] Rank " << comm_rank << " created " << num_comms_
                 << " device communication(s) with " << MAX_BARRIER_SESSIONS << " barrier sessions each" << std::endl;
         
         // Allocate device memory for dcomms and copy data
@@ -264,11 +307,18 @@ int NCCLGINBackend::init(const std::vector<uint8_t>& root_unique_id_val,
                                    cudaGetErrorString(e4));
         }
 
+        // Store global rank and num_ranks (for external API)
         rank_ = rank;
         num_ranks_ = num_ranks;
+
+        // Store communicator-specific ranks for internal use
+        comm_rank_ = comm_rank;
+        comm_nranks_ = comm_nranks;
+
         initialized_ = true;
 
-        std::cout << "[NCCL GIN Backend] Initialized rank " << rank_ << "/" << num_ranks_ << std::endl;
+        std::cout << "[NCCL GIN Backend] Initialized global rank " << rank_ << "/" << num_ranks_
+                  << " (comm rank " << comm_rank_ << "/" << comm_nranks_ << ")" << std::endl;
         return rank_;
 
     } catch (const std::exception& e) {
@@ -463,12 +513,17 @@ void* NCCLGINBackend::get_gin_base_ptr() {
 
 unsigned NCCLGINBackend::get_signals_base(int buffer_idx) const {
     EP_HOST_ASSERT(buffer_idx == 0 || buffer_idx == 1 || buffer_idx == 2);
-    if (!initialized_ || num_dispatch_signals_ == 0 || num_total_signals_ == num_dispatch_signals_) {
+    if (!initialized_ || num_total_signals_ == 0) {
         throw std::runtime_error("NCCL GIN backend not initialized or no signals allocated");
     }
-    // Calculate signal offset based on buffer index (without signal_base_id_)
-    // It works for the high-throughput kernels, because when buffer_idx == 2 it skips all num_dispatch_signals_ 
-    int signals_per_buffer = num_dispatch_signals_ / 2;  // We allocated double-buffered signals
+
+    // Signal layout: [dispatch buffer 0][dispatch buffer 1][channel signals]
+    // - buffer_idx 0/1: LL mode dispatch signals (double buffered)
+    // - buffer_idx 2: Channel signals (used by both LL and HT modes)
+    //
+    // For HT mode: num_dispatch_signals_ = 0, so buffer_idx 2 returns 0
+    // For LL mode: buffer_idx 2 skips past dispatch signals to reach channel signals
+    int signals_per_buffer = num_dispatch_signals_ / 2;  // 0 for HT mode
     return buffer_idx * signals_per_buffer;
 }
 

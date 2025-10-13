@@ -48,11 +48,16 @@ std::vector<uint8_t> get_unique_id(int qps_per_rank, int num_ranks) {
     std::vector<uint8_t> result;
     
 #ifdef ENABLE_NCCL_GIN
-    // For NCCL GIN: generate qps_per_rank unique IDs (one per communicator)
-    int num_comms = qps_per_rank;
-    
-    // Generate one unique ID per communicator and pack them
-    for (int i = 0; i < num_comms; i++) {
+    // For NCCL GIN: Generate enough IDs for both LL and HT modes
+    // At this stage, we don't know which mode will be used, so generate for worst case (HT mode)
+    // - Low Latency mode: will use only first qps_per_rank IDs
+    // - High Throughput mode: will use all NUM_MAX_NVL_PEERS * qps_per_rank IDs
+    //   (each of the 8 color groups needs qps_per_rank IDs)
+
+    int num_total_ids = NUM_MAX_NVL_PEERS * qps_per_rank;  // 8 * qps_per_rank
+
+    // Generate unique IDs and pack them
+    for (int i = 0; i < num_total_ids; i++) {
         ncclUniqueId unique_id;
         ncclGetUniqueId(&unique_id);
         
@@ -78,27 +83,15 @@ int init(const std::vector<uint8_t>& root_unique_id_val, int rank, int num_ranks
 #ifdef ENABLE_NCCL_GIN
     //printf("NCCL: init()\n"); fflush(stdout);
     
-    // For NCCL GIN: expect qps_per_rank unique IDs packed together
-    int num_comms = qps_per_rank;
-    size_t expected_size = num_comms * sizeof(ncclUniqueId);
-    
+    // For NCCL GIN: Verify we received the correct number of unique IDs
+    // We always receive NUM_MAX_NVL_PEERS * qps_per_rank IDs (generated for HT mode worst case)
+    // LL mode uses only the first qps_per_rank IDs, HT mode uses all of them
+    size_t expected_size = NUM_MAX_NVL_PEERS * qps_per_rank * sizeof(ncclUniqueId);
     EP_HOST_ASSERT(root_unique_id_val.size() == expected_size && 
                    "Unique ID size mismatch");
     
+    // Initialize backend with packed unique IDs (backend will unpack based on mode)
     internode::BackendType backend_type = internode::detect_backend_type();
-    
-    // NCCL-GIN requires low_latency_mode to be enabled
-    // NCCL-GIN has 1:1 mapping between GPU and rank with no concept of "shared PE"
-    if (backend_type == internode::BackendType::NCCL_GIN && !low_latency_mode) {
-        throw std::runtime_error(
-            "NCCL-GIN backend requires low_latency_mode=True. "
-            "The NCCL-GIN backend uses a 1:1 GPU-to-rank mapping without shared PE support, "
-            "which is incompatible with the high-throughput (HT) kernels used when low_latency_mode=False. "
-            "Please set low_latency_mode=True when using NCCL-GIN."
-        );
-    }
-    
-    // Initialize backend with packed unique IDs (backend will unpack them internally)
     internode::initialize_backend(backend_type, root_unique_id_val, rank, num_ranks, low_latency_mode, qps_per_rank);     
     internode::CommunicationBackend* backend = internode::get_backend();
     backend->barrier();
