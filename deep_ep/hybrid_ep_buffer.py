@@ -5,20 +5,30 @@ import os
 import hybrid_ep_cpp
 
 
-def indices_to_map(topk_idx: torch.Tensor, topk_weights: torch.Tensor, num_of_tokens: int, num_of_experts: int):
+def indices_to_map(
+    topk_idx: torch.Tensor,
+    topk_weights: torch.Tensor,
+    num_of_tokens: int,
+    num_of_experts: int,
+):
     """
     Map the map to the indices.
     """
     # Generate the routing map and the probs according to the topk_idx and topk_weights.
     assert topk_idx is not None
-    routing_map = torch.zeros(num_of_tokens, num_of_experts, device="cuda", dtype=torch.bool)
+    routing_map = torch.zeros(
+        num_of_tokens, num_of_experts, device="cuda", dtype=torch.bool
+    )
     routing_map = routing_map.scatter(1, topk_idx.to(torch.int64), 1).bool()
     if topk_weights is not None:
-        probs = torch.zeros(num_of_tokens, num_of_experts, device="cuda", dtype=torch.float32)
+        probs = torch.zeros(
+            num_of_tokens, num_of_experts, device="cuda", dtype=torch.float32
+        )
         probs = probs.scatter(1, topk_idx.to(torch.int64), topk_weights)
     else:
         probs = None
     return routing_map, probs
+
 
 class HybridEpBuffer:
     def __init__(
@@ -82,28 +92,29 @@ class HybridEpBuffer:
         # Initialize the BufferConfig for the hybrid-ep buffer allocation.
         self.config = hybrid_ep_cpp.BufferConfig()
         self.config.hidden_dim = hidden_dim
-        self.config.max_num_of_tokens_per_rank = max_num_of_tokens_per_rank
+        self.config.max_num_of_tokens_per_rank = max(max_num_of_tokens_per_rank, 1024)
         self.config.num_of_experts_per_rank = num_local_experts
         self.config.num_of_ranks_per_node = self.num_of_ranks_per_node
         self.config.num_of_nodes = self.num_of_nodes
         # The SMs of preprocessing, chunk size of dispatch and combine will affact the size of intermediate buffers.
         self.config.num_of_blocks_preprocessing_api = self.num_sms_preprocessing_api
         # The fp8/bf16/fp16 data is communicated in the uint8/uint16 format.
-        self.config.token_data_type = hybrid_ep_cpp.UINT8 if self.use_fp8 else hybrid_ep_cpp.UINT16
+        self.config.token_data_type = (
+            hybrid_ep_cpp.UINT8 if self.use_fp8 else hybrid_ep_cpp.UINT16
+        )
         self.config.num_of_tokens_per_chunk_dispatch_api = int(
             os.getenv("NUM_OF_TOKENS_PER_CHUNK_DISPATCH_API", "128")
         )
         self.config.num_of_tokens_per_chunk_combine_api = int(
             os.getenv("NUM_OF_TOKENS_PER_CHUNK_COMBINE_API", "128")
         )
-        
+
         # Create C++ buffer - this will allocate all buffers during construction
         self.runtime = hybrid_ep_cpp.HybridEpBuffer(
             self.config, self.local_rank, self.node_rank, self.group_size
         )
         # Exchange IPC addresses using C++ distributed communication
         self.runtime.exchange_ipc_address(self.group)
-
 
     def update_template_config(
         self,
@@ -128,6 +139,9 @@ class HybridEpBuffer:
             if max_num_of_tokens_per_rank is not None
             else self.config.max_num_of_tokens_per_rank
         )
+        config.max_num_of_tokens_per_rank = max(
+            config.max_num_of_tokens_per_rank, self.config.max_num_of_tokens_per_rank
+        )
         config.num_of_experts_per_rank = (
             num_local_experts
             if num_local_experts is not None
@@ -145,7 +159,9 @@ class HybridEpBuffer:
         # Dispatch API Config
         if use_fp8 is None:
             use_fp8 = self.use_fp8
-        config.token_data_type = hybrid_ep_cpp.UINT8 if use_fp8 else hybrid_ep_cpp.UINT16
+        config.token_data_type = (
+            hybrid_ep_cpp.UINT8 if use_fp8 else hybrid_ep_cpp.UINT16
+        )
         config.num_of_blocks_dispatch_api = self.num_sms_dispatch_api
         config.device_side_sync_dispatch_api = True
         # Dispatch stages config:
@@ -181,7 +197,6 @@ class HybridEpBuffer:
         if reallocated:
             self.runtime.exchange_ipc_address(self.group)
         return config
-    
 
     def dispatch(
         self,
@@ -212,9 +227,13 @@ class HybridEpBuffer:
             num_of_experts = routing_map.size(-1)
         else:
             # Generate the routing map and the probs according to the topk_idx and topk_weights.
-            assert num_of_experts is not None, "The number of experts should be provided on index-based routing."
+            assert (
+                num_of_experts is not None
+            ), "The number of experts should be provided on index-based routing."
             if topk_idx is not None:
-                routing_map, probs = indices_to_map(topk_idx, topk_weights, num_of_tokens, num_of_experts)
+                routing_map, probs = indices_to_map(
+                    topk_idx, topk_weights, num_of_tokens, num_of_experts
+                )
 
         assert (
             handle is not None or routing_map is not None
@@ -322,7 +341,7 @@ class HybridEpBuffer:
             with_probs=probs is not None,
         )
         return combined_token, combined_probs
-    
+
     def dispatch_with_permute(
         self,
         *,
@@ -368,12 +387,18 @@ class HybridEpBuffer:
             else:
                 # Generate the routing map and the probs according to the topk_idx and topk_weights.
                 if topk_idx is not None:
-                    assert num_of_experts is not None, "The number of experts should be provided on index-based routing."
-                    routing_map, probs = indices_to_map(topk_idx, topk_weights, num_of_tokens_per_rank, num_of_experts)
-                    
+                    assert (
+                        num_of_experts is not None
+                    ), "The number of experts should be provided on index-based routing."
+                    routing_map, probs = indices_to_map(
+                        topk_idx, topk_weights, num_of_tokens_per_rank, num_of_experts
+                    )
+
             # If the handle is not provided, we need to generate the handle in the first invocation of the dispatch kernel.
             if handle is None:
-                assert hidden.size(0) == routing_map.size(0), "The hidden and the routing_map should have the same row number."
+                assert hidden.size(0) == routing_map.size(
+                    0
+                ), "The hidden and the routing_map should have the same row number."
                 # Update the template config.
                 config = self.update_template_config(
                     hidden_dim=hidden_dim,
@@ -420,7 +445,7 @@ class HybridEpBuffer:
                     num_of_tokens_per_rank,
                     config,
                 ) = handle
-                
+
             # Dispatch phase
             (
                 dispatched_token,
@@ -496,16 +521,16 @@ class HybridEpBuffer:
 
             combined_token, combined_probs = self.runtime.combine_with_unpermute(
                 config=config,
-                hidden = hidden,
-                probs = probs,
-                sparse_to_dense_map = sparse_to_dense_map,
-                rdma_to_attn_map = rdma_to_attn_map,
-                attn_to_rdma_map = attn_to_rdma_map,
-                num_dispatched_tokens_tensor = num_dispatched_tokens_tensor,
-                row_id_map = row_id_map,
-                num_dispatched_tokens = num_dispatched_tokens,   
-                num_of_tokens_per_rank = num_of_tokens_per_rank,
-                pad_multiple = pad_multiple,
-                with_probs = probs is not None,
+                hidden=hidden,
+                probs=probs,
+                sparse_to_dense_map=sparse_to_dense_map,
+                rdma_to_attn_map=rdma_to_attn_map,
+                attn_to_rdma_map=attn_to_rdma_map,
+                num_dispatched_tokens_tensor=num_dispatched_tokens_tensor,
+                row_id_map=row_id_map,
+                num_dispatched_tokens=num_dispatched_tokens,
+                num_of_tokens_per_rank=num_of_tokens_per_rank,
+                pad_multiple=pad_multiple,
+                with_probs=probs is not None,
             )
         return combined_token, combined_probs
