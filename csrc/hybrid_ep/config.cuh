@@ -9,6 +9,31 @@
 // This will be used to initialize the template param_t for communication kernel.
 #define MAX_NUM_OF_RANKS_PER_NODE 72
 
+// Config used for buffer allocation.
+struct BufferConfig {
+  int hidden_dim;
+  int max_num_of_tokens_per_rank;
+  int num_of_experts_per_rank;
+  int num_of_ranks_per_node;
+  int num_of_nodes;
+  TOKEN_DATA_TYPE token_data_type;
+  int num_of_blocks_preprocessing_api;
+  int num_of_tokens_per_chunk_dispatch_api;
+  int num_of_tokens_per_chunk_combine_api;
+
+  /*
+   *  Validation check
+   */
+   bool is_valid(){
+    bool valid = true;
+    valid &= (hidden_dim % 512 == 0);
+    valid &= ((num_of_experts_per_rank * num_of_ranks_per_node) % 4 == 0);
+    valid &= (num_of_ranks_per_node % 2 == 0);
+    return valid;
+  }
+};
+
+// Config used for hybrid-ep kernel.
 struct HybridEpConfigInstance {
   /*
    *  Hybrid-ep Config

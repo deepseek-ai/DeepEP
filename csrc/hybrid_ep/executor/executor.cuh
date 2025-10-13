@@ -66,8 +66,8 @@ public:
 
     std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
     metadata_preprocess_core(
-        hybrid_ep::tmp_state_t *preprocessing_tmp,
         HybridEpConfigInstance config,
+        hybrid_ep::tmp_state_t *preprocessing_tmp,
         torch::Tensor global_routing_map,
         int num_of_tokens_per_rank
     );

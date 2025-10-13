@@ -7,14 +7,17 @@ Executor::Executor(int local_rank, int node_rank) : local_rank(local_rank), node
 
 std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
 Executor::metadata_preprocess_core(
-    hybrid_ep::tmp_state_t *preprocessing_tmp,
     HybridEpConfigInstance config, 
+    hybrid_ep::tmp_state_t *preprocessing_tmp,
     torch::Tensor global_routing_map,
     int num_of_tokens_per_rank
 ) {
   nvtxRangePushA("metadata_preprocess_core in hybrid-ep");
   // padding for the routing map
   const int rdma_to_attn_map_size_per_node = (((num_of_tokens_per_rank - 1) / 16) + 1) * 16;
+
+  auto num_of_expert = global_routing_map.size(-1);
+  assert(num_of_expert == config.num_of_experts_per_rank * config.num_of_ranks_per_node * config.num_of_nodes);
 
   // Construt the output tensor of the metadata preprocessing kernel.
   auto sparse_to_dense_map =
@@ -183,7 +186,7 @@ Executor::dispatch_postprocess(HybridEpConfigInstance config, DispatchBuffers& d
         size_t sizeof_token_data_type = get_token_data_type_size(dispatch_buffers.data_type);
         dispatched_tokens = torch::empty({args.num_dispatched_tokens, config.hidden_dim}, torch::dtype(args.hidden.dtype()).device(torch::kCUDA));
         auto res_sz = args.num_dispatched_tokens * config.hidden_dim * sizeof_token_data_type;
-        CUDA_CHECK(cudaMemcpyAsync(dispatched_tokens.data_ptr(), dispatch_buffers.expert_output_token,res_sz, cudaMemcpyDeviceToDevice, args.stream));
+        CUDA_CHECK(cudaMemcpyAsync(dispatched_tokens.data_ptr(), dispatch_buffers.expert_output_token, res_sz, cudaMemcpyDeviceToDevice, args.stream));
 
         if(config.forward_dispatch_api) {
             dispatched_probs = torch::empty({args.num_dispatched_tokens,
