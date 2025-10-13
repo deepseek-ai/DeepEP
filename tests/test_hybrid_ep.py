@@ -26,6 +26,13 @@ torch.cuda.manual_seed_all(SEED)
 torch.backends.cudnn.deterministic = True
 torch.backends.cudnn.benchmark = False
 
+def bitwise_equal(a: torch.Tensor, b: torch.Tensor) -> bool:
+    if a.dtype != b.dtype or a.shape != b.shape or a.device != b.device:
+        return False
+    a_bytes = a.contiguous().view(torch.uint8)
+    b_bytes = b.contiguous().view(torch.uint8)
+    return torch.equal(a_bytes, b_bytes)
+
 def init_tensor(
     hidden_dim: int,
     seq_len: int,
@@ -91,18 +98,18 @@ def test_hybrid_ep_correctness(buffer: deep_ep.HybridEpBuffer, ref: TorchRef, us
         ) = buffer.dispatch(
             hidden=hidden, scaling_factor=scaling_factor, topk_idx=topk_idx, topk_weights=topk_weights if with_probs else None, num_of_experts=NUM_OF_EXPERTS,
         )
-        assert torch.allclose(dispatched_hidden_ref, dispatched_hidden)
+        assert bitwise_equal(dispatched_hidden_ref, dispatched_hidden)
         if dispatched_probs is not None and dispatched_probs_ref is not None:
             start, end = ref._local_expert_range()
             masked_probs = torch.zeros_like(dispatched_probs)
             masked_probs[:, start:end] = dispatched_probs[:, start:end]
-            assert torch.allclose(dispatched_probs_ref, dispatched_probs[:, start:end])
+            assert bitwise_equal(dispatched_probs_ref, dispatched_probs[:, start:end])
             dispatched_probs = masked_probs
         if (
             dispatched_scaling_factor is not None
             and dispatched_scaling_factor_ref is not None
         ):
-            assert torch.allclose(
+            assert bitwise_equal(
                 dispatched_scaling_factor_ref, dispatched_scaling_factor
             )
 
@@ -172,14 +179,14 @@ def test_hybrid_ep_correctness(buffer: deep_ep.HybridEpBuffer, ref: TorchRef, us
             enable_permute=True,
         )
 
-        assert torch.allclose(dispatched_hidden_ref, dispatched_hidden)
+        assert bitwise_equal(dispatched_hidden_ref, dispatched_hidden)
         if dispatched_probs is not None and dispatched_probs_ref is not None:
-            assert torch.allclose(dispatched_probs_ref, dispatched_probs)
+            assert bitwise_equal(dispatched_probs_ref, dispatched_probs)
         if (
             dispatched_scaling_factor is not None
             and dispatched_scaling_factor_ref is not None
         ):
-            assert torch.allclose(
+            assert bitwise_equal(
                 dispatched_scaling_factor_ref, dispatched_scaling_factor
             )
 
