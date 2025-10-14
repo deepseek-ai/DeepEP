@@ -1,28 +1,35 @@
 # NCCL GIN Migration Documentation
 
-This document provides an overview of the migration from NVSHMEM to NCCL GIN in the DeepEP framework. Each section details the original NVSHMEM function, its NCCL GIN replacement, and explains the operation's purpose and implementation details.
+This document provides a comprehensive overview of the migration from NVSHMEM to NCCL GIN in the DeepEP framework. Each section details the original NVSHMEM function, its NCCL GIN replacement, and explains the operation's purpose and implementation details.
 
 ## Table of Contents
 
-1. [NCCL-GIN Summary](#nccl-gin-summary)
+1. [NCCL GIN Summary](#nccl-gin-summary)
 2. [Barrier Operations](#barrier-operations)
 3. [Put Operations](#put-operations)
 4. [Atomic Operations](#atomic-operations)
 5. [Signal Operations](#signal-operations)
-6. [Memory Fence Operations](#memory-fence-operations)
-7. [Quiet Operations](#quiet-operations)
+6. [Quiet Operations](#quiet-operations)
 
 ---
 
-## NCCL-GIN Summary
+## NCCL GIN Summary
 
 ### Key Design Principles
 
-- **Multiple Communicators**: We use multiple communicators (QPs) to replicate DeepEP's behavior, which uses 12 QPs with 24 SMs in our test configurations
-- **Signal-based Atomic Operations**: Atomic operations on head/tail pointers of DeepEP's circular buffers are implemented using signals
-- **High-level API Usage**: We use the high-level NCCL GIN device API (`ncclGin` class) for all operations, which provides methods like `put()`, `signal()`, `flush()`, and `readSignal()`
-- **Device Communicators**: Operations use `ncclDevComm*` device communicators and `ncclWindow_t` memory windows
-- **Per-Channel Context Selection**: Each channel/SM uses a different GIN context (`comm_id = channel_id % num_gin_ctxs`) for load balancing
+- **Multiple Communicators**: Multiple communicators (QPs) are used to replicate DeepEP's behavior, which uses 12 QPs with 24 SMs in our test configurations
+
+- **Signal-based Atomic Operations**: Atomic operations on head/tail pointers of DeepEP's circular buffers are implemented using NCCL GIN signals
+
+- **High-level API Usage**: All operations use the high-level NCCL GIN device API (`ncclGin` class), which provides methods including:
+  - `put()` for data transfer
+  - `signal()` for atomic operations
+  - `flush()` for completion
+  - `readSignal()` for reading signal values
+
+- **Device Communicators**: Operations use `ncclDevComm*` device communicators and `ncclWindow_t` memory windows for RDMA operations
+
+- **Per-Channel Context Selection**: Each channel/SM uses a different GIN context (`comm_id = channel_id % num_gin_ctxs`) for optimal load balancing across QPs
 
 
 ## Barrier Operations
@@ -61,9 +68,14 @@ if (kLowLatencyMode) {
 ```
 
 #### Implementation Details
-- **Low Latency Mode**: Uses symmetric team barrier with `session_id = dcomm.lsaRank` for symmetric RDMA ranks
-- **Standard Mode**: Uses a barrier that synchronizes all ranks
+
+- **Low Latency Mode**: Uses symmetric team barrier (`ncclGinBarrierSession`) with `session_id = dcomm.lsaRank` for symmetric RDMA ranks
+
+- **Standard Mode**: Uses world barrier (`ncclBarrierSession`) that synchronizes all ranks
+
 - **Communicator Selection**: Always uses the first communicator (`dcomms[0]`) for simplicity
+
+- **Memory Ordering**: Uses relaxed memory ordering and fence level for performance
 
 ---
 
@@ -112,22 +124,31 @@ __syncwarp(); // Synchronize all warp threads after the operation
 
 #### Implementation Details
 
-- **Single-threaded Execution**: Only lane 0 executes the put operation (not warp-collective)
-- **Communicator Selection**: Distributes work across GIN contexts (when `sm_id == 0`, uses first communicator)
+- **Single-threaded Execution**: Only lane 0 executes the put operation (not warp-collective in NCCL GIN)
+
+- **Communicator Selection**: Distributes work across GIN contexts using `comm_id = i % num_gin_ctxs` for load balancing
+
 - **High-level API**: Uses `ncclGin::put()` method with `ncclTeamWorld` and memory windows
-- **Data Transfer**: Transfers integer token counts between local and remote buffers
-- **Warp Synchronization**: Uses `__syncwarp()` after the operation
+
+- **Offset Calculation**: Computes source and destination offsets relative to `gin_base_ptr`
+
+- **Data Transfer**: Transfers `(NUM_MAX_NVL_PEERS + num_rdma_experts + 1)` integer token counts
+
+- **No Signaling**: Put operation completes without signals or counters (`ncclGin_None{}`)
+
+- **Warp Synchronization**: Uses `__syncwarp()` to synchronize all warp threads after the operation
 
 ### Warp-level Non-blocking Put
 
 **Purpose**: Performs warp-level non-blocking put operations for channel metadata with immediate submission behavior.
 
 #### Original NVSHMEM Implementation
-The `nvshmemi_ibgda_put_nbi_warp` function is a warp-level non-blocking RDMA put operation that transfers data from a local buffer to a remote buffer. When `kAlwaysDoPostSend` is set to true, it affects the submission behavior of RDMA work queue entries (WQEs):
 
-- **Immediate Submission**: Always submits RDMA requests immediately after preparing WQEs
-- **Producer Index Update**: Updates the producer index (`prod_idx`) immediately
-- **Doorbell Ringing**: Notifies InfiniBand hardware to send operations to the network immediately
+The `nvshmemi_ibgda_put_nbi_warp` function is a warp-level non-blocking RDMA put operation that transfers data from a local buffer to a remote buffer. When `kAlwaysDoPostSend` is set to `true`, it enables immediate submission behavior:
+
+- **Immediate Submission**: RDMA requests are submitted immediately after preparing work queue entries (WQEs)
+- **Producer Index Update**: The producer index (`prod_idx`) is updated immediately
+- **Doorbell Ringing**: InfiniBand hardware is notified immediately to send operations to the network
 
 ```cuda
 nvshmemi_ibgda_put_nbi_warp<true>(reinterpret_cast<uint64_t>(rdma_channel_meta.recv_buffer(rdma_rank)),
@@ -138,7 +159,8 @@ nvshmemi_ibgda_put_nbi_warp<true>(reinterpret_cast<uint64_t>(rdma_channel_meta.r
 ```
 
 #### NCCL GIN Replacement
-When using multiple communicators (QPs), we use `channel_id` (`channel_id = sm_id/2`) to select the appropriate communicator.
+
+When using multiple communicators (QPs), the `channel_id` (computed as `channel_id = sm_id / 2`) is used to select the appropriate communicator for load balancing.
 
 ```cuda
 if (lane_id == 0) {  // Only execute on lane 0 to match nvshmemi_ibgda_put_nbi_warp behavior
@@ -168,9 +190,19 @@ __syncwarp(); // Synchronize all warp threads
 ```
 
 #### Implementation Details
+
 - **Single-threaded Execution**: Only lane 0 executes the put operation (not warp-collective in NCCL GIN)
-- **Communicator Selection**: Maps `channel_id` to different communicators for load balancing
+
+- **Communicator Selection**: Maps `channel_id` to different communicators using `comm_id = channel_id % num_gin_ctxs` for load balancing
+
 - **High-level API**: Uses `ncclGin::put()` method with `ncclTeamWorld` and memory windows
+
+- **Offset Calculation**: Computes source and destination offsets relative to `gin_base_ptr`
+
+- **Data Transfer**: Transfers `sizeof(int) * (NUM_MAX_NVL_PEERS * 2 + 2)` bytes of channel metadata
+
+- **No Signaling**: Put operation completes without signals or counters (`ncclGin_None{}`)
+
 - **Warp Synchronization**: Uses `__syncwarp()` to maintain warp-level semantics
 
 ---
@@ -209,11 +241,18 @@ net.signal(
 ```
 
 #### Implementation Details
-- **Signal-based Atomic Operations**: Uses `ncclGin::signal()` method with `ncclGin_SignalAdd` to achieve atomic addition
-- **Tail Pointer Management**: Updates tail pointers to track available buffer space
-- **Communicator Mapping**: Maps `channel_id` to appropriate communicator (QP)
-- **No Data Transfer**: Only performs signal operation without transferring data
-- **High-level API**: Uses the high-level signal API for atomic operations
+
+- **Signal-based Atomic Operations**: Uses `ncclGin::signal()` method with `ncclGin_SignalAdd` to perform atomic addition
+
+- **Signal ID Calculation**: Signal ID is computed as `gin_signals_tail + rdma_rank` to identify the target signal
+
+- **Tail Pointer Management**: Atomically updates tail pointers to track available buffer space in circular buffers
+
+- **Communicator Mapping**: Maps `channel_id` to appropriate communicator using `comm_id = channel_id % num_gin_ctxs`
+
+- **No Data Transfer**: Only performs signal operation without transferring data (pure atomic operation)
+
+- **High-level API**: Uses the high-level signal API for atomic operations with default thread scope
 
 ### Atomic Add for Head Updates
 
@@ -247,11 +286,20 @@ net.signal(
 ```
 
 #### Implementation Details
-- **Head Pointer Updates**: Communicates head updates to remote ranks using signal operations
-- **Buffer Space Management**: Indicates freed buffer space for reuse
-- **Signal-based Communication**: Uses `ncclGin::signal()` method with `ncclGin_SignalAdd`
-- **Communicator Selection**: Maps `channel_id` to appropriate communicator (QP)
-- **High-level API**: Uses the high-level signal API for atomic operations
+
+- **Signal-based Atomic Operations**: Uses `ncclGin::signal()` method with `ncclGin_SignalAdd` to perform atomic addition
+
+- **Signal ID Calculation**: Signal ID is computed as `gin_signals_head + rdma_rank` to identify the target signal
+
+- **Head Pointer Updates**: Atomically communicates head pointer advances to remote ranks to indicate freed buffer space
+
+- **Delta Calculation**: Adds the difference `(min_head - last_head)` to the remote head pointer
+
+- **Buffer Space Management**: Indicates freed buffer space that can be reused by remote ranks
+
+- **Communicator Selection**: Maps `channel_id` to appropriate communicator using `comm_id = channel_id % num_gin_ctxs`
+
+- **High-level API**: Uses the high-level signal API for atomic operations with default thread scope
 
 ---
 
@@ -259,13 +307,28 @@ net.signal(
 
 ### Signal Layout and Management
 
-**Purpose**: NCCL GIN uses signals to implement atomic operations on head/tail pointers of circular buffers. The signals are organized as follows:
+**Purpose**: NCCL GIN uses signals to implement atomic operations on head/tail pointers of circular buffers.
 
-- **Signal Base**: Each buffer type (e.g., internode buffer with index 2) has a base signal ID obtained via `backend->get_signals_base(internode_buffer_idx)`
-- **Head Signals**: Located at `signals_base + (channel_id * kNumRDMARanks) + rank_id`
-- **Tail Signals**: Located at `signals_base + (kNumRDMARanks * num_channels) + (channel_id * kNumRDMARanks) + rank_id`
+#### Signal Organization
 
-This layout ensures that each rank's head and tail pointers for each channel have unique signal IDs.
+Signals are organized in a structured layout to ensure each rank's head and tail pointers for each channel have unique signal IDs:
+
+- **Signal Base**: Each buffer type (e.g., internode buffer with index 2) has a base signal ID obtained via:
+  ```
+  backend->get_signals_base(internode_buffer_idx)
+  ```
+
+- **Head Signals**: Located at:
+  ```
+  signals_base + (channel_id * kNumRDMARanks) + rank_id
+  ```
+
+- **Tail Signals**: Located at:
+  ```
+  signals_base + (kNumRDMARanks * num_channels) + (channel_id * kNumRDMARanks) + rank_id
+  ```
+
+This layout ensures unique signal IDs for all head and tail pointers across all channels and ranks.
 
 ### Signal Reset
 
@@ -304,12 +367,22 @@ __syncthreads();
 ```
 
 #### Implementation Details
-- **Signal Range**: Each channel has `kNumRDMARanks` head and tail signals
-- **Thread Distribution**: Each thread handles one specific signal
-- **Channel-specific Reset**: Only resets signal for the communicator assigned to that channel
-- **Signal Layout**: Head signals come first, followed by tail signals
-- **High-level API**: Uses `ncclGin::resetSignal()` method
-- **Synchronization**: Uses `__syncthreads()` to ensure all resets complete
+
+- **Signal Range**: Total of `kNumRDMARanks * num_channels * 2` signals (head + tail for each rank and channel)
+
+- **Thread Distribution**: Each thread handles one specific signal for parallelization
+
+- **Signal ID Calculation**: Signal ID is computed as `signals_base + thread_id`
+
+- **Channel Derivation**: Channel ID is derived from signal offset using the signal layout structure
+
+- **Channel-specific Reset**: Only resets signal using the communicator assigned to that channel (`comm_id = channel_id % num_gin_ctxs`)
+
+- **Signal Layout**: Head signals come first, followed by tail signals (two distinct ranges)
+
+- **High-level API**: Uses `ncclGin::resetSignal()` method for atomic reset to zero
+
+- **Synchronization**: Uses `__syncthreads()` to ensure all resets complete before proceeding
 
 ### Signal Reading
 
@@ -331,41 +404,18 @@ cached_rdma_channel_head = static_cast<int>(signal_value);
 ```
 
 #### Implementation Details
-- **Context Selection**: Uses different GIN context for each channel/SM
-- **Signal Reading**: Uses `ncclGin::readSignal()` method to read signal value
-- **High-level API**: Simple method call replaces low-level pointer operations
-- **Atomic Operations**: Memory ordering handled internally by the API
 
----
+- **Context Selection**: Uses different GIN context for each channel/SM via `comm_id = channel_id % num_gin_ctxs`
 
-## Memory Fence Operations
+- **Signal ID Calculation**: Signal ID is computed as `gin_signals_head + lane_id` to read the head pointer for each rank
 
-### Memory Fence
+- **Signal Reading**: Uses `ncclGin::readSignal()` method to atomically read the 64-bit signal value
 
-**Purpose**: Ensures memory ordering and system-wide visibility of previous operations across all processing elements.
+- **Type Conversion**: Converts the 64-bit signal value to 32-bit integer for head pointer caching
 
-#### Original NVSHMEM Implementation
-`nvshmem_fence()` is a memory ordering operation that ensures all previous NVSHMEM operations complete in order before any subsequent 
-operations begin. Internally, it works by iterating through all initialized transport layers and performing two types of synchronization: (1) For transports 
-without endpoints (like shared memory), it synchronizes all CUDA streams using cudaStreamSynchronize() to ensure GPU operations complete, and (2) For transports 
-with endpoints (like InfiniBand or UCX), it calls the transport-specific fence operation for each processing element (PE) to ensure proper ordering of network 
-operations. The function essentially acts as a barrier that guarantees that all prior memory operations have been completed and are visible to other PEs before 
-any subsequent operations can proceed, providing the necessary memory consistency guarantees for distributed shared memory operations across multiple GPUs and 
-nodes.
-```cuda
-nvshmem_fence();
-```
+- **High-level API**: Simple method call replaces low-level volatile pointer operations
 
-#### NCCL GIN Replacement
-```cuda
-__threadfence_system();  // Memory barrier
-```
-
-#### Implementation Details
-- **System-wide Fence**: Uses `__threadfence_system()` for system-wide memory visibility
-
-#### Equivalence Note
-The NCCL GIN implementation may not be fully equivalent to NVSHMEM's fence operation, as it uses a different synchronization strategy. Further testing may be required to verify complete functional equivalence.
+- **Memory Ordering**: Atomic operations and memory ordering are handled internally by the API
 
 ---
 
@@ -373,10 +423,12 @@ The NCCL GIN implementation may not be fully equivalent to NVSHMEM's fence opera
 
 ### Quiet Operation
 
-**Purpose**: Ensures all previously issued RDMA operations (puts, atomics, etc.) have completed and their effects are visible to remote PEs. This is critical when reusing buffers to prevent data corruption from in-flight operations.
+**Purpose**: Ensures all previously issued RDMA operations (puts, atomics, signals, etc.) have completed and their effects are visible to remote processing elements (PEs). This is critical when reusing buffers to prevent data corruption from in-flight operations.
 
 #### Original NVSHMEM Implementation
-`nvshmem_quiet()` is a completion and memory ordering operation that ensures all previously issued NVSHMEM operations (put, get, atomic operations, etc.) targeting all processing elements (PEs) have completed and their effects are visible to remote PEs. Unlike `nvshmem_fence()` which only ensures ordering, 
+
+`nvshmem_quiet()` is a completion and memory ordering operation that ensures all previously issued NVSHMEM operations (put, get, atomic operations, etc.) targeting all processing elements have completed and their effects are visible to remote PEs.
+
 ```cuda
 nvshmem_quiet();
 ```
@@ -394,14 +446,23 @@ __syncthreads();
 ```
 
 #### Implementation Details
-- **Multi-context Flush**: Each thread flushes one GIN context to parallelize the operation
-- **Thread Distribution**: Distributes flush operations across threads (one context per thread)
-- **High-level API**: Uses `ncclGin::flush()` method for completion
-- **Memory Ordering**: Uses `memory_order_acquire` to ensure all previous operations are visible
+
+- **Multi-context Flush**: Each thread flushes one GIN context to parallelize the flush operation
+
+- **Thread Distribution**: Distributes flush operations across threads (one context per thread, where `comm_id = thread_id`)
+
+- **High-level API**: Uses `ncclGin::flush()` method for completion guarantee
+
+- **Memory Ordering**: Uses `cuda::std::memory_order_acquire` to ensure all previous operations are visible
+
+- **Cooperation Scope**: Uses `ncclCoopThread()` to indicate thread-level cooperation
+
 - **Synchronization**: Uses `__syncthreads()` to ensure all contexts have been flushed before proceeding
+
 - **Buffer Safety**: Critical for preventing data corruption when reusing RDMA buffers
 
 #### Use Case
-This operation is typically used before clearing or reusing RDMA buffers to ensure that all previous writes to those buffers have completed. In the DeepEP framework, it's used to wait for all inflight work requests to complete before rewriting the cleared `rdma_buffer`.
+
+This operation is typically used before clearing or reusing RDMA buffers to ensure that all previous writes to those buffers have completed. In the DeepEP framework, it waits for all inflight work requests to complete before rewriting the cleared `rdma_buffer`, preventing race conditions between in-flight RDMA operations and buffer reuse.
 
 ---
