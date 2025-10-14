@@ -66,22 +66,6 @@ int NCCLGINBackend::init(const std::vector<uint8_t>& root_unique_id_val, int ran
                               "NCCL_P2P_DISABLE",
                               "NCCL_NET_PLUGIN"};
 
-    // const char* env_vars[] = {
-    //     "DEEP_EP_BACKEND", "NCCL_GIN_TYPE", "NCCL_SPCX_COLL_ENABLE", "NCCL_GIN_ENABLE",
-    //     "UCX_IB_DM_COUNT", "NCCL_SHM_DISABLE", "NCCL_COLLNET_ENABLE",
-    //     "NCCL_COLLNET_NODE_THRESHOLD", "NCCL_P2P_DISABLE", "NCCL_NET_PLUGIN"
-    // };/print all environment variables
-    /*
-    for (const char* var : env_vars) {
-        const char* value = getenv(var);
-        if (value) {
-            std::cout << "[NCCL GIN Backend] Rank " << rank << " " << var << "=" << value << std::endl;
-        } else {
-            std::cout << "[NCCL GIN Backend] Rank " << rank << " " << var << " is NOT SET" << std::endl;
-        }
-    }
-    */
-
     // Assert all GIN environment variables are set
     for (const char* var : env_vars) {
         // EP_HOST_ASSERT(getenv(var) != nullptr);
@@ -251,14 +235,14 @@ int NCCLGINBackend::init(const std::vector<uint8_t>& root_unique_id_val, int ran
         // Build and upload device arrays for contexts; windows copied after registration
         {
             std::vector<ncclGinCtx_M<-1u>> h_ctxs;
-            h_ctxs.reserve(num_gin_ctxs_);
+            h_ctxs.reserve(num_comms_);
 
             // For now, use the first communicator's contexts
             // In multi-comm mode, this can be extended to use one ctx per communicator
-            for (int i = 0; i < num_gin_ctxs_; ++i) {
+            for (int i = 0; i < num_comms_; ++i) {
                 ncclGinCtx_M<-1u> gctx;
-                gctx.backend = comms_multi_[0]->sharedRes->ginState.ginDevHandles[i]->netDeviceType;
-                gctx.handle = comms_multi_[0]->sharedRes->ginState.ginDevHandles[i]->handle;
+                gctx.backend = comms_multi_[i]->sharedRes->ginState.ginDevHandles[0]->netDeviceType;
+                gctx.handle = comms_multi_[i]->sharedRes->ginState.ginDevHandles[0]->handle;
                 gctx.rank = comm_rank;
                 gctx.nRanks = comm_nranks;
                 h_ctxs.push_back(gctx);
@@ -271,8 +255,8 @@ int NCCLGINBackend::init(const std::vector<uint8_t>& root_unique_id_val, int ran
                 if (e2 != cudaSuccess)
                     throw std::runtime_error("Failed to cudaMemcpy d_gin_ctxs_");
             }
-            if (num_gin_ctxs_ > 0) {
-                // Allocate device window arrays based on num_comms_ (not num_gin_ctxs_)
+            if (num_comms_ > 0) {
+                // Allocate device window arrays based on num_comms_
                 // since we need one window per communicator in multi-communicator mode
                 cudaError_t e3 = cudaMalloc(reinterpret_cast<void**>(&d_nccl_dev_wins_), num_comms_ * sizeof(ncclWindow_t));
                 if (e3 != cudaSuccess) {
@@ -462,7 +446,7 @@ void* NCCLGINBackend::alloc(size_t size, size_t alignment) {
     }
     mem_handle_.ptr = ptr;
     mem_handle_.size = size;
-    if (d_nccl_dev_wins_ != nullptr && num_gin_ctxs_ > 0) {
+    if (d_nccl_dev_wins_ != nullptr && num_comms_ > 0) {
         printf("[NCCL GIN Backend - Memory Alloc] Rank %d: Copying %lu NCCL windows to GPU\n", rank_, wins_nccl.size());
         fflush(stdout);
 
@@ -538,8 +522,8 @@ unsigned NCCLGINBackend::get_signals_base(int buffer_idx) const {
     return buffer_idx * signals_per_buffer;
 }
 
-int NCCLGINBackend::get_num_gin_ctxs() const {
-    return initialized_ ? num_gin_ctxs_ : 0;
+int NCCLGINBackend::get_num_gin_comms() const {
+    return initialized_ ? num_comms_ : 0;
 }
 
 ncclDevComm_t* NCCLGINBackend::get_device_communicators() const {

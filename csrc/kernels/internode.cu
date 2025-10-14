@@ -132,6 +132,29 @@ __forceinline__ __device__ void sync_with_same_gpu_idx(const nvshmem_team_t& rdm
 #endif
 }
 
+#if defined(ENABLE_NCCL_GIN)
+template <bool kLowLatencyMode>
+__forceinline__ __device__ void sync_with_same_gpu_idx_warp(ncclDevComm* dcomms) {
+    // Barrier before cleaning (in case of unfinished chunked EP)
+    auto dcomm = dcomms[0];
+    ncclGin net(dcomm, 0);
+
+    if (kLowLatencyMode) {
+        // Use rank as session ID for symmetric synchronization
+        // This ensures each rank has a unique session ID for symmetric barriers
+        int session_id = dcomm.lsaRank;
+
+        // Use GIN barrier session directly with symmetric team
+        ncclGinBarrierSession<ncclCoopWarp> barrier(ncclCoopWarp(), net, ncclTeamTagRail(), session_id);
+        barrier.sync(ncclCoopWarp(), cuda::memory_order_relaxed, ncclGinFenceLevel::Relaxed);
+    } else {
+        // World barrier - synchronizes all ranks
+        ncclBarrierSession<ncclCoopWarp> barrier(ncclCoopWarp(), ncclTeamTagWorld(), net, 0);
+        barrier.sync(ncclCoopWarp(), cuda::memory_order_relaxed, ncclGinFenceLevel::Relaxed);
+    }
+}
+#endif
+
 template <bool kLowLatencyMode, int kNumRDMARanks>
 __global__ void notify_dispatch(const int* num_tokens_per_rank,
                                 int* moe_recv_counter_mapped,
@@ -160,13 +183,13 @@ __global__ void notify_dispatch(const int* num_tokens_per_rank,
                                 int rank,
                                 const nvshmem_team_t rdma_team,
 #if defined(ENABLE_NCCL_GIN)
-                                int num_gin_ctxs,
+                                int num_gin_comms,
                                 void* gin_base_ptr,
                                 ncclDevComm* dcomms,
                                 const ncclWindow_t* nccl_windows,
                                 unsigned signals_base) {
 #else
-                                int num_gin_ctxs,
+                                int num_gin_comms,
                                 void* gin_base_ptr,
                                 void* dcomms,
                                 void* nccl_windows,
@@ -189,8 +212,8 @@ __global__ void notify_dispatch(const int* num_tokens_per_rank,
         // in case of rewriting cleared rdma_buffer
 #if defined(ENABLE_NCCL_GIN)
         // Flush all contexts
-        EP_DEVICE_ASSERT(num_gin_ctxs <= num_threads);
-        if (thread_id < num_gin_ctxs) {
+        EP_DEVICE_ASSERT(num_gin_comms <= num_threads);
+        if (thread_id < num_gin_comms) {
             auto comm_id = thread_id;
             ncclGin net(dcomms[comm_id], 0);
             net.flush(ncclCoopThread(), cuda::std::memory_order_acquire);  // We even flush for QPs not used
@@ -204,9 +227,13 @@ __global__ void notify_dispatch(const int* num_tokens_per_rank,
         }
 #endif
         __syncthreads();
-
+        /*#if defined(ENABLE_NCCL_GIN)
+                if (warp_id == 1)
+                    sync_with_same_gpu_idx_warp<kLowLatencyMode>(dcomms);
+        #else*/
         if (thread_id == 32)
             sync_with_same_gpu_idx<kLowLatencyMode>(rdma_team, dcomms);
+        // #endif
         barrier_block<NUM_MAX_NVL_PEERS, true>(barrier_signal_ptrs, nvl_rank);
 
         // Send numbers of tokens per rank/expert to RDMA ranks
@@ -236,7 +263,7 @@ __global__ void notify_dispatch(const int* num_tokens_per_rank,
             int channel_id =
                 (signal_offset < head_signal_count) ? signal_offset / kNumRDMARanks : (signal_offset - head_signal_count) / kNumRDMARanks;
             // Only reset for the context assigned to this channel
-            auto comm_id = channel_id % num_gin_ctxs;
+            auto comm_id = channel_id % num_gin_comms;
             ncclGin net(dcomms[comm_id], 0);
             net.resetSignal(signal_id);
         }
@@ -263,7 +290,7 @@ __global__ void notify_dispatch(const int* num_tokens_per_rank,
                 // GIN put is not warp-collective, so only one thread should execute it
                 if (lane_id == 0) {
                     // Distribute work across GIN contexts
-                    auto comm_id = i % num_gin_ctxs;
+                    auto comm_id = i % num_gin_comms;
                     int dst_rank = translate_dst_rdma_rank<kLowLatencyMode>(i, nvl_rank);
                     size_t src_offset =
                         reinterpret_cast<size_t>(rdma_recv_num_tokens_mixed.send_buffer(i)) - reinterpret_cast<size_t>(gin_base_ptr);
@@ -310,8 +337,8 @@ __global__ void notify_dispatch(const int* num_tokens_per_rank,
         // Wait previous operations to be finished
 #if defined(ENABLE_NCCL_GIN)
         // Flush all contexts
-        EP_DEVICE_ASSERT(num_gin_ctxs <= num_threads);
-        if (thread_id < num_gin_ctxs) {
+        EP_DEVICE_ASSERT(num_gin_comms <= num_threads);
+        if (thread_id < num_gin_comms) {
             auto comm_id = thread_id;
             ncclGin net(dcomms[comm_id], 0);
             net.flush(ncclCoopThread(), cuda::std::memory_order_acquire);
@@ -323,8 +350,13 @@ __global__ void notify_dispatch(const int* num_tokens_per_rank,
         __syncthreads();
 
         // Barrier
+        /*#if defined(ENABLE_NCCL_GIN)
+                if (warp_id == 0)
+                    sync_with_same_gpu_idx_warp<kLowLatencyMode>(dcomms);
+        #else*/
         if (thread_id == 0)
             sync_with_same_gpu_idx<kLowLatencyMode>(rdma_team, dcomms);
+        // #endif
         __syncthreads();
 
         // NVL buffers
@@ -414,11 +446,13 @@ __global__ void notify_dispatch(const int* num_tokens_per_rank,
         }
 
         // Finally barrier
+        /*#if defined(ENABLE_NCCL_GIN)
+                if (warp_id == 1)
+                    sync_with_same_gpu_idx_warp<kLowLatencyMode>(dcomms);
+        #else*/
         if (thread_id == 32)
             sync_with_same_gpu_idx<kLowLatencyMode>(rdma_team, dcomms);
-#if defined(ENABLE_NCCL_GIN)
-        __syncthreads();  // do we need this?
-#endif
+        // #endif
         barrier_block<NUM_MAX_NVL_PEERS>(barrier_signal_ptrs, nvl_rank);
     } else {
         // Calculate meta data
@@ -509,19 +543,19 @@ void notify_dispatch(const int* num_tokens_per_rank,
     EP_HOST_ASSERT(backend != nullptr);
     auto gin_base_ptr = backend->get_gin_base_ptr();
     auto dcomms = backend->get_device_communicators();
-    int num_gin_ctxs = backend->get_num_gin_ctxs();
+    int num_gin_comms = backend->get_num_gin_comms();
     auto nccl_windows = backend->get_device_nccl_windows();
     auto signals_base = backend->get_signals_base(internode_buffer_idx);
 
     EP_HOST_ASSERT(dcomms != nullptr);
-    EP_HOST_ASSERT(num_gin_ctxs >= 1);
+    EP_HOST_ASSERT(num_gin_comms >= 1);
     EP_HOST_ASSERT(rdma_buffer_ptr == gin_base_ptr);
     EP_HOST_ASSERT(reinterpret_cast<uintptr_t>(rdma_buffer_ptr) >= reinterpret_cast<uintptr_t>(gin_base_ptr));
     EP_HOST_ASSERT(nccl_windows != nullptr);
 #else
     void* gin_base_ptr = nullptr;
     void* dcomms = nullptr;
-    int num_gin_ctxs = 1;
+    int num_gin_comms = 1;
     void* nccl_windows = nullptr;
     unsigned signals_base = 0;
 #endif
@@ -557,7 +591,7 @@ void notify_dispatch(const int* num_tokens_per_rank,
                       barrier_signal_ptrs,                                                                                             \
                       rank,                                                                                                            \
                       cpu_rdma_team,                                                                                                   \
-                      num_gin_ctxs,                                                                                                    \
+                      num_gin_comms,                                                                                                   \
                       gin_base_ptr,                                                                                                    \
                       dcomms,                                                                                                          \
                       nccl_windows,                                                                                                    \
@@ -638,13 +672,13 @@ __global__ void __launch_bounds__(((kNumDispatchRDMASenderWarps + 1 + NUM_MAX_NV
              int rank,
              int num_ranks,
 #if defined(ENABLE_NCCL_GIN)
-             int num_gin_ctxs,
+             int num_gin_comms,
              void* gin_base_ptr,
              ncclDevComm* dcomms,
              const ncclWindow_t* nccl_windows,
              unsigned signals_base) {
 #else
-             int num_gin_ctxs,
+             int num_gin_comms,
              void* gin_base_ptr,
              void* dcomms,
              void* nccl_windows,
@@ -704,10 +738,15 @@ __global__ void __launch_bounds__(((kNumDispatchRDMASenderWarps + 1 + NUM_MAX_NV
         kNumRDMARanks * channel_id;  // move the signals to the corresponding channel after passing all head signals
 
     // Use a diff GIN context and window for each channel/SM
-    auto comm_id = channel_id % num_gin_ctxs;
+    auto comm_id = channel_id % num_gin_comms;
     ncclGin net(dcomms[comm_id], 0);
     auto nccl_window = nccl_windows[comm_id];
     ncclTeam world = ncclTeamWorld(dcomms[comm_id]);
+
+    // Using different communicator for reading/writing head pointers
+    auto comm_id_head = (channel_id + num_channels) % num_gin_comms;
+    ncclGin net_head(dcomms[comm_id_head], 0);
+    ncclTeam world_head = ncclTeamWorld(dcomms[comm_id_head]);
 #endif
 
     // NVL buffer layouts
@@ -1309,11 +1348,6 @@ __global__ void __launch_bounds__(((kNumDispatchRDMASenderWarps + 1 + NUM_MAX_NV
             if (min_head != std::numeric_limits<int>::max() and min_head >= last_head + num_max_rdma_chunked_send_tokens and
                 lane_id < kNumRDMARanks) {
 #if defined(ENABLE_NCCL_GIN)
-// printf("ERROR: #6 NCCL GIN is not implemented\n"); __trap();
-#if defined(DEBUG_NCCL_GIN_API)
-                printf("[DEBUG] Rank: %d - kForwarderCoordinator - Before NCCL GIN signal call at line %d\n", rank, __LINE__);
-#endif
-
                 // kForwarderCoordinator: Update remote head
                 auto dst_rank = translate_dst_rdma_rank<kLowLatencyMode>(lane_id, nvl_rank);
                 auto signal_id = gin_signals_head + rdma_rank;
@@ -1542,12 +1576,12 @@ void dispatch(void* recv_x,
     EP_HOST_ASSERT(backend != nullptr);
     auto gin_base_ptr = backend->get_gin_base_ptr();
     auto dcomms = backend->get_device_communicators();
-    int num_gin_ctxs = backend->get_num_gin_ctxs();
+    int num_gin_comms = backend->get_num_gin_comms();
     auto nccl_windows = backend->get_device_nccl_windows();
     auto signals_base = backend->get_signals_base(internode_buffer_idx);
 
     EP_HOST_ASSERT(dcomms != nullptr);
-    EP_HOST_ASSERT(num_gin_ctxs >= 1);
+    EP_HOST_ASSERT(num_gin_comms >= 1);
     EP_HOST_ASSERT(rdma_buffer_ptr == gin_base_ptr);
     EP_HOST_ASSERT(reinterpret_cast<uintptr_t>(rdma_buffer_ptr) >= reinterpret_cast<uintptr_t>(gin_base_ptr));
     // Check if number of channels exceeds the maximum allowed by NCCL GIN backend
@@ -1556,7 +1590,7 @@ void dispatch(void* recv_x,
 #else
     void* gin_base_ptr = nullptr;
     void* dcomms = nullptr;
-    int num_gin_ctxs = 1;
+    int num_gin_comms = 1;
     void* nccl_windows = nullptr;
     unsigned signals_base = 0;
 #endif
@@ -1604,7 +1638,7 @@ void dispatch(void* recv_x,
                       num_max_nvl_chunked_recv_tokens,                                                                         \
                       rank,                                                                                                    \
                       num_ranks,                                                                                               \
-                      num_gin_ctxs,                                                                                            \
+                      num_gin_comms,                                                                                           \
                       gin_base_ptr,                                                                                            \
                       dcomms,                                                                                                  \
                       nccl_windows,                                                                                            \
@@ -1655,7 +1689,7 @@ void dispatch(void* recv_x,
                       num_max_nvl_chunked_recv_tokens,                                                                         \
                       rank,                                                                                                    \
                       num_ranks,                                                                                               \
-                      num_gin_ctxs,                                                                                            \
+                      num_gin_comms,                                                                                           \
                       gin_base_ptr,                                                                                            \
                       dcomms,                                                                                                  \
                       nccl_windows,                                                                                            \
@@ -1690,12 +1724,12 @@ __global__ void cached_notify(const int rdma_clean_offset,
                               bool is_cached_dispatch,
                               const nvshmem_team_t rdma_team,
 #if defined(ENABLE_NCCL_GIN)
-                              int num_gin_ctxs,
+                              int num_gin_comms,
                               void* gin_base_ptr,
                               ncclDevComm* dcomms,
                               unsigned signals_base) {
 #else
-                              int num_gin_ctxs,
+                              int num_gin_comms,
                               void* gin_base_ptr,
                               void* dcomms,
                               unsigned signals_base) {
@@ -1715,8 +1749,8 @@ __global__ void cached_notify(const int rdma_clean_offset,
     if (sm_id == 0) {
 #if defined(ENABLE_NCCL_GIN)
         // Flush all contexts
-        EP_DEVICE_ASSERT(num_gin_ctxs <= num_threads);
-        if (thread_id < num_gin_ctxs) {
+        EP_DEVICE_ASSERT(num_gin_comms <= num_threads);
+        if (thread_id < num_gin_comms) {
             auto comm_id = thread_id;
             ncclGin net(dcomms[comm_id], 0);
             net.flush(ncclCoopThread(), cuda::std::memory_order_acquire);
@@ -1732,12 +1766,14 @@ __global__ void cached_notify(const int rdma_clean_offset,
         __syncthreads();
 
         // Barrier for RDMA
+        /*#if defined(ENABLE_NCCL_GIN)
+                if (warp_id == 1)
+                    sync_with_same_gpu_idx_warp<kLowLatencyMode>(dcomms);
+        #else*/
         if (thread_id == 32)
             sync_with_same_gpu_idx<kLowLatencyMode>(rdma_team, dcomms);
-#if defined(ENABLE_NCCL_GIN)
-        __syncthreads();
-#endif
-        // Barrier for NVL
+        // #endif
+        //  Barrier for NVL
         barrier_block<NUM_MAX_NVL_PEERS, true>(barrier_signal_ptrs, nvl_rank);
 
         // Clean RDMA buffer
@@ -1763,7 +1799,7 @@ __global__ void cached_notify(const int rdma_clean_offset,
             int channel_id =
                 (signal_offset < head_signal_count) ? signal_offset / num_rdma_ranks : (signal_offset - head_signal_count) / num_rdma_ranks;
             // Only reset for the context assigned to this channel
-            auto comm_id = channel_id % num_gin_ctxs;
+            auto comm_id = channel_id % num_gin_comms;
             ncclGin net(dcomms[comm_id], 0);
             net.resetSignal(signal_id);
         }
@@ -1778,11 +1814,14 @@ __global__ void cached_notify(const int rdma_clean_offset,
         __syncthreads();
 
         // Barrier again
+        /*#if defined(ENABLE_NCCL_GIN)
+                if (warp_id == 1)
+                    sync_with_same_gpu_idx_warp<kLowLatencyMode>(dcomms);
+        #else*/
         if (thread_id == 32)
             sync_with_same_gpu_idx<kLowLatencyMode>(rdma_team, dcomms);
-#if defined(ENABLE_NCCL_GIN)
-        __syncthreads();
-#endif
+        // #endif
+
         barrier_block<NUM_MAX_NVL_PEERS>(barrier_signal_ptrs, nvl_rank);
     } else if (sm_id == 1) {
         if (is_cached_dispatch)
@@ -1932,17 +1971,17 @@ void cached_notify(int hidden_int4,
     EP_HOST_ASSERT(backend != nullptr);
     auto gin_base_ptr = backend->get_gin_base_ptr();
     auto dcomms = backend->get_device_communicators();
-    int num_gin_ctxs = backend->get_num_gin_ctxs();
+    int num_gin_comms = backend->get_num_gin_comms();
     auto signals_base = backend->get_signals_base(internode_buffer_idx);
 
     EP_HOST_ASSERT(dcomms != nullptr);
-    EP_HOST_ASSERT(num_gin_ctxs >= 1);
+    EP_HOST_ASSERT(num_gin_comms >= 1);
     EP_HOST_ASSERT(rdma_buffer_ptr == gin_base_ptr);
     EP_HOST_ASSERT(reinterpret_cast<uintptr_t>(rdma_buffer_ptr) >= reinterpret_cast<uintptr_t>(gin_base_ptr));
 #else
     void* gin_base_ptr = nullptr;
     void* dcomms = nullptr;
-    int num_gin_ctxs = 1;
+    int num_gin_comms = 1;
     unsigned signals_base = 0;
 #endif
 
@@ -1969,7 +2008,7 @@ void cached_notify(int hidden_int4,
                   num_ranks,
                   is_cached_dispatch,
                   cpu_rdma_team,
-                  num_gin_ctxs,
+                  num_gin_comms,
                   gin_base_ptr,
                   dcomms,
                   signals_base);
@@ -2176,13 +2215,13 @@ __global__ void __launch_bounds__((kNumForwarders + 1) * 32, 1) combine(int4* co
                                                                         int rank,
                                                                         int num_ranks,
 #if defined(ENABLE_NCCL_GIN)
-                                                                        int num_gin_ctxs,
+                                                                        int num_gin_comms,
                                                                         void* gin_base_ptr,
                                                                         ncclDevComm* dcomms,
                                                                         const ncclWindow_t* nccl_windows,
                                                                         unsigned signals_base) {
 #else
-                                                                        int num_gin_ctxs,
+                                                                        int num_gin_comms,
                                                                         void* gin_base_ptr,
                                                                         void* dcomms,
                                                                         void* nccl_windows,
@@ -2204,10 +2243,15 @@ __global__ void __launch_bounds__((kNumForwarders + 1) * 32, 1) combine(int4* co
 
 #if defined(ENABLE_NCCL_GIN)
     // Use a diff GIN context and window for each channel/SM
-    auto comm_id = channel_id % num_gin_ctxs;
+    auto comm_id = channel_id % num_gin_comms;
     auto nccl_window = nccl_windows[comm_id];
     ncclGin net(dcomms[comm_id], 0);
     ncclTeam world = ncclTeamWorld(dcomms[comm_id]);
+
+    // Using different communicator for reading/writing head pointers
+    auto comm_id_head = (channel_id + num_channels) % num_gin_comms;
+    ncclGin net_head(dcomms[comm_id_head], 0);
+    ncclTeam world_head = ncclTeamWorld(dcomms[comm_id_head]);
 #endif
 
     // NOTES: we decouple a channel into 2 SMs
@@ -2862,12 +2906,12 @@ void combine(cudaDataType_t type,
     auto* backend = dynamic_cast<deep_ep::internode::NCCLGINBackend*>(deep_ep::internode::get_backend());
     EP_HOST_ASSERT(backend != nullptr);
     auto gin_base_ptr = backend->get_gin_base_ptr();
-    int num_gin_ctxs = backend->get_num_gin_ctxs();
+    int num_gin_comms = backend->get_num_gin_comms();
     auto dcomms = backend->get_device_communicators();
     auto nccl_windows = backend->get_device_nccl_windows();
     auto signals_base = backend->get_signals_base(internode_buffer_idx);
 
-    EP_HOST_ASSERT(num_gin_ctxs >= 1);
+    EP_HOST_ASSERT(num_gin_comms >= 1);
     EP_HOST_ASSERT(rdma_buffer_ptr == gin_base_ptr);
     EP_HOST_ASSERT(reinterpret_cast<uintptr_t>(rdma_buffer_ptr) >= reinterpret_cast<uintptr_t>(gin_base_ptr));
     // Check if number of channels exceeds the maximum allowed by NCCL GIN backend
@@ -2876,7 +2920,7 @@ void combine(cudaDataType_t type,
     EP_HOST_ASSERT(nccl_windows != nullptr);
 #else
     void* gin_base_ptr = nullptr;
-    int num_gin_ctxs = 1;
+    int num_gin_comms = 1;
     void* dcomms = nullptr;
     void* nccl_windows = nullptr;
     unsigned signals_base = 0;
@@ -2924,7 +2968,7 @@ void combine(cudaDataType_t type,
                       num_max_nvl_chunked_recv_tokens,                                \
                       rank,                                                           \
                       num_ranks,                                                      \
-                      num_gin_ctxs,                                                   \
+                      num_gin_comms,                                                  \
                       gin_base_ptr,                                                   \
                       dcomms,                                                         \
                       nccl_windows,                                                   \

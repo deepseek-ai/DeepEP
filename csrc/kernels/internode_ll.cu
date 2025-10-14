@@ -162,13 +162,13 @@ __global__ __launch_bounds__(1024, 1) void dispatch(void* packed_recv_x,
                                                     bool round_scale,
                                                     int phases,
 #ifdef ENABLE_NCCL_GIN
-                                                    int num_gin_ctxs,
+                                                    int num_gin_comms,
                                                     void* gin_base_ptr,
                                                     ncclDevComm* dcomms,
                                                     const ncclWindow_t* nccl_windows,
                                                     unsigned signals_base) {
 #else
-                                                    int num_gin_ctxs,
+                                                    int num_gin_comms,
                                                     void* gin_base_ptr,
                                                     void* dcomms,
                                                     void* nccl_windows,
@@ -350,16 +350,16 @@ __global__ __launch_bounds__(1024, 1) void dispatch(void* packed_recv_x,
                                     expected_dst_offset);
                             }
 
-                            // ncclGinCall<ncclGinApi_Put>(gin_ctxs[dst_expert_local_idx % num_gin_ctxs], thread, dst_rank,
+                            // ncclGinCall<ncclGinApi_Put>(gin_ctxs[dst_expert_local_idx % num_gin_comms], thread, dst_rank,
                             //     /*hasWins=*/true,
-                            //     gin_windows[dst_expert_local_idx % num_gin_ctxs], expected_dst_offset,
-                            //     gin_windows[dst_expert_local_idx % num_gin_ctxs], expected_src_offset, num_bytes_per_msg,
+                            //     gin_windows[dst_expert_local_idx % num_gin_comms], expected_dst_offset,
+                            //     gin_windows[dst_expert_local_idx % num_gin_comms], expected_src_offset, num_bytes_per_msg,
                             //     /*hasSignal=*/false, gin_signals + dst_expert_local_idx * num_ranks + rank, ncclGinSignalAdd, 1,
                             //     /*hasCounter=*/false, 0,
                             //     /*hasDescriptor=*/false, nullptr,
                             //     cuda::thread_scope_thread, cuda::thread_scope_thread);
 
-                            auto ctx_id = dst_expert_local_idx % num_gin_ctxs;
+                            auto ctx_id = dst_expert_local_idx % num_gin_comms;
                             ncclGin net(dcomms[ctx_id], 0);
                             net.put(ncclTeamWorld(dcomms[ctx_id]),
                                     dst_rank,
@@ -479,16 +479,16 @@ __global__ __launch_bounds__(1024, 1) void dispatch(void* packed_recv_x,
                     -num_tokens_sent - 1);
                 //}
 
-                // ncclGinCall<ncclGinApi_Put>(gin_ctxs[dst_expert_local_idx % num_gin_ctxs], thread, dst_rank,
+                // ncclGinCall<ncclGinApi_Put>(gin_ctxs[dst_expert_local_idx % num_gin_comms], thread, dst_rank,
                 //                       /*hasWins=*/true,
-                //                       gin_windows[dst_expert_local_idx % num_gin_ctxs], dst_offset,
-                //                       gin_windows[dst_expert_local_idx % num_gin_ctxs], 0, 0,
+                //                       gin_windows[dst_expert_local_idx % num_gin_comms], dst_offset,
+                //                       gin_windows[dst_expert_local_idx % num_gin_comms], 0, 0,
                 //                       /*hasSignal=*/true, gin_signals + dst_expert_local_idx * num_ranks + rank, ncclGinSignalAdd,
                 //                       num_tokens_sent + 1,
                 //                       /*hasCounter=*/false, 0,
                 //                       /*hasDescriptor=*/false, nullptr,
                 //                       cuda::thread_scope_thread, cuda::thread_scope_thread);
-                auto ctx_id = dst_expert_local_idx % num_gin_ctxs;
+                auto ctx_id = dst_expert_local_idx % num_gin_comms;
                 auto signal_id = signals_base + dst_expert_local_idx * num_ranks + rank;
                 ncclGin net(dcomms[ctx_id], 0);
                 net.put(ncclTeamWorld(dcomms[ctx_id]),
@@ -568,8 +568,8 @@ LOW_LATENCY_DISPATCH_RECV:
                     EP_DEVICE_ASSERT(local_expert_idx >= 0 && local_expert_idx < num_local_experts);
                     int sig_idx_wait2 = local_expert_idx * num_ranks + src_rank;
                     EP_DEVICE_ASSERT(sig_idx_wait2 >= 0 && sig_idx_wait2 < (num_local_experts * num_ranks));
-                    int ctx_idx_wait2 = local_expert_idx % num_gin_ctxs;
-                    EP_DEVICE_ASSERT(ctx_idx_wait2 >= 0 && ctx_idx_wait2 < num_gin_ctxs);
+                    int ctx_idx_wait2 = local_expert_idx % num_gin_comms;
+                    EP_DEVICE_ASSERT(ctx_idx_wait2 >= 0 && ctx_idx_wait2 < num_gin_comms);
                     ncclGin net(dcomms[ctx_idx_wait2], 0);
 
                     do {
@@ -672,13 +672,13 @@ LOW_LATENCY_DISPATCH_RECV:
 
     {
         const int signals_per_buffer = num_experts;
-        const int total_resets = signals_per_buffer * num_gin_ctxs;
+        const int total_resets = signals_per_buffer * num_gin_comms;
         const int linear_tid = blockIdx.x * blockDim.x + threadIdx.x;
         const int linear_stride = gridDim.x * blockDim.x;
 
         for (int idx = linear_tid; idx < total_resets; idx += linear_stride) {
-            const int signal_idx = idx / num_gin_ctxs;
-            const int ctx_id = idx % num_gin_ctxs;
+            const int signal_idx = idx / num_gin_comms;
+            const int ctx_id = idx % num_gin_comms;
             ncclGin net(dcomms[ctx_id], 0);
             net.resetSignal(signals_base + signal_idx);
         }
@@ -744,17 +744,17 @@ void dispatch(void* packed_recv_x,
     auto* backend = dynamic_cast<deep_ep::internode::NCCLGINBackend*>(deep_ep::internode::get_backend());
     EP_HOST_ASSERT(backend != nullptr);
     auto gin_base_ptr = backend->get_gin_base_ptr();
-    int num_gin_ctxs = backend->get_num_gin_ctxs();
+    int num_gin_comms = backend->get_num_gin_comms();
     auto dcomms = backend->get_device_communicators();
     auto nccl_windows = backend->get_device_nccl_windows();
     auto signals_base = backend->get_signals_base(ll_buffer_idx);
 
     EP_HOST_ASSERT(dcomms != nullptr);
-    EP_HOST_ASSERT(num_gin_ctxs >= 1);
+    EP_HOST_ASSERT(num_gin_comms >= 1);
     EP_HOST_ASSERT(nccl_windows != nullptr);
 #else
     void* gin_base_ptr = nullptr;
-    int num_gin_ctxs = 1;
+    int num_gin_comms = 1;
     void* dcomms = nullptr;
     void* nccl_windows = nullptr;
     unsigned signals_base = 0;
@@ -799,7 +799,7 @@ void dispatch(void* packed_recv_x,
                       num_warps_per_group,                   \
                       round_scale,                           \
                       phases,                                \
-                      num_gin_ctxs,                          \
+                      num_gin_comms,                         \
                       gin_base_ptr,                          \
                       dcomms,                                \
                       nccl_windows,                          \
@@ -1000,12 +1000,12 @@ __global__ __launch_bounds__(1024, 1) void combine(void* combined_x,
                                                    int phases,
                                                    bool zero_copy,
 #ifdef ENABLE_NCCL_GIN
-                                                   int num_gin_ctxs,
+                                                   int num_gin_comms,
                                                    ncclDevComm* dcomms,
                                                    const ncclWindow_t* nccl_windows,
                                                    unsigned signals_base) {
 #else
-                                                   int num_gin_ctxs,
+                                                   int num_gin_comms,
                                                    void* dcomms,
                                                    void* nccl_windows,
                                                    unsigned signals_base) {
@@ -1232,8 +1232,8 @@ __global__ __launch_bounds__(1024, 1) void combine(void* combined_x,
                             (unsigned long long)expected_dst_offset);
                         //}
 
-                        int ctx_idx = local_expert_idx % num_gin_ctxs;
-                        EP_DEVICE_ASSERT(ctx_idx >= 0 && ctx_idx < num_gin_ctxs);
+                        int ctx_idx = local_expert_idx % num_gin_comms;
+                        EP_DEVICE_ASSERT(ctx_idx >= 0 && ctx_idx < num_gin_comms);
                         // ncclGinCall<ncclGinApi_Put>(gin_ctxs[ctx_idx], thread, dst_rank,
                         //     /*hasWins=*/true,
                         //     gin_windows[ctx_idx], expected_dst_offset,
@@ -1289,8 +1289,8 @@ __global__ __launch_bounds__(1024, 1) void combine(void* combined_x,
                         (unsigned long long)dst_offset);
                     //}
 
-                    int ctx_idx = (responsible_expert_idx % num_local_experts) % num_gin_ctxs;
-                    EP_DEVICE_ASSERT(ctx_idx >= 0 && ctx_idx < num_gin_ctxs);
+                    int ctx_idx = (responsible_expert_idx % num_local_experts) % num_gin_comms;
+                    EP_DEVICE_ASSERT(ctx_idx >= 0 && ctx_idx < num_gin_comms);
                     // ncclGinCall<ncclGinApi_PutValue>(gin_ctxs[ctx_idx], thread, dst_rank,
                     //     gin_windows[ctx_idx], dst_offset,
                     //     1,
@@ -1356,8 +1356,8 @@ LOW_LATENCY_COMBINE_RECV:
                         responsible_expert_idx);
 
                     uint64_t cur_value;
-                    int ctx_idx_wait = (responsible_expert_idx % num_local_experts) % num_gin_ctxs;
-                    EP_DEVICE_ASSERT(ctx_idx_wait >= 0 && ctx_idx_wait < num_gin_ctxs);
+                    int ctx_idx_wait = (responsible_expert_idx % num_local_experts) % num_gin_comms;
+                    EP_DEVICE_ASSERT(ctx_idx_wait >= 0 && ctx_idx_wait < num_gin_comms);
                     ncclGin net(dcomms[ctx_idx_wait], 0);
                     do {
                         cur_value = net.readSignal(signals_base + responsible_expert_idx);
@@ -1562,20 +1562,20 @@ LOW_LATENCY_COMBINE_RECV:
     if (threadIdx.x == 0 && blockIdx.x == 0) {
         const int signals_per_buffer = num_experts;
         for (int signal_idx = 0; signal_idx < signals_per_buffer; ++signal_idx) {
-            ncclGinResetSignal(&gin_ctxs[signal_idx % num_gin_ctxs], gin_signals + signal_idx, false);
+            ncclGinResetSignal(&gin_ctxs[signal_idx % num_gin_comms], gin_signals + signal_idx, false);
         }
     }
     */
 
     {
         const int signals_per_buffer = num_experts;
-        const int total_resets = signals_per_buffer * num_gin_ctxs;
+        const int total_resets = signals_per_buffer * num_gin_comms;
         const int linear_tid = blockIdx.x * blockDim.x + threadIdx.x;
         const int linear_stride = gridDim.x * blockDim.x;
 
         for (int idx = linear_tid; idx < total_resets; idx += linear_stride) {
-            const int signal_idx = idx / num_gin_ctxs;
-            const int ctx_id = idx % num_gin_ctxs;
+            const int signal_idx = idx / num_gin_comms;
+            const int ctx_id = idx % num_gin_comms;
             ncclGin net(dcomms[ctx_id], 0);
             net.resetSignal(signals_base + signal_idx);
         }
@@ -1654,7 +1654,7 @@ void combine(void* combined_x,
     EP_HOST_ASSERT(backend != nullptr);
     // printf("COMBINE: ll_buffer_idx=%d\n", ll_buffer_idx);
     auto dcomms = backend->get_device_communicators();
-    int num_gin_ctxs = backend->get_num_gin_ctxs();
+    int num_gin_comms = backend->get_num_gin_comms();
     auto nccl_windows = backend->get_device_nccl_windows();
     auto signals_base = backend->get_signals_base(ll_buffer_idx);
     ;
@@ -1665,7 +1665,7 @@ void combine(void* combined_x,
     void* dcomms = nullptr;
     void* nccl_windows = nullptr;
     unsigned signals_base = 0;
-    int num_gin_ctxs = 1;
+    int num_gin_comms = 1;
 #endif
 
 #define COMBINE_LAUNCH_CASE(hidden)                                                                                                \
@@ -1703,7 +1703,7 @@ void combine(void* combined_x,
                       num_warps_per_group,                                                                                         \
                       phases,                                                                                                      \
                       zero_copy,                                                                                                   \
-                      num_gin_ctxs,                                                                                                \
+                      num_gin_comms,                                                                                               \
                       dcomms,                                                                                                      \
                       nccl_windows,                                                                                                \
                       signals_base);                                                                                               \

@@ -53,7 +53,7 @@ public:
 
     // NCCL GIN specific methods
     unsigned get_signals_base(int buffer_idx) const;
-    int get_num_gin_ctxs() const;
+    int get_num_gin_comms() const;
 
     // Device arrays for kernels
     ncclWindow_t* get_device_nccl_windows();
