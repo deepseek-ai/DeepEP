@@ -77,6 +77,13 @@ if (kLowLatencyMode) {
 
 - **Memory Ordering**: Uses relaxed memory ordering and fence level for performance
 
+- **Warp-level Optimization**: It's possible to use `ncclCoopWarp()` instead of `ncclCoopThread()` to have an entire warp (32 threads) perform the barrier operation collectively. See `sync_with_same_gpu_idx_warp` for an example implementation:
+  ```cuda
+  ncclGinBarrierSession<ncclCoopWarp> barrier(ncclCoopWarp(), net, ncclTeamTagRail(), session_id);
+  barrier.sync(ncclCoopWarp(), cuda::memory_order_relaxed, ncclGinFenceLevel::Relaxed);
+  ```
+  This can improve performance when a full warp is available for the operation.
+
 ---
 
 ## Put Operations
@@ -137,6 +144,8 @@ __syncwarp(); // Synchronize all warp threads after the operation
 - **No Signaling**: Put operation completes without signals or counters (`ncclGin_None{}`)
 
 - **Warp Synchronization**: Uses `__syncwarp()` to synchronize all warp threads after the operation
+
+- **No Warp-level Cooperation**: Unlike barrier and flush operations, put operations do not take advantage of `ncclCoopWarp()` at this time due to the current backend implementation.
 
 ### Warp-level Non-blocking Put
 
@@ -204,6 +213,8 @@ __syncwarp(); // Synchronize all warp threads
 - **No Signaling**: Put operation completes without signals or counters (`ncclGin_None{}`)
 
 - **Warp Synchronization**: Uses `__syncwarp()` to maintain warp-level semantics
+
+- **No Warp-level Cooperation**: Unlike barrier and flush operations, put operations do not take advantage of `ncclCoopWarp()` at this time due to the current backend implementation.
 
 ---
 
@@ -460,6 +471,12 @@ __syncthreads();
 - **Synchronization**: Uses `__syncthreads()` to ensure all contexts have been flushed before proceeding
 
 - **Buffer Safety**: Critical for preventing data corruption when reusing RDMA buffers
+
+- **Warp-level Optimization**: Similar to barrier operations, it's possible to use `ncclCoopWarp()` instead of `ncclCoopThread()` to have an entire warp (32 threads) perform the flush operation collectively:
+  ```cuda
+  net.flush(ncclCoopWarp(), cuda::std::memory_order_acquire);
+  ```
+  This can improve performance when a full warp is available for the operation.
 
 #### Use Case
 
