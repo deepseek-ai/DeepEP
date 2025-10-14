@@ -81,15 +81,30 @@ __launch_bounds__(kNumThreads, 1) __global__ void clean_low_latency_buffer(int* 
                                                                            int rank,
                                                                            int num_ranks,
                                                                            int* mask_buffer_ptr,
-                                                                           int* sync_buffer_ptr) {
+                                                                           int* sync_buffer_ptr,
+#ifdef ENABLE_NCCL_GIN
+                                                                           ncclDevComm* dcomms) {
+#else
+                                                                           void* dcomms) {
+#endif
     auto thread_id = static_cast<int>(threadIdx.x);
 
     // Barrier before cleaning (in case of unfinished chunked EP)
+#ifdef ENABLE_NCCL_GIN
+    auto dcomm = dcomms[0];
+    ncclGin net(dcomm, 0);
+
+    // World barrier - synchronizes all ranks with all block threads participating
+    {
+        ncclBarrierSession<ncclCoopCta> barrier(ncclCoopCta(), ncclTeamTagWorld(), net, 0);
+        barrier.sync(ncclCoopCta(), cuda::memory_order_relaxed, ncclGinFenceLevel::Relaxed);
+    }
+#else
     if (sync_buffer_ptr == nullptr)
         nvshmemx_barrier_all_block();
     else
         barrier<kNumThreads>(thread_id, rank, num_ranks, mask_buffer_ptr, sync_buffer_ptr);
-
+#endif
     // Clean
     #pragma unroll
     for (int i = thread_id; i < num_clean_int_0; i += kNumThreads)
@@ -98,11 +113,19 @@ __launch_bounds__(kNumThreads, 1) __global__ void clean_low_latency_buffer(int* 
     for (int i = thread_id; i < num_clean_int_1; i += kNumThreads)
         clean_1[i] = 0;
 
-    // Barrier after cleaning (make sure the low-latency mode works fine)
+        // Barrier after cleaning (make sure the low-latency mode works fine)
+#ifdef ENABLE_NCCL_GIN
+    // World barrier - synchronizes all ranks with all block threads participating
+    {
+        ncclBarrierSession<ncclCoopCta> barrier(ncclCoopCta(), ncclTeamTagWorld(), net, 0);
+        barrier.sync(ncclCoopCta(), cuda::memory_order_relaxed, ncclGinFenceLevel::Relaxed);
+    }
+#else
     if (sync_buffer_ptr == nullptr)
         nvshmemx_barrier_all_block();
     else
         barrier<kNumThreads>(thread_id, rank, num_ranks, mask_buffer_ptr, sync_buffer_ptr);
+#endif
 }
 
 void clean_low_latency_buffer(int* clean_0,
@@ -116,6 +139,16 @@ void clean_low_latency_buffer(int* clean_0,
                               cudaStream_t stream) {
     constexpr int kNumThreads = 256;
 
+#ifdef ENABLE_NCCL_GIN
+    auto* backend = dynamic_cast<deep_ep::internode::NCCLGINBackend*>(deep_ep::internode::get_backend());
+    EP_HOST_ASSERT(backend != nullptr);
+    auto dcomms = backend->get_device_communicators();
+
+    EP_HOST_ASSERT(dcomms != nullptr);
+#else
+    void* dcomms = nullptr;
+#endif
+
     SETUP_LAUNCH_CONFIG(1, kNumThreads, stream);
 
     LAUNCH_KERNEL(&cfg,
@@ -127,7 +160,8 @@ void clean_low_latency_buffer(int* clean_0,
                   rank,
                   num_ranks,
                   mask_buffer_ptr,
-                  sync_buffer_ptr);
+                  sync_buffer_ptr,
+                  dcomms);
 }
 
 template <bool kUseFP8, bool kUseUE8M0, int kHidden>
