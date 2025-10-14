@@ -260,10 +260,13 @@ __global__ void notify_dispatch(const int* num_tokens_per_rank,
             // Signal layout: [all head signals][all tail signals]
             int signal_offset = thread_id;
             int head_signal_count = kNumRDMARanks * num_channels;
-            int channel_id =
-                (signal_offset < head_signal_count) ? signal_offset / kNumRDMARanks : (signal_offset - head_signal_count) / kNumRDMARanks;
-            // Only reset for the context assigned to this channel
-            auto comm_id = channel_id % num_gin_comms;
+            bool is_head_signal = (signal_offset < head_signal_count);
+            int channel_id = is_head_signal ? signal_offset / kNumRDMARanks : (signal_offset - head_signal_count) / kNumRDMARanks;
+
+            // Match the comm_id logic used for head/tail signal operations
+            // Head signals use (channel_id + num_channels) % num_gin_comms
+            // Tail signals use channel_id % num_gin_comms
+            auto comm_id = is_head_signal ? (channel_id + num_channels) % num_gin_comms : channel_id % num_gin_comms;
             ncclGin net(dcomms[comm_id], 0);
             net.resetSignal(signal_id);
         }
@@ -894,7 +897,7 @@ __global__ void __launch_bounds__(((kNumDispatchRDMASenderWarps + 1 + NUM_MAX_NV
 #if defined(ENABLE_NCCL_GIN)
                 // kRDMASender: Check available space with head pointers to avoid overflow
                 auto signal_id = gin_signals_head + lane_id;
-                uint64_t signal_value = net.readSignal(signal_id);
+                uint64_t signal_value = net_head.readSignal(signal_id);
                 cached_rdma_channel_head = static_cast<int>(signal_value);
 #else
                 cached_rdma_channel_head = static_cast<int>(ld_volatile_global(rdma_channel_head.buffer(lane_id)));
@@ -1351,13 +1354,13 @@ __global__ void __launch_bounds__(((kNumDispatchRDMASenderWarps + 1 + NUM_MAX_NV
                 // kForwarderCoordinator: Update remote head
                 auto dst_rank = translate_dst_rdma_rank<kLowLatencyMode>(lane_id, nvl_rank);
                 auto signal_id = gin_signals_head + rdma_rank;
-                net.signal(world,                                                                   // team
-                           dst_rank,                                                                // destination rank
-                           ncclGin_SignalAdd{signal_id, (uint64_t)min_head - (uint64_t)last_head},  // signal + value
-                           ncclCoopThread(),                                                        // cooperation scope (default)
-                           ncclGin_None{},                                                          // no descriptor (default)
-                           cuda::thread_scope_thread,                                               // alreadyReleased (default)
-                           cuda::thread_scope_thread                                                // expected_scope (default)
+                net_head.signal(world_head,                                                              // team
+                                dst_rank,                                                                // destination rank
+                                ncclGin_SignalAdd{signal_id, (uint64_t)min_head - (uint64_t)last_head},  // signal + value
+                                ncclCoopThread(),                                                        // cooperation scope (default)
+                                ncclGin_None{},                                                          // no descriptor (default)
+                                cuda::thread_scope_thread,                                               // alreadyReleased (default)
+                                cuda::thread_scope_thread                                                // expected_scope (default)
                 );
 #else
                 nvshmemi_ibgda_amo_nonfetch_add(rdma_channel_head.buffer(rdma_rank),
@@ -1796,10 +1799,13 @@ __global__ void cached_notify(const int rdma_clean_offset,
             // Signal layout: [all head signals][all tail signals]
             int signal_offset = thread_id;
             int head_signal_count = num_rdma_ranks * num_channels;
-            int channel_id =
-                (signal_offset < head_signal_count) ? signal_offset / num_rdma_ranks : (signal_offset - head_signal_count) / num_rdma_ranks;
-            // Only reset for the context assigned to this channel
-            auto comm_id = channel_id % num_gin_comms;
+            bool is_head_signal = (signal_offset < head_signal_count);
+            int channel_id = is_head_signal ? signal_offset / num_rdma_ranks : (signal_offset - head_signal_count) / num_rdma_ranks;
+
+            // Match the comm_id logic used for head/tail signal operations
+            // Head signals use (channel_id + num_channels) % num_gin_comms
+            // Tail signals use channel_id % num_gin_comms
+            auto comm_id = is_head_signal ? (channel_id + num_channels) % num_gin_comms : channel_id % num_gin_comms;
             ncclGin net(dcomms[comm_id], 0);
             net.resetSignal(signal_id);
         }
@@ -2524,7 +2530,7 @@ __global__ void __launch_bounds__((kNumForwarders + 1) * 32, 1) combine(int4* co
 #if defined(ENABLE_NCCL_GIN)
                     // kNVLAndRDMAForwarder: Check if RDMA receive buffer has space before sending data
                     auto signal_id = gin_signals_head + dst_rdma_rank;
-                    uint64_t signal_value = net.readSignal(signal_id);
+                    uint64_t signal_value = net_head.readSignal(signal_id);
                     int num_used_slots = token_start_idx - signal_value;
 #else
                     int num_used_slots = token_start_idx - ld_volatile_global(rdma_channel_head.buffer(dst_rdma_rank));
@@ -2537,7 +2543,7 @@ __global__ void __launch_bounds__((kNumForwarders + 1) * 32, 1) combine(int4* co
 #if defined(ENABLE_NCCL_GIN)
                         // kNVLAndRDMAForwarder: debugging
                         auto signal_id = gin_signals_head + dst_rdma_rank;
-                        uint64_t signal_value = net.readSignal(signal_id);
+                        uint64_t signal_value = net_head.readSignal(signal_id);
                         printf(
                             "DeepEP combine forwarder (RDMA check) timeout, channel: %d, RDMA: %d, nvl: %d, dst RDMA: %d, head: %ld, tail: "
                             "%d, chunked: %d\n",
@@ -2829,13 +2835,13 @@ __global__ void __launch_bounds__((kNumForwarders + 1) * 32, 1) combine(int4* co
                         // Coordinator: Notify remote rank that buffer space has been freed (update head pointer)
                         auto dst_rank = translate_dst_rdma_rank<kLowLatencyMode>(dst_rdma_rank, nvl_rank);
                         auto signal_id = gin_signals_head + rdma_rank;
-                        net.signal(world,                                                                        // team
-                                   dst_rank,                                                                     // destination rank
-                                   ncclGin_SignalAdd{signal_id, (uint64_t)min_head - (uint64_t)last_rdma_head},  // signal + value
-                                   ncclCoopThread(),           // cooperation scope (default)
-                                   ncclGin_None{},             // no descriptor (default)
-                                   cuda::thread_scope_thread,  // alreadyReleased (default)
-                                   cuda::thread_scope_thread   // expected_scope (default)
+                        net_head.signal(world_head,                                                                   // team
+                                        dst_rank,                                                                     // destination rank
+                                        ncclGin_SignalAdd{signal_id, (uint64_t)min_head - (uint64_t)last_rdma_head},  // signal + value
+                                        ncclCoopThread(),           // cooperation scope (default)
+                                        ncclGin_None{},             // no descriptor (default)
+                                        cuda::thread_scope_thread,  // alreadyReleased (default)
+                                        cuda::thread_scope_thread   // expected_scope (default)
                         );
 #else
                         nvshmemi_ibgda_amo_nonfetch_add(rdma_channel_head.buffer(rdma_rank),
