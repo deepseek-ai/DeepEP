@@ -44,7 +44,7 @@ public:
         EP_STATIC_ASSERT(kNumRanks == 1, "");
         num_bytes = num_elems * sizeof(dtype_t);
 
-        int per_channel_bytes = num_bytes * num_ranks;
+        int64_t per_channel_bytes = num_bytes * num_ranks;
         total_bytes = per_channel_bytes * num_sms;
         ptrs[0] = static_cast<uint8_t*>(gbl_ptr) + per_channel_bytes * sm_id + num_bytes * offset;
         gbl_ptr = static_cast<uint8_t*>(gbl_ptr) + total_bytes;
@@ -54,7 +54,7 @@ public:
         EP_STATIC_ASSERT(kNumRanks > 1, "");
         num_bytes = num_elems * sizeof(dtype_t);
 
-        int per_channel_bytes = num_bytes * num_ranks;
+        int64_t per_channel_bytes = num_bytes * num_ranks;
         total_bytes = per_channel_bytes * num_sms;
         for (int i = 0; i < kNumRanks; ++i) {
             ptrs[i] = static_cast<uint8_t*>(gbl_ptrs[i]) + per_channel_bytes * sm_id + num_bytes * offset;
@@ -105,7 +105,7 @@ public:
     __device__ __forceinline__ SymBuffer(void*& gbl_ptr, int num_elems, int num_ranks, int sm_id = 0, int num_sms = 1) {
         num_bytes = num_elems * sizeof(dtype_t);
 
-        int per_channel_bytes = num_bytes * num_ranks;
+        int64_t per_channel_bytes = num_bytes * num_ranks;
         total_bytes = per_channel_bytes * num_sms * (static_cast<int>(kDecoupled) + 1);
         send_ptr = static_cast<uint8_t*>(gbl_ptr) + per_channel_bytes * sm_id;
         recv_ptr = static_cast<uint8_t*>(gbl_ptr) + per_channel_bytes * (sm_id + num_sms);
