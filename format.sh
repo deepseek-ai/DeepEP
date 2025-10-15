@@ -19,6 +19,11 @@ if ! (yapf --version &>/dev/null && ruff --version &>/dev/null); then
     pip install -r requirements-lint.txt
 fi
 
+SED_CMD="sed -i"
+if [[ "$OSTYPE" == "darwin"* ]]; then
+    SED_CMD="sed -i ''"
+fi
+
 YAPF_VERSION=$(yapf --version | awk '{print $2}')
 RUFF_VERSION=$(ruff --version | awk '{print $2}')
 
@@ -137,14 +142,14 @@ if command -v clang-format &>/dev/null; then
         # Replace "#pragma unroll" by "// #pragma unroll"
         find . -type f \( -name '*.c' -o -name '*.cc' -o -name '*.cpp' -o -name '*.h' -o -name '*.hpp' -o -name '*.cu' -o -name '*.cuh' \) \
             -not -path "./build/*" \
-            -exec sed -i 's/#pragma unroll/\/\/#pragma unroll/g' {} +
+            -exec $SED_CMD 's/#pragma unroll/\/\/#pragma unroll/g' {} +
         find . -type f \( -name '*.c' -o -name '*.cc' -o -name '*.cpp' -o -name '*.h' -o -name '*.hpp' -o -name '*.cu' -o -name '*.cuh' \) \
             -not -path "./build/*" \
             -exec clang-format -i {} +
         # Replace "// #pragma unroll" by "#pragma unroll"
         find . -type f \( -name '*.c' -o -name '*.cc' -o -name '*.cpp' -o -name '*.h' -o -name '*.hpp' -o -name '*.cu' -o -name '*.cuh' \) \
             -not -path "./build/*" \
-            -exec sed -i 's/\/\/ *#pragma unroll/#pragma unroll/g' {} +
+            -exec $SED_CMD 's/\/\/ *#pragma unroll/#pragma unroll/g' {} +
     }
 
     # Format changed C/C++ files relative to main
@@ -158,9 +163,9 @@ if command -v clang-format &>/dev/null; then
         MERGEBASE="$(git merge-base $BASE_BRANCH HEAD)"
 
         if ! git diff --diff-filter=ACM --quiet --exit-code "$MERGEBASE" -- '*.c' '*.cc' '*.cpp' '*.h' '*.hpp' '*.cu' '*.cuh' &>/dev/null; then
-            git diff --name-only --diff-filter=ACM "$MERGEBASE" -- '*.c' '*.cc' '*.cpp' '*.h' '*.hpp' '*.cu' '*.cuh' | xargs sed -i 's/#pragma unroll/\/\/#pragma unroll/g'
+            git diff --name-only --diff-filter=ACM "$MERGEBASE" -- '*.c' '*.cc' '*.cpp' '*.h' '*.hpp' '*.cu' '*.cuh' | xargs $SED_CMD 's/#pragma unroll/\/\/#pragma unroll/g'
             git diff --name-only --diff-filter=ACM "$MERGEBASE" -- '*.c' '*.cc' '*.cpp' '*.h' '*.hpp' '*.cu' '*.cuh' | xargs clang-format -i
-            git diff --name-only --diff-filter=ACM "$MERGEBASE" -- '*.c' '*.cc' '*.cpp' '*.h' '*.hpp' '*.cu' '*.cuh' | xargs sed -i 's/\/\/ *#pragma unroll/#pragma unroll/g'
+            git diff --name-only --diff-filter=ACM "$MERGEBASE" -- '*.c' '*.cc' '*.cpp' '*.h' '*.hpp' '*.cu' '*.cuh' | xargs $SED_CMD 's/\/\/ *#pragma unroll/#pragma unroll/g'
         fi
     }
 
