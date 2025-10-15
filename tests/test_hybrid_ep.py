@@ -73,7 +73,7 @@ def init_tensor(
     return hidden, probs, scaling_factor, routing_map, topk_idx, topk_weights
 
 
-def test_hybrid_ep_correctness(buffer: deep_ep.HybridEpBuffer, ref: TorchRef, use_fp8: bool):
+def test_hybrid_ep_correctness(buffer: deep_ep.HybridEPBuffer, ref: TorchRef, use_fp8: bool):
     hidden, probs, scaling_factor, routing_map, topk_idx, topk_weights  = init_tensor(
         hidden_dim=HIDDEN_DIM,
         seq_len=NUM_TOKENS_PER_RANK,
@@ -218,7 +218,7 @@ def test_hybrid_ep_correctness(buffer: deep_ep.HybridEpBuffer, ref: TorchRef, us
     print(f'[rank {torch.distributed.get_rank()}] Correctness check passed ({"FP8" if hidden.dtype == torch.uint8 else "BF16"})')
 
 
-def test_hybrid_ep_benchmark(buffer: deep_ep.HybridEpBuffer, group: dist.ProcessGroup, use_fp8: bool, nsys_profile: bool):
+def test_hybrid_ep_benchmark(buffer: deep_ep.HybridEPBuffer, group: dist.ProcessGroup, use_fp8: bool, nsys_profile: bool):
     hidden, probs, scaling_factor, routing_map, topk_idx, topk_weights = init_tensor(
         hidden_dim=HIDDEN_DIM,
         seq_len=NUM_TOKENS_PER_RANK,
@@ -313,7 +313,7 @@ def test_main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
     rank, num_ranks, group = init_dist(local_rank, num_local_ranks)
     try:
         for use_fp8 in [True, False]:
-            buffer = deep_ep.HybridEpBuffer(
+            buffer = deep_ep.HybridEPBuffer(
                 group=group,
                 hidden_dim=HIDDEN_DIM,
                 max_num_of_tokens_per_rank=MAX_NUM_OF_TOKENS_PER_RANK,

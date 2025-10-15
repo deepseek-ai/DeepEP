@@ -100,13 +100,13 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
                  ">";
         });
   
-    pybind11::class_<HybridEpBuffer>(m, "HybridEpBuffer")
+    pybind11::class_<HybridEPBuffer>(m, "HybridEPBuffer")
         .def(py::init<BufferConfig, int, int, int>())
-        .def("update_buffer", &HybridEpBuffer::update_buffer, py::arg("config"))
-        .def("exchange_ipc_address", &HybridEpBuffer::exchange_ipc_address)
-        .def("metadata_preprocessing", &HybridEpBuffer::metadata_preprocessing,
+        .def("update_buffer", &HybridEPBuffer::update_buffer, py::arg("config"))
+        .def("exchange_ipc_address", &HybridEPBuffer::exchange_ipc_address)
+        .def("metadata_preprocessing", &HybridEPBuffer::metadata_preprocessing,
              py::kw_only(), py::arg("config"), py::arg("routing_map"), py::arg("num_of_tokens_per_rank"))
-        .def("dispatch", &HybridEpBuffer::dispatch, py::kw_only(), 
+        .def("dispatch", &HybridEPBuffer::dispatch, py::kw_only(), 
              py::arg("config"), py::arg("hidden"),
              py::arg("probs") = c10::nullopt,
              py::arg("scaling_factor") = c10::nullopt,
@@ -114,13 +114,13 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
              py::arg("attn_to_rdma_map"), py::arg("num_dispatched_tokens_tensor"),
              py::arg("num_dispatched_tokens") = -1, py::arg("num_of_tokens_per_rank"),
              py::arg("with_probs"))
-        .def("combine", &HybridEpBuffer::combine, py::kw_only(), 
+        .def("combine", &HybridEPBuffer::combine, py::kw_only(), 
              py::arg("config"), py::arg("hidden"),
              py::arg("probs") = c10::nullopt, py::arg("sparse_to_dense_map"),
              py::arg("rdma_to_attn_map"), py::arg("attn_to_rdma_map"),
              py::arg("num_of_tokens_per_rank"),
              py::arg("with_probs"))
-        .def("dispatch_with_permute", &HybridEpBuffer::dispatch_with_permute, py::kw_only(), 
+        .def("dispatch_with_permute", &HybridEPBuffer::dispatch_with_permute, py::kw_only(), 
              py::arg("config"), py::arg("hidden"),
              py::arg("probs") = c10::nullopt,
              py::arg("scaling_factor") = c10::nullopt,
@@ -130,7 +130,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
              py::arg("num_permuted_tokens") = -1,
              py::arg("num_of_tokens_per_rank"), py::arg("pad_multiple") = 0, py::arg("use_host_meta") = false,
              py::arg("with_probs") = false)
-        .def("combine_with_unpermute", &HybridEpBuffer::combine_with_unpermute, py::kw_only(), 
+        .def("combine_with_unpermute", &HybridEPBuffer::combine_with_unpermute, py::kw_only(), 
              py::arg("config"), py::arg("hidden"),
              py::arg("probs") = c10::nullopt,
              py::arg("sparse_to_dense_map"), py::arg("rdma_to_attn_map"),

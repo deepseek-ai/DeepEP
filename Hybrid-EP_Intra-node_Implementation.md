@@ -152,7 +152,7 @@ Refer to `tests/test_hybrid_ep.py` for comprehensive usage examples including:
 - Performance benchmarking setups
 
 ### Important Configuration Note
-Here are important parameter settings in `csrc/hybrid_ep/config.cuh`. You can modify these parameters via `HybridEpBuffer.init_config()` or by setting proper environment variables (see `deep_ep/hybrid_ep_buffer.py`) to achieve better performance/usability:
+Here are important parameter settings in `csrc/hybrid_ep/config.cuh`. You can modify these parameters via `HybridEPBuffer.init_config()` or by setting proper environment variables (see `deep_ep/hybrid_ep_buffer.py`) to achieve better performance/usability:
 
 - HIDDEN_DIM  
   Hidden size (must match model hidden dimension).

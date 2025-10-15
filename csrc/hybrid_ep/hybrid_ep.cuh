@@ -12,10 +12,10 @@
 #include <vector>
 #include <algorithm>
 
-class HybridEpBuffer {
+class HybridEPBuffer {
 public:
-  HybridEpBuffer(BufferConfig config, int local_rank, int node_rank, int group_size);
-  ~HybridEpBuffer();
+  HybridEPBuffer(BufferConfig config, int local_rank, int node_rank, int group_size);
+  ~HybridEPBuffer();
   bool update_buffer(HybridEpConfigInstance config); // True means the buffer is reallocated.
 
   // Exchange IPC addresses using C++ distributed communication

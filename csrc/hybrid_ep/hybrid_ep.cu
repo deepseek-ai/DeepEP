@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved
 #include "hybrid_ep.cuh"
 
-HybridEpBuffer::HybridEpBuffer(BufferConfig config, int local_rank, int node_rank, int group_size)
+HybridEPBuffer::HybridEPBuffer(BufferConfig config, int local_rank, int node_rank, int group_size)
     : buffer_config(config), local_rank(local_rank), node_rank(node_rank), group_size(group_size),
     executor(local_rank, node_rank) {
     if(group_size <= buffer_config.num_of_ranks_per_node) {
@@ -17,11 +17,11 @@ HybridEpBuffer::HybridEpBuffer(BufferConfig config, int local_rank, int node_ran
     allocate_buffer();
 }
 
-HybridEpBuffer::~HybridEpBuffer() {
+HybridEPBuffer::~HybridEPBuffer() {
     release_buffer();
 }
 
-void HybridEpBuffer::release_buffer() {
+void HybridEPBuffer::release_buffer() {
   // Synchronize the device to ensure all operations are completed.
   CUDA_CHECK(cudaDeviceSynchronize());
 
@@ -92,7 +92,7 @@ void HybridEpBuffer::release_buffer() {
   delete[] combine_buffers.expert_input_prob_all_ranks;
 }
 
-void HybridEpBuffer::allocate_buffer_for_preprocessing() {
+void HybridEPBuffer::allocate_buffer_for_preprocessing() {
   auto preprocessing_tmp_elts =
     buffer_config.num_of_blocks_preprocessing_api * buffer_config.num_of_ranks_per_node;
   CUDA_CHECK(
@@ -100,7 +100,7 @@ void HybridEpBuffer::allocate_buffer_for_preprocessing() {
                  preprocessing_tmp_elts * sizeof(hybrid_ep::tmp_state_t)));
 }
 
-void HybridEpBuffer::allocate_buffer_for_dispatch() {
+void HybridEPBuffer::allocate_buffer_for_dispatch() {
   dispatch_buffers.data_type = buffer_config.token_data_type;
   size_t sizeof_token_data_type = get_token_data_type_size(dispatch_buffers.data_type);
 
@@ -170,7 +170,7 @@ void HybridEpBuffer::allocate_buffer_for_dispatch() {
   CUDA_CHECK(cudaGetLastError());
 }
 
-void HybridEpBuffer::allocate_buffer_for_combine() {
+void HybridEPBuffer::allocate_buffer_for_combine() {
   // Calculate buffer sizes
   auto expert_input_token_elts = max_num_of_tokens_for_experts * buffer_config.hidden_dim;
   auto expert_input_prob_elts = max_num_of_tokens_for_experts *
@@ -231,7 +231,7 @@ void HybridEpBuffer::allocate_buffer_for_combine() {
   CUDA_CHECK(cudaGetLastError());
 }
 
-void HybridEpBuffer::allocate_buffer() {
+void HybridEPBuffer::allocate_buffer() {
   // Token number at the worst case, all tokens are routed to the same expert.
   this->max_num_of_tokens_for_experts = buffer_config.max_num_of_tokens_per_rank *
                                         buffer_config.num_of_ranks_per_node *
@@ -244,7 +244,7 @@ void HybridEpBuffer::allocate_buffer() {
   allocate_buffer_for_dispatch();
 }
 
-void HybridEpBuffer::exchange_ipc_address(py::object process_group) {
+void HybridEPBuffer::exchange_ipc_address(py::object process_group) {
   try {
     // Use Python's torch.distributed APIs through py::object
     auto torch_distributed = py::module_::import("torch.distributed");
@@ -289,7 +289,7 @@ void HybridEpBuffer::exchange_ipc_address(py::object process_group) {
 }
 
 
-void HybridEpBuffer::open_handles_from_other_ranks(
+void HybridEPBuffer::open_handles_from_other_ranks(
     std::vector<torch::Tensor> dispatch_handles,
     std::vector<torch::Tensor> combine_handles) {
   // Malloc the pointer arrays used in the dispatch kernel.
@@ -388,7 +388,7 @@ void HybridEpBuffer::open_handles_from_other_ranks(
   }
 }
 
-bool HybridEpBuffer::update_buffer(HybridEpConfigInstance config) {
+bool HybridEPBuffer::update_buffer(HybridEpConfigInstance config) {
   // If new config requires bigger buffer, we will release the old buffer and allocate a new one.
   bool need_reallocate = false;
   
@@ -416,7 +416,7 @@ bool HybridEpBuffer::update_buffer(HybridEpConfigInstance config) {
 
 std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor,
            torch::Tensor>
-HybridEpBuffer::metadata_preprocessing(HybridEpConfigInstance config, torch::Tensor global_routing_map, int64_t num_of_tokens_per_rank) {
+HybridEPBuffer::metadata_preprocessing(HybridEpConfigInstance config, torch::Tensor global_routing_map, int64_t num_of_tokens_per_rank) {
   // Basic checks
   assert(global_routing_map.device().is_cuda());
   assert(global_routing_map.is_contiguous());
@@ -426,7 +426,7 @@ HybridEpBuffer::metadata_preprocessing(HybridEpConfigInstance config, torch::Ten
 }
 
 std::tuple<torch::Tensor, c10::optional<torch::Tensor>, c10::optional<torch::Tensor>>
-HybridEpBuffer::dispatch(HybridEpConfigInstance config, 
+HybridEPBuffer::dispatch(HybridEpConfigInstance config, 
                  torch::Tensor hidden, c10::optional<torch::Tensor> probs,
                  c10::optional<torch::Tensor> scaling_factor,
                  torch::Tensor sparse_to_dense_map,
@@ -482,7 +482,7 @@ HybridEpBuffer::dispatch(HybridEpConfigInstance config,
 }
 
 std::tuple<torch::Tensor, torch::Tensor>
-HybridEpBuffer::combine(HybridEpConfigInstance config, 
+HybridEPBuffer::combine(HybridEpConfigInstance config, 
                 torch::Tensor hidden, c10::optional<torch::Tensor> probs,
                 torch::Tensor sparse_to_dense_map,
                 torch::Tensor rdma_to_attn_map, torch::Tensor attn_to_rdma_map,
@@ -535,7 +535,7 @@ HybridEpBuffer::combine(HybridEpConfigInstance config,
 
 
 std::tuple<torch::Tensor, c10::optional<torch::Tensor>, c10::optional<torch::Tensor>, torch::Tensor, torch::Tensor>
-HybridEpBuffer::dispatch_with_permute(HybridEpConfigInstance config, 
+HybridEPBuffer::dispatch_with_permute(HybridEpConfigInstance config, 
           torch::Tensor hidden, c10::optional<torch::Tensor> probs,
           c10::optional<torch::Tensor> scaling_factor,
           torch::Tensor sparse_to_dense_map, torch::Tensor rdma_to_attn_map,
@@ -601,7 +601,7 @@ HybridEpBuffer::dispatch_with_permute(HybridEpConfigInstance config,
 }
 
 std::tuple<torch::Tensor, torch::Tensor>
-HybridEpBuffer::combine_with_unpermute(HybridEpConfigInstance config, 
+HybridEPBuffer::combine_with_unpermute(HybridEpConfigInstance config, 
         torch::Tensor hidden, c10::optional<torch::Tensor> probs,
         torch::Tensor sparse_to_dense_map, torch::Tensor rdma_to_attn_map,
         torch::Tensor attn_to_rdma_map, c10::optional<torch::Tensor> num_dispatched_tokens_tensor,

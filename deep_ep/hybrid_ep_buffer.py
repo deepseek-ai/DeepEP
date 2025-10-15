@@ -30,7 +30,7 @@ def indices_to_map(
     return routing_map, probs
 
 
-class HybridEpBuffer:
+class HybridEPBuffer:
     def __init__(
         self,
         group: torch.distributed.ProcessGroup,
@@ -110,7 +110,7 @@ class HybridEpBuffer:
         )
 
         # Create C++ buffer - this will allocate all buffers during construction
-        self.runtime = hybrid_ep_cpp.HybridEpBuffer(
+        self.runtime = hybrid_ep_cpp.HybridEPBuffer(
             self.config, self.local_rank, self.node_rank, self.group_size
         )
         # Exchange IPC addresses using C++ distributed communication
