@@ -23,6 +23,40 @@ __forceinline__ __device__ bool is_rank_masked(int* mask_buffer_ptr, int rank) {
     }
 }
 
+#ifdef ENABLE_NCCL_GIN
+// Device constant for P2P/NVLink disabled flag
+// Set to true to force RDMA path, false to allow P2P when available
+// Default is false (P2P enabled), updated from host via CLI option
+__device__ __constant__ bool d_p2p_disabled = false;
+
+// Get peer-to-peer pointer for NCCL GIN
+// Returns dst_ptr if NVLink is available, 0 otherwise
+// offset parameter allows callers to pass a pre-calculated offset for the destination
+__device__ __forceinline__ uint64_t nccl_get_p2p_ptr(const uint64_t& dst_ptr,
+                                                     const size_t& offset,
+                                                     const int& rank,
+                                                     const int& dst_rank,
+                                                     const int& expert_idx,
+                                                     const ncclWindow_t* nccl_windows,
+                                                     const int& num_comms) {
+    // Local rank, no need for peer mapping
+    if (rank == dst_rank)
+        return dst_ptr;
+
+    // If P2P is disabled, always use RDMA path
+    if (d_p2p_disabled)
+        return 0;
+
+    auto const p2p_ptr = reinterpret_cast<uint64_t>(ncclGetPeerPointer(nccl_windows[expert_idx % num_comms], offset, dst_rank));
+
+    // Check if NVLink P2P is available
+    if (p2p_ptr != NULL)
+        return p2p_ptr;
+    else
+        return 0;  // No NVLink connection, use RDMA (offset will be used for network path)
+}
+#endif
+
 template <int kNumThreads>
 __forceinline__ __device__ void barrier(int thread_id, int rank, int num_ranks, int* mask_buffer_ptr, int* sync_buffer_ptr) {
     EP_DEVICE_ASSERT(kNumThreads >= num_ranks);
@@ -349,50 +383,16 @@ __global__ __launch_bounds__(1024, 1) void dispatch(void* packed_recv_x,
                     rank * num_max_dispatch_tokens_per_rank * num_bytes_per_msg + slot_idx * num_bytes_per_msg;
 
 #ifdef ENABLE_NCCL_GIN
-                const auto dst_p2p_ptr = nvshmemi_get_p2p_ptr(dst_ptr, rank, dst_rank);
+                size_t expected_dst_offset = rdma_recv_x_offset +
+                    dst_expert_local_idx * num_ranks * num_max_dispatch_tokens_per_rank * num_bytes_per_msg +
+                    rank * num_max_dispatch_tokens_per_rank * num_bytes_per_msg + slot_idx * num_bytes_per_msg;
+                const auto dst_p2p_ptr =
+                    nccl_get_p2p_ptr(dst_ptr, expected_dst_offset, rank, dst_rank, dst_expert_local_idx, nccl_windows, num_gin_comms);
+
                 if (not is_rank_masked<true>(mask_buffer_ptr, dst_rank)) {
-                    if (rank != dst_rank) {
+                    if (dst_p2p_ptr == 0) {
                         if (lane_id == 0) {
-                            size_t expected_dst_offset = rdma_recv_x_offset +
-                                dst_expert_local_idx * num_ranks * num_max_dispatch_tokens_per_rank * num_bytes_per_msg +
-                                rank * num_max_dispatch_tokens_per_rank * num_bytes_per_msg + slot_idx * num_bytes_per_msg;
                             size_t expected_src_offset = rdma_x_offset + token_idx * num_bytes_per_msg;
-
-                            size_t src_offset = src_ptr - reinterpret_cast<uint64_t>(gin_base_ptr);
-                            size_t dst_offset = dst_ptr - reinterpret_cast<uint64_t>(gin_base_ptr);
-
-                            EP_DEVICE_ASSERT(dst_offset == expected_dst_offset);
-                            EP_DEVICE_ASSERT(src_offset == expected_src_offset);
-
-                            if (rank == 0) {
-                                DEEPEP_DEBUG_PRINT(
-                                    "[Dispatch LL - Put] Rank %d (sm=%d,thread=%d,warp=%d,warp_group=%d,sub_warp=%d,lane=%d): Sending "
-                                    "token %d to expert %d on rank %d | src_ptr=%p, dst_ptr=%p, src_offset=%llx, dst_offset=%llx\n",
-                                    rank,
-                                    sm_id,
-                                    thread_id,
-                                    warp_id,
-                                    warp_group_id,
-                                    sub_warp_id,
-                                    lane_id,
-                                    token_idx,
-                                    dst_expert_idx,
-                                    dst_rank,
-                                    reinterpret_cast<uint8_t*>(gin_base_ptr) + expected_src_offset,
-                                    reinterpret_cast<uint8_t*>(gin_base_ptr) + expected_dst_offset,
-                                    expected_src_offset,
-                                    expected_dst_offset);
-                            }
-
-                            // ncclGinCall<ncclGinApi_Put>(gin_ctxs[dst_expert_local_idx % num_gin_comms], thread, dst_rank,
-                            //     /*hasWins=*/true,
-                            //     gin_windows[dst_expert_local_idx % num_gin_comms], expected_dst_offset,
-                            //     gin_windows[dst_expert_local_idx % num_gin_comms], expected_src_offset, num_bytes_per_msg,
-                            //     /*hasSignal=*/false, gin_signals + dst_expert_local_idx * num_ranks + rank, ncclGinSignalAdd, 1,
-                            //     /*hasCounter=*/false, 0,
-                            //     /*hasDescriptor=*/false, nullptr,
-                            //     cuda::thread_scope_thread, cuda::thread_scope_thread);
-
                             auto ctx_id = dst_expert_local_idx % num_gin_comms;
                             ncclGin net(dcomms[ctx_id], 0);
                             net.put(ncclTeamWorld(dcomms[ctx_id]),
@@ -491,37 +491,13 @@ __global__ __launch_bounds__(1024, 1) void dispatch(void* packed_recv_x,
         auto dst_ptr = reinterpret_cast<uint64_t>(rdma_recv_count + dst_expert_local_idx * num_ranks + rank);
 
 #ifdef ENABLE_NCCL_GIN
-        const auto dst_p2p_ptr = nvshmemi_get_p2p_ptr(dst_ptr, rank, dst_rank);
+        size_t dst_offset = rdma_recv_count_offset + (dst_expert_local_idx * num_ranks + rank) * sizeof(int);
+        const auto dst_p2p_ptr = nccl_get_p2p_ptr(dst_ptr, dst_offset, rank, dst_rank, dst_expert_local_idx, nccl_windows, num_gin_comms);
+
         if (not is_rank_masked(mask_buffer_ptr, dst_rank)) {
-            if (rank != dst_rank) {
+            if (dst_p2p_ptr == 0) {  // if (rank != dst_rank) {
                 // Each thread writes its value to its slot in shared memory
-                size_t dst_offset = rdma_recv_count_offset + (dst_expert_local_idx * num_ranks + rank) * sizeof(int);
 
-                // if (rank == 0) {
-                DEEPEP_DEBUG_PRINT(
-                    "[Dispatch LL - GinPut] Rank %d: ncclGinPut to dst_rank=%d, dst_expert_local_idx=%d, rdma_x=%p, rdma_recv_count=%p, "
-                    "dst_ptr=%p, dst_offset=%lx, offset=%lx, num_tokens_sent=%d, value=%d\n",
-                    rank,
-                    dst_rank,
-                    dst_expert_local_idx,
-                    rdma_x,
-                    rdma_recv_count,
-                    (reinterpret_cast<uint8_t*>(rdma_x) + dst_offset),
-                    dst_offset,
-                    (dst_expert_local_idx * num_ranks + rank) * sizeof(int),
-                    num_tokens_sent,
-                    -num_tokens_sent - 1);
-                //}
-
-                // ncclGinCall<ncclGinApi_Put>(gin_ctxs[dst_expert_local_idx % num_gin_comms], thread, dst_rank,
-                //                       /*hasWins=*/true,
-                //                       gin_windows[dst_expert_local_idx % num_gin_comms], dst_offset,
-                //                       gin_windows[dst_expert_local_idx % num_gin_comms], 0, 0,
-                //                       /*hasSignal=*/true, gin_signals + dst_expert_local_idx * num_ranks + rank, ncclGinSignalAdd,
-                //                       num_tokens_sent + 1,
-                //                       /*hasCounter=*/false, 0,
-                //                       /*hasDescriptor=*/false, nullptr,
-                //                       cuda::thread_scope_thread, cuda::thread_scope_thread);
                 auto ctx_id = dst_expert_local_idx % num_gin_comms;
                 auto signal_id = signals_base + dst_expert_local_idx * num_ranks + rank;
                 ncclGin net(dcomms[ctx_id], 0);
@@ -596,16 +572,13 @@ LOW_LATENCY_DISPATCH_RECV:
             uint64_t wait_recv_cost = 0;
             if (not is_rank_masked(mask_buffer_ptr, src_rank)) {
 #ifdef ENABLE_NCCL_GIN
-                if (rank != src_rank) {
-                    // FIXME: this path does not handle time out yet.
+                // int sig_idx_wait2 = local_expert_idx * num_ranks + src_rank;
+                size_t src_offset = rdma_recv_count_offset + (local_expert_idx * num_ranks + src_rank) * sizeof(int);
+                auto src_p2p_ptr = nccl_get_p2p_ptr(0x01, src_offset, rank, src_rank, local_expert_idx, nccl_windows, num_gin_comms);
+                // if (rank != src_rank) {
+                if (src_p2p_ptr == 0) {
+                    ncclGin net(dcomms[local_expert_idx % num_gin_comms], 0);
                     uint64_t cur_value;
-                    EP_DEVICE_ASSERT(local_expert_idx >= 0 && local_expert_idx < num_local_experts);
-                    int sig_idx_wait2 = local_expert_idx * num_ranks + src_rank;
-                    EP_DEVICE_ASSERT(sig_idx_wait2 >= 0 && sig_idx_wait2 < (num_local_experts * num_ranks));
-                    int ctx_idx_wait2 = local_expert_idx % num_gin_comms;
-                    EP_DEVICE_ASSERT(ctx_idx_wait2 >= 0 && ctx_idx_wait2 < num_gin_comms);
-                    ncclGin net(dcomms[ctx_idx_wait2], 0);
-
                     do {
                         cur_value = net.readSignal(signals_base + local_expert_idx * num_ranks + src_rank);
                     } while (cur_value < 1                                                       // data not arrived
@@ -613,15 +586,12 @@ LOW_LATENCY_DISPATCH_RECV:
                     );
 
                     num_recv_tokens = -(int)cur_value;
-                    // num_recv_tokens = (int)cur_value - 1;
-                    // num_recv_tokens = -num_recv_tokens - 1; //FIXME: check this Aamir.
                 } else {
                     while ((num_recv_tokens = ld_acquire_sys_global((rdma_recv_count + local_expert_idx * num_ranks + src_rank))) ==
                                0                                                               // data not arrived
                            && (wait_recv_cost = clock64() - start_time) <= NUM_TIMEOUT_CYCLES  // not timeout
                     )
                         ;
-                    // num_recv_tokens = -num_recv_tokens - 1;
                 }
 #else
                 while ((num_recv_tokens = ld_acquire_sys_global(rdma_recv_count + local_expert_idx * num_ranks + src_rank)) ==
@@ -710,6 +680,7 @@ LOW_LATENCY_DISPATCH_RECV:
         const int linear_tid = blockIdx.x * blockDim.x + threadIdx.x;
         const int linear_stride = gridDim.x * blockDim.x;
 
+        #pragma unroll
         for (int idx = linear_tid; idx < total_resets; idx += linear_stride) {
             const int signal_idx = idx / num_gin_comms;
             const int ctx_id = idx % num_gin_comms;
@@ -843,6 +814,7 @@ void dispatch(void* packed_recv_x,
 
     SETUP_LAUNCH_CONFIG(num_sms, num_warps * 32, stream);
     SWITCH_HIDDEN(DISPATCH_LAUNCH_CASE);
+    cudaStreamSynchronize(stream);
 #undef DISPATCH_LAUNCH_CASE
 }
 
@@ -1150,7 +1122,16 @@ __global__ __launch_bounds__(1024, 1) void combine(void* combined_x,
                 const auto buf_ptr = reinterpret_cast<int64_t>(rdma_send_x_vec_row);
                 const auto dst_ptr = reinterpret_cast<uint64_t>(rdma_recv_x) +
                     (global_expert_idx * num_max_dispatch_tokens_per_rank + src_idx) * num_bytes_per_slot;
+
+#ifdef ENABLE_NCCL_GIN
+                const auto expected_dst_offset =
+                    rdma_recv_x_offset + (global_expert_idx * num_max_dispatch_tokens_per_rank + src_idx) * num_bytes_per_slot;
+                const auto dst_p2p_ptr =
+                    nccl_get_p2p_ptr(dst_ptr, expected_dst_offset, rank, dst_rank, local_expert_idx, nccl_windows, num_gin_comms);
+#else
                 const auto dst_p2p_ptr = nvshmemi_get_p2p_ptr(dst_ptr, rank, dst_rank);
+#endif
+
                 int num_send_bytes = hidden * sizeof(nv_bfloat16);
 
                 if (not zero_copy or dst_p2p_ptr != 0) {
@@ -1217,8 +1198,8 @@ __global__ __launch_bounds__(1024, 1) void combine(void* combined_x,
                 if (dst_p2p_ptr == 0)
 #ifdef ENABLE_NCCL_GIN
                     if (lane_id == 0) {
-                        const auto expected_dst_offset =
-                            rdma_recv_x_offset + (global_expert_idx * num_max_dispatch_tokens_per_rank + src_idx) * num_bytes_per_slot;
+                        // const auto expected_dst_offset =
+                        //     rdma_recv_x_offset + (global_expert_idx * num_max_dispatch_tokens_per_rank + src_idx) * num_bytes_per_slot;
                         const auto expected_buf_offset = rdma_send_x_offset +
                             (local_expert_idx * num_ranks * num_max_dispatch_tokens_per_rank * num_bytes_per_slot) +
                             token_idx * num_bytes_per_slot;
@@ -1301,11 +1282,22 @@ __global__ __launch_bounds__(1024, 1) void combine(void* combined_x,
             while (ld_acquire_global(atomic_clean_flag) == 0)
                 ;
             auto dst_ptr = reinterpret_cast<uint64_t>(rdma_recv_flag + global_expert_idx);
+#ifdef ENABLE_NCCL_GIN
+            size_t dst_offset = rdma_recv_flag_offset + global_expert_idx * sizeof(int);
+            /*uint64_t dst_p2p_ptr = 0;
+            if (rank == dst_rank)
+                dst_p2p_ptr = dst_ptr; */
+
+            auto dst_p2p_ptr = nccl_get_p2p_ptr(
+                dst_ptr, dst_offset, rank, dst_rank, (responsible_expert_idx % num_local_experts), nccl_windows, num_gin_comms);
+#else
             auto dst_p2p_ptr = nvshmemi_get_p2p_ptr(dst_ptr, rank, dst_rank);
+#endif
+
             if (not is_rank_masked(mask_buffer_ptr, dst_rank)) {
                 if (dst_p2p_ptr == 0) {
 #ifdef ENABLE_NCCL_GIN
-                    size_t dst_offset = rdma_recv_flag_offset + global_expert_idx * sizeof(int);
+
                     auto signal_id = signals_base + global_expert_idx;
 
                     // if (rank == 0) {
@@ -1372,12 +1364,16 @@ LOW_LATENCY_COMBINE_RECV:
             auto start_time = clock64();
             uint64_t wait_recv_cost = 0;
             if (not is_rank_masked(mask_buffer_ptr, src_rank)) {
+#ifdef ENABLE_NCCL_GIN
+                size_t src_offset = rdma_recv_flag_offset + responsible_expert_idx * sizeof(int);
+                auto src_p2p_ptr = nccl_get_p2p_ptr(
+                    0x01, src_offset, rank, src_rank, (responsible_expert_idx % num_local_experts), nccl_windows, num_gin_comms);
                 while (ld_acquire_sys_global(rdma_recv_flag + responsible_expert_idx) == 0  // recv not ready
                        && (wait_recv_cost = clock64() - start_time) <= NUM_TIMEOUT_CYCLES   // not timeout
                 )
                     ;
-#ifdef ENABLE_NCCL_GIN
-                if (src_rank != rank) {
+                // if (src_rank != rank) {
+                if (src_p2p_ptr == 0) {
                     DEEPEP_DEBUG_PRINT(
                         "[Combine LL - Signal Wait] Rank %d (sm=%d,thread=%d,warp_group=%d,sub_warp=%d,lane=%d): Starting signal wait for "
                         "expert %d\n",
@@ -1409,7 +1405,10 @@ LOW_LATENCY_COMBINE_RECV:
                         responsible_expert_idx);
                 }
 #else
-                    // do nothing for NVSHMEM
+                while (ld_acquire_sys_global(rdma_recv_flag + responsible_expert_idx) == 0  // recv not ready
+                       && (wait_recv_cost = clock64() - start_time) <= NUM_TIMEOUT_CYCLES   // not timeout
+                )
+                    ;
 #endif
             }
             // Mask rank if timeout
@@ -1592,21 +1591,13 @@ LOW_LATENCY_COMBINE_RECV:
     }
 
 #ifdef ENABLE_NCCL_GIN
-    /*
-    if (threadIdx.x == 0 && blockIdx.x == 0) {
-        const int signals_per_buffer = num_experts;
-        for (int signal_idx = 0; signal_idx < signals_per_buffer; ++signal_idx) {
-            ncclGinResetSignal(&gin_ctxs[signal_idx % num_gin_comms], gin_signals + signal_idx, false);
-        }
-    }
-    */
-
     {
         const int signals_per_buffer = num_experts;
         const int total_resets = signals_per_buffer * num_gin_comms;
         const int linear_tid = blockIdx.x * blockDim.x + threadIdx.x;
         const int linear_stride = gridDim.x * blockDim.x;
 
+        #pragma unroll
         for (int idx = linear_tid; idx < total_resets; idx += linear_stride) {
             const int signal_idx = idx / num_gin_comms;
             const int ctx_id = idx % num_gin_comms;
@@ -1615,7 +1606,7 @@ LOW_LATENCY_COMBINE_RECV:
         }
     }
 #else
-    /* do nothing for NVSHMEM*/
+    // do nothing for NVSHMEM
 #endif
 }
 
@@ -1797,6 +1788,16 @@ void clean_mask_buffer(int* mask_buffer_ptr, int num_ranks, cudaStream_t stream)
     SETUP_LAUNCH_CONFIG(num_sms, kNumThreads, stream);
     LAUNCH_KERNEL(&cfg, clean_mask_buffer<kNumThreads>, mask_buffer_ptr, num_ranks);
 }
+
+#ifdef ENABLE_NCCL_GIN
+// Set the device constant for P2P disabled flag
+void set_p2p_disabled_flag(bool disabled) {
+    cudaError_t err = cudaMemcpyToSymbol(d_p2p_disabled, &disabled, sizeof(bool), 0, cudaMemcpyHostToDevice);
+    if (err != cudaSuccess) {
+        throw std::runtime_error(std::string("Failed to set d_p2p_disabled: ") + cudaGetErrorString(err));
+    }
+}
+#endif
 
 }  // namespace internode_ll
 

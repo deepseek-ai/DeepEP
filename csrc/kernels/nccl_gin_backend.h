@@ -48,6 +48,9 @@ public:
     int get_num_ranks() const override;
     BackendType get_backend_type() const override;
 
+    // NCCL GIN-specific methods
+    bool is_p2p_disabled() const;
+
     // NCCL GIN-specific method for unique ID generation
     void get_unique_id(void* unique_id) override;
 
@@ -66,10 +69,11 @@ public:
 
 private:
     bool initialized_ = false;
-    int rank_ = -1;         // Global rank (for external API)
-    int num_ranks_ = -1;    // Global num_ranks (for external API)
-    int comm_rank_ = -1;    // Rank within NCCL communicator
-    int comm_nranks_ = -1;  // Number of ranks in NCCL communicator
+    bool p2p_disabled_ = false;  // True if P2P/NVLink is disabled
+    int rank_ = -1;              // Global rank (for external API)
+    int num_ranks_ = -1;         // Global num_ranks (for external API)
+    int comm_rank_ = -1;         // Rank within NCCL communicator
+    int comm_nranks_ = -1;       // Number of ranks in NCCL communicator
 
     // NCCL communicators for GIN support (always use vector, even for single comm)
     std::vector<ncclComm_t> comms_multi_;

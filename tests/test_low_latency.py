@@ -75,8 +75,6 @@ def test_main(num_tokens: int,
     for _ in range(10):
         topk_idx[random.randint(0, num_tokens - 1), random.randint(0, num_topk - 1)] = -1
 
-    print(f"[rank {rank}] topk_idx: {topk_idx}", flush=True)
-
     all_topk_idx = torch.empty((num_ranks, num_tokens, num_topk), dtype=topk_idx.dtype, device='cuda')
     backend_aware_all_gather_into_tensor(all_topk_idx, topk_idx, group)
 

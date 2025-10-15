@@ -10,6 +10,13 @@
 #include <nccl.h>
 
 #include "nccl_gin_backend.h"
+
+// Forward declaration for internal initialization function
+namespace deep_ep {
+namespace internode_ll {
+void set_p2p_disabled_flag(bool disabled);
+}
+}  // namespace deep_ep
 #endif
 
 #ifndef DISABLE_NVSHMEM
@@ -93,6 +100,14 @@ int init(const std::vector<uint8_t>& root_unique_id_val, int rank, int num_ranks
     internode::BackendType backend_type = internode::detect_backend_type();
     internode::initialize_backend(backend_type, root_unique_id_val, rank, num_ranks, low_latency_mode, qps_per_rank);
     internode::CommunicationBackend* backend = internode::get_backend();
+
+    // Set the device constant for P2P disabled flag based on backend configuration
+    auto* nccl_backend = dynamic_cast<internode::NCCLGINBackend*>(backend);
+    if (nccl_backend) {
+        bool p2p_disabled = nccl_backend->is_p2p_disabled();
+        internode_ll::set_p2p_disabled_flag(p2p_disabled);
+    }
+
     backend->barrier();
     return backend->get_rank();
 #else
@@ -151,7 +166,7 @@ void free(void* ptr) {
 
 void barrier() {
 #ifdef ENABLE_NCCL_GIN
-    printf("NCCL: barrier()\n");
+    // printf("NCCL: barrier()\n");
     internode::CommunicationBackend* backend = internode::get_backend();
     backend->barrier();
 #else

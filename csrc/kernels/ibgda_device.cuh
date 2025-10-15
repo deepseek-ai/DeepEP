@@ -444,8 +444,6 @@ __device__ __forceinline__ uint64_t nvshmemi_get_p2p_ptr(const uint64_t& ptr, co
     // Local rank, no need for mapping
     if (rank == dst_rank)
         return ptr;
-    else  // FIXME: Aamir: disables NVLink communication
-        return 0;
 
     auto peer_base = __ldg(reinterpret_cast<uint64_t*>(nvshmemi_device_state_d.peer_heap_base_p2p) + dst_rank);
 

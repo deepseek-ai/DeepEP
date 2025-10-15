@@ -27,26 +27,6 @@
 namespace deep_ep {
 namespace internode {
 
-// Helper functions (from working examples)
-static void ncclGinGetHostName(char* hostname, int maxlen) {
-    gethostname(hostname, maxlen);
-    for (int i = 0; i < maxlen; i++) {
-        if (hostname[i] == '.') {
-            hostname[i] = '\0';
-            return;
-        }
-    }
-}
-
-static uint64_t ncclGinGetHostHash(const char* string) {
-    // djb2 hash
-    uint64_t result = 5381;
-    for (int c = 0; string[c] != '\0'; c++) {
-        result = ((result << 5) + result) + string[c];
-    }
-    return result;
-}
-
 NCCLGINBackend::~NCCLGINBackend() {
     if (initialized_) {
         finalize();
@@ -58,18 +38,9 @@ int NCCLGINBackend::init(const std::vector<uint8_t>& root_unique_id_val, int ran
         return rank_;
     }
 
-    const char* env_vars[] = {"DEEP_EP_BACKEND",
-                              "NCCL_GIN_TYPE",
-                              "NCCL_GIN_ENABLE",
-                              "UCX_IB_DM_COUNT",
-                              "NCCL_SHM_DISABLE",
-                              "NCCL_P2P_DISABLE",
-                              "NCCL_NET_PLUGIN"};
-
-    // Assert all GIN environment variables are set
-    for (const char* var : env_vars) {
-        // EP_HOST_ASSERT(getenv(var) != nullptr);
-    }
+    // Check if P2P/NVLink is disabled via environment variable
+    const char* nccl_disable_p2p = std::getenv("NCCL_DISABLE_P2P");
+    p2p_disabled_ = (nccl_disable_p2p != nullptr && std::string(nccl_disable_p2p) == "1");
 
     try {
         // Calculate localRank based on hostname (like working examples)
@@ -106,7 +77,8 @@ int NCCLGINBackend::init(const std::vector<uint8_t>& root_unique_id_val, int ran
             // LOW LATENCY MODE: Connect to all ranks
             comm_rank = rank;
             comm_nranks = num_ranks;
-            printf("[NCCL GIN Backend] LOW LATENCY MODE: Rank %d connecting to all %d ranks\n", rank, num_ranks);
+            if (rank == 0)
+                printf("[NCCL GIN Backend] LOW LATENCY MODE: Rank %d connecting to all %d ranks\n", rank, num_ranks);
         } else {
             // HIGH THROUGHPUT MODE: Connect only to symmetric RDMA ranks
             color = rank % gpus_per_server;
@@ -139,11 +111,12 @@ int NCCLGINBackend::init(const std::vector<uint8_t>& root_unique_id_val, int ran
         EP_HOST_ASSERT(root_unique_id_val.size() == expected_ids * single_id_size &&
                        "Number of unique IDs doesn't match NUM_MAX_NVL_PEERS * qps_per_rank");
 
-        printf("[NCCL GIN Backend] Initializing %d communicator(s) (qps_per_rank=%d) for rank %d/%d\n",
-               num_comms_,
-               qps_per_rank,
-               rank,
-               num_ranks);
+        if (rank == 0)
+            printf("[NCCL GIN Backend] Initializing %d communicator(s) (qps_per_rank=%d) for rank %d/%d\n",
+                   num_comms_,
+                   qps_per_rank,
+                   rank,
+                   num_ranks);
 
         // Configure NCCL with GIN support
         ncclConfig_t config = NCCL_CONFIG_INITIALIZER;
@@ -200,7 +173,8 @@ int NCCLGINBackend::init(const std::vector<uint8_t>& root_unique_id_val, int ran
             // fflush(stdout);
         }
 
-        printf("[NCCL GIN Backend] Rank %d successfully initialized %d communicator(s)\n", comm_rank, num_comms_);
+        if (rank == 0)
+            printf("[NCCL GIN Backend] Rank %d successfully initialized %d communicator(s)\n", comm_rank, num_comms_);
 
         // Get num_gin_ctxs_ from first communicator
         if (num_comms_ > 0) {
@@ -277,8 +251,9 @@ int NCCLGINBackend::init(const std::vector<uint8_t>& root_unique_id_val, int ran
             reqs.ginForceEnable = true;
             NCCLCHECK(ncclDevCommCreate(comms_multi_[c], &reqs, &dcomms_[c]));
         }
-        std::cout << "[NCCL GIN Backend] Rank " << comm_rank << " created " << num_comms_ << " device communication(s) with "
-                  << MAX_BARRIER_SESSIONS << " barrier sessions each" << std::endl;
+        if (rank == 0)
+            std::cout << "[NCCL GIN Backend] Rank " << comm_rank << " created " << num_comms_ << " device communication(s) with "
+                      << MAX_BARRIER_SESSIONS << " barrier sessions each" << std::endl;
 
         // Allocate device memory for dcomms and copy data
         cudaError_t e1 = cudaMalloc(reinterpret_cast<void**>(&d_dcomms_), num_comms_ * sizeof(ncclDevComm_t));
@@ -310,8 +285,9 @@ int NCCLGINBackend::init(const std::vector<uint8_t>& root_unique_id_val, int ran
 
         initialized_ = true;
 
-        std::cout << "[NCCL GIN Backend] Initialized global rank " << rank_ << "/" << num_ranks_ << " (comm rank " << comm_rank_ << "/"
-                  << comm_nranks_ << ")" << std::endl;
+        if (rank == 0)
+            std::cout << "[NCCL GIN Backend] Initialized global rank " << rank_ << "/" << num_ranks_ << " (comm rank " << comm_rank_ << "/"
+                      << comm_nranks_ << ")" << std::endl;
         return rank_;
 
     } catch (const std::exception& e) {
@@ -322,7 +298,8 @@ int NCCLGINBackend::init(const std::vector<uint8_t>& root_unique_id_val, int ran
 
 void NCCLGINBackend::finalize() {
     if (initialized_) {
-        std::cout << "[NCCL GIN Backend] Finalizing rank " << rank_ << std::endl;
+        if (rank_ == 0)
+            std::cout << "[NCCL GIN Backend] Finalizing rank " << rank_ << std::endl;
 
         try {
             // Destroy device communicators
@@ -367,7 +344,8 @@ void NCCLGINBackend::finalize() {
                 cudaFree(d_nccl_dev_wins_);
                 d_nccl_dev_wins_ = nullptr;
             }
-            std::cout << "[NCCL GIN Backend] Destroyed NCCL communicator" << std::endl;
+            if (rank_ == 0)
+                std::cout << "[NCCL GIN Backend] Destroyed NCCL communicator" << std::endl;
         } catch (const std::exception& e) {
             std::cerr << "[NCCL GIN Backend] Error during finalization: " << e.what() << std::endl;
         }
@@ -421,8 +399,8 @@ void* NCCLGINBackend::alloc(size_t size, size_t alignment) {
     if (res != ncclSuccess) {
         throw std::runtime_error(std::string("Failed to allocate NCCL memory: ") + ncclGetErrorString(res));
     }
-    printf("[NCCL GIN Backend - Memory Alloc] Rank %d: Allocated ptr=%p, size=%lu\n", rank_, ptr, size);
-    fflush(stdout);
+    if (rank_ == 0)
+        printf("[NCCL GIN Backend - Memory Alloc] Rank %d: Allocated ptr=%p, size=%lu\n", rank_, ptr, size);
 
     // Multi-communicator: register with each communicator and gather ctx0 windows
     dev_wins_multi_nccl_.clear();
@@ -447,8 +425,10 @@ void* NCCLGINBackend::alloc(size_t size, size_t alignment) {
     mem_handle_.ptr = ptr;
     mem_handle_.size = size;
     if (d_nccl_dev_wins_ != nullptr && num_comms_ > 0) {
-        printf("[NCCL GIN Backend - Memory Alloc] Rank %d: Copying %lu NCCL windows to GPU\n", rank_, wins_nccl.size());
-        fflush(stdout);
+        if (rank_ == 0) {
+            printf("[NCCL GIN Backend - Memory Alloc] Rank %d: Copying %lu NCCL windows to GPU\n", rank_, wins_nccl.size());
+            fflush(stdout);
+        }
 
         cudaError_t e2 = cudaMemcpy(d_nccl_dev_wins_, wins_nccl.data(), wins_nccl.size() * sizeof(ncclWindow_t), cudaMemcpyHostToDevice);
         if (e2 != cudaSuccess) {
@@ -463,11 +443,15 @@ void* NCCLGINBackend::alloc(size_t size, size_t alignment) {
             throw std::runtime_error(std::string("Failed to copy NCCL windows to GPU: ") + cudaGetErrorString(e2));
         }
 
-        printf("[NCCL GIN Backend - Memory Alloc] Rank %d: Successfully copied windows to GPU\n", rank_);
+        if (rank_ == 0) {
+            printf("[NCCL GIN Backend - Memory Alloc] Rank %d: Successfully copied windows to GPU\n", rank_);
+            fflush(stdout);
+        }
+    }
+    if (rank_ == 0) {
+        printf("[NCCL GIN Backend - Memory Alloc] Rank %d: Registered windows and returning ptr=%p, size=%lu\n", rank_, ptr, size);
         fflush(stdout);
     }
-    printf("[NCCL GIN Backend - Memory Alloc] Rank %d: Registered windows and returning ptr=%p, size=%lu\n", rank_, ptr, size);
-    fflush(stdout);
     return ptr;
 }
 
@@ -550,6 +534,10 @@ int NCCLGINBackend::get_num_ranks() const {
 
 BackendType NCCLGINBackend::get_backend_type() const {
     return BackendType::NCCL_GIN;
+}
+
+bool NCCLGINBackend::is_p2p_disabled() const {
+    return p2p_disabled_;
 }
 
 void NCCLGINBackend::get_unique_id(void* unique_id) {

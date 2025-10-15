@@ -102,8 +102,6 @@ void finalize_backend() {
 }
 
 std::unique_ptr<CommunicationBackend> create_backend(BackendType type) {
-    printf("create_backend: %s\n", backend_type_to_string(type).c_str());
-    fflush(stdout);
     switch (type) {
         case BackendType::NVSHMEM:
             // return std::make_unique<NVSHMEMBackend>(); FIXME: the backend implementation code is disabled for NVSHMEM right now.
