@@ -33,9 +33,12 @@ class EventOverlap:
     def current_stream_wait(self) -> None:
         """
         The current stream `torch.cuda.current_stream()` waits for the event to be finished.
+        After synchronization completes, tensor references are released to allow memory reuse.
         """
         assert self.event is not None
         self.event.current_stream_wait()
+        # Release tensor references after synchronization is complete
+        self.extra_tensors = None
 
     def __enter__(self) -> Any:
         """
@@ -56,9 +59,10 @@ class EventOverlap:
         Utility for overlapping and Python `with` syntax.
 
         Please follow the example in the `__enter__` function.
+        After synchronization completes, tensor references are released to allow memory reuse.
         """
         if self.event is not None:
-            self.event.current_stream_wait()
+            self.current_stream_wait()
 
 
 def check_nvlink_connections(group: dist.ProcessGroup):
