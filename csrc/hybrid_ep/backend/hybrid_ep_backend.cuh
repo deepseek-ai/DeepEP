@@ -204,15 +204,15 @@ struct dispatch_kernel_param_t{
   // Input buffers. These buffers are local buffers.
   const TOKEN_DATA_TYPE* attn_input_token;
   const float* attn_input_prob; // Needed by expert layer, so only valid in forward dispatch.
-  const float* attn_input_token_scaling_factor; // If input token is FP8 dtype, we need scaling factor for tokens.
+  const float* attn_input_token_scaling_factor = nullptr; // If input token is FP8 dtype, we need scaling factor for tokens.
   // Output buffers. These buffers are both local and remote buffers.
   TOKEN_DATA_TYPE* expert_output_token[MAX_NUM_OF_RANKS_PER_NODE];
   float* expert_output_prob[MAX_NUM_OF_RANKS_PER_NODE]; // Only valid in forward dispatch.
-  float* expert_output_scaling_factor[MAX_NUM_OF_RANKS_PER_NODE]; // Only valid for FP8 token type.
+  float* expert_output_scaling_factor[MAX_NUM_OF_RANKS_PER_NODE] = {}; // Only valid for FP8 token type.
   // Internal temp buffers. These buffers are local buffers.
   const TOKEN_DATA_TYPE* rdma_inter_node_group_token;
   const float* rdma_inter_node_group_prob; // Only valid in forward dispatch.
-  const float* rdma_inter_node_group_scaling_factor; // Only valid for FP8 token type.
+  const float* rdma_inter_node_group_scaling_factor = nullptr; // Only valid for FP8 token type.
   uint64_t* rdma_inter_node_group_flags; // For RDMA Atomic flags.
   uint32_t* intra_node_write_completion_flags; // For intra-node S2G write completion notification.
   // Metadata buffers. These buffers are local buffers.
