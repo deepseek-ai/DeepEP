@@ -3,7 +3,7 @@
 
 #include "executor.cuh"
 
-Executor::Executor(int local_rank, int node_rank) : local_rank(local_rank), node_rank(node_rank), kernel_cache(local_rank) {}  
+Executor::Executor(int local_rank, int node_rank, std::string base_path) : local_rank(local_rank), node_rank(node_rank), kernel_cache(local_rank, base_path) {}  
 
 std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
 Executor::metadata_preprocess_core(

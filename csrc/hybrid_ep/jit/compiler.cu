@@ -11,7 +11,7 @@ inline std::string get_env(std::string name) {
     return std::string(env);
 }
 
-NVCCCompiler::NVCCCompiler() {
+NVCCCompiler::NVCCCompiler(std::string base_path): base_path(base_path) {
     nvcc_path = get_env("CUDA_HOME") + "/bin/nvcc";
 
     // Init the flags to compiler
@@ -21,10 +21,7 @@ NVCCCompiler::NVCCCompiler() {
             " -Xcompiler -fPIC -shared";
 
     // Add the include path of the hybrid-ep library
-    std::string base_path = BASE_PATH;
-
-    // Add the include path of the hybrid-ep library
-    include = " -I" + base_path + "/csrc/hybrid_ep" + " -I" + get_env("CUDA_HOME") + "/include";
+    include = " -I" + base_path + "/backend" + " -I" + get_env("CUDA_HOME") + "/include";
 
     // Add the library path of the hybrid-ep library
     library = "-L" + get_env("CUDA_HOME") + "/lib64 -lcudart";
@@ -40,8 +37,6 @@ NVCCCompiler::NVCCCompiler() {
   
 
 std::string NVCCCompiler::build(std::string code, std::string signature, int local_rank) {
-    std::string base_path = BASE_PATH;
-
     // Create the source directory
     std::string jit_dir = base_path + "/build/jit";
     std::filesystem::create_directories(jit_dir);
@@ -80,7 +75,7 @@ std::string NVCCCompiler::build(std::string code, std::string signature, int loc
     return output_path;
 }
 
-std::any NVCCCompiler::get_instance(std::string library_path) {
+std::any NVCCCompiler::get_instance(std::string library_path, std::string kernel_key) {
     // Open the compiled library with RTLD_GLOBAL for symbol visibility
     void* handle = dlopen(library_path.c_str(), RTLD_NOW | RTLD_GLOBAL);
     if (handle == nullptr) {
@@ -98,8 +93,15 @@ std::any NVCCCompiler::get_instance(std::string library_path) {
                                 library_path);
     }
 
-    // After using the library, clear the built library
-    remove(library_path.c_str());
+    // Unique the compiled lib from different rank
+    std::string unique_library_path = base_path + "/build/jit/" + kernel_key + ".so";
+    std::string unique_command = "mv " + library_path + " " + unique_library_path;
+    if(library_path != unique_library_path) {
+        auto ret = std::system(unique_command.c_str());
+        if (ret != 0) {
+            throw std::runtime_error("Failed to unique the library: " + unique_command);
+        }
+    }
 
     // Run the get_function_ptr, then we get the compiled template
     std::any func_ptr = get_ptr();
@@ -109,7 +111,7 @@ std::any NVCCCompiler::get_instance(std::string library_path) {
 
 std::string NVCCCompiler::get_metadata_preprocessing_code(HybridEpConfigInstance config) {
   return R"(
-        #include "backend/hybrid_ep_backend.cuh"
+        #include "hybrid_ep_backend.cuh"
         #include <any>
         
         extern "C" {
@@ -130,7 +132,7 @@ std::string NVCCCompiler::get_dispatch_code(HybridEpConfigInstance config) {
       (config.token_data_type == TOKEN_DATA_TYPE::UINT8) ? "uint8_t" : "uint16_t";
 
   return R"(
-        #include "backend/hybrid_ep_backend.cuh"
+        #include "hybrid_ep_backend.cuh"
         #include <any>
         
         extern "C" {
@@ -150,7 +152,7 @@ std::string NVCCCompiler::get_dispatch_code(HybridEpConfigInstance config) {
 
 std::string NVCCCompiler::get_combine_code(HybridEpConfigInstance config) {
   return R"(
-        #include "backend/hybrid_ep_backend.cuh"
+        #include "hybrid_ep_backend.cuh"
         #include <any>
 
         extern "C" {
@@ -171,7 +173,18 @@ std::string NVCCCompiler::get_combine_code(HybridEpConfigInstance config) {
       )";
 }
 
-
+KernelCache::KernelCache(int local_rank, std::string base_path): 
+local_rank(local_rank), base_path(base_path), nvcc_compiler(base_path) {
+    // Load all cached kernels from the cache directory
+    std::string cache_dir = base_path + "/build/jit";
+    std::filesystem::create_directories(cache_dir);
+    for (const auto& entry : std::filesystem::directory_iterator(cache_dir)) {
+        if (entry.path().extension() == ".so") {
+            std::string kernel_key = entry.path().stem().string();
+            kernel_cache[kernel_key] = nvcc_compiler.get_instance(entry.path().string(), kernel_key);
+        }
+    }
+}
 
 void KernelCache::run_proprecess_kernel(
     HybridEpConfigInstance config, 
@@ -202,7 +215,7 @@ void KernelCache::run_proprecess_kernel(
     if (it == kernel_cache.end()) {
         auto preprocessing_code = nvcc_compiler.get_metadata_preprocessing_code(config);
         auto preprocessing_path = nvcc_compiler.build(preprocessing_code, preprocess_kernel_key, local_rank);
-        kernel_cache[preprocess_kernel_key] = nvcc_compiler.get_instance(preprocessing_path);
+        kernel_cache[preprocess_kernel_key] = nvcc_compiler.get_instance(preprocessing_path, preprocess_kernel_key);
     }
     auto preprocessing_instance = kernel_cache[preprocess_kernel_key];
 
@@ -255,7 +268,7 @@ void KernelCache::run_dispatch_kernel(
         // JIT Compile the kernel
         auto dispatch_code = nvcc_compiler.get_dispatch_code(config);
         auto dispatch_path = nvcc_compiler.build(dispatch_code, dispatch_kernel_key, local_rank);
-        kernel_cache[dispatch_kernel_key] = nvcc_compiler.get_instance(dispatch_path);
+        kernel_cache[dispatch_kernel_key] = nvcc_compiler.get_instance(dispatch_path, dispatch_kernel_key);
     }
     auto dispatch_instance = kernel_cache[dispatch_kernel_key];
 
@@ -295,7 +308,7 @@ void KernelCache::run_combine_kernel(
         // JIT Compile the kernel
         auto combine_code = nvcc_compiler.get_combine_code(config);
         auto combine_path = nvcc_compiler.build(combine_code, combine_kernel_key, local_rank);
-        kernel_cache[combine_kernel_key] = nvcc_compiler.get_instance(combine_path);
+        kernel_cache[combine_kernel_key] = nvcc_compiler.get_instance(combine_path, combine_kernel_key);
     }
     auto combine_instance = kernel_cache[combine_kernel_key];
     

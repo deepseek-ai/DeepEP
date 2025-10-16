@@ -101,7 +101,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         });
   
     pybind11::class_<HybridEPBuffer>(m, "HybridEPBuffer")
-        .def(py::init<BufferConfig, int, int, int>())
+        .def(py::init<BufferConfig, int, int, int, std::string>())
         .def("update_buffer", &HybridEPBuffer::update_buffer, py::arg("config"))
         .def("exchange_ipc_address", &HybridEPBuffer::exchange_ipc_address)
         .def("metadata_preprocessing", &HybridEPBuffer::metadata_preprocessing,

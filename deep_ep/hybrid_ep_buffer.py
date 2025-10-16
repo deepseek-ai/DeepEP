@@ -111,10 +111,18 @@ class HybridEPBuffer:
 
         # Create C++ buffer - this will allocate all buffers during construction
         self.runtime = hybrid_ep_cpp.HybridEPBuffer(
-            self.config, self.local_rank, self.node_rank, self.group_size
+            self.config, self.local_rank, self.node_rank, self.group_size, os.path.dirname(os.path.abspath(__file__))
         )
         # Exchange IPC addresses using C++ distributed communication
         self.runtime.exchange_ipc_address(self.group)
+
+    def empty_jit_cache(self):
+        '''
+        Clean the cached kernel files.
+        '''
+        jit_cache_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "build", "jit")
+        if os.path.exists(jit_cache_path):
+            shutil.rmtree(jit_cache_path)
 
     def update_template_config(
         self,
