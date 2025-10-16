@@ -177,6 +177,7 @@ KernelCache::KernelCache(int local_rank, std::string base_path):
 local_rank(local_rank), base_path(base_path), nvcc_compiler(base_path) {
     // Load all cached kernels from the cache directory
     std::string cache_dir = base_path + "/build/jit";
+    std::filesystem::create_directories(cache_dir);
     for (const auto& entry : std::filesystem::directory_iterator(cache_dir)) {
         if (entry.path().extension() == ".so") {
             std::string kernel_key = entry.path().stem().string();
