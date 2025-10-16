@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved
 #pragma once
 #include "config.cuh"
-#include "backend/hybrid_ep_backend.cuh"
+#include "hybrid_ep_backend.cuh"
 #include "allocator/allocator.cuh"
 #include "utils.cuh"
 #include "executor/executor.cuh"
@@ -11,10 +11,11 @@
 #include <torch/torch.h>
 #include <vector>
 #include <algorithm>
+#include <string>
 
 class HybridEPBuffer {
 public:
-  HybridEPBuffer(BufferConfig config, int local_rank, int node_rank, int group_size);
+  HybridEPBuffer(BufferConfig config, int local_rank, int node_rank, int group_size, std::string base_path);
   ~HybridEPBuffer();
   bool update_buffer(HybridEpConfigInstance config); // True means the buffer is reallocated.
 

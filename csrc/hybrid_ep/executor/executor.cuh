@@ -7,13 +7,13 @@
 #include <torch/torch.h>
 
 #include "utils.cuh"
-#include "backend/hybrid_ep_backend.cuh"
+#include "hybrid_ep_backend.cuh"
 #include "jit/compiler.cuh"
 #include "extension/permute.cuh"
 
 class Executor {
 public:
-    Executor(int local_rank, int node_rank);
+    Executor(int local_rank, int node_rank, std::string base_path);
 
     struct DispatchArgs {
         // Input tensors

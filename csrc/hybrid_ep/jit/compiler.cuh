@@ -17,13 +17,13 @@
 #include <iostream>
 
 #include "config.cuh"
-#include "backend/hybrid_ep_backend.cuh"
+#include "hybrid_ep_backend.cuh"
 #include "utils.cuh"
 
 class NVCCCompiler{
 public:
     // Init the flags required by nvcc compiler
-    NVCCCompiler();
+    NVCCCompiler(std::string base_path);
 
     // Generate the code for jit compile
     std::string get_metadata_preprocessing_code(HybridEpConfigInstance config);
@@ -45,12 +45,14 @@ public:
     * @brief Get the compiled function pointer from the compiled .so file
     *
     * @param library_path The path of the compiled .so file
+    * @param kernel_key The key of the kernel, used to cache the compiled function pointer
     * @return std::any The function pointer
     */
-    std::any get_instance(std::string library_path);
+    std::any get_instance(std::string library_path, std::string kernel_key);
 
 
 private:
+    std::string base_path;  // The path of the installed package
     std::string flags;      // The flags required by nvcc compiler, which contains the
     // base flags(-O3, -arch...), include files, library files
     std::string nvcc_path;  // The path of the nvcc compiler
@@ -60,8 +62,7 @@ private:
 
 class KernelCache{
 public:
-    KernelCache() = default;
-    KernelCache(int local_rank) : local_rank(local_rank) {}
+    KernelCache(int local_rank, std::string base_path);
 
     void run_proprecess_kernel(
         HybridEpConfigInstance config, 
@@ -94,5 +95,6 @@ public:
 private:
     NVCCCompiler nvcc_compiler;
     std::unordered_map<std::string, std::any> kernel_cache;
+    std::string base_path;  // The path of the installed package
     int local_rank;   // Used to generate the unique signature for each rank
 };

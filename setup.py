@@ -36,15 +36,16 @@ def get_extension_hybrid_ep_cpp():
     }
 
     sources = [
-        os.path.join(current_dir, "csrc/hybrid_ep/hybrid_ep.cu"),
-        os.path.join(current_dir, "csrc/hybrid_ep/allocator/allocator.cu"),
-        os.path.join(current_dir, "csrc/hybrid_ep/jit/compiler.cu"),
-        os.path.join(current_dir, "csrc/hybrid_ep/executor/executor.cu"),
-        os.path.join(current_dir, "csrc/hybrid_ep/extension/permute.cu"),
-        os.path.join(current_dir, "csrc/hybrid_ep/pybind_hybrid_ep.cu"),
+        "csrc/hybrid_ep/hybrid_ep.cu",
+        "csrc/hybrid_ep/allocator/allocator.cu",
+        "csrc/hybrid_ep/jit/compiler.cu",
+        "csrc/hybrid_ep/executor/executor.cu",
+        "csrc/hybrid_ep/extension/permute.cu",
+        "csrc/hybrid_ep/pybind_hybrid_ep.cu",
     ]
     include_dirs = [
-        os.path.join(current_dir, "csrc/hybrid_ep"),
+        os.path.join(current_dir, "csrc/hybrid_ep/"),
+        os.path.join(current_dir, "deep_ep/backend/"),
     ]
     extra_link_args = [
         "-lnvtx3interop",
@@ -199,5 +200,9 @@ if __name__ == '__main__':
         ],
         cmdclass={
             'build_ext': BuildExtension
-        }
+        },
+        package_data={
+            'deep_ep': ['backend/*'],
+        },
+        include_package_data=True
     )

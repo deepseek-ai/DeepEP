@@ -2,9 +2,9 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved
 #include "hybrid_ep.cuh"
 
-HybridEPBuffer::HybridEPBuffer(BufferConfig config, int local_rank, int node_rank, int group_size)
+HybridEPBuffer::HybridEPBuffer(BufferConfig config, int local_rank, int node_rank, int group_size, std::string base_path)
     : buffer_config(config), local_rank(local_rank), node_rank(node_rank), group_size(group_size),
-    executor(local_rank, node_rank) {
+    executor(local_rank, node_rank, base_path) {
     if(group_size <= buffer_config.num_of_ranks_per_node) {
       // If used on only intra-node communication, the dispatch/combine can share same buffers.
       use_shared_buffer = true;
