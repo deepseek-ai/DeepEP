@@ -42,12 +42,12 @@ struct DispatchBuffers {
   void **expert_output_token_all_ranks;
   float *expert_output_prob;
   float **expert_output_prob_all_ranks;
-  float *expert_output_scaling_factor;
-  float **expert_output_scaling_factor_all_ranks;
+  float *expert_output_scaling_factor = nullptr;
+  float **expert_output_scaling_factor_all_ranks = nullptr;
   // Local temp buffer for dispatch kernel.
   void *rdma_inter_node_group_token;
   float *rdma_inter_node_group_prob;
-  float *rdma_inter_node_group_scaling_factor;
+  float *rdma_inter_node_group_scaling_factor = nullptr;
   uint64_t *rdma_inter_node_group_flags;
   // Misc flags
   uint32_t *intra_node_write_completion_flags;

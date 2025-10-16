@@ -72,16 +72,21 @@ void Executor::dispatch_core(HybridEpConfigInstance config, DispatchBuffers& dis
       param.expert_output_token[i] = reinterpret_cast<DType*>(
           dispatch_buffers.expert_output_token_all_ranks[i]);
       param.expert_output_prob[i] = dispatch_buffers.expert_output_prob_all_ranks[i];
-      param.expert_output_scaling_factor[i] = 
-          dispatch_buffers.expert_output_scaling_factor_all_ranks[i];
+      if (config.token_data_type == TOKEN_DATA_TYPE::UINT8) {
+          param.expert_output_scaling_factor[i] = 
+              dispatch_buffers.expert_output_scaling_factor_all_ranks[i];
+      }
     }
     
     // Setup local buffer pointers
     param.rdma_inter_node_group_token = reinterpret_cast<DType*>(
         dispatch_buffers.rdma_inter_node_group_token);
     param.rdma_inter_node_group_prob = dispatch_buffers.rdma_inter_node_group_prob;
-    param.rdma_inter_node_group_scaling_factor = 
-        dispatch_buffers.rdma_inter_node_group_scaling_factor;
+    if (config.token_data_type == TOKEN_DATA_TYPE::UINT8) {
+        param.rdma_inter_node_group_scaling_factor = 
+            dispatch_buffers.rdma_inter_node_group_scaling_factor;
+    }
+
     param.rdma_inter_node_group_flags = dispatch_buffers.rdma_inter_node_group_flags;
     param.intra_node_write_completion_flags = 
         dispatch_buffers.intra_node_write_completion_flags;

@@ -60,7 +60,9 @@ void HybridEPBuffer::release_buffer() {
     if (i != local_rank) {
       remote_allocator.close_handle(dispatch_buffers.expert_output_token_all_ranks[i]);
       remote_allocator.close_handle(dispatch_buffers.expert_output_prob_all_ranks[i]);
-      remote_allocator.close_handle(dispatch_buffers.expert_output_scaling_factor_all_ranks[i]);
+      if (buffer_config.token_data_type == TOKEN_DATA_TYPE::UINT8) {
+          remote_allocator.close_handle(dispatch_buffers.expert_output_scaling_factor_all_ranks[i]);
+      }
     }
   }
   delete[] dispatch_buffers.expert_output_token_all_ranks;
@@ -130,15 +132,22 @@ void HybridEPBuffer::allocate_buffer_for_dispatch() {
     remote_allocator.allocate((void**)&dispatch_buffers.expert_output_token, expert_output_token_elts * sizeof_token_data_type);
     remote_allocator.allocate((void**)&dispatch_buffers.expert_output_prob, expert_output_prob_elts * sizeof(float));
   }
-  remote_allocator.allocate((void**)&dispatch_buffers.expert_output_scaling_factor, expert_output_scaling_factor_elts * sizeof(float));
+
+  if (buffer_config.token_data_type == TOKEN_DATA_TYPE::UINT8) {
+      remote_allocator.allocate((void**)&dispatch_buffers.expert_output_scaling_factor, expert_output_scaling_factor_elts * sizeof(float));
+  }
 
   // Allocate RDMA buffers
   CUDA_CHECK(cudaMalloc((void**)&dispatch_buffers.rdma_inter_node_group_token,
                         rdma_inter_node_group_token_elts * sizeof_token_data_type));
   CUDA_CHECK(cudaMalloc((void**)&dispatch_buffers.rdma_inter_node_group_prob,
                         rdma_inter_node_group_prob_elts * sizeof(float)));
-  CUDA_CHECK(cudaMalloc((void**)&dispatch_buffers.rdma_inter_node_group_scaling_factor,
+
+  if (buffer_config.token_data_type == TOKEN_DATA_TYPE::UINT8) {
+      CUDA_CHECK(cudaMalloc((void**)&dispatch_buffers.rdma_inter_node_group_scaling_factor,
                         rdma_inter_node_group_scaling_factor_elts * sizeof(float)));
+  }
+
   CUDA_CHECK(cudaMalloc((void**)&dispatch_buffers.rdma_inter_node_group_flags,
                         rdma_inter_node_group_flags_elts * sizeof(uint64_t)));
 
@@ -156,7 +165,9 @@ void HybridEPBuffer::allocate_buffer_for_dispatch() {
   MemHandle handles[4];
   remote_allocator.get_handle(&handles[0], dispatch_buffers.expert_output_token);
   remote_allocator.get_handle(&handles[1], dispatch_buffers.expert_output_prob);
-  remote_allocator.get_handle(&handles[2], dispatch_buffers.expert_output_scaling_factor);
+  if (buffer_config.token_data_type == TOKEN_DATA_TYPE::UINT8) {
+      remote_allocator.get_handle(&handles[2], dispatch_buffers.expert_output_scaling_factor);
+  }
   if (local_rank == 0) {
     remote_allocator.get_handle(&handles[3], dispatch_buffers.intra_node_write_completion_flags);
   }
@@ -297,8 +308,11 @@ void HybridEPBuffer::open_handles_from_other_ranks(
       (void **)malloc(buffer_config.num_of_ranks_per_node * sizeof(void *));
   dispatch_buffers.expert_output_prob_all_ranks =
       (float **)malloc(buffer_config.num_of_ranks_per_node * sizeof(float *));
-  dispatch_buffers.expert_output_scaling_factor_all_ranks =
-      (float **)malloc(buffer_config.num_of_ranks_per_node * sizeof(float *));
+
+  if (buffer_config.token_data_type == TOKEN_DATA_TYPE::UINT8) {
+      dispatch_buffers.expert_output_scaling_factor_all_ranks =
+          (float **)malloc(buffer_config.num_of_ranks_per_node * sizeof(float *));
+  }
 
   // Global offset means the position in the multi-node case.
   auto global_offset = node_rank * buffer_config.num_of_ranks_per_node;
@@ -325,9 +339,12 @@ void HybridEPBuffer::open_handles_from_other_ranks(
     memcpy(&expert_output_token_handle, base_ptr, sizeof(MemHandle));
     memcpy(&expert_output_prob_handle, base_ptr + sizeof(MemHandle),
            sizeof(MemHandle));
-    memcpy(&expert_output_scaling_factor_handle,
-           base_ptr + sizeof(MemHandle) * 2,
-           sizeof(MemHandle));
+
+    if (buffer_config.token_data_type == TOKEN_DATA_TYPE::UINT8) {
+        memcpy(&expert_output_scaling_factor_handle,
+               base_ptr + sizeof(MemHandle) * 2,
+               sizeof(MemHandle));
+    }
 
     // Open the handles for export_output
     if (i != local_rank) {
@@ -335,16 +352,21 @@ void HybridEPBuffer::open_handles_from_other_ranks(
                              &expert_output_token_handle);
       remote_allocator.open_handle((void**)(&dispatch_buffers.expert_output_prob_all_ranks[i]),
                              &expert_output_prob_handle);
-      remote_allocator.open_handle((void**)(&dispatch_buffers.expert_output_scaling_factor_all_ranks[i]), 
-                             &expert_output_scaling_factor_handle);
+      if (buffer_config.token_data_type == TOKEN_DATA_TYPE::UINT8) {
+          remote_allocator.open_handle((void**)(&dispatch_buffers.expert_output_scaling_factor_all_ranks[i]), 
+                                       &expert_output_scaling_factor_handle);
+      }
     } else {
       // For local rank, use direct pointer assignment (more efficient, no IPC overhead)
       dispatch_buffers.expert_output_token_all_ranks[i] =
           dispatch_buffers.expert_output_token;
       dispatch_buffers.expert_output_prob_all_ranks[i] =
           dispatch_buffers.expert_output_prob;
-      dispatch_buffers.expert_output_scaling_factor_all_ranks[i] =
-          dispatch_buffers.expert_output_scaling_factor;
+
+      if (buffer_config.token_data_type == TOKEN_DATA_TYPE::UINT8) {
+          dispatch_buffers.expert_output_scaling_factor_all_ranks[i] =
+              dispatch_buffers.expert_output_scaling_factor;
+      }
     }
   }
 
