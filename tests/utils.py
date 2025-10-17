@@ -208,7 +208,7 @@ def bench_kineto(fn,
         prof.export_chrome_trace(trace_path)
 
     # Return average kernel durations
-    units = {'ms': 1e3, 'us': 1e6}
+    units = {'ms': 1e3, 'us': 1e6, 's': 1}
     kernel_durations = []
     for name in kernel_names:
         for line in prof_lines:
