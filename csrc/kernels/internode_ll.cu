@@ -234,13 +234,15 @@ __global__ __launch_bounds__(1024, 1) void dispatch(void* packed_recv_x,
                                                     void* gin_base_ptr,
                                                     ncclDevComm* dcomms,
                                                     const ncclWindow_t* nccl_windows,
-                                                    unsigned signals_base) {
+                                                    unsigned signals_base,
+                                                    unsigned signals_base_next) {
 #else
                                                     int num_gin_comms,
                                                     void* gin_base_ptr,
                                                     void* dcomms,
                                                     void* nccl_windows,
-                                                    unsigned signals_base) {
+                                                    unsigned signals_base,
+                                                    unsigned signals_base_next) {
 #endif
     const auto sm_id = static_cast<int>(blockIdx.x);
     const auto thread_id = static_cast<int>(threadIdx.x);
@@ -446,6 +448,22 @@ __global__ __launch_bounds__(1024, 1) void dispatch(void* packed_recv_x,
             #pragma unroll
             for (int i = lane_id; i < num_next_clean_int; i += 32)
                 next_clean[i] = 0;
+
+            // Clear signals for next dispatch
+            const int signals_per_buffer = num_experts;
+            const int total_resets = signals_per_buffer * num_gin_comms;
+
+#ifdef ENABLE_NCCL_GIN
+            #pragma unroll
+            for (int idx = lane_id; idx < total_resets; idx += 32) {
+                const int signal_idx = idx / num_gin_comms;
+                const int ctx_id = idx % num_gin_comms;
+                ncclGin net(dcomms[ctx_id], 0);
+                net.resetSignal(signals_base_next + signal_idx);
+            }
+#else 
+            //do nothing for NVSHMEM
+#endif 
 
             // Notify before executing `int_p`
             __syncwarp();
@@ -671,6 +689,7 @@ LOW_LATENCY_DISPATCH_RECV:
         }
     }
 
+/*
 #ifdef ENABLE_NCCL_GIN
     cg::this_grid().sync();  // code hangs if this is removed
 
@@ -691,6 +710,7 @@ LOW_LATENCY_DISPATCH_RECV:
 #else
     // do nothing for NVSHMEM
 #endif
+*/
 }
 
 void dispatch(void* packed_recv_x,
@@ -753,6 +773,7 @@ void dispatch(void* packed_recv_x,
     auto dcomms = backend->get_device_communicators();
     auto nccl_windows = backend->get_device_nccl_windows();
     auto signals_base = backend->get_signals_base(ll_buffer_idx);
+    auto signals_base_next = backend->get_signals_base(ll_buffer_idx ^ 1);
 
     EP_HOST_ASSERT(dcomms != nullptr);
     EP_HOST_ASSERT(num_gin_comms >= 1);
@@ -763,6 +784,7 @@ void dispatch(void* packed_recv_x,
     void* dcomms = nullptr;
     void* nccl_windows = nullptr;
     unsigned signals_base = 0;
+    unsigned signals_base_next = 0;
 #endif
 
 #define DISPATCH_LAUNCH_CASE(hidden)                         \
@@ -808,7 +830,8 @@ void dispatch(void* packed_recv_x,
                       gin_base_ptr,                          \
                       dcomms,                                \
                       nccl_windows,                          \
-                      signals_base);                         \
+                      signals_base,                          \
+                      signals_base_next);                         \
     }                                                        \
     break
 
@@ -1009,12 +1032,14 @@ __global__ __launch_bounds__(1024, 1) void combine(void* combined_x,
                                                    int num_gin_comms,
                                                    ncclDevComm* dcomms,
                                                    const ncclWindow_t* nccl_windows,
-                                                   unsigned signals_base) {
+                                                   unsigned signals_base,
+                                                   unsigned signals_base_next) {
 #else
                                                    int num_gin_comms,
                                                    void* dcomms,
                                                    void* nccl_windows,
-                                                   unsigned signals_base) {
+                                                   unsigned signals_base,
+                                                   unsigned signals_base_next) {
 #endif
     const auto sm_id = __shfl_sync(0xffffffff, static_cast<int>(blockIdx.x), 0);
     const auto num_sms = __shfl_sync(0xffffffff, static_cast<int>(gridDim.x), 0);
@@ -1058,6 +1083,21 @@ __global__ __launch_bounds__(1024, 1) void combine(void* combined_x,
         for (int i = lane_id; i < num_next_clean_int; i += 32)
             next_clean[i] = 0;
 
+#ifdef ENABLE_NCCL_GIN
+        // Clear signals for next combine
+        const int signals_per_buffer = num_experts;
+        const int total_resets = signals_per_buffer * num_gin_comms;
+            
+        #pragma unroll
+        for (int idx = lane_id; idx < total_resets; idx += 32) {
+            const int signal_idx = idx / num_gin_comms;
+            const int ctx_id = idx % num_gin_comms;
+            ncclGin net(dcomms[ctx_id], 0);
+            net.resetSignal(signals_base_next + signal_idx);
+        }
+#else
+        //do nothing for NVSHMEM
+#endif
         // Notify before executing `int_p`
         __syncwarp();
         if (lane_id == 0)
@@ -1363,11 +1403,11 @@ LOW_LATENCY_COMBINE_RECV:
             const auto src_rank = responsible_expert_idx / num_local_experts;
             auto start_time = clock64();
             uint64_t wait_recv_cost = 0;
+            size_t src_offset = rdma_recv_flag_offset + responsible_expert_idx * sizeof(int);
+            auto src_p2p_ptr = nccl_get_p2p_ptr(
+                0x01, src_offset, rank, src_rank, (responsible_expert_idx % num_local_experts), nccl_windows, num_gin_comms);
             if (not is_rank_masked(mask_buffer_ptr, src_rank)) {
 #ifdef ENABLE_NCCL_GIN
-                size_t src_offset = rdma_recv_flag_offset + responsible_expert_idx * sizeof(int);
-                auto src_p2p_ptr = nccl_get_p2p_ptr(
-                    0x01, src_offset, rank, src_rank, (responsible_expert_idx % num_local_experts), nccl_windows, num_gin_comms);
                 while (ld_acquire_sys_global(rdma_recv_flag + responsible_expert_idx) == 0  // recv not ready
                        && (wait_recv_cost = clock64() - start_time) <= NUM_TIMEOUT_CYCLES   // not timeout
                 )
@@ -1589,7 +1629,7 @@ LOW_LATENCY_COMBINE_RECV:
             }
         }
     }
-
+/*
 #ifdef ENABLE_NCCL_GIN
     {
         const int signals_per_buffer = num_experts;
@@ -1607,7 +1647,7 @@ LOW_LATENCY_COMBINE_RECV:
     }
 #else
     // do nothing for NVSHMEM
-#endif
+#endif */
 }
 
 void combine(void* combined_x,
@@ -1682,7 +1722,7 @@ void combine(void* combined_x,
     int num_gin_comms = backend->get_num_gin_comms();
     auto nccl_windows = backend->get_device_nccl_windows();
     auto signals_base = backend->get_signals_base(ll_buffer_idx);
-    ;
+    auto signals_base_next = backend->get_signals_base(ll_buffer_idx ^ 1);
 
     EP_HOST_ASSERT(dcomms != nullptr);
     EP_HOST_ASSERT(nccl_windows != nullptr);
@@ -1690,6 +1730,7 @@ void combine(void* combined_x,
     void* dcomms = nullptr;
     void* nccl_windows = nullptr;
     unsigned signals_base = 0;
+    unsigned signals_base_next = 0;
     int num_gin_comms = 1;
 #endif
 
@@ -1731,7 +1772,8 @@ void combine(void* combined_x,
                       num_gin_comms,                                                                                               \
                       dcomms,                                                                                                      \
                       nccl_windows,                                                                                                \
-                      signals_base);                                                                                               \
+                      signals_base,                                                                                                \
+                      signals_base_next);                                                                                               \
     }                                                                                                                              \
     break
 
