@@ -16,6 +16,7 @@
 #include "communication_backend.h"
 
 #define DEEP_EP_GIN_MAX_CONTEXTS 32
+#define NCCL_GIN_NUM_CONTEXTS_PER_COMM 4
 
 #ifdef ENABLE_NCCL_GIN
 

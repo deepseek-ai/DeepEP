@@ -5,6 +5,12 @@
 
 #ifdef ENABLE_NCCL_GIN
 #include "nccl_gin_backend.h"
+// Use the defined constant for contexts per communicator
+// Each communicator has NCCL_GIN_NUM_CONTEXTS_PER_COMM contexts
+// To get unique (comm_id, ctx_id) pairs:
+//   comm_id = expert_id / NCCL_GIN_NUM_CONTEXTS_PER_COMM
+//   ctx_id = expert_id % NCCL_GIN_NUM_CONTEXTS_PER_COMM
+// This gives sequential assignment: experts 0-3 → (comm0, ctx0-3), experts 4-7 → (comm1, ctx0-3), etc.
 #endif
 
 namespace deep_ep {
@@ -42,12 +48,22 @@ __device__ __forceinline__ uint64_t nccl_get_p2p_ptr(const uint64_t& dst_ptr,
     // Local rank, no need for peer mapping
     if (rank == dst_rank)
         return dst_ptr;
+    // else
+    //     return 0;
 
-    // If P2P is disabled, always use RDMA path
+    // If P2P is globally disabled, always use RDMA path
     if (d_p2p_disabled)
         return 0;
 
-    auto const p2p_ptr = reinterpret_cast<uint64_t>(ncclGetPeerPointer(nccl_windows[expert_idx % num_comms], offset, dst_rank));
+    // P2P/NVLink only works between ranks on the same node
+    // Calculate if ranks are on the same node based on NUM_MAX_NVL_PEERS (8 GPUs per node)
+    int rank_node = rank / NUM_MAX_NVL_PEERS;
+    int dst_rank_node = dst_rank / NUM_MAX_NVL_PEERS;
+    if (rank_node != dst_rank_node)
+        return 0;  // Different nodes, must use RDMA
+
+    auto const p2p_ptr =
+        reinterpret_cast<uint64_t>(ncclGetPeerPointer(nccl_windows[expert_idx / NCCL_GIN_NUM_CONTEXTS_PER_COMM], offset, dst_rank));
 
     // Check if NVLink P2P is available
     if (p2p_ptr != NULL)
@@ -395,13 +411,14 @@ __global__ __launch_bounds__(1024, 1) void dispatch(void* packed_recv_x,
                     if (dst_p2p_ptr == 0) {
                         if (lane_id == 0) {
                             size_t expected_src_offset = rdma_x_offset + token_idx * num_bytes_per_msg;
-                            auto ctx_id = dst_expert_local_idx % num_gin_comms;
-                            ncclGin net(dcomms[ctx_id], 0);
-                            net.put(ncclTeamWorld(dcomms[ctx_id]),
+                            auto comm_id = dst_expert_local_idx / NCCL_GIN_NUM_CONTEXTS_PER_COMM;
+                            auto ctx_id = dst_expert_local_idx % NCCL_GIN_NUM_CONTEXTS_PER_COMM;
+                            ncclGin net(dcomms[comm_id], ctx_id);
+                            net.put(ncclTeamWorld(dcomms[comm_id]),
                                     dst_rank,
-                                    nccl_windows[ctx_id],
+                                    nccl_windows[comm_id],
                                     expected_dst_offset,
-                                    nccl_windows[ctx_id],
+                                    nccl_windows[comm_id],
                                     expected_src_offset,
                                     num_bytes_per_msg,
                                     ncclGin_None{},  // no signal
@@ -457,13 +474,17 @@ __global__ __launch_bounds__(1024, 1) void dispatch(void* packed_recv_x,
             #pragma unroll
             for (int idx = lane_id; idx < total_resets; idx += 32) {
                 const int signal_idx = idx / num_gin_comms;
-                const int ctx_id = idx % num_gin_comms;
-                ncclGin net(dcomms[ctx_id], 0);
-                net.resetSignal(signals_base_next + signal_idx);
+                const int comm_id = idx % num_gin_comms;
+                // Reset signal for all contexts in this communicator
+                #pragma unroll
+                for (int ctx_id = 0; ctx_id < NCCL_GIN_NUM_CONTEXTS_PER_COMM; ++ctx_id) {
+                    ncclGin net(dcomms[comm_id], ctx_id);
+                    net.resetSignal(signals_base_next + signal_idx);
+                }
             }
-#else 
-            //do nothing for NVSHMEM
-#endif 
+#else
+            // do nothing for NVSHMEM
+#endif
 
             // Notify before executing `int_p`
             __syncwarp();
@@ -516,14 +537,15 @@ __global__ __launch_bounds__(1024, 1) void dispatch(void* packed_recv_x,
             if (dst_p2p_ptr == 0) {  // if (rank != dst_rank) {
                 // Each thread writes its value to its slot in shared memory
 
-                auto ctx_id = dst_expert_local_idx % num_gin_comms;
+                auto comm_id = dst_expert_local_idx / NCCL_GIN_NUM_CONTEXTS_PER_COMM;
+                auto ctx_id = dst_expert_local_idx % NCCL_GIN_NUM_CONTEXTS_PER_COMM;
                 auto signal_id = signals_base + dst_expert_local_idx * num_ranks + rank;
-                ncclGin net(dcomms[ctx_id], 0);
-                net.put(ncclTeamWorld(dcomms[ctx_id]),
+                ncclGin net(dcomms[comm_id], ctx_id);
+                net.put(ncclTeamWorld(dcomms[comm_id]),
                         dst_rank,
-                        nccl_windows[ctx_id],
+                        nccl_windows[comm_id],
                         dst_offset,
-                        nccl_windows[ctx_id],
+                        nccl_windows[comm_id],
                         0,
                         0,  // 0 bytes transfer
                         ncclGin_SignalAdd{signal_id, (uint64_t)num_tokens_sent + 1},
@@ -595,7 +617,9 @@ LOW_LATENCY_DISPATCH_RECV:
                 auto src_p2p_ptr = nccl_get_p2p_ptr(0x01, src_offset, rank, src_rank, local_expert_idx, nccl_windows, num_gin_comms);
                 // if (rank != src_rank) {
                 if (src_p2p_ptr == 0) {
-                    ncclGin net(dcomms[local_expert_idx % num_gin_comms], 0);
+                    auto comm_id = local_expert_idx / NCCL_GIN_NUM_CONTEXTS_PER_COMM;
+                    auto ctx_id = local_expert_idx % NCCL_GIN_NUM_CONTEXTS_PER_COMM;
+                    ncclGin net(dcomms[comm_id], ctx_id);
                     uint64_t cur_value;
                     do {
                         cur_value = net.readSignal(signals_base + local_expert_idx * num_ranks + src_rank);
@@ -689,28 +713,28 @@ LOW_LATENCY_DISPATCH_RECV:
         }
     }
 
-/*
-#ifdef ENABLE_NCCL_GIN
-    cg::this_grid().sync();  // code hangs if this is removed
+    /*
+    #ifdef ENABLE_NCCL_GIN
+        cg::this_grid().sync();  // code hangs if this is removed
 
-    {
-        const int signals_per_buffer = num_experts;
-        const int total_resets = signals_per_buffer * num_gin_comms;
-        const int linear_tid = blockIdx.x * blockDim.x + threadIdx.x;
-        const int linear_stride = gridDim.x * blockDim.x;
+        {
+            const int signals_per_buffer = num_experts;
+            const int total_resets = signals_per_buffer * num_gin_comms;
+            const int linear_tid = blockIdx.x * blockDim.x + threadIdx.x;
+            const int linear_stride = gridDim.x * blockDim.x;
 
-        #pragma unroll
-        for (int idx = linear_tid; idx < total_resets; idx += linear_stride) {
-            const int signal_idx = idx / num_gin_comms;
-            const int ctx_id = idx % num_gin_comms;
-            ncclGin net(dcomms[ctx_id], 0);
-            net.resetSignal(signals_base + signal_idx);
+            #pragma unroll
+            for (int idx = linear_tid; idx < total_resets; idx += linear_stride) {
+                const int signal_idx = idx / num_gin_comms;
+                const int ctx_id = idx % num_gin_comms;
+                ncclGin net(dcomms[ctx_id], 0);
+                net.resetSignal(signals_base + signal_idx);
+            }
         }
-    }
-#else
-    // do nothing for NVSHMEM
-#endif
-*/
+    #else
+        // do nothing for NVSHMEM
+    #endif
+    */
 }
 
 void dispatch(void* packed_recv_x,
@@ -831,7 +855,7 @@ void dispatch(void* packed_recv_x,
                       dcomms,                                \
                       nccl_windows,                          \
                       signals_base,                          \
-                      signals_base_next);                         \
+                      signals_base_next);                    \
     }                                                        \
     break
 
@@ -1087,16 +1111,20 @@ __global__ __launch_bounds__(1024, 1) void combine(void* combined_x,
         // Clear signals for next combine
         const int signals_per_buffer = num_experts;
         const int total_resets = signals_per_buffer * num_gin_comms;
-            
+
         #pragma unroll
         for (int idx = lane_id; idx < total_resets; idx += 32) {
             const int signal_idx = idx / num_gin_comms;
-            const int ctx_id = idx % num_gin_comms;
-            ncclGin net(dcomms[ctx_id], 0);
-            net.resetSignal(signals_base_next + signal_idx);
+            const int comm_id = idx % num_gin_comms;
+            // Reset signal for all contexts in this communicator
+            #pragma unroll
+            for (int ctx_id = 0; ctx_id < NCCL_GIN_NUM_CONTEXTS_PER_COMM; ++ctx_id) {
+                ncclGin net(dcomms[comm_id], ctx_id);
+                net.resetSignal(signals_base_next + signal_idx);
+            }
         }
 #else
-        //do nothing for NVSHMEM
+            // do nothing for NVSHMEM
 #endif
         // Notify before executing `int_p`
         __syncwarp();
@@ -1287,22 +1315,23 @@ __global__ __launch_bounds__(1024, 1) void combine(void* combined_x,
                             (unsigned long long)expected_dst_offset);
                         //}
 
-                        int ctx_idx = local_expert_idx % num_gin_comms;
-                        EP_DEVICE_ASSERT(ctx_idx >= 0 && ctx_idx < num_gin_comms);
-                        // ncclGinCall<ncclGinApi_Put>(gin_ctxs[ctx_idx], thread, dst_rank,
+                        auto comm_id = local_expert_idx / NCCL_GIN_NUM_CONTEXTS_PER_COMM;
+                        auto ctx_id = local_expert_idx % NCCL_GIN_NUM_CONTEXTS_PER_COMM;
+                        EP_DEVICE_ASSERT(comm_id >= 0 && comm_id < num_gin_comms);
+                        // ncclGinCall<ncclGinApi_Put>(gin_ctxs[comm_id], thread, dst_rank,
                         //     /*hasWins=*/true,
-                        //     gin_windows[ctx_idx], expected_dst_offset,
-                        //     gin_windows[ctx_idx], expected_buf_offset, hidden * sizeof(nv_bfloat16),
+                        //     gin_windows[comm_id], expected_dst_offset,
+                        //     gin_windows[comm_id], expected_buf_offset, hidden * sizeof(nv_bfloat16),
                         //     /*hasSignal=*/false, 0, ncclGinSignalAdd, 0,
                         //     /*hasCounter=*/false, 0,
                         //     /*hasDescriptor=*/false, nullptr,
                         //     cuda::thread_scope_thread, cuda::thread_scope_thread);
-                        ncclGin net(dcomms[ctx_idx], 0);
-                        net.put(ncclTeamWorld(dcomms[ctx_idx]),
+                        ncclGin net(dcomms[comm_id], ctx_id);
+                        net.put(ncclTeamWorld(dcomms[comm_id]),
                                 dst_rank,
-                                nccl_windows[ctx_idx],
+                                nccl_windows[comm_id],
                                 expected_dst_offset,
-                                nccl_windows[ctx_idx],
+                                nccl_windows[comm_id],
                                 expected_buf_offset,
                                 hidden * sizeof(nv_bfloat16),
                                 ncclGin_None{},  // no signal
@@ -1355,18 +1384,20 @@ __global__ __launch_bounds__(1024, 1) void combine(void* combined_x,
                         (unsigned long long)dst_offset);
                     //}
 
-                    int ctx_idx = (responsible_expert_idx % num_local_experts) % num_gin_comms;
-                    EP_DEVICE_ASSERT(ctx_idx >= 0 && ctx_idx < num_gin_comms);
-                    // ncclGinCall<ncclGinApi_PutValue>(gin_ctxs[ctx_idx], thread, dst_rank,
-                    //     gin_windows[ctx_idx], dst_offset,
+                    auto local_expert_idx_flag = responsible_expert_idx % num_local_experts;
+                    auto comm_id = local_expert_idx_flag / NCCL_GIN_NUM_CONTEXTS_PER_COMM;
+                    auto ctx_id = local_expert_idx_flag % NCCL_GIN_NUM_CONTEXTS_PER_COMM;
+                    EP_DEVICE_ASSERT(comm_id >= 0 && comm_id < num_gin_comms);
+                    // ncclGinCall<ncclGinApi_PutValue>(gin_ctxs[comm_id], thread, dst_rank,
+                    //     gin_windows[comm_id], dst_offset,
                     //     1,
                     //     /*hasSignal=*/true, gin_signals + global_expert_idx, ncclGinSignalAdd, 1,
                     //     /*hasDescriptor=*/false, nullptr,
                     //     cuda::thread_scope_thread, cuda::thread_scope_thread);
-                    ncclGin net(dcomms[ctx_idx], 0);
-                    net.putValue(ncclTeamWorld(dcomms[ctx_idx]),
+                    ncclGin net(dcomms[comm_id], ctx_id);
+                    net.putValue(ncclTeamWorld(dcomms[comm_id]),
                                  dst_rank,
-                                 nccl_windows[ctx_idx],
+                                 nccl_windows[comm_id],
                                  dst_offset,
                                  (uint32_t)1,  // immediate value to write
                                  ncclGin_SignalAdd{signal_id, 1},
@@ -1426,9 +1457,11 @@ LOW_LATENCY_COMBINE_RECV:
                         responsible_expert_idx);
 
                     uint64_t cur_value;
-                    int ctx_idx_wait = (responsible_expert_idx % num_local_experts) % num_gin_comms;
-                    EP_DEVICE_ASSERT(ctx_idx_wait >= 0 && ctx_idx_wait < num_gin_comms);
-                    ncclGin net(dcomms[ctx_idx_wait], 0);
+                    auto local_expert_idx_wait = responsible_expert_idx % num_local_experts;
+                    auto comm_id_wait = local_expert_idx_wait / NCCL_GIN_NUM_CONTEXTS_PER_COMM;
+                    auto ctx_id_wait = local_expert_idx_wait % NCCL_GIN_NUM_CONTEXTS_PER_COMM;
+                    EP_DEVICE_ASSERT(comm_id_wait >= 0 && comm_id_wait < num_gin_comms);
+                    ncclGin net(dcomms[comm_id_wait], ctx_id_wait);
                     do {
                         cur_value = net.readSignal(signals_base + responsible_expert_idx);
                     } while (cur_value < 1);
@@ -1629,25 +1662,25 @@ LOW_LATENCY_COMBINE_RECV:
             }
         }
     }
-/*
-#ifdef ENABLE_NCCL_GIN
-    {
-        const int signals_per_buffer = num_experts;
-        const int total_resets = signals_per_buffer * num_gin_comms;
-        const int linear_tid = blockIdx.x * blockDim.x + threadIdx.x;
-        const int linear_stride = gridDim.x * blockDim.x;
+    /*
+    #ifdef ENABLE_NCCL_GIN
+        {
+            const int signals_per_buffer = num_experts;
+            const int total_resets = signals_per_buffer * num_gin_comms;
+            const int linear_tid = blockIdx.x * blockDim.x + threadIdx.x;
+            const int linear_stride = gridDim.x * blockDim.x;
 
-        #pragma unroll
-        for (int idx = linear_tid; idx < total_resets; idx += linear_stride) {
-            const int signal_idx = idx / num_gin_comms;
-            const int ctx_id = idx % num_gin_comms;
-            ncclGin net(dcomms[ctx_id], 0);
-            net.resetSignal(signals_base + signal_idx);
+            #pragma unroll
+            for (int idx = linear_tid; idx < total_resets; idx += linear_stride) {
+                const int signal_idx = idx / num_gin_comms;
+                const int ctx_id = idx % num_gin_comms;
+                ncclGin net(dcomms[ctx_id], 0);
+                net.resetSignal(signals_base + signal_idx);
+            }
         }
-    }
-#else
-    // do nothing for NVSHMEM
-#endif */
+    #else
+        // do nothing for NVSHMEM
+    #endif */
 }
 
 void combine(void* combined_x,
@@ -1773,7 +1806,7 @@ void combine(void* combined_x,
                       dcomms,                                                                                                      \
                       nccl_windows,                                                                                                \
                       signals_base,                                                                                                \
-                      signals_base_next);                                                                                               \
+                      signals_base_next);                                                                                          \
     }                                                                                                                              \
     break
 

@@ -99,15 +99,16 @@ int NCCLGINBackend::init(const std::vector<uint8_t>& root_unique_id_val, int ran
             printf("]\n");
         }
 
-        // Number of communicators equals qps_per_rank
-        num_comms_ = qps_per_rank;
+        // Total comms (add 1 if there's a remainder)
+        num_comms_ = (qps_per_rank / NCCL_GIN_NUM_CONTEXTS_PER_COMM) + ((qps_per_rank % NCCL_GIN_NUM_CONTEXTS_PER_COMM) > 0 ? 1 : 0);
         num_gin_ctxs_ = num_comms_;
 
         // Verify we received the right number of unique IDs
         // We always receive NUM_MAX_NVL_PEERS * qps_per_rank IDs from runtime.cu
         // (generated for worst-case HT mode, LL mode uses only the first qps_per_rank IDs)
         size_t single_id_size = sizeof(ncclUniqueId);
-        size_t expected_ids = gpus_per_server * num_comms_;  // Always NUM_MAX_NVL_PEERS * qps_per_rank
+        size_t expected_ids = gpus_per_server * qps_per_rank;  // Always NUM_MAX_NVL_PEERS * qps_per_rank
+        printf("[NCCL GIN Backend] Expected IDs: %zu, Actual IDs: %zu\n", expected_ids, root_unique_id_val.size() / single_id_size);
         EP_HOST_ASSERT(root_unique_id_val.size() == expected_ids * single_id_size &&
                        "Number of unique IDs doesn't match NUM_MAX_NVL_PEERS * qps_per_rank");
 
@@ -182,6 +183,8 @@ int NCCLGINBackend::init(const std::vector<uint8_t>& root_unique_id_val, int ran
             if (num_gin_ctxs_ <= 0 || num_gin_ctxs_ > DEEP_EP_GIN_MAX_CONTEXTS) {
                 num_gin_ctxs_ = DEEP_EP_GIN_MAX_CONTEXTS;
             }
+            // Verify we have at least as many contexts as expected per communicator
+            EP_HOST_ASSERT(num_gin_ctxs_ >= NCCL_GIN_NUM_CONTEXTS_PER_COMM);
         }
 
         // Allocate signals per context per buffer (double buffered total)
@@ -207,7 +210,7 @@ int NCCLGINBackend::init(const std::vector<uint8_t>& root_unique_id_val, int ran
         num_total_signals_ = rdma_channel_head_signals + rdma_channel_tail_signals + num_dispatch_signals_;
 
         // Build and upload device arrays for contexts; windows copied after registration
-        {
+        /* {
             std::vector<ncclGinCtx_M<-1u>> h_ctxs;
             h_ctxs.reserve(num_comms_);
 
@@ -229,6 +232,9 @@ int NCCLGINBackend::init(const std::vector<uint8_t>& root_unique_id_val, int ran
                 if (e2 != cudaSuccess)
                     throw std::runtime_error("Failed to cudaMemcpy d_gin_ctxs_");
             }
+        } */
+
+        {
             if (num_comms_ > 0) {
                 // Allocate device window arrays based on num_comms_
                 // since we need one window per communicator in multi-communicator mode
@@ -409,6 +415,7 @@ void* NCCLGINBackend::alloc(size_t size, size_t alignment) {
     wins_nccl.reserve(num_comms_);
 
     for (int c = 0; c < num_comms_; ++c) {
+        printf("[NCCL GIN Backend - Memory Alloc] Rank %d: Registering comm %d/%d\n", rank_, c, num_comms_);
         // Register with ncclCommWindowRegister
         ncclResult_t r = ncclCommWindowRegister(comms_multi_[c], ptr, size, dev_wins_multi_nccl_[c].data(), 0);
         if (r != ncclSuccess) {
