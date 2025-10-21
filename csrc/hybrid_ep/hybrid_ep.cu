@@ -145,6 +145,7 @@ void HybridEPBuffer::allocate_buffer_for_dispatch() {
   // Allocate and initialize synchronization buffers
   if (local_rank == 0) {
     remote_allocator.allocate((void**)&dispatch_buffers.intra_node_write_completion_flags, sizeof(uint32_t));
+    CUDA_CHECK(cudaMemset(dispatch_buffers.intra_node_write_completion_flags, 0, sizeof(uint32_t)));
   }
   
   CUDA_CHECK(cudaMalloc((void**)&dispatch_buffers.expected_rdma_flag_value, sizeof(uint64_t)));
@@ -207,6 +208,7 @@ void HybridEPBuffer::allocate_buffer_for_combine() {
   // Allocate and initialize synchronization buffers
   if (local_rank == 0) {
     remote_allocator.allocate((void**)&combine_buffers.intra_node_write_completion_flags, sizeof(uint32_t));
+    CUDA_CHECK(cudaMemset(combine_buffers.intra_node_write_completion_flags, 0, sizeof(uint32_t)));
   }
   
   CUDA_CHECK(cudaMalloc((void**)&combine_buffers.expected_rdma_flag_value, sizeof(uint64_t)));
