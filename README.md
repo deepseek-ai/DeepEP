@@ -325,9 +325,13 @@ For better performance on your cluster, we recommend to run all the tests and us
 
 This code repository is released under [the MIT License](LICENSE), except for codes that reference NVSHMEM (including `csrc/kernels/ibgda_device.cuh` and `third-party/nvshmem.patch`), which are subject to [NVSHMEM SLA](https://docs.nvidia.com/nvshmem/api/sla.html).
 
-## Experimental Branchs
+## Experimental Branches
 
-- [Eager](https://github.com/deepseek-ai/DeepEP/pull/437) - Using a low-latency protocol removes the extra RTT latency introduced by RDMA atomic OPs
+- [Zero-copy](https://github.com/deepseek-ai/DeepEP/pull/453)
+  - Removing the copy between PyTorch tensors and communication buffers, which reduces the SM usages significantly for normal kernels
+  - This PR is authored by **Tencent Network Platform Department**
+- [Eager](https://github.com/deepseek-ai/DeepEP/pull/437)
+  - Using a low-latency protocol removes the extra RTT latency introduced by RDMA atomic OPs
 
 ## Community Forks
 
