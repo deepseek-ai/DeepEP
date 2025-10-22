@@ -18,7 +18,6 @@ def get_nvshmem_host_lib_name(base_dir):
 def get_extension_hybrid_ep_cpp():
     current_dir = os.path.dirname(os.path.abspath(__file__))
     enable_multinode = os.getenv("HYBRID_EP_MULTINODE", "0") != "0"
-    assert not enable_multinode, "Multinode is not supported yet"
 
     # Default to Blackwell series
     os.environ['TORCH_CUDA_ARCH_LIST'] = os.getenv('TORCH_CUDA_ARCH_LIST', '10.0')
@@ -53,7 +52,6 @@ def get_extension_hybrid_ep_cpp():
     libraries = ["cuda"]
 
     # Add dependency for jit
-    compile_args["nvcc"].append(f'-DBASE_PATH="{current_dir}"')
     compile_args["nvcc"].append(f'-DSM_ARCH="{os.environ["TORCH_CUDA_ARCH_LIST"]}"')
     if enable_multinode:
         compile_args["nvcc"].append("-DHYBRID_EP_BUILD_MULTINODE_ENABLE")
