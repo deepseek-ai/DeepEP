@@ -3,6 +3,8 @@ import os
 import subprocess
 import setuptools
 import importlib
+import shutil
+import re
 
 from pathlib import Path
 from torch.utils.cpp_extension import BuildExtension, CUDAExtension
@@ -14,6 +16,20 @@ def get_nvshmem_host_lib_name(base_dir):
     for file in path.rglob('libnvshmem_host.so.*'):
         return file.name
     raise ModuleNotFoundError('libnvshmem_host.so not found')
+
+def to_nvcc_gencode(s: str) -> str:
+    flags = []
+    for part in re.split(r'[,\s;]+', s.strip()):
+        if not part:
+            continue
+        m = re.fullmatch(r'(\d+)\.(\d+)([A-Za-z]?)', part)
+        if not m:
+            raise ValueError(f"Invalid entry: {part}")
+        major, minor, suf = m.groups()
+        arch = f"{int(major)}{int(minor)}{suf.lower()}"
+        flags.append(f"-gencode=arch=compute_{arch},code=sm_{arch}")
+    return " ".join(flags)
+
 
 def get_extension_hybrid_ep_cpp():
     current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -44,7 +60,7 @@ def get_extension_hybrid_ep_cpp():
     ]
     include_dirs = [
         os.path.join(current_dir, "csrc/hybrid_ep/"),
-        os.path.join(current_dir, "deep_ep/backend/"),
+        os.path.join(current_dir, "csrc/hybrid_ep/backend/"),
     ]
     extra_link_args = [
         "-lnvtx3interop",
@@ -73,6 +89,41 @@ def get_extension_hybrid_ep_cpp():
         extra_compile_args=compile_args,
         extra_link_args=extra_link_args,
     )
+
+    # Copy the hybrid backend code to python package for JIT compilation
+    shutil.copytree(
+        os.path.join(current_dir, "csrc/hybrid_ep/backend/"),
+        os.path.join(current_dir, "deep_ep/backend/"),
+        dirs_exist_ok=True
+    )
+    # Generate the inter-node dependency to the python package for JIT compilation
+    if enable_multinode:
+        rdma_core_dir = os.path.join(current_dir, "third-party/rdma-core")
+        nccl_dir = os.path.join(current_dir, "third-party/nccl")
+        subprocess.run(["git", "submodule", "update", "--init", "--recursive"], cwd=current_dir)
+        subprocess.run(["bash", "build.sh"], cwd=rdma_core_dir)
+        subprocess.run(["make", "-j", "src.build", f"NVCC_GENCODE={to_nvcc_gencode(os.environ['TORCH_CUDA_ARCH_LIST'])}"], cwd=nccl_dir)
+        # Copy the inter-node dependency
+        shutil.copytree(
+            os.path.join(rdma_core_dir, "build/include"),
+            os.path.join(current_dir, "deep_ep/backend/rdma-core/include"),
+            dirs_exist_ok=True
+        )
+        shutil.copytree(
+            os.path.join(rdma_core_dir, "build/lib"),
+            os.path.join(current_dir, "deep_ep/backend/rdma-core/lib"),
+            dirs_exist_ok=True
+        )
+        shutil.copytree(
+            os.path.join(nccl_dir, "src/transport/gdaki/doca-gpunetio"),
+            os.path.join(current_dir, "deep_ep/backend/nccl/include"),
+            dirs_exist_ok=True
+        )
+        shutil.copytree(
+            os.path.join(nccl_dir, "build/obj/transport/gdaki/doca-gpunetio"),
+            os.path.join(current_dir, "deep_ep/backend/nccl/obj"),
+            dirs_exist_ok=True
+        )
 
     return extension_hybrid_ep_cpp
 
