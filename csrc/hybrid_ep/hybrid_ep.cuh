@@ -13,14 +13,18 @@
 #include <algorithm>
 #include <string>
 
+#ifdef HYBRID_EP_BUILD_MULTINODE_ENABLE
+#include "internode.cuh"
+#endif
+
 class HybridEPBuffer {
 public:
-  HybridEPBuffer(BufferConfig config, int local_rank, int node_rank, int group_size, std::string base_path);
+  HybridEPBuffer(pybind11::object process_group, BufferConfig config, int local_rank, int node_rank, int group_size, std::string base_path);
   ~HybridEPBuffer();
   bool update_buffer(HybridEpConfigInstance config); // True means the buffer is reallocated.
 
   // Exchange IPC addresses using C++ distributed communication
-  void exchange_ipc_address(pybind11::object process_group);
+  void exchange_remote_handle();
 
   std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor,
              torch::Tensor>
@@ -75,6 +79,10 @@ private:
   ExtendedMemoryAllocator remote_allocator;
   BufferConfig buffer_config;
   Executor executor;
+  pybind11::object process_group;
+#ifdef HYBRID_EP_BUILD_MULTINODE_ENABLE
+  RDMACoordinator rdma_coordinator;
+#endif
 
   void allocate_buffer();
   void allocate_buffer_for_preprocessing();

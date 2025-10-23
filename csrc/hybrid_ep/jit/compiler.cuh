@@ -58,6 +58,7 @@ private:
     std::string nvcc_path;  // The path of the nvcc compiler
     std::string include;
     std::string library;
+    std::string objs = "";
 };
 
 class KernelCache{

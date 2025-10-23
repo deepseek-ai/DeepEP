@@ -19,17 +19,33 @@ NVCCCompiler::NVCCCompiler(std::string base_path): base_path(base_path) {
     flags = "-std=c++17 " + sm_arch_flags +
             " -O3 --expt-relaxed-constexpr "
             " -Xcompiler -fPIC -shared";
-
     // Add the include path of the hybrid-ep library
-    include = " -I" + base_path + "/backend" + " -I" + get_env("CUDA_HOME") + "/include";
-
+    include = " -I" + base_path + "/backend" 
+            + " -I" + get_env("CUDA_HOME") + "/include";
     // Add the library path of the hybrid-ep library
     library = "-L" + get_env("CUDA_HOME") + "/lib64 -lcudart";
 
-    // TODO: Add the inter-node jit dependency
 #ifdef HYBRID_EP_BUILD_MULTINODE_ENABLE
-    assert(false, "Multinode is not supported yet");
+    // Add the dependency of the inter-node jit
     flags += " -DHYBRID_EP_BUILD_MULTINODE_ENABLE";
+    include += " -I" + base_path + "/backend/rdma-core/include"
+             + " -I" + base_path + "/backend/nccl/include";
+    library += " -L" + base_path + "/backend/rdma-core/lib"
+             + "-lmlx5 -libverbs";
+    std::string doca_obj_path = base_path + "/backend/nccl/obj";
+    objs = doca_obj_path + "/doca_gpunetio.o "
+        + doca_obj_path + "/doca_gpunetio_high_level.o"
+        + doca_obj_path + "/doca_verbs_cuda_wrapper.o"
+        + doca_obj_path + "/doca_verbs_device_attr.o"
+        + doca_obj_path + "/doca_verbs_ibv_wrapper.o"
+        + doca_obj_path + "/doca_verbs_mlx5dv_wrapper.o"
+        + doca_obj_path + "/doca_verbs_qp.o"
+        + doca_obj_path + "/doca_verbs_cq.o"
+        + doca_obj_path + "/doca_verbs_srq.o"
+        + doca_obj_path + "/doca_verbs_uar.o"
+        + doca_obj_path + "/doca_verbs_umem.o"
+        + doca_obj_path + "/doca_gpunetio_gdrcopy.o"
+        + doca_obj_path + "/doca_gpunetio_log.o";
 #endif
 
     flags = flags + " " + include + " " + library;
@@ -62,7 +78,8 @@ std::string NVCCCompiler::build(std::string code, std::string signature, int loc
         jit_dir + "/" + extended_signature + ".so";
     // Remove the output .so file if it exists
     remove(output_path.c_str());
-    std::string compile_command = nvcc_path + " " + flags + " " + source_path + " -o " + output_path;
+    std::string compile_command = 
+        nvcc_path + " " + flags + " " + source_path + " " + objs + " -o " + output_path;
 
     auto ret = std::system(compile_command.c_str());
     if (ret != 0) {

@@ -95,6 +95,10 @@ void Executor::dispatch_core(HybridEpConfigInstance config, DispatchBuffers& dis
     param.num_of_tokens_per_rank = args.num_of_tokens_per_rank;
     param.expected_rdma_flag_value = dispatch_buffers.expected_rdma_flag_value;
     param.expected_intra_node_flag_value = dispatch_buffers.expected_intra_node_flag_value;
+#ifdef HYBRID_EP_BUILD_MULTINODE_ENABLE
+    param.d_qps_gpu = dispatch_buffers.d_qps_gpu;
+    param.mr_info = dispatch_buffers.mr_info;
+#endif
     
     // Launch kernel
     kernel_cache.run_dispatch_kernel<DType>(config, param, args.stream);
@@ -293,6 +297,10 @@ void Executor::combine_core(HybridEpConfigInstance config, CombineBuffers& combi
     param.expected_rdma_flag_value = combine_buffers.expected_rdma_flag_value;
     param.expected_intra_node_flag_value =
         combine_buffers.expected_intra_node_flag_value;
+#ifdef HYBRID_EP_BUILD_MULTINODE_ENABLE
+    param.d_qps_gpu = combine_buffers.d_qps_gpu;
+    param.mr_info = combine_buffers.mr_info;
+#endif
 
     // Launch kernel
     kernel_cache.run_combine_kernel(config, param, args.stream);
