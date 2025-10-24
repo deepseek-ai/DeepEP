@@ -270,38 +270,6 @@ __global__ __launch_bounds__(1024, 1) void dispatch(void* packed_recv_x,
     const auto sub_warp_id = warp_id % num_warps_per_group;
     const auto responsible_expert_idx = sm_id * num_warp_groups + warp_group_id;
 
-    if (threadIdx.x == 0 && blockIdx.x == 0 && rank == 0) {
-#ifdef ENABLE_NCCL_GIN
-        void* gin_ctx_print = (void*)(&dcomms[0]);
-#else
-        void* gin_ctx_print = nullptr;
-#endif
-        DEEPEP_DEBUG_PRINT(
-            "[Dispatch LL Kernel Start] Rank %d (sm=%d,thread=%d,warp=%d,warp_group=%d,sub_warp=%d,lane=%d): Starting dispatch phase %d "
-            "with %d tokens, %d experts, %d ranks | Pointers: rdma_x=%p, rdma_recv_x=%p, rdma_recv_count=%p, gin_base_ptr=%p | Offsets: "
-            "rdma_recv_x_offset=%llx, rdma_recv_count_offset=%llx, rdma_x_offset=%llx | gin_ctx=%p, gin_window=%p \n",
-            rank,
-            sm_id,
-            thread_id,
-            warp_id,
-            warp_group_id,
-            sub_warp_id,
-            lane_id,
-            phases,
-            num_tokens,
-            num_experts,
-            num_ranks,
-            rdma_x,
-            rdma_recv_x,
-            rdma_recv_count,
-            gin_base_ptr,
-            rdma_recv_x_offset,
-            rdma_recv_count_offset,
-            rdma_x_offset,
-            gin_ctx_print,
-            (void*)nccl_windows);
-    }
-
     // May extract UE8M0 from the scales
     using scale_t = std::conditional_t<kUseUE8M0, uint8_t, float>;
     using packed_t = std::conditional_t<kUseUE8M0, uint32_t, float>;
@@ -712,29 +680,6 @@ LOW_LATENCY_DISPATCH_RECV:
             }
         }
     }
-
-    /*
-    #ifdef ENABLE_NCCL_GIN
-        cg::this_grid().sync();  // code hangs if this is removed
-
-        {
-            const int signals_per_buffer = num_experts;
-            const int total_resets = signals_per_buffer * num_gin_comms;
-            const int linear_tid = blockIdx.x * blockDim.x + threadIdx.x;
-            const int linear_stride = gridDim.x * blockDim.x;
-
-            #pragma unroll
-            for (int idx = linear_tid; idx < total_resets; idx += linear_stride) {
-                const int signal_idx = idx / num_gin_comms;
-                const int ctx_id = idx % num_gin_comms;
-                ncclGin net(dcomms[ctx_id], 0);
-                net.resetSignal(signals_base + signal_idx);
-            }
-        }
-    #else
-        // do nothing for NVSHMEM
-    #endif
-    */
 }
 
 void dispatch(void* packed_recv_x,
@@ -1126,6 +1071,7 @@ __global__ __launch_bounds__(1024, 1) void combine(void* combined_x,
 #else
             // do nothing for NVSHMEM
 #endif
+
         // Notify before executing `int_p`
         __syncwarp();
         if (lane_id == 0)
@@ -1261,10 +1207,10 @@ __global__ __launch_bounds__(1024, 1) void combine(void* combined_x,
                     __syncwarp();
                 }
 
+#ifdef ENABLE_NCCL_GIN
                 // Issue RDMA
                 // NOTES: for zero-copy mode, we assume the data is already in the send buffer
-                if (dst_p2p_ptr == 0)
-#ifdef ENABLE_NCCL_GIN
+                if (dst_p2p_ptr == 0) {
                     if (lane_id == 0) {
                         // const auto expected_dst_offset =
                         //     rdma_recv_x_offset + (global_expert_idx * num_max_dispatch_tokens_per_rank + src_idx) * num_bytes_per_slot;
@@ -1275,57 +1221,15 @@ __global__ __launch_bounds__(1024, 1) void combine(void* combined_x,
                         const size_t buf_offset = buf_ptr - reinterpret_cast<uint64_t>(rdma_send_x);
                         const size_t dst_offset = dst_ptr - reinterpret_cast<uint64_t>(rdma_send_x);
 
-                        // if (rank == 0) {
-                        DEEPEP_DEBUG_PRINT(
-                            "[Combine LL - Offset Debug] Rank %d: token_idx=%d, src_idx=%d, global_expert_idx=%d, local_expert_idx=%d | "
-                            "expected_dst_offset=%llu, expected_buf_offset=%llu, buf_offset=%llu, dst_offset=%llu\n",
-                            rank,
-                            token_idx,
-                            src_idx,
-                            global_expert_idx,
-                            local_expert_idx,
-                            (unsigned long long)expected_dst_offset,
-                            (unsigned long long)expected_buf_offset,
-                            (unsigned long long)buf_offset,
-                            (unsigned long long)dst_offset);
-                        //}
-
                         if (rdma_send_x_offset == 0) { /*these assertions are only valid for buffer[0]*/
                             EP_DEVICE_ASSERT(dst_offset == expected_dst_offset);
                             EP_DEVICE_ASSERT(buf_offset == expected_buf_offset);
                         }
 
-                        // if (rank == 0) {
-                        DEEPEP_DEBUG_PRINT(
-                            "[Combine LL - Put] Rank %d (sm=%d,thread=%d,warp_group=%d,sub_warp=%d,lane=%d): Sending token %d (src_idx=%d) "
-                            "to expert %d on rank %d | src=%p+%llu, dst=%p+%llu\n",
-                            rank,
-                            sm_id,
-                            thread_id,
-                            warp_group_id,
-                            sub_warp_id,
-                            lane_id,
-                            token_idx,
-                            src_idx,
-                            global_expert_idx,
-                            dst_rank,
-                            reinterpret_cast<void*>(buf_ptr),
-                            (unsigned long long)expected_buf_offset,
-                            reinterpret_cast<void*>(dst_ptr),
-                            (unsigned long long)expected_dst_offset);
-                        //}
-
                         auto comm_id = local_expert_idx / NCCL_GIN_NUM_CONTEXTS_PER_COMM;
                         auto ctx_id = local_expert_idx % NCCL_GIN_NUM_CONTEXTS_PER_COMM;
                         EP_DEVICE_ASSERT(comm_id >= 0 && comm_id < num_gin_comms);
-                        // ncclGinCall<ncclGinApi_Put>(gin_ctxs[comm_id], thread, dst_rank,
-                        //     /*hasWins=*/true,
-                        //     gin_windows[comm_id], expected_dst_offset,
-                        //     gin_windows[comm_id], expected_buf_offset, hidden * sizeof(nv_bfloat16),
-                        //     /*hasSignal=*/false, 0, ncclGinSignalAdd, 0,
-                        //     /*hasCounter=*/false, 0,
-                        //     /*hasDescriptor=*/false, nullptr,
-                        //     cuda::thread_scope_thread, cuda::thread_scope_thread);
+
                         ncclGin net(dcomms[comm_id], ctx_id);
                         net.put(ncclTeamWorld(dcomms[comm_id]),
                                 dst_rank,
@@ -1338,8 +1242,13 @@ __global__ __launch_bounds__(1024, 1) void combine(void* combined_x,
                                 ncclGin_None{},  // no counter
                                 ncclCoopThread());
                     }
+                }
 #else
+                // Issue RDMA
+                // NOTES: for zero-copy mode, we assume the data is already in the send buffer
+                if (dst_p2p_ptr == 0) {
                     nvshmemi_ibgda_put_nbi_warp(dst_ptr, buf_ptr, num_send_bytes, dst_rank, local_expert_idx, lane_id, token_idx - offset);
+                }
 #endif
             }
         }
@@ -1353,9 +1262,6 @@ __global__ __launch_bounds__(1024, 1) void combine(void* combined_x,
             auto dst_ptr = reinterpret_cast<uint64_t>(rdma_recv_flag + global_expert_idx);
 #ifdef ENABLE_NCCL_GIN
             size_t dst_offset = rdma_recv_flag_offset + global_expert_idx * sizeof(int);
-            /*uint64_t dst_p2p_ptr = 0;
-            if (rank == dst_rank)
-                dst_p2p_ptr = dst_ptr; */
 
             auto dst_p2p_ptr = nccl_get_p2p_ptr(
                 dst_ptr, dst_offset, rank, dst_rank, (responsible_expert_idx % num_local_experts), nccl_windows, num_gin_comms);
@@ -1369,38 +1275,22 @@ __global__ __launch_bounds__(1024, 1) void combine(void* combined_x,
 
                     auto signal_id = signals_base + global_expert_idx;
 
-                    // if (rank == 0) {
-                    DEEPEP_DEBUG_PRINT(
-                        "[Combine LL - Flag Put] Rank %d (sm=%d,thread=%d,warp_group=%d,sub_warp=%d,lane=%d): Sending finish flag to "
-                        "expert %d on rank %d | dst_offset=%llu\n",
-                        rank,
-                        sm_id,
-                        thread_id,
-                        warp_group_id,
-                        sub_warp_id,
-                        lane_id,
-                        global_expert_idx,
-                        dst_rank,
-                        (unsigned long long)dst_offset);
-                    //}
-
                     auto local_expert_idx_flag = responsible_expert_idx % num_local_experts;
                     auto comm_id = local_expert_idx_flag / NCCL_GIN_NUM_CONTEXTS_PER_COMM;
                     auto ctx_id = local_expert_idx_flag % NCCL_GIN_NUM_CONTEXTS_PER_COMM;
                     EP_DEVICE_ASSERT(comm_id >= 0 && comm_id < num_gin_comms);
-                    // ncclGinCall<ncclGinApi_PutValue>(gin_ctxs[comm_id], thread, dst_rank,
-                    //     gin_windows[comm_id], dst_offset,
-                    //     1,
-                    //     /*hasSignal=*/true, gin_signals + global_expert_idx, ncclGinSignalAdd, 1,
-                    //     /*hasDescriptor=*/false, nullptr,
-                    //     cuda::thread_scope_thread, cuda::thread_scope_thread);
+
                     ncclGin net(dcomms[comm_id], ctx_id);
-                    net.putValue(ncclTeamWorld(dcomms[comm_id]),
+
+                    net.put(ncclTeamWorld(dcomms[comm_id]),
                                  dst_rank,
                                  nccl_windows[comm_id],
                                  dst_offset,
-                                 (uint32_t)1,  // immediate value to write
+                                 nccl_windows[comm_id],
+                                 0,
+                                 0,  // 0 bytes transfer
                                  ncclGin_SignalAdd{signal_id, 1},
+                                 ncclGin_None{},  // no counter
                                  ncclCoopThread());
 #else
                     nvshmemi_ibgda_amo_nonfetch_add(reinterpret_cast<int*>(dst_ptr), 1, dst_rank, local_expert_idx);
@@ -1434,28 +1324,13 @@ LOW_LATENCY_COMBINE_RECV:
             const auto src_rank = responsible_expert_idx / num_local_experts;
             auto start_time = clock64();
             uint64_t wait_recv_cost = 0;
+
+#ifdef ENABLE_NCCL_GIN
             size_t src_offset = rdma_recv_flag_offset + responsible_expert_idx * sizeof(int);
             auto src_p2p_ptr = nccl_get_p2p_ptr(
                 0x01, src_offset, rank, src_rank, (responsible_expert_idx % num_local_experts), nccl_windows, num_gin_comms);
             if (not is_rank_masked(mask_buffer_ptr, src_rank)) {
-#ifdef ENABLE_NCCL_GIN
-                while (ld_acquire_sys_global(rdma_recv_flag + responsible_expert_idx) == 0  // recv not ready
-                       && (wait_recv_cost = clock64() - start_time) <= NUM_TIMEOUT_CYCLES   // not timeout
-                )
-                    ;
-                // if (src_rank != rank) {
                 if (src_p2p_ptr == 0) {
-                    DEEPEP_DEBUG_PRINT(
-                        "[Combine LL - Signal Wait] Rank %d (sm=%d,thread=%d,warp_group=%d,sub_warp=%d,lane=%d): Starting signal wait for "
-                        "expert %d\n",
-                        rank,
-                        sm_id,
-                        thread_id,
-                        warp_group_id,
-                        sub_warp_id,
-                        lane_id,
-                        responsible_expert_idx);
-
                     uint64_t cur_value;
                     auto local_expert_idx_wait = responsible_expert_idx % num_local_experts;
                     auto comm_id_wait = local_expert_idx_wait / NCCL_GIN_NUM_CONTEXTS_PER_COMM;
@@ -1464,26 +1339,25 @@ LOW_LATENCY_COMBINE_RECV:
                     ncclGin net(dcomms[comm_id_wait], ctx_id_wait);
                     do {
                         cur_value = net.readSignal(signals_base + responsible_expert_idx);
-                    } while (cur_value < 1);
+                    } while (cur_value < 1                                                        // signal not arrived
+                             && (wait_recv_cost = clock64() - start_time) <= NUM_TIMEOUT_CYCLES   // not timeout
+                    );
 
-                    DEEPEP_DEBUG_PRINT(
-                        "[Combine LL - Signal Wait] Rank %d (sm=%d,thread=%d,warp_group=%d,sub_warp=%d,lane=%d): Completed signal wait for "
-                        "expert %d\n",
-                        rank,
-                        sm_id,
-                        thread_id,
-                        warp_group_id,
-                        sub_warp_id,
-                        lane_id,
-                        responsible_expert_idx);
+                } else {
+                    while (ld_acquire_sys_global(rdma_recv_flag + responsible_expert_idx) == 0  // recv not ready
+                           && (wait_recv_cost = clock64() - start_time) <= NUM_TIMEOUT_CYCLES   // not timeout
+                    )     
+                        ;
                 }
+            }
 #else
+            if (not is_rank_masked(mask_buffer_ptr, src_rank)) {
                 while (ld_acquire_sys_global(rdma_recv_flag + responsible_expert_idx) == 0  // recv not ready
                        && (wait_recv_cost = clock64() - start_time) <= NUM_TIMEOUT_CYCLES   // not timeout
                 )
                     ;
-#endif
             }
+#endif
             // Mask rank if timeout
             if (wait_recv_cost > NUM_TIMEOUT_CYCLES) {
                 printf("Warning: DeepEP timeout for combine receive, rank %d, local_expert_idx %d, src_rank %d\n",
@@ -1662,25 +1536,6 @@ LOW_LATENCY_COMBINE_RECV:
             }
         }
     }
-    /*
-    #ifdef ENABLE_NCCL_GIN
-        {
-            const int signals_per_buffer = num_experts;
-            const int total_resets = signals_per_buffer * num_gin_comms;
-            const int linear_tid = blockIdx.x * blockDim.x + threadIdx.x;
-            const int linear_stride = gridDim.x * blockDim.x;
-
-            #pragma unroll
-            for (int idx = linear_tid; idx < total_resets; idx += linear_stride) {
-                const int signal_idx = idx / num_gin_comms;
-                const int ctx_id = idx % num_gin_comms;
-                ncclGin net(dcomms[ctx_id], 0);
-                net.resetSignal(signals_base + signal_idx);
-            }
-        }
-    #else
-        // do nothing for NVSHMEM
-    #endif */
 }
 
 void combine(void* combined_x,

@@ -108,7 +108,7 @@ int NCCLGINBackend::init(const std::vector<uint8_t>& root_unique_id_val, int ran
         // (generated for worst-case HT mode, LL mode uses only the first qps_per_rank IDs)
         size_t single_id_size = sizeof(ncclUniqueId);
         size_t expected_ids = gpus_per_server * qps_per_rank;  // Always NUM_MAX_NVL_PEERS * qps_per_rank
-        printf("[NCCL GIN Backend] Expected IDs: %zu, Actual IDs: %zu\n", expected_ids, root_unique_id_val.size() / single_id_size);
+        //printf("[NCCL GIN Backend] Expected IDs: %zu, Actual IDs: %zu\n", expected_ids, root_unique_id_val.size() / single_id_size);
         EP_HOST_ASSERT(root_unique_id_val.size() == expected_ids * single_id_size &&
                        "Number of unique IDs doesn't match NUM_MAX_NVL_PEERS * qps_per_rank");
 
@@ -415,7 +415,7 @@ void* NCCLGINBackend::alloc(size_t size, size_t alignment) {
     wins_nccl.reserve(num_comms_);
 
     for (int c = 0; c < num_comms_; ++c) {
-        printf("[NCCL GIN Backend - Memory Alloc] Rank %d: Registering comm %d/%d\n", rank_, c, num_comms_);
+        //printf("[NCCL GIN Backend - Memory Alloc] Rank %d: Registering comm %d/%d\n", rank_, c, num_comms_);
         // Register with ncclCommWindowRegister
         ncclResult_t r = ncclCommWindowRegister(comms_multi_[c], ptr, size, dev_wins_multi_nccl_[c].data(), 0);
         if (r != ncclSuccess) {
