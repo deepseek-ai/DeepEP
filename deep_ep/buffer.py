@@ -156,6 +156,13 @@ class Buffer:
 
             # Get current device and set appropriate HCA
             current_device = torch.cuda.current_device()
+            # Translate CUDA_VISIBLE_DEVICES
+            if 'CUDA_VISIBLE_DEVICES' in os.environ:
+                visible_devices = os.environ['CUDA_VISIBLE_DEVICES'].split(",")
+                assert len(visible_devices) > current_device, f"CUDA_VISIBLE_DEVICES has {len(visible_devices)} entries which is fewer than the current device {current_device}"
+                assert visible_devices[current_device].isdigit(), f"DEEP_EP_DEVICE_TO_HCA_MAPPING requires CUDA_VISIBLE_DEVICES to contain integer indices"
+                current_device = int(visible_devices[current_device])
+
             assert current_device in device_mapping, f"Current CUDA device {current_device} not found in DEEP_EP_DEVICE_TO_HCA_MAPPING"
             os.environ['NVSHMEM_ENABLE_NIC_PE_MAPPING'] = '1'
             os.environ['NVSHMEM_HCA_LIST'] = device_mapping[current_device]
