@@ -56,9 +56,9 @@ __device__ __forceinline__ uint64_t nccl_get_p2p_ptr(const uint64_t& dst_ptr,
         return 0;
 
     // P2P/NVLink only works between ranks on the same node
-    // Calculate if ranks are on the same node based on NUM_MAX_NVL_PEERS (8 GPUs per node)
-    int rank_node = rank / NUM_MAX_NVL_PEERS;
-    int dst_rank_node = dst_rank / NUM_MAX_NVL_PEERS;
+    // Calculate if ranks are on the same node based on actual GPUs per node for low-latency mode
+    int rank_node = rank / NUM_GPUS_PER_NODE_LOW_LATENCY;
+    int dst_rank_node = dst_rank / NUM_GPUS_PER_NODE_LOW_LATENCY;
     if (rank_node != dst_rank_node)
         return 0;  // Different nodes, must use RDMA
 
@@ -435,6 +435,9 @@ __global__ __launch_bounds__(1024, 1) void dispatch(void* packed_recv_x,
                 next_clean[i] = 0;
 
             // Clear signals for next dispatch
+            // Only reset signals that are actually used (optimization):
+            // - With NVLink: skip intra-node signals (they use P2P)
+            // - Without NVLink: skip local expert signals (they don't use signals)
             const int signals_per_buffer = num_experts;
             const int total_resets = signals_per_buffer * num_gin_comms;
 
@@ -443,11 +446,27 @@ __global__ __launch_bounds__(1024, 1) void dispatch(void* packed_recv_x,
             for (int idx = lane_id; idx < total_resets; idx += 32) {
                 const int signal_idx = idx / num_gin_comms;
                 const int comm_id = idx % num_gin_comms;
-                // Reset signal for all contexts in this communicator
-                #pragma unroll
-                for (int ctx_id = 0; ctx_id < NCCL_GIN_NUM_CONTEXTS_PER_COMM; ++ctx_id) {
-                    ncclGin net(dcomms[comm_id], ctx_id);
-                    net.resetSignal(signals_base_next + signal_idx);
+
+                // Skip if this signal won't be used
+                // When NVLink is enabled: intra-node communication uses P2P (no signals)
+                bool skip = false;
+                if (!d_p2p_disabled) {
+                    // Dispatch signal pattern: signal_idx = local_expert_idx * num_ranks + src_rank
+                    const int local_expert_idx = signal_idx / num_ranks;
+                    const int src_rank = signal_idx % num_ranks;
+
+                    int src_node = src_rank / NUM_GPUS_PER_NODE_LOW_LATENCY;
+                    int my_node = rank / NUM_GPUS_PER_NODE_LOW_LATENCY;
+                    skip = (src_node == my_node);
+                }
+
+                if (!skip) {
+                    // Reset signal for all contexts in this communicator
+                    #pragma unroll
+                    for (int ctx_id = 0; ctx_id < NCCL_GIN_NUM_CONTEXTS_PER_COMM; ++ctx_id) {
+                        ncclGin net(dcomms[comm_id], ctx_id);
+                        net.resetSignal(signals_base_next + signal_idx);
+                    }
                 }
             }
 #else
@@ -1054,6 +1073,9 @@ __global__ __launch_bounds__(1024, 1) void combine(void* combined_x,
 
 #ifdef ENABLE_NCCL_GIN
         // Clear signals for next combine
+        // Only reset signals that are actually used (optimization):
+        // - With NVLink: skip intra-node signals (they use P2P)
+        // - Without NVLink: skip local expert signals (they don't use signals)
         const int signals_per_buffer = num_experts;
         const int total_resets = signals_per_buffer * num_gin_comms;
 
@@ -1061,11 +1083,26 @@ __global__ __launch_bounds__(1024, 1) void combine(void* combined_x,
         for (int idx = lane_id; idx < total_resets; idx += 32) {
             const int signal_idx = idx / num_gin_comms;
             const int comm_id = idx % num_gin_comms;
-            // Reset signal for all contexts in this communicator
-            #pragma unroll
-            for (int ctx_id = 0; ctx_id < NCCL_GIN_NUM_CONTEXTS_PER_COMM; ++ctx_id) {
-                ncclGin net(dcomms[comm_id], ctx_id);
-                net.resetSignal(signals_base_next + signal_idx);
+
+            // Skip if this signal won't be used
+            // When NVLink is enabled: intra-node communication uses P2P (no signals)
+            bool skip = false;
+            if (!d_p2p_disabled) {
+                // Combine signal pattern: signal_idx = global_expert_idx
+                const int dst_rank = signal_idx / num_local_experts;
+
+                int dst_node = dst_rank / NUM_GPUS_PER_NODE_LOW_LATENCY;
+                int my_node = rank / NUM_GPUS_PER_NODE_LOW_LATENCY;
+                skip = (dst_node == my_node);
+            }
+
+            if (!skip) {
+                // Reset signal for all contexts in this communicator
+                #pragma unroll
+                for (int ctx_id = 0; ctx_id < NCCL_GIN_NUM_CONTEXTS_PER_COMM; ++ctx_id) {
+                    ncclGin net(dcomms[comm_id], ctx_id);
+                    net.resetSignal(signals_base_next + signal_idx);
+                }
             }
         }
 #else
@@ -1283,15 +1320,15 @@ __global__ __launch_bounds__(1024, 1) void combine(void* combined_x,
                     ncclGin net(dcomms[comm_id], ctx_id);
 
                     net.put(ncclTeamWorld(dcomms[comm_id]),
-                                 dst_rank,
-                                 nccl_windows[comm_id],
-                                 dst_offset,
-                                 nccl_windows[comm_id],
-                                 0,
-                                 0,  // 0 bytes transfer
-                                 ncclGin_SignalAdd{signal_id, 1},
-                                 ncclGin_None{},  // no counter
-                                 ncclCoopThread());
+                            dst_rank,
+                            nccl_windows[comm_id],
+                            dst_offset,
+                            nccl_windows[comm_id],
+                            0,
+                            0,  // 0 bytes transfer
+                            ncclGin_SignalAdd{signal_id, 1},
+                            ncclGin_None{},  // no counter
+                            ncclCoopThread());
 #else
                     nvshmemi_ibgda_amo_nonfetch_add(reinterpret_cast<int*>(dst_ptr), 1, dst_rank, local_expert_idx);
 #endif
@@ -1339,14 +1376,14 @@ LOW_LATENCY_COMBINE_RECV:
                     ncclGin net(dcomms[comm_id_wait], ctx_id_wait);
                     do {
                         cur_value = net.readSignal(signals_base + responsible_expert_idx);
-                    } while (cur_value < 1                                                        // signal not arrived
-                             && (wait_recv_cost = clock64() - start_time) <= NUM_TIMEOUT_CYCLES   // not timeout
+                    } while (cur_value < 1                                                       // signal not arrived
+                             && (wait_recv_cost = clock64() - start_time) <= NUM_TIMEOUT_CYCLES  // not timeout
                     );
 
                 } else {
                     while (ld_acquire_sys_global(rdma_recv_flag + responsible_expert_idx) == 0  // recv not ready
                            && (wait_recv_cost = clock64() - start_time) <= NUM_TIMEOUT_CYCLES   // not timeout
-                    )     
+                    )
                         ;
                 }
             }

@@ -43,29 +43,6 @@ int NCCLGINBackend::init(const std::vector<uint8_t>& root_unique_id_val, int ran
     p2p_disabled_ = (nccl_disable_p2p != nullptr && std::string(nccl_disable_p2p) == "1");
 
     try {
-        // Calculate localRank based on hostname (like working examples)
-        /* - the device is already set by the caller in init_dist(). By setting the device here, we need to do MPI_Allgather and we don't
-        have MPI here. int localRank = 0; uint64_t* hostHashs = new uint64_t[num_ranks]; char hostname[1024]; ncclGinGetHostName(hostname,
-        1024); hostHashs[rank] = ncclGinGetHostHash(hostname);
-
-        // Use MPI to exchange hostnames
-        MPI_Allgather(MPI_IN_PLACE, 0, MPI_DATATYPE_NULL, hostHashs, sizeof(uint64_t), MPI_BYTE, MPI_COMM_WORLD);
-        for (int p = 0; p < num_ranks; p++) {
-            if (p == rank) break;
-            if (hostHashs[p] == hostHashs[rank]) localRank++;
-        }
-        delete[] hostHashs;
-
-        std::cout << "[NCCL GIN Backend] Rank " << rank << " using GPU " << localRank << std::endl;
-
-        // Set CUDA device BEFORE NCCL initialization (critical!)
-        cudaError_t cuda_result = cudaSetDevice(localRank);
-        if (cuda_result != cudaSuccess) {
-            throw std::runtime_error("Failed to set CUDA device " + std::to_string(localRank) +
-                                   ": " + std::string(cudaGetErrorString(cuda_result)));
-        }
-        */
-
         // Determine communication topology based on mode
         const int gpus_per_server = NUM_MAX_NVL_PEERS;
         int comm_rank;        // Rank to use for NCCL initialization
@@ -101,14 +78,13 @@ int NCCLGINBackend::init(const std::vector<uint8_t>& root_unique_id_val, int ran
 
         // Total comms (add 1 if there's a remainder)
         num_comms_ = (qps_per_rank / NCCL_GIN_NUM_CONTEXTS_PER_COMM) + ((qps_per_rank % NCCL_GIN_NUM_CONTEXTS_PER_COMM) > 0 ? 1 : 0);
-        num_gin_ctxs_ = num_comms_;
 
         // Verify we received the right number of unique IDs
         // We always receive NUM_MAX_NVL_PEERS * qps_per_rank IDs from runtime.cu
         // (generated for worst-case HT mode, LL mode uses only the first qps_per_rank IDs)
         size_t single_id_size = sizeof(ncclUniqueId);
         size_t expected_ids = gpus_per_server * qps_per_rank;  // Always NUM_MAX_NVL_PEERS * qps_per_rank
-        //printf("[NCCL GIN Backend] Expected IDs: %zu, Actual IDs: %zu\n", expected_ids, root_unique_id_val.size() / single_id_size);
+        // printf("[NCCL GIN Backend] Expected IDs: %zu, Actual IDs: %zu\n", expected_ids, root_unique_id_val.size() / single_id_size);
         EP_HOST_ASSERT(root_unique_id_val.size() == expected_ids * single_id_size &&
                        "Number of unique IDs doesn't match NUM_MAX_NVL_PEERS * qps_per_rank");
 
@@ -125,17 +101,25 @@ int NCCLGINBackend::init(const std::vector<uint8_t>& root_unique_id_val, int ran
 
         // Get current device
         int current_device = -1;
-        cudaError_t cuda_get_err = cudaGetDevice(&current_device);
-        if (cuda_get_err != cudaSuccess) {
-            throw std::runtime_error(std::string("cudaGetDevice failed: ") + cudaGetErrorString(cuda_get_err));
-        }
-        cudaError_t cuda_set_err = cudaSetDevice(current_device);
-        if (cuda_set_err != cudaSuccess) {
-            throw std::runtime_error(std::string("cudaSetDevice failed: ") + cudaGetErrorString(cuda_set_err));
+        CUDA_CHECK(cudaGetDevice(&current_device));
+        CUDA_CHECK(cudaSetDevice(current_device));
+
+        // Validate GPU count matches compile-time configuration for low-latency mode
+        if (low_latency_mode) {
+            int actual_gpu_count;
+            CUDA_CHECK(cudaGetDeviceCount(&actual_gpu_count));
+
+            if (actual_gpu_count != NUM_GPUS_PER_NODE_LOW_LATENCY) {
+                throw std::runtime_error("GPU count mismatch: NUM_GPUS_PER_NODE_LOW_LATENCY is set to " +
+                                         std::to_string(NUM_GPUS_PER_NODE_LOW_LATENCY) + " but system has " +
+                                         std::to_string(actual_gpu_count) +
+                                         " GPUs. When using low-latency mode with NCCL GIN backend, "
+                                         "please recompile with matching NUM_GPUS_PER_NODE_LOW_LATENCY in csrc/kernels/configs.cuh");
+            }
         }
 
         // Always use vector approach (even for single communicator)
-        comms_multi_.resize(num_comms_);
+        nccl_comms_.resize(num_comms_);
         for (int i = 0; i < num_comms_; i++) {
             ncclUniqueId id;
             size_t id_offset;
@@ -148,44 +132,19 @@ int NCCLGINBackend::init(const std::vector<uint8_t>& root_unique_id_val, int ran
             }
             std::memcpy(&id, root_unique_id_val.data() + id_offset, single_id_size);
 
-            // printf("[NCCL GIN Backend] Rank %d, Device %d: initializing communicator %d/%d (ID first 8 bytes:
-            // %02x%02x%02x%02x%02x%02x%02x%02x)\n",
-            //        rank, current_device, i, num_comms_,
-            //        id.internal[0], id.internal[1], id.internal[2], id.internal[3],
-            //        id.internal[4], id.internal[5], id.internal[6], id.internal[7]);
-            // fflush(stdout);
-
-            ncclResult_t nccl_result = ncclCommInitRankConfig(&comms_multi_[i], comm_nranks, id, comm_rank, &config);
-            // printf("[Rank %d] Comm %d: ncclCommInitRankConfig returned: %d (%s)\n", rank, i, nccl_result,
-            // ncclGetErrorString(nccl_result)); fflush(stdout);
-
-            if (nccl_result != ncclSuccess) {
-                throw std::runtime_error("NCCL communicator initialization failed for comm " + std::to_string(i) + ": " +
-                                         ncclGetErrorString(nccl_result));
-            }
-
+            NCCLCHECK(ncclCommInitRankConfig(&nccl_comms_[i], comm_nranks, id, comm_rank, &config));
             cudaError_t cuda_err = cudaGetLastError();
-            // printf("[Rank %d] Comm %d: after ncclCommInitRankConfig - cuda error: %d (%s)\n", rank, i, cuda_err,
-            // cudaGetErrorString(cuda_err)); fflush(stdout);
 
-            NCCLCHECK(ncclGinConnectOnce(comms_multi_[i]));
+            NCCLCHECK(ncclGinConnectOnce(nccl_comms_[i]));
             cudaGetLastError();
-            // printf("[Rank %d] Comm %d: after ncclGinConnectOnce - cuda error: %s\n", rank, i, cudaGetErrorString(cudaGetLastError()));
-            // fflush(stdout);
         }
 
         if (rank == 0)
             printf("[NCCL GIN Backend] Rank %d successfully initialized %d communicator(s)\n", comm_rank, num_comms_);
 
-        // Get num_gin_ctxs_ from first communicator
-        if (num_comms_ > 0) {
-            num_gin_ctxs_ = comms_multi_[0]->sharedRes->ginState.ginCommCount;
-            if (num_gin_ctxs_ <= 0 || num_gin_ctxs_ > DEEP_EP_GIN_MAX_CONTEXTS) {
-                num_gin_ctxs_ = DEEP_EP_GIN_MAX_CONTEXTS;
-            }
-            // Verify we have at least as many contexts as expected per communicator
-            EP_HOST_ASSERT(num_gin_ctxs_ >= NCCL_GIN_NUM_CONTEXTS_PER_COMM);
-        }
+        // Verify NCCL allocated enough contexts for our usage
+        EP_HOST_ASSERT(num_comms_ > 0);
+        EP_HOST_ASSERT(nccl_comms_[0]->sharedRes->ginState.ginCommCount >= NCCL_GIN_NUM_CONTEXTS_PER_COMM);
 
         // Allocate signals per context per buffer (double buffered total)
         // Only Low Latency mode uses dispatch signals
@@ -209,42 +168,10 @@ int NCCLGINBackend::init(const std::vector<uint8_t>& root_unique_id_val, int ran
         // Adding signals for high throughput and low latency kernels
         num_total_signals_ = rdma_channel_head_signals + rdma_channel_tail_signals + num_dispatch_signals_;
 
-        // Build and upload device arrays for contexts; windows copied after registration
-        /* {
-            std::vector<ncclGinCtx_M<-1u>> h_ctxs;
-            h_ctxs.reserve(num_comms_);
-
-            // For now, use the first communicator's contexts
-            // In multi-comm mode, this can be extended to use one ctx per communicator
-            for (int i = 0; i < num_comms_; ++i) {
-                ncclGinCtx_M<-1u> gctx;
-                gctx.backend = comms_multi_[i]->sharedRes->ginState.ginDevHandles[0]->netDeviceType;
-                gctx.handle = comms_multi_[i]->sharedRes->ginState.ginDevHandles[0]->handle;
-                gctx.rank = comm_rank;
-                gctx.nRanks = comm_nranks;
-                h_ctxs.push_back(gctx);
-            }
-            if (!h_ctxs.empty()) {
-                cudaError_t e1 = cudaMalloc(reinterpret_cast<void**>(&d_gin_ctxs_), h_ctxs.size() * sizeof(ncclGinCtx_M<-1u>));
-                if (e1 != cudaSuccess)
-                    throw std::runtime_error("Failed to cudaMalloc d_gin_ctxs_");
-                cudaError_t e2 = cudaMemcpy(d_gin_ctxs_, h_ctxs.data(), h_ctxs.size() * sizeof(ncclGinCtx_M<-1u>), cudaMemcpyHostToDevice);
-                if (e2 != cudaSuccess)
-                    throw std::runtime_error("Failed to cudaMemcpy d_gin_ctxs_");
-            }
-        } */
-
-        {
-            if (num_comms_ > 0) {
-                // Allocate device window arrays based on num_comms_
-                // since we need one window per communicator in multi-communicator mode
-                cudaError_t e3 = cudaMalloc(reinterpret_cast<void**>(&d_nccl_dev_wins_), num_comms_ * sizeof(ncclWindow_t));
-                if (e3 != cudaSuccess) {
-                    cudaFree(d_nccl_dev_wins_);
-                    d_nccl_dev_wins_ = nullptr;
-                    throw std::runtime_error("Failed to cudaMalloc d_nccl_dev_wins_");
-                }
-            }
+        if (num_comms_ > 0) {
+            // Allocate device window arrays based on num_comms_
+            // since we need one window per communicator in multi-communicator mode
+            CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&d_nccl_dev_wins_), num_comms_ * sizeof(ncclWindow_t)));
         }
 
         // Initialize Device Communicators
@@ -255,31 +182,21 @@ int NCCLGINBackend::init(const std::vector<uint8_t>& root_unique_id_val, int ran
             reqs.barrierCount = MAX_BARRIER_SESSIONS;
             reqs.ginSignalCount = num_total_signals_ + MAX_BARRIER_SESSIONS;
             reqs.ginForceEnable = true;
-            NCCLCHECK(ncclDevCommCreate(comms_multi_[c], &reqs, &dcomms_[c]));
+            NCCLCHECK(ncclDevCommCreate(nccl_comms_[c], &reqs, &dcomms_[c]));
         }
         if (rank == 0)
-            std::cout << "[NCCL GIN Backend] Rank " << comm_rank << " created " << num_comms_ << " device communication(s) with "
-                      << MAX_BARRIER_SESSIONS << " barrier sessions each" << std::endl;
+            printf("[NCCL GIN Backend] Rank %d created %d device communication(s) with %d barrier sessions each\n",
+                   comm_rank,
+                   num_comms_,
+                   MAX_BARRIER_SESSIONS);
 
         // Allocate device memory for dcomms and copy data
-        cudaError_t e1 = cudaMalloc(reinterpret_cast<void**>(&d_dcomms_), num_comms_ * sizeof(ncclDevComm_t));
-        if (e1 != cudaSuccess)
-            throw std::runtime_error("Failed to cudaMalloc d_dcomms_");
-        cudaError_t e2 = cudaMemcpy(d_dcomms_, dcomms_, num_comms_ * sizeof(ncclDevComm_t), cudaMemcpyHostToDevice);
-        if (e2 != cudaSuccess)
-            throw std::runtime_error("Failed to cudaMemcpy d_dcomms_");
+        CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&d_dcomms_), num_comms_ * sizeof(ncclDevComm_t)));
+        CUDA_CHECK(cudaMemcpy(d_dcomms_, dcomms_, num_comms_ * sizeof(ncclDevComm_t), cudaMemcpyHostToDevice));
 
         // Allocate barrier dummy variable
-        cudaError_t e3 = cudaMalloc(reinterpret_cast<void**>(&d_barrier_var_), sizeof(int));
-        if (e3 != cudaSuccess) {
-            throw std::runtime_error(std::string("Failed to cudaMalloc d_barrier_var_: ") + cudaGetErrorString(e3));
-        }
-        cudaError_t e4 = cudaMemset(d_barrier_var_, 0, sizeof(int));
-        if (e4 != cudaSuccess) {
-            cudaFree(d_barrier_var_);
-            d_barrier_var_ = nullptr;
-            throw std::runtime_error(std::string("Failed to cudaMemset d_barrier_var_: ") + cudaGetErrorString(e4));
-        }
+        CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&d_barrier_var_), sizeof(int)));
+        CUDA_CHECK(cudaMemset(d_barrier_var_, 0, sizeof(int)));
 
         // Store global rank and num_ranks (for external API)
         rank_ = rank;
@@ -292,12 +209,11 @@ int NCCLGINBackend::init(const std::vector<uint8_t>& root_unique_id_val, int ran
         initialized_ = true;
 
         if (rank == 0)
-            std::cout << "[NCCL GIN Backend] Initialized global rank " << rank_ << "/" << num_ranks_ << " (comm rank " << comm_rank_ << "/"
-                      << comm_nranks_ << ")" << std::endl;
+            printf("[NCCL GIN Backend] Initialized global rank %d/%d (comm rank %d/%d)\n", rank_, num_ranks_, comm_rank_, comm_nranks_);
         return rank_;
 
     } catch (const std::exception& e) {
-        std::cerr << "[NCCL GIN Backend] Initialization failed: " << e.what() << std::endl;
+        fprintf(stderr, "[NCCL GIN Backend] Initialization failed: %s\n", e.what());
         throw;
     }
 }
@@ -305,17 +221,19 @@ int NCCLGINBackend::init(const std::vector<uint8_t>& root_unique_id_val, int ran
 void NCCLGINBackend::finalize() {
     if (initialized_) {
         if (rank_ == 0)
-            std::cout << "[NCCL GIN Backend] Finalizing rank " << rank_ << std::endl;
+            printf("[NCCL GIN Backend] Finalizing rank %d\n", rank_);
 
         try {
             // Destroy device communicators
             if (dcomms_ != nullptr) {
                 for (int c = 0; c < num_comms_; ++c) {
-                    if (c < static_cast<int>(comms_multi_.size()) && comms_multi_[c]) {
-                        ncclResult_t res = ncclDevCommDestroy(comms_multi_[c], &dcomms_[c]);
+                    if (c < static_cast<int>(nccl_comms_.size()) && nccl_comms_[c]) {
+                        ncclResult_t res = ncclDevCommDestroy(nccl_comms_[c], &dcomms_[c]);
                         if (res != ncclSuccess) {
-                            std::cerr << "[NCCL GIN Backend] Warning: Failed to destroy device communication " << c << ": "
-                                      << ncclGetErrorString(res) << std::endl;
+                            fprintf(stderr,
+                                    "[NCCL GIN Backend] Warning: Failed to destroy device communication %d: %s\n",
+                                    c,
+                                    ncclGetErrorString(res));
                         }
                     }
                 }
@@ -333,14 +251,14 @@ void NCCLGINBackend::finalize() {
                 d_barrier_var_ = nullptr;
             }
             // Destroy all communicators
-            for (auto& c : comms_multi_) {
+            for (auto& c : nccl_comms_) {
                 if (c) {
                     ncclGinFinalize(c);
                     ncclCommFinalize(c);
                     ncclCommDestroy(c);
                 }
             }
-            comms_multi_.clear();
+            nccl_comms_.clear();
             // Free device arrays
             if (d_gin_ctxs_) {
                 cudaFree(d_gin_ctxs_);
@@ -351,9 +269,9 @@ void NCCLGINBackend::finalize() {
                 d_nccl_dev_wins_ = nullptr;
             }
             if (rank_ == 0)
-                std::cout << "[NCCL GIN Backend] Destroyed NCCL communicator" << std::endl;
+                printf("[NCCL GIN Backend] Destroyed NCCL communicator\n");
         } catch (const std::exception& e) {
-            std::cerr << "[NCCL GIN Backend] Error during finalization: " << e.what() << std::endl;
+            fprintf(stderr, "[NCCL GIN Backend] Error during finalization: %s\n", e.what());
         }
 
         initialized_ = false;
@@ -372,23 +290,20 @@ void NCCLGINBackend::barrier() {
     cudaStream_t stream = 0;
 
     // Perform AllReduce with device memory
-    ncclResult_t result = ncclAllReduce(d_barrier_var_,   // sendbuff (device memory)
-                                        d_barrier_var_,   // recvbuff (device memory, in-place)
-                                        1,                // count
-                                        ncclInt,          // datatype
-                                        ncclSum,          // operation
-                                        comms_multi_[0],  // communicator
-                                        stream            // CUDA stream
+    ncclResult_t result = ncclAllReduce(d_barrier_var_,  // sendbuff (device memory)
+                                        d_barrier_var_,  // recvbuff (device memory, in-place)
+                                        1,               // count
+                                        ncclInt,         // datatype
+                                        ncclSum,         // operation
+                                        nccl_comms_[0],  // communicator
+                                        stream           // CUDA stream
     );
     if (result != ncclSuccess) {
         throw std::runtime_error(std::string("NCCL barrier failed: ") + ncclGetErrorString(result));
     }
 
     // Wait for completion
-    cudaError_t cuda_err = cudaStreamSynchronize(stream);
-    if (cuda_err != cudaSuccess) {
-        throw std::runtime_error(std::string("cudaStreamSynchronize failed in barrier: ") + cudaGetErrorString(cuda_err));
-    }
+    CUDA_CHECK(cudaStreamSynchronize(stream));
 }
 
 void* NCCLGINBackend::alloc(size_t size, size_t alignment) {
@@ -415,13 +330,13 @@ void* NCCLGINBackend::alloc(size_t size, size_t alignment) {
     wins_nccl.reserve(num_comms_);
 
     for (int c = 0; c < num_comms_; ++c) {
-        //printf("[NCCL GIN Backend - Memory Alloc] Rank %d: Registering comm %d/%d\n", rank_, c, num_comms_);
-        // Register with ncclCommWindowRegister
-        ncclResult_t r = ncclCommWindowRegister(comms_multi_[c], ptr, size, dev_wins_multi_nccl_[c].data(), 0);
+        // printf("[NCCL GIN Backend - Memory Alloc] Rank %d: Registering comm %d/%d\n", rank_, c, num_comms_);
+        //  Register with ncclCommWindowRegister
+        ncclResult_t r = ncclCommWindowRegister(nccl_comms_[c], ptr, size, dev_wins_multi_nccl_[c].data(), 0);
         if (r != ncclSuccess) {
             // Best-effort rollback of registrations
             for (int j = 0; j < c; ++j) {
-                ncclCommWindowDeregister(comms_multi_[j], dev_wins_multi_nccl_[j][0]);
+                ncclCommWindowDeregister(nccl_comms_[j], dev_wins_multi_nccl_[j][0]);
             }
             ncclMemFree(ptr);
             throw std::runtime_error(std::string("Failed to register NCCL comm windows (multi): ") + ncclGetErrorString(r));
@@ -443,7 +358,7 @@ void* NCCLGINBackend::alloc(size_t size, size_t alignment) {
                 "[NCCL GIN Backend - Memory Alloc] Rank %d: NCCL window copy FAILED: %s (error %d)\n", rank_, cudaGetErrorString(e2), e2);
             fflush(stdout);
             for (int c = 0; c < num_comms_; ++c) {
-                ncclCommWindowDeregister(comms_multi_[c], dev_wins_multi_nccl_[c][0]);
+                ncclCommWindowDeregister(nccl_comms_[c], dev_wins_multi_nccl_[c][0]);
             }
             ncclMemFree(mem_handle_.ptr);
             mem_handle_ = {};
@@ -471,10 +386,10 @@ void NCCLGINBackend::free(void* ptr) {
     if (ptr != nullptr && ptr == mem_handle_.ptr) {
         // Deregister memory windows from all communicators
         for (int c = 0; c < num_comms_; ++c) {
-            ncclResult_t r = ncclCommWindowDeregister(comms_multi_[c], dev_wins_multi_nccl_[c][0]);
+            ncclResult_t r = ncclCommWindowDeregister(nccl_comms_[c], dev_wins_multi_nccl_[c][0]);
             if (r != ncclSuccess) {
-                std::cerr << "[NCCL GIN Backend] Warning: Failed to deregister NCCL comm windows (comm " << c
-                          << "): " << ncclGetErrorString(r) << std::endl;
+                fprintf(
+                    stderr, "[NCCL GIN Backend] Warning: Failed to deregister NCCL comm windows (comm %d): %s\n", c, ncclGetErrorString(r));
             }
         }
         dev_wins_multi_nccl_.clear();
@@ -482,7 +397,7 @@ void NCCLGINBackend::free(void* ptr) {
         // Free the memory
         ncclResult_t res2 = ncclMemFree(mem_handle_.ptr);
         if (res2 != ncclSuccess) {
-            std::cerr << "[NCCL GIN Backend] Warning: Failed to free NCCL memory: " << ncclGetErrorString(res2) << std::endl;
+            fprintf(stderr, "[NCCL GIN Backend] Warning: Failed to free NCCL memory: %s\n", ncclGetErrorString(res2));
         }
 
         // Reset the handle

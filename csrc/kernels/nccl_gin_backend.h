@@ -77,7 +77,7 @@ private:
     int comm_nranks_ = -1;       // Number of ranks in NCCL communicator
 
     // NCCL communicators for GIN support (always use vector, even for single comm)
-    std::vector<ncclComm_t> comms_multi_;
+    std::vector<ncclComm_t> nccl_comms_;
 
     NcclGinMemHandle mem_handle_;
     // Per-communicator registration (multi-communicator path)
@@ -91,7 +91,6 @@ private:
     int num_dispatch_counters_ = 0;  // currently unused
 
     // Multi-context tracking
-    int num_gin_ctxs_ = 1;
     int num_comms_ = 1;
     int signals_per_buffer_per_ctx_ = 0;  // number of signals per buffer for one context
 
