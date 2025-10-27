@@ -17,6 +17,8 @@
 #include "internode.cuh"
 #endif
 
+static void set_IB_device_list(std::vector<std::string> ib_dev_name_list);
+
 class HybridEPBuffer {
 public:
   HybridEPBuffer(pybind11::object process_group, BufferConfig config, int local_rank, int node_rank, int group_size, std::string base_path);

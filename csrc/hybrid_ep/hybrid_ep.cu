@@ -2,6 +2,16 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved
 #include "hybrid_ep.cuh"
 
+void set_IB_device_list(std::vector<std::string> ib_dev_name_list) {
+#ifdef HYBRID_EP_BUILD_MULTINODE_ENABLE
+  assert(ib_dev_name_list.size() <= MAX_NUM_OF_RANKS_PER_NODE);
+  for (int i = 0; i < ib_dev_name_list.size(); ++i) {
+    IBV_DEV_NAME_LIST[i] = ib_dev_name_list[i].c_str();
+  }
+#endif
+}
+
+
 HybridEPBuffer::HybridEPBuffer(
   pybind11::object process_group, 
   BufferConfig config, 
@@ -107,6 +117,12 @@ void HybridEPBuffer::release_buffer() {
   }
   delete[] combine_buffers.expert_input_token_all_ranks;
   delete[] combine_buffers.expert_input_prob_all_ranks;
+
+#ifdef HYBRID_EP_BUILD_MULTINODE_ENABLE
+  if(buffer_config.num_of_nodes > 1) {
+    rdma_coordinator.destory();
+  }
+#endif
 }
 
 void HybridEPBuffer::allocate_buffer_for_preprocessing() {

@@ -111,7 +111,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
              py::arg("scaling_factor") = c10::nullopt,
              py::arg("sparse_to_dense_map"), py::arg("rdma_to_attn_map"),
              py::arg("attn_to_rdma_map"), py::arg("num_dispatched_tokens_tensor"),
-             py::arg("num_dispatched_tokens") = -1, py::arg("num_of_tokens_per_rank"),
+             py::arg("num_dispatched_tokens") = std::nullopt, py::arg("num_of_tokens_per_rank"),
              py::arg("with_probs"))
         .def("combine", &HybridEPBuffer::combine, py::kw_only(), 
              py::arg("config"), py::arg("hidden"),
@@ -125,16 +125,18 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
              py::arg("scaling_factor") = c10::nullopt,
              py::arg("sparse_to_dense_map"), py::arg("rdma_to_attn_map"),
              py::arg("attn_to_rdma_map"), py::arg("num_dispatched_tokens_tensor"),
-             py::arg("local_expert_routing_map"), py::arg("row_id_map"), py::arg("num_dispatched_tokens") = -1,
-             py::arg("num_permuted_tokens") = -1,
-             py::arg("num_of_tokens_per_rank"), py::arg("pad_multiple") = 0, py::arg("use_host_meta") = false,
+             py::arg("local_expert_routing_map"), py::arg("row_id_map"), py::arg("num_dispatched_tokens") = std::nullopt,
+             py::arg("num_permuted_tokens") = std::nullopt,
+             py::arg("num_of_tokens_per_rank"), py::arg("pad_multiple") = std::nullopt, py::arg("use_host_meta") = false,
              py::arg("with_probs") = false)
         .def("combine_with_unpermute", &HybridEPBuffer::combine_with_unpermute, py::kw_only(), 
              py::arg("config"), py::arg("hidden"),
              py::arg("probs") = c10::nullopt,
              py::arg("sparse_to_dense_map"), py::arg("rdma_to_attn_map"),
              py::arg("attn_to_rdma_map"), py::arg("num_dispatched_tokens_tensor"),
-             py::arg("row_id_map"), py::arg("num_dispatched_tokens") = -1,
-             py::arg("num_of_tokens_per_rank"), py::arg("pad_multiple") = 0,
+             py::arg("row_id_map"), py::arg("num_dispatched_tokens") = std::nullopt,
+             py::arg("num_of_tokens_per_rank"), py::arg("pad_multiple") = std::nullopt,
              py::arg("with_probs") = false);    
+    
+    pybind11::def("set_IB_device_list", &set_IB_device_list, py::arg("ib_dev_name_list"));
   }

@@ -49,8 +49,26 @@ Executor::metadata_preprocess_core(
 }
 
 void Executor::dispatch_preprocess(HybridEpConfigInstance config, DispatchBuffers& dispatch_buffers, DispatchArgs& args) {
-    // Empty now, will be filled with D2D in the inter-node case
     nvtxRangePushA("dispatch_preprocess in hybrid-ep");
+    if(config.num_of_nodes > 1) {
+#ifdef HYBRID_EP_BUILD_MULTINODE_ENABLE
+        auto sizeof_token_data_type = get_token_data_type_size(args.hidden.dtype());
+        CUDA_CHECK(cudaMemcpyAsync(dispatch_buffers.attn_input_token, args.hidden.data_ptr(), args.hidden.numel() * sizeof_token_data_type, cudaMemcpyDeviceToDevice, args.stream));
+        if(config.forward_dispatch_api) {
+            CUDA_CHECK(cudaMemcpyAsync(dispatch_buffers.attn_input_prob, args.probs.data_ptr(), args.probs.numel() * sizeof(float), cudaMemcpyDeviceToDevice, args.stream));
+        }
+        if(config.token_data_type == TOKEN_DATA_TYPE::UINT8) {
+            CUDA_CHECK(cudaMemcpyAsync(dispatch_buffers.attn_input_token_scaling_factor, args.scaling_factor.data_ptr(), args.scaling_factor.numel() * sizeof(float), cudaMemcpyDeviceToDevice, args.stream));
+        }
+#else
+        throw std::runtime_error("Multi-node support is not enabled in this build.");
+#endif
+    } else {
+        // Set the tensor pointers to the dispatch buffers.
+        dispatch_buffers.attn_input_token = args.hidden.data_ptr();
+        dispatch_buffers.attn_input_prob = (config.forward_dispatch_api) ? args.probs.data_ptr() : nullptr;
+        dispatch_buffers.attn_input_token_scaling_factor = (config.token_data_type == TOKEN_DATA_TYPE::UINT8) ? args.scaling_factor.data_ptr() : nullptr;
+    }
     nvtxRangePop();  // End of dispatch_preprocess nvtx range
 }
 
@@ -63,9 +81,9 @@ void Executor::dispatch_core(HybridEpConfigInstance config, DispatchBuffers& dis
 
     hybrid_ep::dispatch_kernel_param_t<DType> param;
     // Setup input pointers
-    param.attn_input_token = reinterpret_cast<DType*>(args.hidden.data_ptr());
-    param.attn_input_prob = (config.forward_dispatch_api) ? reinterpret_cast<float*>(args.probs.data_ptr()) : nullptr;
-    param.attn_input_token_scaling_factor = (config.token_data_type == TOKEN_DATA_TYPE::UINT8) ? reinterpret_cast<float*>(args.scaling_factor.data_ptr()) : nullptr;
+    param.attn_input_token = dispatch_buffers.expert_output_token;
+    param.attn_input_prob = dispatch_buffers.expert_output_prob;
+    param.attn_input_token_scaling_factor = dispatch_buffers.expert_output_scaling_factor;
     
     // Setup output pointers
     for (int i = 0; i < config.num_of_ranks_per_node; i++) {
@@ -256,6 +274,16 @@ void Executor::combine_preprocess(HybridEpConfigInstance config, CombineBuffers&
                                                 cudaMemcpyDeviceToDevice, args.stream));
         }
     }
+
+    // Set the output tensor pointers to the combine buffers.
+    if(config.num_of_nodes > 1) {
+#ifndef HYBRID_EP_BUILD_MULTINODE_ENABLE
+        throw std::runtime_error("Multi-node support is not enabled in this build.");
+#endif
+    } else {
+        combine_buffers.attn_output_token = args.combined_tokens;
+        combine_buffers.attn_output_prob = (config.backward_combine_api) ? args.combined_probs : nullptr;
+    }
     nvtxRangePop();  // End of combine_preprocess nvtx range
 }
 
@@ -272,8 +300,8 @@ void Executor::combine_core(HybridEpConfigInstance config, CombineBuffers& combi
     }
 
     // Setup output pointers
-    param.attn_output_token = args.combined_tokens;
-    param.attn_output_prob = (config.backward_combine_api) ? args.combined_probs : nullptr;
+    param.attn_output_token = combine_buffers.attn_output_token;
+    param.attn_output_prob = combine_buffers.attn_output_prob;
 
     // Setup local buffer pointers
     param.rdma_intra_node_red_token =
@@ -309,6 +337,16 @@ void Executor::combine_core(HybridEpConfigInstance config, CombineBuffers& combi
 
 void Executor::combine_postprocess(HybridEpConfigInstance config, CombineBuffers& combine_buffers, CombineArgs& args) {
     nvtxRangePushA("combine_postprocess in hybrid-ep");
-    // TODO: Implement the combine postprocessing
+    if(config.num_of_nodes > 1) {
+    #ifdef HYBRID_EP_BUILD_MULTINODE_ENABLE
+        auto size_of_token_data_type = get_token_data_type_size(args.hidden.dtype());
+        CUDA_CHECK(cudaMemcpyAsync(args.combined_tokens, combine_buffers.attn_output_token, args.num_of_tokens_per_rank * config.hidden_dim * size_of_token_data_type, cudaMemcpyDeviceToHost, args.stream));
+        if(config.backward_combine_api) {
+            CUDA_CHECK(cudaMemcpyAsync(args.combined_probs, combine_buffers.attn_output_prob, args.num_of_tokens_per_rank * config.num_of_experts_per_rank * config.num_of_ranks_per_node * config.num_of_nodes * sizeof(float), cudaMemcpyDeviceToHost, args.stream));
+        }
+    #else
+        throw std::runtime_error("Multi-node support is not enabled in this build.");
+        #endif
+    } 
     nvtxRangePop();  // End of combine_postprocess nvtx range
 }
