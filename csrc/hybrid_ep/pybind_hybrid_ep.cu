@@ -44,7 +44,11 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
                  " num_of_ranks_per_node=" + std::to_string(config.num_of_ranks_per_node) +
                  " num_of_nodes=" + std::to_string(config.num_of_nodes) +
                  " token_data_type=" + type_to_string(config.token_data_type) +
-                 " num_of_blocks_preprocessing_api=" + std::to_string(config.num_of_blocks_preprocessing_api) +
+                 " num_of_blocks_preprocessing_api=" + std::to_string(config.num_of_blocks_preprocessing_api) + 
+                 " num_of_blocks_dispatch_api=" + std::to_string(config.num_of_blocks_dispatch_api) + 
+                 " num_of_blocks_combine_api=" + std::to_string(config.num_of_blocks_combine_api) + 
+                 " num_of_tokens_per_chunk_dispatch_api=" + std::to_string(config.num_of_tokens_per_chunk_dispatch_api) + 
+                 " num_of_tokens_per_chunk_combine_api=" + std::to_string(config.num_of_tokens_per_chunk_combine_api) + 
                  ">";
         });
 

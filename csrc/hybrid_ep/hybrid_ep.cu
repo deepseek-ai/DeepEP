@@ -31,7 +31,11 @@ HybridEPBuffer::HybridEPBuffer(
       assert(false); // inter-node communication is not supported.
 #endif
     }
-      
+#ifdef HYBRID_EP_BUILD_MULTINODE_ENABLE
+    printf("build multinode enable\n");
+#else
+    printf("build multinode disable\n");
+#endif
     remote_allocator.init(/*enable_fabric = */ true);
     allocate_buffer();
 }

@@ -64,6 +64,7 @@ def get_extension_hybrid_ep_cpp():
     ]
     library_dirs = []
     libraries = ["cuda", "nvtx3interop"]
+    extra_objects = []
 
     # Add dependency for jit
     compile_args["nvcc"].append(f'-DSM_ARCH="{os.environ["TORCH_CUDA_ARCH_LIST"]}"')
@@ -110,6 +111,24 @@ def get_extension_hybrid_ep_cpp():
             os.path.join(current_dir, "deep_ep/backend/nccl/obj"),
             dirs_exist_ok=True
         )
+        # Set the extra objects
+        DOCA_OBJ_PATH = os.path.join(current_dir, "deep_ep/backend/nccl/obj")
+        extra_objects = [
+            os.path.join(DOCA_OBJ_PATH, "doca_gpunetio.o"),
+            os.path.join(DOCA_OBJ_PATH, "doca_gpunetio_high_level.o"),
+            os.path.join(DOCA_OBJ_PATH, "doca_verbs_cuda_wrapper.o"),
+            os.path.join(DOCA_OBJ_PATH, "doca_verbs_device_attr.o"),
+            os.path.join(DOCA_OBJ_PATH, "doca_verbs_ibv_wrapper.o"),
+            os.path.join(DOCA_OBJ_PATH, "doca_verbs_mlx5dv_wrapper.o"),
+            os.path.join(DOCA_OBJ_PATH, "doca_verbs_qp.o"),
+            os.path.join(DOCA_OBJ_PATH, "doca_verbs_cq.o"),
+            os.path.join(DOCA_OBJ_PATH, "doca_verbs_srq.o"),
+            os.path.join(DOCA_OBJ_PATH, "doca_verbs_uar.o"),
+            os.path.join(DOCA_OBJ_PATH, "doca_verbs_umem.o"),
+            os.path.join(DOCA_OBJ_PATH, "doca_gpunetio_gdrcopy.o"),
+            os.path.join(DOCA_OBJ_PATH, "doca_gpunetio_log.o"),
+        ]
+
 
     print(f'Build summary:')
     print(f' > Sources: {sources}')
@@ -117,6 +136,7 @@ def get_extension_hybrid_ep_cpp():
     print(f' > Libraries: {libraries}')
     print(f' > Library dirs: {library_dirs}')
     print(f' > Compilation flags: {compile_args}')
+    print(f' > Extra objects: {extra_objects}')
     print(f' > Arch list: {os.environ["TORCH_CUDA_ARCH_LIST"]}')
     print()
 
@@ -127,6 +147,7 @@ def get_extension_hybrid_ep_cpp():
         libraries=libraries,
         library_dirs=library_dirs,
         extra_compile_args=compile_args,
+        extra_objects=extra_objects,
     )
 
     return extension_hybrid_ep_cpp
