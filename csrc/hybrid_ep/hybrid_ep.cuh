@@ -17,7 +17,7 @@
 #include "internode.cuh"
 #endif
 
-static void set_IB_device_list(std::vector<std::string> ib_dev_name_list);
+void set_IB_device_list(std::vector<std::string> ib_dev_name_list);
 
 class HybridEPBuffer {
 public:

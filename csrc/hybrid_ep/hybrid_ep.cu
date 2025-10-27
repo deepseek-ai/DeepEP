@@ -387,7 +387,7 @@ void HybridEPBuffer::open_handles_from_other_ranks(
 
 bool HybridEPBuffer::update_buffer(HybridEpConfigInstance config) {
   // If new config requires bigger buffer, we will release the old buffer and allocate a new one.
-  bool need_reallocate = true;
+  bool need_reallocate = false;
   
   need_reallocate |= grow_to(buffer_config.hidden_dim,             config.hidden_dim);
   need_reallocate |= grow_to(buffer_config.num_of_experts_per_rank,config.num_of_experts_per_rank);

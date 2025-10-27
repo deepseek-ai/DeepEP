@@ -26,18 +26,6 @@ static ibv_device *ctx_find_dev(const char *ib_devname) {
   return ib_dev;
 }
 
-static const char *link_layer_str(int8_t link_layer) {
-  switch (link_layer) {
-  case IBV_LINK_LAYER_UNSPECIFIED:
-  case IBV_LINK_LAYER_INFINIBAND:
-    return "IB";
-  case IBV_LINK_LAYER_ETHERNET:
-    return "Ethernet";
-  default:
-    return "Unknown";
-  }
-}
-
 // Functions related to initialization of gverbs_context.
 static int get_gpu_handler(struct doca_gpu *handler,
                            struct ibv_context *ib_context, int local_rank) {
@@ -251,7 +239,6 @@ static int setup_qp_attr_and_set_qp(struct gverbs_context *g_ctx,
                                     struct doca_verbs_qp_attr *qp_attr,
                                     int num_of_blocks, int num_of_nodes,
                                     int node_rank, uint32_t qp_cnt) {
-  int status = 0;
   int attr_mask = DOCA_VERBS_QP_ATTR_NEXT_STATE |
                   DOCA_VERBS_QP_ATTR_ALLOW_REMOTE_WRITE |
                   DOCA_VERBS_QP_ATTR_ALLOW_REMOTE_READ |
@@ -273,13 +260,6 @@ static int setup_qp_attr_and_set_qp(struct gverbs_context *g_ctx,
   return 0;
 }
 
-void set_IB_device_list(std::vector<std::string> ib_dev_name_list) {
-  assert(ib_dev_name_list.size() <= MAX_NUM_OF_RANKS_PER_NODE);
-  for (int i = 0; i < ib_dev_name_list.size(); ++i) {
-    IBV_DEV_NAME_LIST[i] = ib_dev_name_list[i].c_str();
-  }
-}
-
 RDMACoordinator::RDMACoordinator(
   pybind11::object process_group,
   int node_rank,
@@ -289,7 +269,7 @@ RDMACoordinator::RDMACoordinator(
 ) : process_group(process_group), node_rank(node_rank), local_rank(local_rank), buffer_config(config), allocator(allocator){
     assert(buffer_config.num_of_nodes > 1);
     // Get name of ibv device.
-    char *ib_devname = IBV_DEV_NAME_LIST[local_rank];
+    const char *ib_devname = IBV_DEV_NAME_LIST[local_rank].c_str();
     // Find ib device and get ibv_context.
     struct ibv_device *ib_dev = ctx_find_dev(ib_devname);
 
@@ -329,8 +309,8 @@ void RDMACoordinator::allocate_dispatch_rdma_buffers(DispatchBuffers &dispatch_b
                                         * buffer_config.num_of_ranks_per_node);
   auto rdma_inter_node_group_scaling_factor_elts = buffer_config.max_num_of_tokens_per_rank * 
                                                     (buffer_config.num_of_nodes - 1) * (buffer_config.hidden_dim / 128);
-  auto rdma_inter_node_group_flags_elts = (buffer_config.max_num_of_tokens_per_rank /
-                                           buffer_config.num_of_tokens_per_chunk_dispatch_api) *
+  auto rdma_inter_node_group_flags_elts = ((buffer_config.max_num_of_tokens_per_rank - 1) /
+                                           buffer_config.num_of_tokens_per_chunk_dispatch_api + 1) *
                                           (buffer_config.num_of_nodes - 1);
                                           
   // Allocate RDMA buffers
@@ -362,19 +342,19 @@ void RDMACoordinator::allocate_dispatch_rdma_buffers(DispatchBuffers &dispatch_b
   // Allocate memory region
   attn_input_token_mr = ibv_reg_mr(ib_pd, dispatch_buffers.attn_input_token,
                         attn_input_token_elts * sizeof_token_data_type, mr_access_flag);
-  rdma_inter_node_group_token_mr = ibv_reg_mr(ib_pd, dispatch_buffers.rdma_inter_node_group_token,
+  dispatch_rdma_inter_node_group_token_mr = ibv_reg_mr(ib_pd, dispatch_buffers.rdma_inter_node_group_token,
                         rdma_inter_node_group_token_elts * sizeof_token_data_type, mr_access_flag);
   attn_input_flags_mr = ibv_reg_mr(ib_pd, dispatch_buffers.attn_input_flags,
                         rdma_inter_node_group_flags_elts * sizeof(uint64_t), mr_access_flag);
-  rdma_inter_node_group_flags_mr = ibv_reg_mr(ib_pd, dispatch_buffers.rdma_inter_node_group_flags,
+  dispatch_rdma_inter_node_group_flags_mr = ibv_reg_mr(ib_pd, dispatch_buffers.rdma_inter_node_group_flags,
                         rdma_inter_node_group_flags_elts * sizeof(uint64_t), mr_access_flag);
   attn_input_prob_mr = ibv_reg_mr(ib_pd, dispatch_buffers.attn_input_prob,
                         attn_input_prob_elts * sizeof(float), mr_access_flag);
-  rdma_inter_node_group_prob_mr = ibv_reg_mr(ib_pd, dispatch_buffers.rdma_inter_node_group_prob,
+  dispatch_rdma_inter_node_group_prob_mr = ibv_reg_mr(ib_pd, dispatch_buffers.rdma_inter_node_group_prob,
                         rdma_inter_node_group_prob_elts * sizeof(float), mr_access_flag);
   attn_input_token_scaling_factor_mr = ibv_reg_mr(ib_pd, dispatch_buffers.attn_input_scaling_factor,
                         attn_input_token_scaling_factor_elts * sizeof(float), mr_access_flag);
-  rdma_inter_node_group_scaling_factor_mr = ibv_reg_mr(ib_pd, dispatch_buffers.rdma_inter_node_group_scaling_factor,
+  dispatch_rdma_inter_node_group_scaling_factor_mr = ibv_reg_mr(ib_pd, dispatch_buffers.rdma_inter_node_group_scaling_factor,
                         rdma_inter_node_group_scaling_factor_elts * sizeof(float), mr_access_flag);
 
   // Set dispatch queue pair attributes.
@@ -412,17 +392,17 @@ void RDMACoordinator::allocate_dispatch_rdma_buffers(DispatchBuffers &dispatch_b
       curr_info->gid_index = GID_INDEX;
       memset(&curr_info->gid, 0, sizeof(curr_info->gid));;
       memcpy(curr_info->gid.raw, dispatch_gverbs_ctx.gid.raw, 16);
-      curr_info->token_rkey = rdma_inter_node_group_token_mr->rkey;
-      curr_info->token_vaddr = (uintptr_t)((TOKEN_DATA_TYPE *)rdma_inter_node_group_token_mr->addr +
+      curr_info->token_rkey = dispatch_rdma_inter_node_group_token_mr->rkey;
+      curr_info->token_vaddr = (uintptr_t)((TOKEN_DATA_TYPE *)dispatch_rdma_inter_node_group_token_mr->addr +
                                             peer_idx * token_stride);
-      curr_info->flag_rkey = rdma_inter_node_group_flags_mr->rkey;
-      curr_info->flag_vaddr = (uintptr_t)((uint64_t *)rdma_inter_node_group_flags_mr->addr +
+      curr_info->flag_rkey = dispatch_rdma_inter_node_group_flags_mr->rkey;
+      curr_info->flag_vaddr = (uintptr_t)((uint64_t *)dispatch_rdma_inter_node_group_flags_mr->addr +
                                           peer_idx * flag_stride);
-      curr_info->prob_rkey = rdma_inter_node_group_prob_mr->rkey;
-      curr_info->prob_vaddr = (uintptr_t)((float *)rdma_inter_node_group_prob_mr->addr +
+      curr_info->prob_rkey = dispatch_rdma_inter_node_group_prob_mr->rkey;
+      curr_info->prob_vaddr = (uintptr_t)((float *)dispatch_rdma_inter_node_group_prob_mr->addr +
                                           peer_idx * prob_stride);
-      curr_info->scaling_factor_rkey = rdma_inter_node_group_scaling_factor_mr->rkey;
-      curr_info->scaling_factor_vaddr = (uintptr_t)((float *)rdma_inter_node_group_scaling_factor_mr->addr +
+      curr_info->scaling_factor_rkey = dispatch_rdma_inter_node_group_scaling_factor_mr->rkey;
+      curr_info->scaling_factor_vaddr = (uintptr_t)((float *)dispatch_rdma_inter_node_group_scaling_factor_mr->addr +
                                                     peer_idx * scaling_factor_stride);
     }
   }
@@ -439,15 +419,15 @@ void RDMACoordinator::allocate_dispatch_rdma_buffers(DispatchBuffers &dispatch_b
   CUDA_CHECK(cudaMalloc(&dispatch_gverbs_ctx.d_qps_gpu, num_of_dispatch_qps * sizeof(doca_gpu_dev_verbs_qp*)));
   CUDA_CHECK(cudaMemcpy(dispatch_gverbs_ctx.d_qps_gpu, h_qps_gpu, num_of_dispatch_qps * sizeof(doca_gpu_dev_verbs_qp*), cudaMemcpyHostToDevice));
   // Move Memory regions to GPU.
-  dispatch_mr_info_h = (hybrid_ep::dispatch_memory_region_info_t *)calloc(sizeof(hybrid_ep::dispatch_memory_region_info_t), num_of_dispatch_qps);
-  CUDA_CHECK(cudaMalloc((void**)&dispatch_mr_info_d, num_of_dispatch_qps * sizeof(hybrid_ep::dispatch_memory_region_info_t)));
+  dispatch_mr_info_h = (dispatch_memory_region_info_t *)calloc(sizeof(dispatch_memory_region_info_t), num_of_dispatch_qps);
+  CUDA_CHECK(cudaMalloc((void**)&dispatch_mr_info_d, num_of_dispatch_qps * sizeof(dispatch_memory_region_info_t)));
   for (int qp_idx = 0; qp_idx < buffer_config.num_of_blocks_dispatch_api; ++qp_idx) {
     for (int peer_idx = 0; peer_idx < buffer_config.num_of_nodes - 1; ++peer_idx) {
       int actual_node_idx = peer_idx < node_rank ? peer_idx : (peer_idx + 1);
       int actual_idx_in_node = peer_idx < node_rank ? (node_rank - 1) : node_rank;
       int my_idx = qp_idx * (buffer_config.num_of_nodes - 1) + peer_idx;
       int rem_idx = actual_node_idx * num_of_dispatch_qps + qp_idx * (buffer_config.num_of_nodes - 1) + actual_idx_in_node;
-      struct hybrid_ep::dispatch_memory_region_info_t *data = dispatch_mr_info_h + my_idx;
+      struct dispatch_memory_region_info_t *data = dispatch_mr_info_h + my_idx;
       data->token_laddr = (uint64_t)attn_input_token_mr->addr;
       data->token_lkey = htobe32(attn_input_token_mr->lkey);
       data->token_raddr = dispatch_remote_info_vec[rem_idx].token_vaddr;
@@ -462,7 +442,7 @@ void RDMACoordinator::allocate_dispatch_rdma_buffers(DispatchBuffers &dispatch_b
       data->prob_rkey = htobe32(dispatch_remote_info_vec[rem_idx].prob_rkey);
     }
   }
-  CUDA_CHECK(cudaMemcpy(dispatch_mr_info_d, dispatch_mr_info_h, num_of_dispatch_qps * sizeof(hybrid_ep::dispatch_memory_region_info_t), cudaMemcpyHostToDevice));
+  CUDA_CHECK(cudaMemcpy(dispatch_mr_info_d, dispatch_mr_info_h, num_of_dispatch_qps * sizeof(dispatch_memory_region_info_t), cudaMemcpyHostToDevice));
 
   // Free temporary resources.
   free(my_dispatch_info);
@@ -479,8 +459,8 @@ void RDMACoordinator::allocate_combine_rdma_buffers(CombineBuffers &combine_buff
                                           (buffer_config.num_of_nodes - 1) * buffer_config.hidden_dim;
   auto rdma_inter_node_group_prob_elts = buffer_config.max_num_of_tokens_per_rank * (buffer_config.num_of_nodes - 1) *
                                          (buffer_config.num_of_experts_per_rank * buffer_config.num_of_ranks_per_node);
-  auto rdma_inter_node_group_flags_elts = (buffer_config.max_num_of_tokens_per_rank /
-                                           buffer_config.num_of_tokens_per_chunk_combine_api) *
+  auto rdma_inter_node_group_flags_elts = ((buffer_config.max_num_of_tokens_per_rank - 1) /
+                                           buffer_config.num_of_tokens_per_chunk_combine_api + 1) *
                                           (buffer_config.num_of_nodes - 1);
                                     
   // Allocate RDMA buffers
@@ -507,15 +487,15 @@ void RDMACoordinator::allocate_combine_rdma_buffers(CombineBuffers &combine_buff
 
   rdma_intra_node_red_token_mr = ibv_reg_mr(ib_pd, combine_buffers.rdma_intra_node_red_token,
                         rdma_intra_node_red_token_elts * sizeof(uint16_t), mr_access_flag);
-  rdma_inter_node_group_token_mr = ibv_reg_mr(ib_pd, combine_buffers.rdma_inter_node_group_token,
+  combine_rdma_inter_node_group_token_mr = ibv_reg_mr(ib_pd, combine_buffers.rdma_inter_node_group_token,
                         rdma_inter_node_group_token_elts * sizeof(uint16_t), mr_access_flag);
   attn_output_flags_mr = ibv_reg_mr(ib_pd, combine_buffers.attn_output_flags,
                         rdma_inter_node_group_flags_elts * sizeof(uint64_t), mr_access_flag);
-  rdma_inter_node_group_flags_mr = ibv_reg_mr(ib_pd, combine_buffers.rdma_inter_node_group_flags,
+  combine_rdma_inter_node_group_flags_mr = ibv_reg_mr(ib_pd, combine_buffers.rdma_inter_node_group_flags,
                         rdma_inter_node_group_flags_elts * sizeof(uint64_t), mr_access_flag);
   rdma_intra_node_red_prob_mr = ibv_reg_mr(ib_pd, combine_buffers.rdma_intra_node_red_prob,
                         rdma_intra_node_red_prob_elts * sizeof(float), mr_access_flag);
-  rdma_inter_node_group_prob_mr = ibv_reg_mr(ib_pd, combine_buffers.rdma_inter_node_group_prob,
+  combine_rdma_inter_node_group_prob_mr = ibv_reg_mr(ib_pd, combine_buffers.rdma_inter_node_group_prob,
                         rdma_inter_node_group_prob_elts * sizeof(float), mr_access_flag);
 
   // Set combine queue pair attributes.
@@ -537,6 +517,9 @@ void RDMACoordinator::allocate_combine_rdma_buffers(CombineBuffers &combine_buff
   // Construct combine remote_info
   combine_remote_info_vec = static_cast<remote_info *>(calloc(buffer_config.num_of_nodes * num_of_combine_qps, sizeof(remote_info)));
   remote_info *my_combine_info = static_cast<remote_info *>(calloc(num_of_combine_qps, sizeof(remote_info)));
+  int token_stride = buffer_config.max_num_of_tokens_per_rank * buffer_config.hidden_dim;
+  int flag_stride = (buffer_config.max_num_of_tokens_per_rank - 1) / buffer_config.num_of_tokens_per_chunk_combine_api + 1;
+  int prob_stride = buffer_config.max_num_of_tokens_per_rank * buffer_config.num_of_experts_per_rank * buffer_config.num_of_ranks_per_node;
   // For each queue pair to the same remote. 
   for (int qp_idx = 0; qp_idx < buffer_config.num_of_blocks_combine_api; ++qp_idx) {
     // For each remote.
@@ -561,6 +544,7 @@ void RDMACoordinator::allocate_combine_rdma_buffers(CombineBuffers &combine_buff
     }
   }
   exchange_remote_rmda_info(combine_remote_info_vec, my_combine_info, num_of_combine_qps);
+
   // Init queue pairs.
   setup_qp_attr_and_set_qp(&combine_gverbs_ctx, ib_context, combine_remote_info_vec, combine_gverbs_ctx.qp_attr,
     buffer_config.num_of_blocks_combine_api, buffer_config.num_of_nodes, node_rank, num_of_combine_qps);
@@ -572,21 +556,21 @@ void RDMACoordinator::allocate_combine_rdma_buffers(CombineBuffers &combine_buff
   CUDA_CHECK(cudaMalloc(&combine_gverbs_ctx.d_qps_gpu, num_of_combine_qps * sizeof(doca_gpu_dev_verbs_qp*)));
   CUDA_CHECK(cudaMemcpy(combine_gverbs_ctx.d_qps_gpu, h_qps_gpu, num_of_combine_qps * sizeof(doca_gpu_dev_verbs_qp*), cudaMemcpyHostToDevice));
   // Move Memory regions to GPU.
-  combine_mr_info_h = (hybrid_ep::combine_memory_region_info_t *)calloc(sizeof(hybrid_ep::combine_memory_region_info_t), num_of_combine_qps);
-  CUDA_CHECK(cudaMalloc((void**)&combine_mr_info_d, num_of_combine_qps * sizeof(hybrid_ep::combine_memory_region_info_t)));
+  combine_mr_info_h = (combine_memory_region_info_t *)calloc(sizeof(combine_memory_region_info_t), num_of_combine_qps);
+  CUDA_CHECK(cudaMalloc((void**)&combine_mr_info_d, num_of_combine_qps * sizeof(combine_memory_region_info_t)));
   for (int qp_idx = 0; qp_idx < buffer_config.num_of_blocks_combine_api; ++qp_idx) {
     for (int peer_idx = 0; peer_idx < buffer_config.num_of_nodes - 1; ++peer_idx) {
       int actual_node_idx = peer_idx < node_rank ? peer_idx : (peer_idx + 1);
       int actual_idx_in_node = peer_idx < node_rank ? (node_rank - 1) : node_rank;
       int my_idx = qp_idx * (buffer_config.num_of_nodes - 1) + peer_idx;
       int rem_idx = actual_node_idx * num_of_combine_qps + qp_idx * (buffer_config.num_of_nodes - 1) + actual_idx_in_node;
-      struct hybrid_ep::combine_memory_region_info_t *data = combine_mr_info_h + my_idx;
+      struct combine_memory_region_info_t *data = combine_mr_info_h + my_idx;
       data->token_laddr = (uint64_t)((uint16_t *)rdma_intra_node_red_token_mr->addr);
       data->token_lkey = htobe32(rdma_intra_node_red_token_mr->lkey);
       data->token_raddr = combine_remote_info_vec[rem_idx].token_vaddr;
       data->token_rkey = htobe32(combine_remote_info_vec[rem_idx].token_rkey);
-      data->flag_laddr = (uint64_t)((uint64_t *)combine_attn_input_flags_mr->addr + peer_idx * flag_stride);
-      data->flag_lkey = htobe32(combine_attn_input_flags_mr->lkey);
+      data->flag_laddr = (uint64_t)((uint64_t *)attn_output_flags_mr->addr + peer_idx * flag_stride);
+      data->flag_lkey = htobe32(attn_output_flags_mr->lkey);
       data->flag_raddr = combine_remote_info_vec[rem_idx].flag_vaddr;
       data->flag_rkey = htobe32(combine_remote_info_vec[rem_idx].flag_rkey);
       data->prob_laddr = (uint64_t)rdma_intra_node_red_prob_mr->addr;
@@ -595,7 +579,7 @@ void RDMACoordinator::allocate_combine_rdma_buffers(CombineBuffers &combine_buff
       data->prob_rkey = htobe32(combine_remote_info_vec[rem_idx].prob_rkey);
     }
   }
-  CUDA_CHECK(cudaMemcpy(combine_mr_info_d, combine_mr_info_h, num_of_combine_qps * sizeof(hybrid_ep::combine_memory_region_info_t), cudaMemcpyHostToDevice));
+  CUDA_CHECK(cudaMemcpy(combine_mr_info_d, combine_mr_info_h, num_of_combine_qps * sizeof(combine_memory_region_info_t), cudaMemcpyHostToDevice));
 
   // Free temporary resources.
   free(my_combine_info);
@@ -607,19 +591,19 @@ void RDMACoordinator::destory() {
 
   // Close memory regions
   ibv_dereg_mr(attn_input_token_mr);
-  ibv_dereg_mr(rdma_inter_node_group_token_mr);
+  ibv_dereg_mr(dispatch_rdma_inter_node_group_token_mr);
   ibv_dereg_mr(attn_input_flags_mr);
-  ibv_dereg_mr(rdma_inter_node_group_flags_mr);
+  ibv_dereg_mr(dispatch_rdma_inter_node_group_flags_mr);
   ibv_dereg_mr(attn_input_prob_mr);
-  ibv_dereg_mr(rdma_inter_node_group_prob_mr);
+  ibv_dereg_mr(dispatch_rdma_inter_node_group_prob_mr);
   ibv_dereg_mr(attn_input_token_scaling_factor_mr);
-  ibv_dereg_mr(rdma_inter_node_group_scaling_factor_mr);
+  ibv_dereg_mr(dispatch_rdma_inter_node_group_scaling_factor_mr);
   ibv_dereg_mr(rdma_intra_node_red_token_mr);
-  ibv_dereg_mr(rdma_inter_node_group_token_mr);
+  ibv_dereg_mr(combine_rdma_inter_node_group_token_mr);
   ibv_dereg_mr(rdma_intra_node_red_prob_mr);
-  ibv_dereg_mr(rdma_inter_node_group_prob_mr);
+  ibv_dereg_mr(combine_rdma_inter_node_group_prob_mr);
   ibv_dereg_mr(attn_output_flags_mr);
-  ibv_dereg_mr(rdma_inter_node_group_flags_mr);
+  ibv_dereg_mr(combine_rdma_inter_node_group_flags_mr);
 
   // Free misc resources.
   free(dispatch_remote_info_vec);
@@ -658,7 +642,9 @@ void RDMACoordinator::exchange_remote_rmda_info(remote_info* dst, remote_info *s
   try {
     auto torch_distributed = py::module_::import("torch.distributed");
 
-    torch::Tensor buffer = torch::empty({num_of_qps * sizeof(remote_info)}, torch::kInt8, at::device(at::kCUDA));
+    auto num_bytes = static_cast<int64_t>(num_of_qps) *
+                 static_cast<int64_t>(sizeof(remote_info));
+    torch::Tensor buffer = torch::empty({num_bytes}, at::device(at::kCUDA).dtype(at::kByte));
     CUDA_CHECK(cudaMemcpy(buffer.data_ptr<int8_t>(), reinterpret_cast<int8_t *>(src), num_of_qps * sizeof(remote_info), cudaMemcpyHostToDevice));
     
     // Get world size from process group

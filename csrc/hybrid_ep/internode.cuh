@@ -52,7 +52,7 @@ constexpr uint8_t SL = 0;
 constexpr uint8_t TRAFFIC_CLASS = 0;
 constexpr enum memory_type MEMORY_TYPE = MEMORY_CUDA;
 // Ibv device list need to be filled by hand currently.
-static char *IBV_DEV_NAME_LIST[MAX_NUM_OF_RANKS_PER_NODE];
+static std::string IBV_DEV_NAME_LIST[MAX_NUM_OF_RANKS_PER_NODE];
 // Port state array.
 static const char *portStates[] = {"Nop","Down","Init","Armed","","Active Defer"};
 
@@ -113,7 +113,6 @@ struct remote_info {
 };
 
 static ibv_device *ctx_find_dev(const char *ib_devname);
-static const char *link_layer_str(int8_t link_layer);
 static int get_gpu_handler(struct doca_gpu *handler,
                            struct ibv_context *ib_context, int local_rank);
 void setup_qp_init_attr(struct doca_gpu_verbs_qp_init_attr_hl *qp_init_attr,
@@ -162,13 +161,13 @@ private:
     // Detailed Dispatch RDMA resources
     // Memory Region
     struct ibv_mr *attn_input_token_mr = nullptr;
-    struct ibv_mr *rdma_inter_node_group_token_mr = nullptr;
+    struct ibv_mr *dispatch_rdma_inter_node_group_token_mr = nullptr;
     struct ibv_mr *attn_input_flags_mr = nullptr;
-    struct ibv_mr *rdma_inter_node_group_flags_mr = nullptr;
+    struct ibv_mr *dispatch_rdma_inter_node_group_flags_mr = nullptr;
     struct ibv_mr *attn_input_prob_mr = nullptr;
-    struct ibv_mr *rdma_inter_node_group_prob_mr = nullptr;
+    struct ibv_mr *dispatch_rdma_inter_node_group_prob_mr = nullptr;
     struct ibv_mr *attn_input_token_scaling_factor_mr = nullptr;
-    struct ibv_mr *rdma_inter_node_group_scaling_factor_mr = nullptr;
+    struct ibv_mr *dispatch_rdma_inter_node_group_scaling_factor_mr = nullptr;
     // Misc
     struct remote_info *dispatch_remote_info_vec = nullptr;
     struct dispatch_memory_region_info_t *dispatch_mr_info_h = nullptr;
@@ -179,11 +178,11 @@ private:
     // Detailed Combine RDMA resources
     // Memory Region
     struct ibv_mr *rdma_intra_node_red_token_mr = nullptr;
-    struct ibv_mr *rdma_inter_node_group_token_mr = nullptr;
+    struct ibv_mr *combine_rdma_inter_node_group_token_mr = nullptr;
     struct ibv_mr *rdma_intra_node_red_prob_mr = nullptr;
-    struct ibv_mr *rdma_inter_node_group_prob_mr = nullptr;
+    struct ibv_mr *combine_rdma_inter_node_group_prob_mr = nullptr;
     struct ibv_mr *attn_output_flags_mr = nullptr;
-    struct ibv_mr *rdma_inter_node_group_flags_mr = nullptr;
+    struct ibv_mr *combine_rdma_inter_node_group_flags_mr = nullptr;
     // Misc
     struct remote_info *combine_remote_info_vec = nullptr;
     struct combine_memory_region_info_t *combine_mr_info_h = nullptr;
@@ -191,5 +190,5 @@ private:
     struct gverbs_context combine_gverbs_ctx;
     struct combine_memory_region_info_t *combine_mr_info_d = nullptr;  
 
-    void exchange_remote_rmda_info();
+    void exchange_remote_rmda_info(remote_info* dst, remote_info *src, int num_of_qps);
 };

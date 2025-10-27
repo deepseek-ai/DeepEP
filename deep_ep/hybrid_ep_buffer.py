@@ -97,6 +97,7 @@ class HybridEPBuffer:
         self.config.num_of_ranks_per_node = self.num_of_ranks_per_node
         self.config.num_of_nodes = self.num_of_nodes
         self.config.num_of_blocks_dispatch_api = self.num_sms_dispatch_api
+        self.config.num_of_blocks_combine_api = self.num_sms_combine_api
         # The SMs of preprocessing, chunk size of dispatch and combine will affact the size of intermediate buffers.
         self.config.num_of_blocks_preprocessing_api = self.num_sms_preprocessing_api
         # The fp8/bf16/fp16 data is communicated in the uint8/uint16 format.

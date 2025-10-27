@@ -13,6 +13,7 @@ namespace py = pybind11;
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.doc() = "HybridEP, efficiently enable the expert-parallel communication in "
               "the Hopper+ architectures";
+    m.def("set_IB_device_list", &set_IB_device_list, py::arg("ib_dev_name_list"));
   
     pybind11::enum_<TOKEN_DATA_TYPE>(m, "TokenDataType")
         .value("UINT16", TOKEN_DATA_TYPE::UINT16)
@@ -31,6 +32,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         .def_readwrite("num_of_nodes", &BufferConfig::num_of_nodes)
         .def_readwrite("token_data_type", &BufferConfig::token_data_type)
         .def_readwrite("num_of_blocks_preprocessing_api", &BufferConfig::num_of_blocks_preprocessing_api)
+        .def_readwrite("num_of_blocks_dispatch_api", &BufferConfig::num_of_blocks_dispatch_api)
+        .def_readwrite("num_of_blocks_combine_api", &BufferConfig::num_of_blocks_combine_api)
         .def_readwrite("num_of_tokens_per_chunk_dispatch_api", &BufferConfig::num_of_tokens_per_chunk_dispatch_api)
         .def_readwrite("num_of_tokens_per_chunk_combine_api", &BufferConfig::num_of_tokens_per_chunk_combine_api)
         .def("__repr__", [](const BufferConfig &config) {
@@ -138,5 +141,4 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
              py::arg("num_of_tokens_per_rank"), py::arg("pad_multiple") = std::nullopt,
              py::arg("with_probs") = false);    
     
-    pybind11::def("set_IB_device_list", &set_IB_device_list, py::arg("ib_dev_name_list"));
   }
