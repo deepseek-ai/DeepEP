@@ -11,7 +11,7 @@ import torch
 import torch.distributed as dist
 from typing import Optional, Tuple, Union
 
-
+BLOCK_SIZE = 16
 def init_dist(local_rank: int, num_local_ranks: int):
     # NOTES: you may rewrite this function with your own cluster settings
     ip = os.getenv('MASTER_ADDR', '127.0.0.1')
@@ -57,8 +57,8 @@ def per_token_cast_to_fp8(x: torch.Tensor):
     x_amax = x_padded_view.abs().float().amax(dim=2).view(m, -1).clamp(1e-4)
     return (x_padded_view * (448.0 / x_amax.unsqueeze(2))).to(torch.float8_e4m3fn).view(m, aligned_n)[:, :n].contiguous(), (x_amax / 448.0).view(m, -1)
 
-
-def per_token_cast_back(x_fp8: torch.Tensor, x_scales: torch.Tensor):
+    
+def cast_fp8_to_bf16(x_fp8: torch.Tensor, x_scales: torch.Tensor):
     if x_fp8.numel() == 0:
         return x_fp8.to(torch.bfloat16)
 
@@ -73,6 +73,44 @@ def per_token_cast_back(x_fp8: torch.Tensor, x_scales: torch.Tensor):
     x_scales = x_scales.view(x_fp8.size(0), -1, 1)
     return (x_fp32_padded * x_scales).view(x_fp8_padded.shape).to(torch.bfloat16)[:,:n].contiguous()
 
+def get_global_token_idxs(recv_count: torch.Tensor, recv_src_info: torch.Tensor, recv_layout_range: torch.Tensor, num_local_experts: int, num_ranks: int, num_tokens: int):
+    rank = dist.get_rank()
+    int_mask = (2 ** 32) - 1
+    begin_idx = torch.zeros((num_local_experts, num_ranks), dtype=torch.int, device='cuda')
+    count = torch.zeros((num_local_experts, num_ranks), dtype=torch.int, device='cuda')
+    global_token_idxs = torch.ones((num_local_experts, num_ranks * num_tokens), dtype=torch.int, device='cuda') * -1
+    for local_expert in range(num_local_experts):
+        num_valid_tokens = recv_count[local_expert].item()
+        for src_rank in range(num_ranks):
+            begin_idx_local, count_local = (recv_layout_range[local_expert][src_rank] >> 32).item(), (recv_layout_range[local_expert][src_rank] & int_mask).item()
+            begin_idx[local_expert, src_rank], count[local_expert, src_rank] = begin_idx_local, count_local
+            for recv_idx in range(begin_idx_local, begin_idx_local + count_local):
+                global_token_idxs[local_expert, recv_idx] = recv_src_info[local_expert, recv_idx] + src_rank * num_tokens
+    return global_token_idxs
+
+
+def get_pair_token_idx(global_token_idxs_test: torch.Tensor, global_token_idxs_ref: torch.Tensor, local_expert: int, token_idx: int):
+    global_token_idxs_temp = global_token_idxs_test[local_expert, token_idx]    
+    idx_arr = torch.nonzero(global_token_idxs_ref[local_expert, :] == global_token_idxs_temp, as_tuple=False)
+    assert idx_arr.numel() == 1, f'idx_arr.numel(): {idx_arr.numel()}'
+    return idx_arr.item(), global_token_idxs_temp
+
+
+def recover_swizzled_scales(scale, m, n):
+    rounded_m = ((m + 128 - 1) // 128) * 128
+    scale_n = n // BLOCK_SIZE
+    rounded_n = ((scale_n + 4 - 1) // 4) * 4
+    # Recover the swizzled scaling factor to linear layout
+    tmp = torch.reshape(scale, (1, rounded_m // 128, rounded_n // 4, 32, 4, 4))
+    tmp = torch.permute(tmp, (0, 1, 4, 3, 2, 5))
+    result = torch.reshape(tmp, (rounded_m, rounded_n)).to(torch.float32)
+    return result[:m, :scale_n]
+
+def recover_experts_swizzled_scales(scale, l, m, n):
+    recovered_tensor = torch.empty((l, m, n//16), dtype=torch.float32, device=scale.device)
+    for i in range(l):
+        recovered_tensor[i] = recover_swizzled_scales(scale[i], m, n)
+    return recovered_tensor
 def quantize_bfloat16_to_nvfp4(x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     assert x.dim() == 2 and x.size(1) % 16 == 0
     m, n = x.shape
@@ -101,7 +139,7 @@ def pack_8xnvfp4_to_int32(x: torch.Tensor) -> torch.Tensor:
     final = uint32_shift.sum(dim=-1).to(dtype=torch.uint32).view(dtype=torch.int32)
     return final
 
-def int32_to_8floats_lookup(tensor: torch.Tensor, table: torch.Tensor) -> torch.Tensor:
+def int32_to_8floats_lookup(tensor: torch.Tensor, table: torch.Tensor, msb_first: bool = True) -> torch.Tensor:
     """
     Decomposes each int32 in the input tensor into 8 4-bit values,
     and converts them into float values using a lookup table.
@@ -109,6 +147,7 @@ def int32_to_8floats_lookup(tensor: torch.Tensor, table: torch.Tensor) -> torch.
     Args:
         tensor: (int32 Tensor) Tensor of any shape, e.g., [B, N]
         table: (float Tensor) A 1D lookup table of length 16 that maps all 4-bit values to floats
+        msb_first: (bool) Whether the most significant 4 bytes should be put at the first element in the result list
 
     Returns:
         float32 Tensor: Merges the last two dimensions, so shape is [..., n*M], where n is the number of int32 and 8 per int32.
@@ -118,7 +157,10 @@ def int32_to_8floats_lookup(tensor: torch.Tensor, table: torch.Tensor) -> torch.
 
     result = []
     for i in range(8):
-        shift = (7 - i) * 4
+        if msb_first:
+            shift = (7 - i) * 4
+        else:
+            shift = i * 4
         idx = ((tensor >> shift) & 0xF).long()  # Extract 4-bit index [0, 15]
         val = table[idx].unsqueeze(-1)  # Lookup and preserve dimensions
         result.append(val)
@@ -128,6 +170,75 @@ def int32_to_8floats_lookup(tensor: torch.Tensor, table: torch.Tensor) -> torch.
     out = out.reshape(*out.shape[:-2], -1) if out.ndim > 2 else out
     return out
 
+
+def uint8_to_2floats_lookup(tensor: torch.Tensor, table: torch.Tensor, msb_first: bool = True) -> torch.Tensor:
+    """
+    Decomposes each uint8 in the input tensor into 2 4-bit values,
+    and converts them into float values using a lookup table.
+
+    Args:
+        tensor: (uint8 Tensor) Tensor of any shape, e.g., [B, M]
+        table: (float Tensor) A 1D lookup table of length 16 that maps all 4-bit values to floats
+        msb_first: (bool) Whether the most significant 4 bytes should be put at the first element in the result list
+
+    Returns:
+        float32 Tensor: Merges the last two dimensions, so shape is [..., n*M], where n is 2, 
+        which isthe number of 4-bit values per uint8.
+    """
+    assert tensor.dtype == torch.uint8, "Input must be of uint8 type"
+
+    result = []
+    for i in range(2):
+        if msb_first:
+            shift = (1 - i) * 4
+        else:
+            shift = i * 4
+        idx = ((tensor >> shift) & 0xF).long()  # Extract 4-bit index [0, 15]
+        val = table[idx].unsqueeze(-1)  # Lookup and preserve dimensions
+        result.append(val)
+
+    out = torch.cat(result, dim=-1)  # Output shape: [..., 2]
+    # Merge the last two dimension
+    out = out.reshape(*out.shape[:-2], -1) if out.ndim > 1 else out
+    return out
+
+
+def cast_nvfp4_to_bf16(x_nvfp4: torch.Tensor, x_scales: torch.Tensor, x_global_scale: float, use_ue8m0_for_sf: bool = False):
+    NVFP4_TABLE = torch.tensor([0, 0.5, 1, 1.5, 2, 3, 4, 6, 0, -0.5, -1.0, -1.5, -2, -3, -4, -6], dtype=torch.float32, device=x_nvfp4.device)  
+    assert x_nvfp4.dtype == torch.uint8, "Input must be of int8 type, but got " + str(x_nvfp4.dtype)
+    assert x_scales.ndim == 6, "Input scales must be of 6 dimensions"
+    assert x_scales.shape[0] == 32 and x_scales.shape[1] == 4 and x_scales.shape[3] == 4, "Input scales shape must be [32, 4, rm, 4, rk, l]"
+    _, _, rm, _, rk, l = x_scales.shape
+    assert x_nvfp4.ndim == 3, "Input nvfp4 must be of 3 dimensions"
+    assert x_nvfp4.shape[2] == l, "Input nvfp4 shape must be [m, k//2, l], but got " + str(x_nvfp4.shape)
+    x_nvfp4 = x_nvfp4.permute(2, 0, 1)
+    
+    if use_ue8m0_for_sf:
+        assert x_scales.dtype == torch.int8, "Input scales must be of int8 type if use_ue8m0_for_sf is True"
+        x_scales = x_scales.view(dtype=torch.int8).to(torch.int) << 23
+        x_scales = x_scales.view(dtype=torch.float)
+    else:
+        assert x_scales.dtype == torch.float8_e4m3fn, "Input scales must be of float8_e4m3fn type if use_ue8m0_for_sf is False"
+        x_scales = x_scales.to(torch.float32)
+    x_scales = x_scales * (1 / x_global_scale)
+    
+    x_fp32 = uint8_to_2floats_lookup(x_nvfp4, table=NVFP4_TABLE, msb_first=False).to(torch.float32)
+    x_scales_view = x_scales.permute(5, 2, 4, 0, 1, 3).view(l, rm, -1)
+    x_scales_view_recover = torch.empty((l, rm*128, rk*4), dtype=torch.float32, device=x_scales.device)
+    for i in range(l):
+        x_scales_view_recover[i] = recover_swizzled_scales(x_scales_view[i], rm*128, rk*64)
+    x_fp32_dequantized = x_fp32 * x_scales_view_recover.repeat_interleave(16, dim=-1)[:, :x_nvfp4.shape[1], :]
+
+    return x_fp32_dequantized.contiguous().to(torch.bfloat16)
+
+
+def per_token_cast_back(x: torch.Tensor, x_scales: torch.Tensor, x_global_scale: torch.Tensor = None, use_ue8m0_for_sf: bool = False, src_data_format: str = 'fp8'):
+    if src_data_format == 'fp8':
+        return cast_fp8_to_bf16(x, x_scales)
+    elif src_data_format == 'nvfp4':
+        return cast_nvfp4_to_bf16(x, x_scales, x_global_scale, use_ue8m0_for_sf)
+    else:
+        raise ValueError(f"Unsupported src_data_format: {src_data_format}")
 
 def dequantize_nvfp4_back_to_bfloat16(x_nvfp4: torch.Tensor, x_scales: torch.Tensor, x_sf_scale: torch.Tensor, use_ue8m0_for_nvfp4_sf: bool = False):
     NVFP4_TABLE = torch.tensor([0, 0.5, 1, 1.5, 2, 3, 4, 6, 0, -0.5, -1.0, -1.5, -2, -3, -4, -6], dtype=torch.float32, device=x_nvfp4.device)   

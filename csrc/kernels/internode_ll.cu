@@ -36,13 +36,171 @@ void clean_low_latency_buffer(int* clean_0, int num_clean_int_0,
                   clean_0, num_clean_int_0, clean_1, num_clean_int_1);
 }
 
-template <bool kUseFP8, bool kUseUE8M0, int kHidden>
+
+struct PackedVec {
+  __nv_bfloat162 elts[4];
+};
+
+using Type = __nv_bfloat16;
+
+__device__ __forceinline__ float exp2f_rcp(uint8_t exp) {
+  constexpr uint32_t FP32_EXPONENT_BIAS = 127;
+  return (exp == 0) ? 1 : exp2f(FP32_EXPONENT_BIAS - static_cast<float>(exp));
+}
+
+// Fast reciprocal.
+inline __device__ float reciprocal_approximate_ftz(float a) {
+  float b;
+  asm volatile("rcp.approx.ftz.f32 %0, %1;\n" : "=f"(b) : "f"(a));
+  return b;
+}
+
+// Convert 1 float value into one e2m1 value (represented as one uint8_t).
+__device__ inline uint8_t float_to_e2m1(float f) {
+    // Get sign
+    uint8_t sign = (f < 0);
+    float abs_f = fabsf(f);
+    float abs_f_log2 = log2f(abs_f);
+    // map float to 2-bit exponent
+    uint8_t exp, mant;
+    if (abs_f_log2 < 0) {
+        exp = 0;
+        if (abs_f_log2 < -1) {
+            mant = 0;
+        }
+        else {
+            mant = 1;
+        }
+    }
+    else{
+        exp = static_cast<int>(floorf(abs_f_log2 + 1));
+        exp = fminf(exp, 3.0f);
+        mant = (abs_f_log2 + 1 - exp > 0.5f) ? 1 : 0;
+    }
+    // Take one bit for mantissa
+    return (sign << 3) | (exp << 1) | mant;
+}
+
+// Convert 4 float2 values into 8 e2m1 values (represented as one uint32_t).
+inline __device__ uint32_t fp32_vec_to_e2m1(float2 (&array)[4]) {
+    // PTX instructions used here requires sm100a.
+  #if CUDA_VERSION >= 12080
+  #if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000) && __CUDA_ARCH_HAS_FEATURE__(SM100_ALL)
+    uint32_t val;
+    asm volatile(
+        "{\n"
+        ".reg .b8 byte0;\n"
+        ".reg .b8 byte1;\n"
+        ".reg .b8 byte2;\n"
+        ".reg .b8 byte3;\n"
+        "cvt.rn.satfinite.e2m1x2.f32   byte0, %2, %1;\n"
+        "cvt.rn.satfinite.e2m1x2.f32   byte1, %4, %3;\n"
+        "cvt.rn.satfinite.e2m1x2.f32   byte2, %6, %5;\n"
+        "cvt.rn.satfinite.e2m1x2.f32   byte3, %8, %7;\n"
+        "mov.b32 %0, {byte0, byte1, byte2, byte3};\n"
+        "}"
+        : "=r"(val)
+        : "f"(array[0].x),
+          "f"(array[0].y),
+          "f"(array[1].x),
+          "f"(array[1].y),
+          "f"(array[2].x),
+          "f"(array[2].y),
+          "f"(array[3].x),
+          "f"(array[3].y));
+    return val;
+  #else
+    uint32_t val = 0;
+    float2* data = reinterpret_cast<float2*>(&array[0]);
+    for (int i = 0; i < 4; ++i) {
+        val |= (float_to_e2m1(data[i].x) & 0xFF) << (8 * i);
+        val |= (float_to_e2m1(data[i].y) & 0xFF) << (8 * i + 4);
+    }
+    return val;
+  #endif
+  #endif
+  }
+
+constexpr int CVT_ELTS_PER_THREAD = 8;
+// Quantizes the provided PackedVec into the uint32_t output
+template <int SF_VEC_SIZE, bool UE8M0_SF>
+__device__ uint32_t cvt_warp_fp16_to_fp4(PackedVec& vec, float SFScaleVal, uint8_t* SFout) {
+  // Get absolute maximum values among the local 8 values.
+  auto localMax = __habs2(vec.elts[0]);
+
+// Local maximum value.
+#pragma unroll
+  for (int i = 1; i < CVT_ELTS_PER_THREAD / 2; i++) {
+    localMax = __hmax2(localMax, __habs2(vec.elts[i]));
+  }
+
+  constexpr int CVT_NUM_THREADS_PER_SF = SF_VEC_SIZE / CVT_ELTS_PER_THREAD;
+  EP_STATIC_ASSERT(CVT_NUM_THREADS_PER_SF == 2 or CVT_NUM_THREADS_PER_SF == 4, "Invalid number of threads per SF");
+  // Get the absolute maximum among all 16 values (two threads for 16, four threads for 32).
+  localMax = __hmax2(__shfl_xor_sync(uint32_t(-1), localMax, 1), localMax);
+  if constexpr (CVT_NUM_THREADS_PER_SF == 4) {
+    localMax = __hmax2(__shfl_xor_sync(uint32_t(-1), localMax, 2), localMax);
+  }
+  // Get the final absolute maximum values.
+  float vecMax = float(__hmax(localMax.x, localMax.y));
+
+  // 8 bits representation of the SF.
+  uint8_t fp8SFVal;
+  float outputScale;
+  // Write the SF to global memory (STG.8).
+  if constexpr (UE8M0_SF) {
+    __nv_fp8_e8m0 tmp;
+    // Scale the max value to the range of E2m1.
+    vecMax *= reciprocal_approximate_ftz(6.0f);
+    tmp.__x = __nv_cvt_float_to_e8m0(vecMax, __NV_SATFINITE, cudaRoundPosInf);
+    fp8SFVal = tmp.__x;
+    outputScale = exp2f_rcp(fp8SFVal);
+  } else {
+    // Get the SF (max value of the vector / max value of e2m1).
+    // maximum value of e2m1 = 6.0.
+    // TODO: use half as compute data type.
+    auto SFValue = SFScaleVal * (vecMax * reciprocal_approximate_ftz(6.0f));
+    // Here SFValue is always positive, so E4M3 is the same as UE4M3.
+    __nv_fp8_e4m3 tmp = __nv_fp8_e4m3(SFValue);
+    fp8SFVal = tmp.__x;
+    SFValue = static_cast<float>(tmp);
+    // Get the output scale.
+    // Recipe: final_scale = reciprocal(fp32(fp8(SFValue * SFScaleVal)) * reciprocal(SFScaleVal))
+    outputScale = SFValue != 0
+                      ? reciprocal_approximate_ftz(SFValue * reciprocal_approximate_ftz(SFScaleVal))
+                      : 0.0f;
+  }
+
+  if (SFout) {
+    // Write the SF to global memory (STG.8).
+    *SFout = fp8SFVal;
+  }
+
+  // Convert the input to float.
+  float2 fp2Vals[CVT_ELTS_PER_THREAD / 2];
+
+#pragma unroll
+  for (int i = 0; i < CVT_ELTS_PER_THREAD / 2; i++) {
+    fp2Vals[i] = __bfloat1622float2(vec.elts[i]);
+    fp2Vals[i].x *= outputScale;
+    fp2Vals[i].y *= outputScale;
+  }
+
+  // Convert to e2m1 values.
+  uint32_t e2m1Vec = fp32_vec_to_e2m1(fp2Vals);
+
+  // Write the e2m1 values to global memory.
+  return e2m1Vec;
+}
+
+template <bool kUseFP8, bool kUseUE8M0, bool kUseNVFP4, bool kUseUE8M0ForNVFP4SF, int kHidden>
 __global__ __launch_bounds__(1024, 1) void
 dispatch(void* packed_recv_x, void* packed_recv_x_scales,
          int* packed_recv_src_info, int64_t* packed_recv_layout_range,
          int* packed_recv_count,
          int* cumulative_local_expert_recv_stats,
          int64_t* dispatch_wait_recv_cost_stats,
+         const float* x_global_scale,
          void* rdma_recv_x, int* rdma_recv_count, void* rdma_x,
          const void* x, const int64_t* topk_idx,
          int* atomic_counter_per_expert, int* atomic_finish_counter_per_expert,
@@ -62,20 +220,28 @@ dispatch(void* packed_recv_x, void* packed_recv_x_scales,
     const auto responsible_expert_idx = sm_id * num_warp_groups + warp_group_id;
 
     // May extract UE8M0 from the scales
-    using scale_t = std::conditional_t<kUseUE8M0, uint8_t, float>;
-    using packed_t = std::conditional_t<kUseUE8M0, uint32_t, float>;
+    using scale_t = std::conditional_t<kUseUE8M0 || kUseNVFP4, uint8_t, float>;
+    using packed_t = std::conditional_t<kUseUE8M0 || kUseNVFP4, uint32_t, float>;
     EP_STATIC_ASSERT(sizeof(packed_t) % sizeof(scale_t) == 0, "Invalid vector length");
+    EP_STATIC_ASSERT(!(kUseFP8 && kUseNVFP4), "FP8 and NVFP4 cannot be used together");
 
     // FP8 staffs
-    constexpr int kNumPerChannels = 128;
+    constexpr int kNumPerChannels = kUseNVFP4 ? 16 : 128;
     const int num_scales = kHidden / kNumPerChannels;
-    const size_t hidden_bytes = kHidden * (kUseFP8 ? sizeof(__nv_fp8_storage_t) : sizeof(nv_bfloat16));
+    constexpr size_t hidden_bytes =
+    kUseNVFP4
+        ? kHidden * sizeof(__nv_fp8_storage_t) / 2
+        : kHidden * (kUseFP8 ? sizeof(__nv_fp8_storage_t) : sizeof(nv_bfloat16));
     const size_t hidden_int4 = hidden_bytes / sizeof(int4);
 
     // Message package: index at source (int), 3 reserved int fields, hidden data, FP8 scales
     // NOTES: currently we have 3 reserved int fields for future use
-    using vec_t = std::conditional_t<kUseFP8, int2, int4>;
-    const size_t num_bytes_per_msg = sizeof(int4) + (kUseFP8 ? (kHidden + num_scales * sizeof(float)) : (kHidden * sizeof(nv_bfloat16)));
+    using vec_t = std::conditional_t<
+        kUseNVFP4,
+        int32_t,
+        std::conditional_t<kUseFP8, int2, int4>>;
+    using rdma_x_scale_t = std::conditional_t<kUseNVFP4, uint8_t, float>;
+    const size_t num_bytes_per_msg = sizeof(int4) + ((kUseFP8 || kUseNVFP4) ? (hidden_bytes + num_scales * sizeof(rdma_x_scale_t)) : hidden_bytes);
     const size_t num_int4_per_msg = num_bytes_per_msg / sizeof(int4);
     EP_DEVICE_ASSERT(num_bytes_per_msg % sizeof(int4) == 0);
 
@@ -101,13 +267,19 @@ dispatch(void* packed_recv_x, void* packed_recv_x_scales,
             const auto x_int4 = static_cast<const int4*>(x) + token_idx * hidden_bf16_int4;
             const auto rdma_x_src_idx = reinterpret_cast<int*>(static_cast<uint8_t*>(rdma_x) + token_idx * num_bytes_per_msg);
             const auto rdma_x_vec = reinterpret_cast<vec_t*>(reinterpret_cast<uint8_t*>(rdma_x_src_idx) + sizeof(int4));
-            const auto rdma_x_scales = reinterpret_cast<float*>(reinterpret_cast<uint8_t*>(rdma_x_vec) + hidden_bytes);
+            const auto rdma_x_scales = reinterpret_cast<rdma_x_scale_t*>(reinterpret_cast<uint8_t*>(rdma_x_vec) + hidden_bytes);
 
             // Overlap top-k index read and source token index writes
             auto dst_expert_idx = warp_id < num_topk ? static_cast<int>(__ldg(topk_idx + token_idx * num_topk + warp_id)) : -1;
             thread_id == 0 ? (*rdma_x_src_idx = token_idx) : 0;
+            float SFScaleVal = 1.0f;
+            if constexpr (kUseNVFP4) {
+                // Get scaling value;
+                EP_DEVICE_ASSERT(x_global_scale != nullptr);
+                SFScaleVal = *(static_cast<const float*>(x_global_scale));
+            }
 
-            // FP8 cast
+            // FP8 or NVFP4 cast
             EP_STATIC_ASSERT(hidden_bf16_int4 % 32 == 0, "Must use the full warp to reduce");
             #pragma unroll
             for (int i = thread_id; i < hidden_bf16_int4; i += num_threads) {
@@ -141,6 +313,20 @@ dispatch(void* packed_recv_x, void* packed_recv_x_scales,
                         fp8x2_values[j / 2] = __nv_cvt_float2_to_fp8x2(fp32x2, __NV_SATFINITE, __NV_E4M3);
                     }
                     rdma_x_vec[i] = int2_value;
+                } else if constexpr (kUseNVFP4) {
+                    // Convert to NVFP4
+                    uint8_t sf_val;
+                    PackedVec vec = *reinterpret_cast<PackedVec*>(&int4_value);
+                    uint32_t result = cvt_warp_fp16_to_fp4<kNumPerChannels, kUseUE8M0ForNVFP4SF>(vec, SFScaleVal, &sf_val);
+
+                    // Write scale to send buffer
+                    if (lane_id % 2 == 0){
+                        EP_DEVICE_ASSERT((i * kNumElemsPerRead) % kNumPerChannels == 0);
+                        int rdma_x_scale_idx = i * kNumElemsPerRead / kNumPerChannels;
+                        rdma_x_scales[rdma_x_scale_idx] = sf_val;
+                        }
+                    // Cast into send buffer
+                    rdma_x_vec[i] = *reinterpret_cast<vec_t*>(&result);
                 } else {
                     // Reinterpret-cast is for C++14 compatibility
                     rdma_x_vec[i] = *reinterpret_cast<vec_t*>(&int4_value);
@@ -263,8 +449,9 @@ dispatch(void* packed_recv_x, void* packed_recv_x_scales,
                 local_expert_idx * num_ranks * num_max_dispatch_tokens_per_rank * hidden_int4;
         const auto recv_src_info = packed_recv_src_info + local_expert_idx * num_ranks * num_max_dispatch_tokens_per_rank;
         const auto recv_range = packed_recv_layout_range + local_expert_idx * num_ranks;
+        const auto num_aligned_tokens = align_up<int>(num_ranks * num_max_dispatch_tokens_per_rank, 128);
         const auto num_aligned_scales = align_up<int>(num_scales, sizeof(float) / sizeof(scale_t));
-        const auto recv_x_scales = static_cast<scale_t*>(packed_recv_x_scales) + local_expert_idx * num_ranks * num_max_dispatch_tokens_per_rank * num_aligned_scales;
+        const auto recv_x_scales = static_cast<scale_t*>(packed_recv_x_scales) + local_expert_idx * num_aligned_tokens * num_aligned_scales;
 
         // Shared between sub-warps in warp groups
         __shared__ int shared_num_recv_tokens[kNumMaxWarpGroups], shared_recv_token_begin_idx[kNumMaxWarpGroups];
@@ -294,7 +481,6 @@ dispatch(void* packed_recv_x, void* packed_recv_x_scales,
         recv_token_begin_idx = shared_recv_token_begin_idx[warp_group_id];
 
         // Copy tokens
-        EP_DEVICE_ASSERT(num_scales <= 64);
         for (int i = sub_warp_id; i < num_recv_tokens; i += num_warps_per_group) {
             // Copy source info
             const auto src_src_idx = reinterpret_cast<int*>(rdma_recv_x_uint8 + i * num_bytes_per_msg);
@@ -310,6 +496,7 @@ dispatch(void* packed_recv_x, void* packed_recv_x_scales,
 
             // Copy scales
             if constexpr (kUseFP8) {
+                EP_DEVICE_ASSERT(num_scales <= 64);
                 // Equivalent CuTe layout:
                 //   (num_tokens, (num_packed, num_elems_per_pack)):(num_elems_per_pack, (num_tokens * num_elems_per_pack, 1))
                 const auto src_scales = reinterpret_cast<float*>(reinterpret_cast<uint8_t*>(src_data) + hidden_bytes);
@@ -329,6 +516,30 @@ dispatch(void* packed_recv_x, void* packed_recv_x_scales,
                     auto scale = extract_required_scale_format<kUseUE8M0>(ld_nc_global(src_scales + lane_id + 32));
                     recv_x_scales[token_idx * token_stride + pack_idx * pack_stride + elem_idx] = scale;
                 }
+            } else if constexpr (kUseNVFP4) {            
+                 // The physical layout is (l, rm, rk, 32, 4, 4)
+                const auto src_scales = reinterpret_cast<uint8_t*>(reinterpret_cast<uint8_t*>(src_data) + hidden_bytes);
+                const auto num_elems_per_pack = static_cast<int>(sizeof(packed_t) / sizeof(scale_t));
+                const auto token_idx = recv_token_begin_idx + i;
+                
+                const auto rk = align_up<int>(kHidden / kNumPerChannels, 4) / 4;
+                const auto dim0_stride = rk * 128 * num_elems_per_pack;
+                const auto dim1_stride = 128 * num_elems_per_pack;
+                const auto dim2_stride = 4 * num_elems_per_pack;
+                const auto dim3_stride = num_elems_per_pack;
+
+                const auto dim0_offset = token_idx / 128;
+                const auto dim2_offset = (token_idx % 128) % 32;
+                const auto dim3_offset = (token_idx % 128) / 32;
+
+                #pragma unroll
+                for (int j = lane_id; j < num_scales; j += 32) {
+                    const auto dim1_offset = j / num_elems_per_pack;
+                    const auto dim4_offset = j % num_elems_per_pack;
+                    auto scale = ld_nc_global(src_scales + j);
+                    const auto offset = dim0_offset * dim0_stride + dim1_offset * dim1_stride + dim2_offset * dim2_stride + dim3_offset * dim3_stride + dim4_offset;
+                    recv_x_scales[offset] = scale;
+                }
             }
         }
     }
@@ -339,12 +550,14 @@ void dispatch(void* packed_recv_x, void* packed_recv_x_scales,
               int* packed_recv_count,
               int* cumulative_local_expert_recv_stats,
               int64_t* dispatch_wait_recv_cost_stats,
+              const float* x_global_scale,
               void* rdma_recv_x, int* rdma_recv_count, void* rdma_x,
               const void* x, const int64_t* topk_idx,
               int* next_clean, int num_next_clean_int,
               int num_tokens, int hidden, int num_max_dispatch_tokens_per_rank,
               int num_topk, int num_experts, int rank, int num_ranks,
               bool use_fp8, bool round_scale, bool use_ue8m0,
+              bool use_nvfp4, bool use_ue8m0_for_sf,
               void* workspace, int num_device_sms,
               cudaStream_t stream, int phases) {
     constexpr int kNumMaxTopK = 11;
@@ -367,17 +580,22 @@ void dispatch(void* packed_recv_x, void* packed_recv_x_scales,
         EP_HOST_ASSERT(round_scale and "UE8M0 SF requires `round_scale=True`");
 
 #define DISPATCH_LAUNCH_CASE(hidden) { \
-auto dispatch_func = dispatch<false, false, hidden>; \
+auto dispatch_func = dispatch<false, false, false, false, hidden>; \
 if (use_fp8 and not use_ue8m0) \
-    dispatch_func = dispatch<true, false, hidden>; \
+    dispatch_func = dispatch<true, false, false, false, hidden>; \
 if (use_fp8 and use_ue8m0) \
-    dispatch_func = dispatch<true, true, hidden>; \
+    dispatch_func = dispatch<true, true, false, false, hidden>; \
+if (use_nvfp4 and not use_ue8m0_for_sf) \
+    dispatch_func = dispatch<false, false, true, false, hidden>; \
+if (use_nvfp4 and use_ue8m0_for_sf) \
+    dispatch_func = dispatch<false, false, true, true, hidden>; \
 LAUNCH_KERNEL(&cfg, dispatch_func, \
               packed_recv_x, packed_recv_x_scales, \
               packed_recv_src_info, packed_recv_layout_range, \
               packed_recv_count, \
               cumulative_local_expert_recv_stats, \
               dispatch_wait_recv_cost_stats, \
+              x_global_scale, \
               rdma_recv_x, rdma_recv_count, rdma_x, \
               x, topk_idx, \
               atomic_counter_per_expert, atomic_finish_counter_per_expert, \
