@@ -113,7 +113,7 @@ class HybridEPBuffer:
 
         # Create C++ buffer - this will allocate all buffers during construction
         self.runtime = hybrid_ep_cpp.HybridEPBuffer(
-            self.config, self.local_rank, self.node_rank, self.group_size, os.path.dirname(os.path.abspath(__file__))
+            self.group, self.config, self.local_rank, self.node_rank, self.group_size, os.path.dirname(os.path.abspath(__file__))
         )
 
     def empty_jit_cache(self):

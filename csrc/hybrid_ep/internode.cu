@@ -260,33 +260,34 @@ static int setup_qp_attr_and_set_qp(struct gverbs_context *g_ctx,
   return 0;
 }
 
-RDMACoordinator::RDMACoordinator(
-  pybind11::object process_group,
-  int node_rank,
-  int local_rank, 
-  BufferConfig config, 
-  ExtendedMemoryAllocator allocator
-) : process_group(process_group), node_rank(node_rank), local_rank(local_rank), buffer_config(config), allocator(allocator){
-    assert(buffer_config.num_of_nodes > 1);
-    // Get name of ibv device.
-    const char *ib_devname = IBV_DEV_NAME_LIST[local_rank].c_str();
-    // Find ib device and get ibv_context.
-    struct ibv_device *ib_dev = ctx_find_dev(ib_devname);
+void RDMACoordinator::init(  
+      pybind11::object process_group,
+      int node_rank,
+      int local_rank, 
+      BufferConfig config, 
+      ExtendedMemoryAllocator allocator) {
+  this->process_group = process_group;
+  this->node_rank = node_rank;
+  this->local_rank = local_rank;
+  this->buffer_config = config;
+  this->allocator = allocator;
 
-    ib_context = ibv_open_device(ib_dev);;
-    ibv_query_port(ib_context, IB_PORT, &port_attr);
-    auto transport_type = ib_context->device->transport_type;
-    assert(transport_type == IBV_TRANSPORT_IB);
-    // Alloc protect domain.
-    ib_pd = ibv_alloc_pd(ib_context);
-    gpu_handler = (struct doca_gpu *)calloc(1, sizeof(struct doca_gpu));
-    get_gpu_handler(gpu_handler, ib_context, local_rank);
-    mr_access_flag = IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_WRITE | IBV_ACCESS_REMOTE_READ |
-                       IBV_ACCESS_REMOTE_ATOMIC | IBV_ACCESS_RELAXED_ORDERING;
-}
+  assert(buffer_config.num_of_nodes > 1);
+  // Get name of ibv device.
+  const char *ib_devname = IBV_DEV_NAME_LIST[local_rank].c_str();
+  // Find ib device and get ibv_context.
+  struct ibv_device *ib_dev = ctx_find_dev(ib_devname);
 
-RDMACoordinator::~RDMACoordinator() {
-   destory();
+  ib_context = ibv_open_device(ib_dev);;
+  ibv_query_port(ib_context, IB_PORT, &port_attr);
+  auto transport_type = ib_context->device->transport_type;
+  assert(transport_type == IBV_TRANSPORT_IB);
+  // Alloc protect domain.
+  ib_pd = ibv_alloc_pd(ib_context);
+  gpu_handler = (struct doca_gpu *)calloc(1, sizeof(struct doca_gpu));
+  get_gpu_handler(gpu_handler, ib_context, local_rank);
+  mr_access_flag = IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_WRITE | IBV_ACCESS_REMOTE_READ |
+                      IBV_ACCESS_REMOTE_ATOMIC | IBV_ACCESS_RELAXED_ORDERING;
 }
 
 void RDMACoordinator::allocate_dispatch_rdma_buffers(DispatchBuffers &dispatch_buffers) {
@@ -312,7 +313,6 @@ void RDMACoordinator::allocate_dispatch_rdma_buffers(DispatchBuffers &dispatch_b
   auto rdma_inter_node_group_flags_elts = ((buffer_config.max_num_of_tokens_per_rank - 1) /
                                            buffer_config.num_of_tokens_per_chunk_dispatch_api + 1) *
                                           (buffer_config.num_of_nodes - 1);
-                                          
   // Allocate RDMA buffers
   CUDA_CHECK(cudaMalloc((void**)&dispatch_buffers.attn_input_token,
                         attn_input_token_elts * sizeof_token_data_type));
@@ -589,31 +589,54 @@ void RDMACoordinator::allocate_combine_rdma_buffers(CombineBuffers &combine_buff
 void RDMACoordinator::destory() {
   CUDA_CHECK(cudaDeviceSynchronize());
 
-  // Close memory regions
-  ibv_dereg_mr(attn_input_token_mr);
-  ibv_dereg_mr(dispatch_rdma_inter_node_group_token_mr);
-  ibv_dereg_mr(attn_input_flags_mr);
-  ibv_dereg_mr(dispatch_rdma_inter_node_group_flags_mr);
-  ibv_dereg_mr(attn_input_prob_mr);
-  ibv_dereg_mr(dispatch_rdma_inter_node_group_prob_mr);
-  ibv_dereg_mr(attn_input_token_scaling_factor_mr);
-  ibv_dereg_mr(dispatch_rdma_inter_node_group_scaling_factor_mr);
-  ibv_dereg_mr(rdma_intra_node_red_token_mr);
-  ibv_dereg_mr(combine_rdma_inter_node_group_token_mr);
-  ibv_dereg_mr(rdma_intra_node_red_prob_mr);
-  ibv_dereg_mr(combine_rdma_inter_node_group_prob_mr);
-  ibv_dereg_mr(attn_output_flags_mr);
-  ibv_dereg_mr(combine_rdma_inter_node_group_flags_mr);
-
+  // Close memory regions 
+  #define CLOSE_MR(mr)                 \
+    do {                               \
+      if ((mr) != nullptr) {           \
+        ibv_dereg_mr((mr));            \
+        (mr) = nullptr;                \
+      }                                \
+    } while (0)
   // Free misc resources.
-  free(dispatch_remote_info_vec);
-  free(dispatch_mr_info_h);
-  CUDA_CHECK(cudaFree(dispatch_gverbs_ctx.d_qps_gpu));
-  CUDA_CHECK(cudaFree(dispatch_mr_info_d));
-  free(combine_remote_info_vec);
-  free(combine_mr_info_h);
-  CUDA_CHECK(cudaFree(combine_gverbs_ctx.d_qps_gpu));
-  CUDA_CHECK(cudaFree(combine_mr_info_d));
+  #define FREE_CUDA_MEMORY(ptr)            \
+    do {                                   \
+      if ((ptr) != nullptr) {              \
+        CUDA_CHECK(cudaFree((ptr)));       \
+        (ptr) = nullptr;                   \
+      }                                    \
+    } while (0)
+  #define FREE_CPU_MEMORY(ptr)             \
+    do {                                   \
+      if ((ptr) != nullptr) {              \
+        free((ptr));                       \
+        (ptr) = nullptr;                   \
+      }                                    \
+    } while (0)
+
+  CLOSE_MR(attn_input_token_mr);
+  CLOSE_MR(dispatch_rdma_inter_node_group_token_mr);
+  CLOSE_MR(attn_input_flags_mr);
+  CLOSE_MR(dispatch_rdma_inter_node_group_flags_mr);
+  CLOSE_MR(attn_input_prob_mr);
+  CLOSE_MR(dispatch_rdma_inter_node_group_prob_mr);
+  CLOSE_MR(attn_input_token_scaling_factor_mr);
+  CLOSE_MR(dispatch_rdma_inter_node_group_scaling_factor_mr);
+  CLOSE_MR(rdma_intra_node_red_token_mr);
+  CLOSE_MR(combine_rdma_inter_node_group_token_mr);
+  CLOSE_MR(rdma_intra_node_red_prob_mr);
+  CLOSE_MR(combine_rdma_inter_node_group_prob_mr);
+  CLOSE_MR(attn_output_flags_mr);
+  CLOSE_MR(combine_rdma_inter_node_group_flags_mr);
+
+
+  FREE_CPU_MEMORY(dispatch_remote_info_vec);
+  FREE_CPU_MEMORY(dispatch_mr_info_h);
+  FREE_CUDA_MEMORY(dispatch_gverbs_ctx.d_qps_gpu);
+  FREE_CUDA_MEMORY(dispatch_mr_info_d);
+  FREE_CPU_MEMORY(combine_remote_info_vec);
+  FREE_CPU_MEMORY(combine_mr_info_h);
+  FREE_CUDA_MEMORY(combine_gverbs_ctx.d_qps_gpu);
+  FREE_CUDA_MEMORY(combine_mr_info_d);
 
   int num_of_dispatch_qps = (buffer_config.num_of_nodes - 1) * buffer_config.num_of_blocks_dispatch_api;
   int num_of_combine_qps = (buffer_config.num_of_nodes - 1) * buffer_config.num_of_blocks_combine_api;
@@ -623,18 +646,23 @@ void RDMACoordinator::destory() {
   for (int idx = 0; idx < num_of_combine_qps; ++idx) {
     doca_gpu_verbs_destroy_qp_hl(combine_gverbs_ctx.qp_hls[idx]);
   }
-  free(dispatch_gverbs_ctx.qp_hls);
-  free(dispatch_gverbs_ctx.qp_init_attr);
-  free(combine_gverbs_ctx.qp_hls);
-  free(combine_gverbs_ctx.qp_init_attr);
+  FREE_CPU_MEMORY(dispatch_gverbs_ctx.qp_hls);
+  FREE_CPU_MEMORY(dispatch_gverbs_ctx.qp_init_attr);
+  FREE_CPU_MEMORY(combine_gverbs_ctx.qp_hls);
+  FREE_CPU_MEMORY(combine_gverbs_ctx.qp_init_attr);
   doca_verbs_qp_attr_destroy(dispatch_gverbs_ctx.qp_attr);
   doca_verbs_qp_attr_destroy(combine_gverbs_ctx.qp_attr);
+  
   // Dealloc protect domain.
   ibv_dealloc_pd(ib_pd);
   // Close device.
   ibv_close_device(ib_context);
   delete gpu_handler->mtable;
-  free(gpu_handler);
+  FREE_CPU_MEMORY(gpu_handler);
+
+  #undef CLOSE_MR
+  #undef FREE_CUDA_MEMORY
+  #undef FREE_CPU_MEMORY
 }
 
 void RDMACoordinator::exchange_remote_rmda_info(remote_info* dst, remote_info *src, int num_of_qps) {

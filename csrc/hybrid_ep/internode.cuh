@@ -137,9 +137,8 @@ static int setup_qp_attr_and_set_qp(struct gverbs_context *g_ctx,
 class RDMACoordinator {
 public:
     RDMACoordinator() = default;
-    RDMACoordinator(pybind11::object process_group, int node_rank, int local_rank, BufferConfig config, ExtendedMemoryAllocator allocator);
-    ~RDMACoordinator();     
-
+    ~RDMACoordinator() = default;
+    void init(pybind11::object process_group, int node_rank, int local_rank, BufferConfig config, ExtendedMemoryAllocator allocator);
     void destory();
     void allocate_dispatch_rdma_buffers(DispatchBuffers &dispatch_buffers);
     void allocate_combine_rdma_buffers(CombineBuffers &combine_buffers);

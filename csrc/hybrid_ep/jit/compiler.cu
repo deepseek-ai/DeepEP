@@ -18,34 +18,34 @@ NVCCCompiler::NVCCCompiler(std::string base_path): base_path(base_path) {
     std::string sm_arch_flags = convert_to_nvcc_arch_flags(SM_ARCH);
     flags = "-std=c++17 " + sm_arch_flags +
             " -O3 --expt-relaxed-constexpr "
-            " -Xcompiler -fPIC -shared";
+            " -Xcompiler -fPIC -shared ";
     // Add the include path of the hybrid-ep library
     include = " -I" + base_path + "/backend" 
-            + " -I" + get_env("CUDA_HOME") + "/include";
+            + " -I" + get_env("CUDA_HOME") + "/include ";
     // Add the library path of the hybrid-ep library
-    library = "-L" + get_env("CUDA_HOME") + "/lib64 -lcudart";
+    library = "-L" + get_env("CUDA_HOME") + "/lib64 -lcudart ";
 
 #ifdef HYBRID_EP_BUILD_MULTINODE_ENABLE
     // Add the dependency of the inter-node jit
     flags += " -DHYBRID_EP_BUILD_MULTINODE_ENABLE";
-    include += " -I" + base_path + "/backend/rdma-core/include"
+    include += " -I" + base_path + "/backend/rdma-core/include "
              + " -I" + base_path + "/backend/nccl/include";
-    library += " -L" + base_path + "/backend/rdma-core/lib"
-             + "-lmlx5 -libverbs";
+    library += " -L" + base_path + "/backend/rdma-core/lib "
+             + "-lmlx5 -libverbs ";
     std::string doca_obj_path = base_path + "/backend/nccl/obj";
     objs = doca_obj_path + "/doca_gpunetio.o "
-        + doca_obj_path + "/doca_gpunetio_high_level.o"
-        + doca_obj_path + "/doca_verbs_cuda_wrapper.o"
-        + doca_obj_path + "/doca_verbs_device_attr.o"
-        + doca_obj_path + "/doca_verbs_ibv_wrapper.o"
-        + doca_obj_path + "/doca_verbs_mlx5dv_wrapper.o"
-        + doca_obj_path + "/doca_verbs_qp.o"
-        + doca_obj_path + "/doca_verbs_cq.o"
-        + doca_obj_path + "/doca_verbs_srq.o"
-        + doca_obj_path + "/doca_verbs_uar.o"
-        + doca_obj_path + "/doca_verbs_umem.o"
-        + doca_obj_path + "/doca_gpunetio_gdrcopy.o"
-        + doca_obj_path + "/doca_gpunetio_log.o";
+        + doca_obj_path + "/doca_gpunetio_high_level.o "
+        + doca_obj_path + "/doca_verbs_cuda_wrapper.o "
+        + doca_obj_path + "/doca_verbs_device_attr.o "
+        + doca_obj_path + "/doca_verbs_ibv_wrapper.o "
+        + doca_obj_path + "/doca_verbs_mlx5dv_wrapper.o "
+        + doca_obj_path + "/doca_verbs_qp.o "
+        + doca_obj_path + "/doca_verbs_cq.o "
+        + doca_obj_path + "/doca_verbs_srq.o "
+        + doca_obj_path + "/doca_verbs_uar.o "
+        + doca_obj_path + "/doca_verbs_umem.o "
+        + doca_obj_path + "/doca_gpunetio_gdrcopy.o "
+        + doca_obj_path + "/doca_gpunetio_log.o ";
 #endif
 
     flags = flags + " " + include + " " + library;

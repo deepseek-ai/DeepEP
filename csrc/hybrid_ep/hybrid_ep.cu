@@ -26,16 +26,11 @@ HybridEPBuffer::HybridEPBuffer(
       use_shared_buffer = true;
     }else{
 #ifdef HYBRID_EP_BUILD_MULTINODE_ENABLE
-      rdma_coordinator = RDMACoordinator(process_group, node_rank, local_rank, buffer_config, remote_allocator);
+      rdma_coordinator.init(process_group, node_rank, local_rank, buffer_config, remote_allocator);
 #else
       assert(false); // inter-node communication is not supported.
 #endif
     }
-#ifdef HYBRID_EP_BUILD_MULTINODE_ENABLE
-    printf("build multinode enable\n");
-#else
-    printf("build multinode disable\n");
-#endif
     remote_allocator.init(/*enable_fabric = */ true);
     allocate_buffer();
 }
@@ -48,15 +43,15 @@ void HybridEPBuffer::release_buffer() {
   // Synchronize the device to ensure all operations are completed.
   CUDA_CHECK(cudaDeviceSynchronize());
 
-  auto free_buffer = [this](void *ptr, bool remote_memory) {
-    if (ptr != nullptr) {
-      if (remote_memory) {
-          // If the memory can be accessed by remote devices, free it from remote allocator.
-          remote_allocator.free(ptr);
-        } else {
-          CUDA_CHECK(cudaFree(ptr));
-        }
-      }
+  auto free_buffer = [this](auto *&ptr, bool remote_memory) {
+    if (ptr == nullptr) return;
+    if (remote_memory) {
+      // If the memory can be accessed by remote devices, free it from remote allocator.
+      remote_allocator.free(reinterpret_cast<void*>(ptr));
+    } else {
+      CUDA_CHECK(cudaFree(reinterpret_cast<void*>(ptr)));
+    }
+    ptr = nullptr;
   };
   
   // Clean up preprocessing buffer
@@ -74,10 +69,15 @@ void HybridEPBuffer::release_buffer() {
   free_buffer(dispatch_buffers.rdma_inter_node_group_flags, false);
   free_buffer(dispatch_buffers.expected_rdma_flag_value, false);
   free_buffer(dispatch_buffers.expected_intra_node_flag_value, false);
-  free_buffer(dispatch_buffers.attn_input_flags, false);
-  free_buffer(dispatch_buffers.attn_input_token, false);
-  free_buffer(dispatch_buffers.attn_input_prob, false);
-  free_buffer(dispatch_buffers.attn_input_scaling_factor, false);
+#ifdef HYBRID_EP_BUILD_MULTINODE_ENABLE
+  if(buffer_config.num_of_nodes > 1) {
+    // Warning: this judgemennt is *necessary*, because the attn_input_* pointers will be replaced by runtime torch tensors, so they could not be nullptr.
+    free_buffer(dispatch_buffers.attn_input_flags, false);
+    free_buffer(dispatch_buffers.attn_input_token, false);
+    free_buffer(dispatch_buffers.attn_input_prob, false);
+    free_buffer(dispatch_buffers.attn_input_scaling_factor, false);
+  }
+#endif
   if (local_rank == 0) {
     free_buffer(dispatch_buffers.intra_node_write_completion_flags, true);
   }else{
@@ -104,9 +104,14 @@ void HybridEPBuffer::release_buffer() {
   free_buffer(combine_buffers.rdma_inter_node_group_flags, false);
   free_buffer(combine_buffers.expected_rdma_flag_value, false);
   free_buffer(combine_buffers.expected_intra_node_flag_value, false);
-  free_buffer(combine_buffers.attn_output_flags, false);
-  free_buffer(combine_buffers.attn_output_token, false);
-  free_buffer(combine_buffers.attn_output_prob, false);
+#ifdef HYBRID_EP_BUILD_MULTINODE_ENABLE
+  if(buffer_config.num_of_nodes > 1) {  
+    // Warning: this judgemennt is *necessary*, because the attn_output_* pointers will be replaced by runtime torch tensors, so they could not be nullptr.
+    free_buffer(combine_buffers.attn_output_flags, false);
+    free_buffer(combine_buffers.attn_output_token, false);
+    free_buffer(combine_buffers.attn_output_prob, false);
+  }
+#endif
 
   if (local_rank == 0) {
     free_buffer(combine_buffers.intra_node_write_completion_flags, true);
