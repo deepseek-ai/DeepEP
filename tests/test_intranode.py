@@ -276,6 +276,7 @@ def test_loop(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
                             low_latency_mode=test_ll_compatibility,
                             num_qps_per_rank=(ll_num_experts // num_ranks if test_ll_compatibility else 1),
                             explicitly_destroy=True,
+                            allow_mnnvl=args.allow_mnnvl,
                             use_fabric=args.use_fabric)
     torch.manual_seed(rank)
 
@@ -302,6 +303,7 @@ if __name__ == '__main__':
     parser.add_argument('--hidden', type=int, default=7168, help='Hidden dimension size (default: 7168)')
     parser.add_argument('--num-topk', type=int, default=8, help='Number of top-k experts (default: 8)')
     parser.add_argument('--num-experts', type=int, default=256, help='Number of experts (default: 256)')
+    parser.add_argument('--allow-mnnvl', action="store_true", help='Enable MNNVL support')
     parser.add_argument('--use-fabric', action="store_true", help='Enable fabric mode')
     args = parser.parse_args()
 
