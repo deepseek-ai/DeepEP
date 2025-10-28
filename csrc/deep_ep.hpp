@@ -24,8 +24,8 @@
 namespace shared_memory {
 
 union MemHandleInner {
-  cudaIpcMemHandle_t cuda_ipc_mem_handle;
-  CUmemFabricHandle cu_mem_fabric_handle;
+    cudaIpcMemHandle_t cuda_ipc_mem_handle;
+    CUmemFabricHandle cu_mem_fabric_handle;
 };
 
 struct MemHandle {
@@ -43,10 +43,11 @@ public:
     void get_mem_handle(MemHandle* mem_handle, void* ptr);
     void open_mem_handle(void** ptr, MemHandle* mem_handle);
     void close_mem_handle(void* ptr);
+
 private:
     bool use_fabric;
 };
-}
+}  // namespace shared_memory
 
 namespace deep_ep {
 

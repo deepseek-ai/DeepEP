@@ -41,7 +41,8 @@ void cu_mem_free(void* ptr) {
 
 size_t get_size_align_to_granularity(size_t size_raw, size_t granularity) {
     size_t size = (size_raw + granularity - 1) & ~(granularity - 1);
-    if (size == 0) size = granularity;
+    if (size == 0)
+        size = granularity;
     return size;
 }
 
@@ -66,7 +67,7 @@ void SharedMemoryAllocator::malloc(void** ptr, size_t size_raw) {
         CUmemGenericAllocationHandle handle;
         CU_CHECK(cuMemCreate(&handle, size, &prop, 0));
 
-        CU_CHECK(cuMemAddressReserve((CUdeviceptr *)ptr, size, granularity, 0, 0));
+        CU_CHECK(cuMemAddressReserve((CUdeviceptr*)ptr, size, granularity, 0, 0));
         CU_CHECK(cuMemMap((CUdeviceptr)*ptr, size, 0, handle, 0));
         cu_mem_set_access_all(*ptr, size);
     } else {
@@ -105,7 +106,7 @@ void SharedMemoryAllocator::open_mem_handle(void** ptr, MemHandle* mem_handle) {
         CUmemGenericAllocationHandle handle;
         CU_CHECK(cuMemImportFromShareableHandle(&handle, &mem_handle->inner.cu_mem_fabric_handle, CU_MEM_HANDLE_TYPE_FABRIC));
 
-        CU_CHECK(cuMemAddressReserve((CUdeviceptr *)ptr, size, 0, 0, 0));
+        CU_CHECK(cuMemAddressReserve((CUdeviceptr*)ptr, size, 0, 0, 0));
         CU_CHECK(cuMemMap((CUdeviceptr)*ptr, size, 0, handle, 0));
         cu_mem_set_access_all(*ptr, size);
     } else {
@@ -120,7 +121,7 @@ void SharedMemoryAllocator::close_mem_handle(void* ptr) {
         CUDA_CHECK(cudaIpcCloseMemHandle(ptr));
     }
 }
-}
+}  // namespace shared_memory
 
 namespace deep_ep {
 
@@ -178,7 +179,8 @@ Buffer::Buffer(int rank,
 
     if (num_nvl_bytes > 0) {
         // Local IPC: alloc local memory and set local IPC handles
-        shared_memory_allocator.malloc(&buffer_ptrs[nvl_rank], num_nvl_bytes + barrier_signal_bytes + buffer_ptr_bytes + barrier_signal_ptr_bytes);
+        shared_memory_allocator.malloc(&buffer_ptrs[nvl_rank],
+                                       num_nvl_bytes + barrier_signal_bytes + buffer_ptr_bytes + barrier_signal_ptr_bytes);
         shared_memory_allocator.get_mem_handle(&ipc_handles[nvl_rank], buffer_ptrs[nvl_rank]);
         buffer_ptrs_gpu = reinterpret_cast<void**>(static_cast<uint8_t*>(buffer_ptrs[nvl_rank]) + num_nvl_bytes + barrier_signal_bytes);
 
