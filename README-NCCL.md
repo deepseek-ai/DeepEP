@@ -1,5 +1,7 @@
 # NCCL GIN Setup and Usage Guide
 
+For system requirements and dependencies, please refer to the main [README.md](README.md).
+
 ## Step 0: Let's first setup the environment
 
 ```bash
