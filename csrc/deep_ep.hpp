@@ -37,14 +37,14 @@ constexpr size_t HANDLE_SIZE = sizeof(MemHandle);
 
 class SharedMemoryAllocator {
 public:
-    SharedMemoryAllocator();
+    SharedMemoryAllocator(bool use_fabric);
     void malloc(void** ptr, size_t size);
     void free(void* ptr);
     void get_mem_handle(MemHandle* mem_handle, void* ptr);
     void open_mem_handle(void** ptr, MemHandle* mem_handle);
     void close_mem_handle(void* ptr);
 private:
-    bool enable_fabric;
+    bool use_fabric;
 };
 }
 
@@ -118,7 +118,8 @@ public:
            int64_t num_rdma_bytes,
            bool low_latency_mode,
            bool explicitly_destroy,
-           bool enable_shrink);
+           bool enable_shrink,
+           bool use_fabric);
 
     ~Buffer() noexcept(false);
 

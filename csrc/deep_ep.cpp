@@ -45,25 +45,10 @@ size_t get_size_align_to_granularity(size_t size_raw, size_t granularity) {
     return size;
 }
 
-bool support_fabric() {
-    int device_count;
-    CUDA_CHECK(cudaGetDeviceCount(&device_count));
-
-    for (int device = 0; device < device_count; ++device) {
-        int support = 0;
-        CU_CHECK(cuDeviceGetAttribute(&support, CU_DEVICE_ATTRIBUTE_HANDLE_TYPE_FABRIC_SUPPORTED, device));
-        if (!support) {
-            return false;
-        }
-    }
-
-    return true;
-}
-
-SharedMemoryAllocator::SharedMemoryAllocator() : enable_fabric(support_fabric()) {}
+SharedMemoryAllocator::SharedMemoryAllocator(bool use_fabric) : use_fabric(use_fabric) {}
 
 void SharedMemoryAllocator::malloc(void** ptr, size_t size_raw) {
-    if (enable_fabric) {
+    if (use_fabric) {
         CUdevice device;
         CU_CHECK(cuCtxGetDevice(&device));
 
@@ -90,7 +75,7 @@ void SharedMemoryAllocator::malloc(void** ptr, size_t size_raw) {
 }
 
 void SharedMemoryAllocator::free(void* ptr) {
-    if (enable_fabric) {
+    if (use_fabric) {
         cu_mem_free(ptr);
     } else {
         CUDA_CHECK(cudaFree(ptr));
@@ -103,7 +88,7 @@ void SharedMemoryAllocator::get_mem_handle(MemHandle* mem_handle, void* ptr) {
 
     mem_handle->size = size;
 
-    if (enable_fabric) {
+    if (use_fabric) {
         CUmemGenericAllocationHandle handle;
         CU_CHECK(cuMemRetainAllocationHandle(&handle, ptr));
 
@@ -114,7 +99,7 @@ void SharedMemoryAllocator::get_mem_handle(MemHandle* mem_handle, void* ptr) {
 }
 
 void SharedMemoryAllocator::open_mem_handle(void** ptr, MemHandle* mem_handle) {
-    if (enable_fabric) {
+    if (use_fabric) {
         size_t size = mem_handle->size;
 
         CUmemGenericAllocationHandle handle;
@@ -129,7 +114,7 @@ void SharedMemoryAllocator::open_mem_handle(void** ptr, MemHandle* mem_handle) {
 }
 
 void SharedMemoryAllocator::close_mem_handle(void* ptr) {
-    if (enable_fabric) {
+    if (use_fabric) {
         cu_mem_free(ptr);
     } else {
         CUDA_CHECK(cudaIpcCloseMemHandle(ptr));
@@ -145,7 +130,8 @@ Buffer::Buffer(int rank,
                int64_t num_rdma_bytes,
                bool low_latency_mode,
                bool explicitly_destroy,
-               bool enable_shrink)
+               bool enable_shrink,
+               bool use_fabric)
     : rank(rank),
       num_ranks(num_ranks),
       num_nvl_bytes(num_nvl_bytes),
@@ -153,7 +139,8 @@ Buffer::Buffer(int rank,
       enable_shrink(enable_shrink),
       low_latency_mode(low_latency_mode),
       explicitly_destroy(explicitly_destroy),
-      comm_stream(at::cuda::getStreamFromPool(true)) {
+      comm_stream(at::cuda::getStreamFromPool(true)),
+      shared_memory_allocator(use_fabric) {
     // Metadata memory
     int64_t barrier_signal_bytes = NUM_MAX_NVL_PEERS * sizeof(int);
     int64_t buffer_ptr_bytes = NUM_MAX_NVL_PEERS * sizeof(void*);
