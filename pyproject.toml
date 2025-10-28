@@ -1,0 +1,39 @@
+[tool.yapf]
+based_on_style = "pep8"
+column_limit = 140
+indent_width = 4
+
+[tool.ruff.lint]
+select = [
+    # pycodestyle
+    "E", "W",
+    # Pyflakes
+    "F",
+    # pyupgrade
+    # "UP",
+    # flake8-bugbear
+    "B",
+    # flake8-simplify
+    "SIM",
+    # isort
+    # "I",
+]
+ignore = [
+    # Module level import not at top of file
+    "E402",
+    # star imports
+    "F405", "F403",
+    # ambiguous name
+    "E741",
+    # line too long
+    "E501",
+    # key in dict.keys()
+    "SIM118",
+    # memory leaks
+    "B019",
+    # No such file or directory
+    "E902",
+]
+exclude = [
+    "deep_ep/__init__.py"
+]

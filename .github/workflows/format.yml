@@ -1,0 +1,28 @@
+name: Code Format Check
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  format-check:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout source
+      uses: actions/checkout@v3
+      with:
+        fetch-depth: 0 
+
+    - name: Setup environment
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y bash
+
+    - name: Run format.sh
+      run: |
+        bash ./format.sh
+
+    # If format.sh return non-zero, GitHub Actions will mark it as failure.
