@@ -328,6 +328,10 @@ __device__ __forceinline__ uint32_t elect_one_sync() {
 #endif
 }
 
+__device__ __forceinline__ void fence_view_async_shared() {
+    asm volatile("fence.proxy.async.shared::cta; \n" :: );
+}
+
 // TMA PTX instructions
 #ifndef DISABLE_SM90_FEATURES
 
