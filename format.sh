@@ -184,6 +184,10 @@ if ! git diff --quiet &>/dev/null; then
     echo
     git --no-pager diff --name-only
 
+    echo 'You can also copy-paste the diff below to fix the lint:'
+    echo
+    git --no-pager diff
+
     exit 1
 fi
 
