@@ -500,8 +500,8 @@ HybridEPBuffer::combine(HybridEpConfigInstance config,
     assert(probs.value().device().is_cuda());
     assert(probs.value().is_contiguous());
     assert(probs.value().dtype() == torch::kFloat32);
-    assert(probs.value().size(1) ==
-           config.num_of_experts_per_rank * config.num_of_ranks_per_node);
+    assert(probs.value().numel() == 0 ||
+           probs.value().size(1) == config.num_of_experts_per_rank * config.num_of_ranks_per_node);
   }
 
   // Construct the output tensors
