@@ -1196,10 +1196,11 @@ __global__ void __launch_bounds__(((kNumDispatchRDMASenderWarps + 1 + NUM_MAX_NV
             return;
         // get the actual number of num_recv_tokens on the current rank
         int num_recv_tokens = recv_gbl_rank_prefix_sum[num_ranks - 1];
-        // some ForwarderCoordinator threads exit early, so we only use non-forwarder thread ids
-        const auto clean_start = num_recv_tokens * num_topk + (sm_id / 2) * num_threads;
+        // some ForwarderCoordinator threads exit early, so we only use non-forwarder in clean-up
+        // channel_id * num_threads is the offset of the current non-forwarder sms
+        const auto clean_start = num_recv_tokens * num_topk + channel_id * num_threads;
         const auto clean_end = num_worst_tokens * num_topk;
-        const auto clean_stride = num_sms * num_threads / 2;
+        const auto clean_stride = num_channels * num_threads;
         #pragma unroll
         for (int i = clean_start + thread_id; i < clean_end; i += clean_stride)
             recv_topk_idx[i] = -1;
