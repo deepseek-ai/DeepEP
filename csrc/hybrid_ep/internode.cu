@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES.
 // All rights reserved
 #include "internode.cuh"
+#include <dlfcn.h>
 
 // Functions realted to get RDMA context.
 static ibv_device *ctx_find_dev(const char *ib_devname) {
@@ -104,15 +105,6 @@ static int get_gpu_handler(struct doca_gpu *handler,
     printf("mtable map allocation failed\n");
     assert(0);
   }
-  // Debug info.
-  printf("cuda_dev:%d, GPU pciBusId:%s, support_gdrcopy:%d, support_dmabuf:%d, "
-         "support_wq_gpumem:%d, "
-         "support_cq_gpumem:%d, support_uar_gpumem:%d, "
-         "support_async_store_release:%d, support_bf_uar:%d\n",
-         handler->cuda_dev, pciBusId, handler->support_gdrcopy,
-         handler->support_dmabuf, handler->support_wq_gpumem,
-         handler->support_cq_gpumem, handler->support_uar_gpumem,
-         handler->support_async_store_release, handler->support_bf_uar);
   cuMemFree(dev_ptr);
   if (db_uar) {
     cuMemHostUnregister(db_uar->reg_addr);
@@ -128,6 +120,7 @@ static int get_gpu_handler(struct doca_gpu *handler,
 void setup_qp_init_attr(struct doca_gpu_verbs_qp_init_attr_hl *qp_init_attr,
                         struct doca_gpu *gpu_handler, struct ibv_pd *ib_pd,
                         int tx_depth) {
+  assert(tx_depth > 0 && tx_depth < 65536);
   qp_init_attr->gpu_dev = gpu_handler;
   qp_init_attr->ibpd = ib_pd;
   qp_init_attr->sq_nwqe = tx_depth;
@@ -143,12 +136,12 @@ int create_and_place_qps(struct gverbs_context *g_ctx,
     struct doca_gpu_verbs_qp_hl *qp_hl = NULL;
     status = doca_gpu_verbs_create_qp_hl(qp_init_attr, &qp_hl);
     if (status) {
-      fprintf(stderr, "Failed to create QP\n");
+      fprintf(stderr, "Failed to create %dth QP with status %d\n", i, status);
       assert(0);
     }
     g_ctx->qp_hls[i] = qp_hl;
   }
-  return 0;
+  return status;
 }
 
 static int setup_qp_attr_for_modify(struct doca_verbs_qp_attr *qp_attr,
@@ -265,16 +258,19 @@ void RDMACoordinator::init(
       int node_rank,
       int local_rank, 
       BufferConfig config, 
-      ExtendedMemoryAllocator allocator) {
+      ExtendedMemoryAllocator allocator,
+      std::vector<std::string> ib_dev_name_list
+  ) {
   this->process_group = process_group;
   this->node_rank = node_rank;
   this->local_rank = local_rank;
   this->buffer_config = config;
   this->allocator = allocator;
-
-  assert(buffer_config.num_of_nodes > 1);
+  this->ib_dev_name_list = ib_dev_name_list;
+  
+  // assert(buffer_config.num_of_nodes > 1);
   // Get name of ibv device.
-  const char *ib_devname = IBV_DEV_NAME_LIST[local_rank].c_str();
+  const char *ib_devname = ib_dev_name_list[local_rank].c_str();
   // Find ib device and get ibv_context.
   struct ibv_device *ib_dev = ctx_find_dev(ib_devname);
 
@@ -444,6 +440,10 @@ void RDMACoordinator::allocate_dispatch_rdma_buffers(DispatchBuffers &dispatch_b
   }
   CUDA_CHECK(cudaMemcpy(dispatch_mr_info_d, dispatch_mr_info_h, num_of_dispatch_qps * sizeof(dispatch_memory_region_info_t), cudaMemcpyHostToDevice));
 
+  // Set RDMA attributes to dispatch buffers.
+  dispatch_buffers.d_qps_gpu = dispatch_gverbs_ctx.d_qps_gpu;
+  dispatch_buffers.mr_info = dispatch_mr_info_d;
+
   // Free temporary resources.
   free(my_dispatch_info);
   free(h_qps_gpu);
@@ -581,6 +581,10 @@ void RDMACoordinator::allocate_combine_rdma_buffers(CombineBuffers &combine_buff
   }
   CUDA_CHECK(cudaMemcpy(combine_mr_info_d, combine_mr_info_h, num_of_combine_qps * sizeof(combine_memory_region_info_t), cudaMemcpyHostToDevice));
 
+  // Set RDMA attributes to combine buffers.
+  combine_buffers.d_qps_gpu = combine_gverbs_ctx.d_qps_gpu;
+  combine_buffers.mr_info = combine_mr_info_d;
+
   // Free temporary resources.
   free(my_combine_info);
   free(h_qps_gpu);
@@ -673,7 +677,7 @@ void RDMACoordinator::exchange_remote_rmda_info(remote_info* dst, remote_info *s
     auto num_bytes = static_cast<int64_t>(num_of_qps) *
                  static_cast<int64_t>(sizeof(remote_info));
     torch::Tensor buffer = torch::empty({num_bytes}, at::device(at::kCUDA).dtype(at::kByte));
-    CUDA_CHECK(cudaMemcpy(buffer.data_ptr<int8_t>(), reinterpret_cast<int8_t *>(src), num_of_qps * sizeof(remote_info), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(buffer.data_ptr(), reinterpret_cast<void *>(src), num_of_qps * sizeof(remote_info), cudaMemcpyHostToDevice));
     
     // Get world size from process group
     int world_size = process_group.attr("size")().cast<int>();
@@ -685,8 +689,8 @@ void RDMACoordinator::exchange_remote_rmda_info(remote_info* dst, remote_info *s
     torch_distributed.attr("all_gather")(output_list, buffer, process_group);
     
     // Move the gathered remote info to CPU.
-    for(int i = local_rank; i < world_size; i += buffer_config.num_of_nodes) {
-      CUDA_CHECK(cudaMemcpy(dst + i * num_of_qps, output_list[i].cast<torch::Tensor>().data_ptr<int8_t>(), num_of_qps * sizeof(remote_info), cudaMemcpyDeviceToHost));
+    for(int i = local_rank; i < world_size; i += buffer_config.num_of_ranks_per_node) {
+      CUDA_CHECK(cudaMemcpy(dst + num_of_qps * (i / buffer_config.num_of_ranks_per_node), output_list[i].cast<torch::Tensor>().data_ptr<uint8_t>(), num_of_qps * sizeof(remote_info), cudaMemcpyDeviceToHost));
     }
     
   } catch (const std::exception& e) {

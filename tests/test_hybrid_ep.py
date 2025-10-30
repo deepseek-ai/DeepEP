@@ -15,9 +15,10 @@ MAX_NUM_OF_TOKENS_PER_RANK = int(os.environ.get("MAX_NUM_OF_TOKENS_PER_RANK", 40
 NUM_TOKENS_PER_RANK = int(os.environ.get("NUM_TOKENS_PER_RANK", 4096))
 NUM_LOCAL_EXPERTS = int(os.environ.get("NUM_LOCAL_EXPERTS", 8))
 NUM_OF_RANKS_PER_NODE = int(os.environ.get("NUM_OF_RANKS_PER_NODE", 4))
+MUM_OF_NODES = int(os.environ.get("MUM_OF_NODES", 1))
 TOPK = int(os.environ.get("TOPK", 8))
 PAD_MULTIPLE = int(os.environ.get("PAD_MULTIPLE", 32))
-NUM_OF_EXPERTS = NUM_LOCAL_EXPERTS * NUM_OF_RANKS_PER_NODE
+NUM_OF_EXPERTS = NUM_LOCAL_EXPERTS * NUM_OF_RANKS_PER_NODE * MUM_OF_NODES
 ITERATIONS = int(os.environ.get("ITERATIONS", 100))
 SEED = int(os.environ.get("SEED", 42))
 torch.manual_seed(SEED)
@@ -319,6 +320,7 @@ def test_main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
                 max_num_of_tokens_per_rank=MAX_NUM_OF_TOKENS_PER_RANK,
                 num_local_experts=NUM_LOCAL_EXPERTS,
                 use_fp8=use_fp8,
+                ib_dev_name_list=args.ib_dev_name_list,
             )
             
             ref = TorchRef(
@@ -340,5 +342,7 @@ if __name__ == "__main__":
                        help='Number of processes to spawn (default: 4)')
     parser.add_argument('--nsys-profile', action='store_true', default=False,
                        help='benchmark with nsys profile or not (default: False)')
+    parser.add_argument('--ib-dev-name-list', nargs='+', type=str, default=[],
+                       help='IB device name list (default: [])')
     args = parser.parse_args()
     torch.multiprocessing.spawn(test_main, args=(args.num_processes, args), nprocs=args.num_processes)

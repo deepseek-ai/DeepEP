@@ -17,11 +17,9 @@
 #include "internode.cuh"
 #endif
 
-void set_IB_device_list(std::vector<std::string> ib_dev_name_list);
-
 class HybridEPBuffer {
 public:
-  HybridEPBuffer(pybind11::object process_group, BufferConfig config, int local_rank, int node_rank, int group_size, std::string base_path);
+  HybridEPBuffer(pybind11::object process_group, BufferConfig config, int local_rank, int node_rank, int group_size, std::string base_path, std::vector<std::string> ib_dev_name_list, bool load_cached_kernels);
   ~HybridEPBuffer();
   bool update_buffer(HybridEpConfigInstance config); // True means the buffer is reallocated.
 
@@ -78,6 +76,9 @@ public:
           bool with_probs);       
 
 private:
+#ifdef HYBRID_EP_BUILD_MULTINODE_ENABLE
+  std::vector<std::string> ib_dev_name_list;
+#endif
   ExtendedMemoryAllocator remote_allocator;
   BufferConfig buffer_config;
   Executor executor;

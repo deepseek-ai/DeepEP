@@ -63,7 +63,7 @@ private:
 
 class KernelCache{
 public:
-    KernelCache(int local_rank, std::string base_path);
+    KernelCache(int local_rank, std::string base_path, bool load_cached_kernels);
 
     void run_proprecess_kernel(
         HybridEpConfigInstance config, 

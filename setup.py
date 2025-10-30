@@ -65,6 +65,7 @@ def get_extension_hybrid_ep_cpp():
     library_dirs = []
     libraries = ["cuda", "nvtx3interop"]
     extra_objects = []
+    runtime_library_dirs = []
 
     # Add dependency for jit
     compile_args["nvcc"].append(f'-DSM_ARCH="{os.environ["TORCH_CUDA_ARCH_LIST"]}"')
@@ -77,30 +78,21 @@ def get_extension_hybrid_ep_cpp():
     # Add inter-node dependency 
     if enable_multinode:
         sources.extend(["csrc/hybrid_ep/internode.cu"])
-        rdma_core_dir = os.path.join(current_dir, "third-party/rdma-core")
-        nccl_dir = os.path.join(current_dir, "third-party/nccl")
+        rdma_core_dir = os.getenv("RDMA_CORE_HOME", "")
+        nccl_dir = os.path.join(current_dir, "third-party/nccl")        
         compile_args["nvcc"].append("-DHYBRID_EP_BUILD_MULTINODE_ENABLE")
+
         subprocess.run(["git", "submodule", "update", "--init", "--recursive"], cwd=current_dir)
         # Generate the inter-node dependency to the python package for JIT compilation
-        subprocess.run(["bash", "build.sh"], cwd=rdma_core_dir, check=True)
         subprocess.run(["make", "-j", "src.build", f"NVCC_GENCODE={to_nvcc_gencode(os.environ['TORCH_CUDA_ARCH_LIST'])}"], cwd=nccl_dir, check=True)
         # Add third-party dependency 
-        include_dirs.append(os.path.join(rdma_core_dir, "build/include"))
         include_dirs.append(os.path.join(nccl_dir, "src/transport/gdaki/doca-gpunetio/include"))
-        library_dirs.append(os.path.join(rdma_core_dir, "build/lib"))
+        include_dirs.append(os.path.join(rdma_core_dir, "include"))
+        library_dirs.append(os.path.join(rdma_core_dir, "lib"))
+        runtime_library_dirs.append(os.path.join(rdma_core_dir, "lib"))
         libraries.append("mlx5")
         libraries.append("ibverbs")
         # Copy the inter-node dependency to python package
-        shutil.copytree(
-            os.path.join(rdma_core_dir, "build/include"),
-            os.path.join(current_dir, "deep_ep/backend/rdma-core/include"),
-            dirs_exist_ok=True
-        )
-        shutil.copytree(
-            os.path.join(rdma_core_dir, "build/lib"),
-            os.path.join(current_dir, "deep_ep/backend/rdma-core/lib"),
-            dirs_exist_ok=True
-        )
         shutil.copytree(
             os.path.join(nccl_dir, "src/transport/gdaki/doca-gpunetio/include"),
             os.path.join(current_dir, "deep_ep/backend/nccl/include"),
@@ -137,6 +129,7 @@ def get_extension_hybrid_ep_cpp():
     print(f' > Library dirs: {library_dirs}')
     print(f' > Compilation flags: {compile_args}')
     print(f' > Extra objects: {extra_objects}')
+    print(f' > Runtime library dirs: {runtime_library_dirs}')
     print(f' > Arch list: {os.environ["TORCH_CUDA_ARCH_LIST"]}')
     print()
 
@@ -144,10 +137,11 @@ def get_extension_hybrid_ep_cpp():
         "hybrid_ep_cpp",
         sources=sources,
         include_dirs=include_dirs,
-        libraries=libraries,
         library_dirs=library_dirs,
+        libraries=libraries,
         extra_compile_args=compile_args,
         extra_objects=extra_objects,
+        runtime_library_dirs=runtime_library_dirs,
     )
 
     return extension_hybrid_ep_cpp

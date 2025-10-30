@@ -13,7 +13,6 @@ namespace py = pybind11;
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.doc() = "HybridEP, efficiently enable the expert-parallel communication in "
               "the Hopper+ architectures";
-    m.def("set_IB_device_list", &set_IB_device_list, py::arg("ib_dev_name_list"));
   
     pybind11::enum_<TOKEN_DATA_TYPE>(m, "TokenDataType")
         .value("UINT16", TOKEN_DATA_TYPE::UINT16)
@@ -108,7 +107,15 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         });
   
     pybind11::class_<HybridEPBuffer>(m, "HybridEPBuffer")
-        .def(py::init<pybind11::object, BufferConfig, int, int, int, std::string>())
+        .def(py::init<py::object, BufferConfig, int, int, int, std::string, std::vector<std::string>, bool>(),
+            py::arg("process_group"),
+            py::arg("config"),
+            py::arg("local_rank"),
+            py::arg("node_rank"),
+            py::arg("group_size"),
+            py::arg("base_path"),
+            py::arg("ib_dev_name_list") = std::vector<std::string>{},
+            py::arg("load_cached_kernels") = false)
         .def("update_buffer", &HybridEPBuffer::update_buffer, py::arg("config"))
         .def("metadata_preprocessing", &HybridEPBuffer::metadata_preprocessing,
              py::kw_only(), py::arg("config"), py::arg("routing_map"), py::arg("num_of_tokens_per_rank"))

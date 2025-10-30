@@ -28,9 +28,10 @@ NVCCCompiler::NVCCCompiler(std::string base_path): base_path(base_path) {
 #ifdef HYBRID_EP_BUILD_MULTINODE_ENABLE
     // Add the dependency of the inter-node jit
     flags += " -DHYBRID_EP_BUILD_MULTINODE_ENABLE";
-    include += " -I" + base_path + "/backend/rdma-core/include "
+    std::string rdma_core_home = get_env("RDMA_CORE_HOME");
+    include += " -I" + rdma_core_home + "/include "
              + " -I" + base_path + "/backend/nccl/include";
-    library += " -L" + base_path + "/backend/rdma-core/lib "
+    library += " -L" + rdma_core_home + "/lib "
              + "-lmlx5 -libverbs ";
     std::string doca_obj_path = base_path + "/backend/nccl/obj";
     objs = doca_obj_path + "/doca_gpunetio.o "
@@ -190,15 +191,17 @@ std::string NVCCCompiler::get_combine_code(HybridEpConfigInstance config) {
       )";
 }
 
-KernelCache::KernelCache(int local_rank, std::string base_path): 
+KernelCache::KernelCache(int local_rank, std::string base_path, bool load_cached_kernels): 
 local_rank(local_rank), base_path(base_path), nvcc_compiler(base_path) {
     // Load all cached kernels from the cache directory
     std::string cache_dir = base_path + "/build/jit";
     std::filesystem::create_directories(cache_dir);
-    for (const auto& entry : std::filesystem::directory_iterator(cache_dir)) {
-        if (entry.path().extension() == ".so") {
-            std::string kernel_key = entry.path().stem().string();
-            kernel_cache[kernel_key] = nvcc_compiler.get_instance(entry.path().string(), kernel_key);
+    if(load_cached_kernels) {
+        for (const auto& entry : std::filesystem::directory_iterator(cache_dir)) {
+            if (entry.path().extension() == ".so") {
+                std::string kernel_key = entry.path().stem().string();
+                kernel_cache[kernel_key] = nvcc_compiler.get_instance(entry.path().string(), kernel_key);
+            }
         }
     }
 }

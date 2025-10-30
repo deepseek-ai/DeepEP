@@ -2,31 +2,23 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved
 #include "hybrid_ep.cuh"
 
-void set_IB_device_list(std::vector<std::string> ib_dev_name_list) {
-#ifdef HYBRID_EP_BUILD_MULTINODE_ENABLE
-  assert(ib_dev_name_list.size() <= MAX_NUM_OF_RANKS_PER_NODE);
-  for (int i = 0; i < ib_dev_name_list.size(); ++i) {
-    IBV_DEV_NAME_LIST[i] = ib_dev_name_list[i].c_str();
-  }
-#endif
-}
-
-
 HybridEPBuffer::HybridEPBuffer(
   pybind11::object process_group, 
   BufferConfig config, 
   int local_rank, 
   int node_rank, 
   int group_size, 
-  std::string base_path
+  std::string base_path,
+  std::vector<std::string> ib_dev_name_list,
+  bool load_cached_kernels
 ) : process_group(process_group), buffer_config(config), local_rank(local_rank), node_rank(node_rank), group_size(group_size),
-    executor(local_rank, node_rank, base_path) {
+    executor(local_rank, node_rank, base_path, load_cached_kernels) {
     if(group_size <= buffer_config.num_of_ranks_per_node) {
       // If used on only intra-node communication, the dispatch/combine can share same buffers.
       use_shared_buffer = true;
     }else{
 #ifdef HYBRID_EP_BUILD_MULTINODE_ENABLE
-      rdma_coordinator.init(process_group, node_rank, local_rank, buffer_config, remote_allocator);
+      rdma_coordinator.init(process_group, node_rank, local_rank, buffer_config, remote_allocator, ib_dev_name_list);
 #else
       assert(false); // inter-node communication is not supported.
 #endif

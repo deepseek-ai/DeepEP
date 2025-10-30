@@ -44,6 +44,7 @@ class HybridEPBuffer:
         num_sms_combine_api: int = 32,
         num_sms_preprocessing_api: int = 128,
         nvlink_domain_size: int = None,
+        ib_dev_name_list: list[str] = [],
     ):
         self.group = group
         self.rank = self.group.rank()
@@ -113,7 +114,8 @@ class HybridEPBuffer:
 
         # Create C++ buffer - this will allocate all buffers during construction
         self.runtime = hybrid_ep_cpp.HybridEPBuffer(
-            self.group, self.config, self.local_rank, self.node_rank, self.group_size, os.path.dirname(os.path.abspath(__file__))
+            self.group, self.config, self.local_rank, self.node_rank, self.group_size, os.path.dirname(os.path.abspath(__file__)), ib_dev_name_list, 
+            load_cached_kernels = False
         )
 
     def empty_jit_cache(self):

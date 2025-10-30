@@ -7,6 +7,7 @@
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/util/Optional.h>
 #include <torch/torch.h>
+#include <iostream>
 #include "backend/hybrid_ep_backend.cuh"
 #include "backend/utils.cuh"
 #include "allocator/allocator.cuh"
@@ -51,8 +52,6 @@ constexpr uint8_t QP_TIMEOUT = 22;
 constexpr uint8_t SL = 0;
 constexpr uint8_t TRAFFIC_CLASS = 0;
 constexpr enum memory_type MEMORY_TYPE = MEMORY_CUDA;
-// Ibv device list need to be filled by hand currently.
-static std::string IBV_DEV_NAME_LIST[MAX_NUM_OF_RANKS_PER_NODE];
 // Port state array.
 static const char *portStates[] = {"Nop","Down","Init","Armed","","Active Defer"};
 
@@ -138,12 +137,13 @@ class RDMACoordinator {
 public:
     RDMACoordinator() = default;
     ~RDMACoordinator() = default;
-    void init(pybind11::object process_group, int node_rank, int local_rank, BufferConfig config, ExtendedMemoryAllocator allocator);
+    void init(pybind11::object process_group, int node_rank, int local_rank, BufferConfig config, ExtendedMemoryAllocator allocator, std::vector<std::string> ib_dev_name_list);
     void destory();
     void allocate_dispatch_rdma_buffers(DispatchBuffers &dispatch_buffers);
     void allocate_combine_rdma_buffers(CombineBuffers &combine_buffers);
 
 private:
+    std::vector<std::string> ib_dev_name_list;
     int node_rank = -1;
     int local_rank = -1;
     BufferConfig buffer_config;
