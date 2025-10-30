@@ -1,0 +1,21 @@
+BasedOnStyle: Google
+UseTab: Never
+IndentWidth: 4
+ColumnLimit: 140
+AccessModifierOffset: -4
+
+# Force pointers to the type for C++.
+DerivePointerAlignment: false
+PointerAlignment: Left
+ReferenceAlignment: Left
+AllowShortFunctionsOnASingleLine: Inline
+AllowShortIfStatementsOnASingleLine: false
+AllowShortLoopsOnASingleLine: false
+AlignOperands: false
+BreakBeforeBinaryOperators: None
+Cpp11BracedListStyle: true
+ContinuationIndentWidth: 4
+
+BinPackArguments: false
+BinPackParameters: false
+

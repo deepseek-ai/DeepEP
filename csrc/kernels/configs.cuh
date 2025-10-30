@@ -11,10 +11,10 @@
 
 #ifndef ENABLE_FAST_DEBUG
 #define NUM_CPU_TIMEOUT_SECS 100
-#define NUM_TIMEOUT_CYCLES 200000000000ull // 200G cycles ~= 100s
+#define NUM_TIMEOUT_CYCLES 200000000000ull  // 200G cycles ~= 100s
 #else
 #define NUM_CPU_TIMEOUT_SECS 10
-#define NUM_TIMEOUT_CYCLES 20000000000ull // 20G cycles ~= 10s
+#define NUM_TIMEOUT_CYCLES 20000000000ull  // 20G cycles ~= 10s
 #endif
 
 #define LOW_LATENCY_SEND_PHASE 1
@@ -22,8 +22,8 @@
 
 // Make CLion CUDA indexing work
 #ifdef __CLION_IDE__
-#define __CUDA_ARCH__ 900 // NOLINT(*-reserved-identifier)
-#define __CUDACC_RDC__ // NOLINT(*-reserved-identifier)
+#define __CUDA_ARCH__ 900  // NOLINT(*-reserved-identifier)
+#define __CUDACC_RDC__     // NOLINT(*-reserved-identifier)
 #endif
 
 // Remove Torch restrictions
@@ -43,9 +43,10 @@
 #undef __CUDA_NO_BFLOAT162_OPERATORS__
 #endif
 
-#include <cstdint>
 #include <cuda_bf16.h>
 #include <cuda_runtime.h>
+
+#include <cstdint>
 
 #ifndef DISABLE_SM90_FEATURES
 #include <cuda_fp8.h>
@@ -58,10 +59,25 @@ typedef int __nv_fp8x4_e4m3;
 typedef uint8_t __nv_fp8_storage_t;
 #endif
 
+namespace deep_ep {
+
+#ifndef TOPK_IDX_BITS
+#define TOPK_IDX_BITS 64
+#endif
+
+#define INT_BITS_T2(bits) int##bits##_t
+#define INT_BITS_T(bits) INT_BITS_T2(bits)
+typedef INT_BITS_T(TOPK_IDX_BITS) topk_idx_t;  // int32_t or int64_t
+#undef INT_BITS_T
+#undef INT_BITS_T2
+
+}  // namespace deep_ep
+
 #ifndef DISABLE_NVSHMEM
+#include <device_host_transport/nvshmem_common_ibgda.h>
+#include <infiniband/mlx5dv.h>
 #include <nvshmem.h>
 #include <nvshmemx.h>
-#include <infiniband/mlx5dv.h>
+
 #include <non_abi/device/threadgroup/nvshmemi_common_device_defines.cuh>
-#include <device_host_transport/nvshmem_common_ibgda.h>
 #endif

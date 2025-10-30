@@ -23,9 +23,11 @@ if __name__ == '__main__':
         try:
             nvshmem_dir = importlib.util.find_spec("nvidia.nvshmem").submodule_search_locations[0]
             nvshmem_host_lib = get_nvshmem_host_lib_name(nvshmem_dir)
-            import nvidia.nvshmem as nvshmem
+            import nvidia.nvshmem as nvshmem  # noqa: F401
         except (ModuleNotFoundError, AttributeError, IndexError):
-            print('Warning: `NVSHMEM_DIR` is not specified, and the NVSHMEM module is not installed. All internode and low-latency features are disabled\n')
+            print(
+                'Warning: `NVSHMEM_DIR` is not specified, and the NVSHMEM module is not installed. All internode and low-latency features are disabled\n'
+            )
             disable_nvshmem = True
     else:
         disable_nvshmem = False
@@ -33,8 +35,7 @@ if __name__ == '__main__':
     if not disable_nvshmem:
         assert os.path.exists(nvshmem_dir), f'The specified NVSHMEM directory does not exist: {nvshmem_dir}'
 
-    cxx_flags = ['-O3', '-Wno-deprecated-declarations', '-Wno-unused-variable',
-                 '-Wno-sign-compare', '-Wno-reorder', '-Wno-attributes']
+    cxx_flags = ['-O3', '-Wno-deprecated-declarations', '-Wno-unused-variable', '-Wno-sign-compare', '-Wno-reorder', '-Wno-attributes']
     nvcc_flags = ['-O3', '-Xcompiler', '-O3']
     sources = ['csrc/deep_ep.cpp', 'csrc/kernels/runtime.cu', 'csrc/kernels/layout.cu', 'csrc/kernels/intranode.cu']
     include_dirs = ['csrc/']
@@ -80,6 +81,12 @@ if __name__ == '__main__':
         cxx_flags.append('-DDISABLE_AGGRESSIVE_PTX_INSTRS')
         nvcc_flags.append('-DDISABLE_AGGRESSIVE_PTX_INSTRS')
 
+    # Bits of `topk_idx.dtype`, choices are 32 and 64
+    if "TOPK_IDX_BITS" in os.environ:
+        topk_idx_bits = int(os.environ['TOPK_IDX_BITS'])
+        cxx_flags.append(f'-DTOPK_IDX_BITS={topk_idx_bits}')
+        nvcc_flags.append(f'-DTOPK_IDX_BITS={topk_idx_bits}')
+
     # Put them together
     extra_compile_args = {
         'cxx': cxx_flags,
@@ -89,7 +96,7 @@ if __name__ == '__main__':
         extra_compile_args['nvcc_dlink'] = nvcc_dlink
 
     # Summary
-    print(f'Build summary:')
+    print('Build summary:')
     print(f' > Sources: {sources}')
     print(f' > Includes: {include_dirs}')
     print(f' > Libraries: {library_dirs}')
@@ -106,23 +113,15 @@ if __name__ == '__main__':
     except Exception as _:
         revision = ''
 
-    setuptools.setup(
-        name='deep_ep',
-        version='1.1.0' + revision,
-        packages=setuptools.find_packages(
-            include=['deep_ep']
-        ),
-        ext_modules=[
-            CUDAExtension(
-                name='deep_ep_cpp',
-                include_dirs=include_dirs,
-                library_dirs=library_dirs,
-                sources=sources,
-                extra_compile_args=extra_compile_args,
-                extra_link_args=extra_link_args
-            )
-        ],
-        cmdclass={
-            'build_ext': BuildExtension
-        }
-    )
+    setuptools.setup(name='deep_ep',
+                     version='1.2.1' + revision,
+                     packages=setuptools.find_packages(include=['deep_ep']),
+                     ext_modules=[
+                         CUDAExtension(name='deep_ep_cpp',
+                                       include_dirs=include_dirs,
+                                       library_dirs=library_dirs,
+                                       sources=sources,
+                                       extra_compile_args=extra_compile_args,
+                                       extra_link_args=extra_link_args)
+                     ],
+                     cmdclass={'build_ext': BuildExtension})

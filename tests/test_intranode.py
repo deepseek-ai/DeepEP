@@ -12,8 +12,8 @@ import test_low_latency
 
 
 # noinspection PyShadowingNames
-def test_main(args: argparse.Namespace, num_sms: int, local_rank: int, num_ranks: int, rank: int,
-              buffer: deep_ep.Buffer, group: dist.ProcessGroup):
+def test_main(args: argparse.Namespace, num_sms: int, local_rank: int, num_ranks: int, rank: int, buffer: deep_ep.Buffer,
+              group: dist.ProcessGroup):
     # Settings
     num_tokens, hidden = args.num_tokens, args.hidden
     num_topk, num_experts = args.num_topk, args.num_experts
@@ -29,9 +29,11 @@ def test_main(args: argparse.Namespace, num_sms: int, local_rank: int, num_ranks
     x_e4m3 = (x_e4m3[0], x_e4m3[1].T.contiguous().T) if x_e4m3 is not None else None
     scores = torch.randn((num_tokens, num_experts), dtype=torch.float32, device='cuda').abs() + 1
     topk_idx = torch.topk(scores, num_topk, dim=-1, largest=True, sorted=False)[1]
+    topk_idx = topk_idx.to(deep_ep.topk_idx_t)
     topk_weights = torch.ones((num_tokens, num_topk), dtype=torch.float32, device='cuda') * rank
     topk_weights_pure_rand = torch.randn((num_tokens, num_topk), dtype=torch.float32, device='cuda')
     rank_idx = topk_idx // (num_experts // num_ranks)
+    rank_idx = rank_idx.to(torch.int64)
     rank_idx.masked_fill_(topk_idx == -1, -1)
     inplace_unique(rank_idx, num_ranks)
 
@@ -88,34 +90,51 @@ def test_main(args: argparse.Namespace, num_sms: int, local_rank: int, num_ranks
             for current_x in filter(lambda elem: elem is not None, (x_pure_rand, x, x_e4m3)):
                 for with_topk in (False, True):
                     if local_rank == 0:
-                        print(f'[testing] Running with {"FP8" if isinstance(current_x, tuple) else "BF16"}, {"with" if with_topk else "without"} top-k (async={async_mode}, previous={previous_mode}) ...', flush=True, end='')
-                    dispatch_args = {'x': current_x, 'num_tokens_per_rank': num_tokens_per_rank,  'is_token_in_rank': is_token_in_rank,
-                                     'num_tokens_per_expert': num_tokens_per_expert, 'config': config, 'async_finish': async_mode}
+                        print(
+                            f'[testing] Running with {"FP8" if isinstance(current_x, tuple) else "BF16"}, {"with" if with_topk else "without"} top-k (async={async_mode}, previous={previous_mode}) ...',
+                            flush=True,
+                            end='')
+                    dispatch_args = {
+                        'x': current_x,
+                        'num_tokens_per_rank': num_tokens_per_rank,
+                        'is_token_in_rank': is_token_in_rank,
+                        'num_tokens_per_expert': num_tokens_per_expert,
+                        'config': config,
+                        'async_finish': async_mode
+                    }
                     if with_topk:
-                        dispatch_args.update({'topk_idx': topk_idx, 'topk_weights': topk_weights_pure_rand if current_x is x_pure_rand else topk_weights})
+                        dispatch_args.update({
+                            'topk_idx': topk_idx,
+                            'topk_weights': topk_weights_pure_rand if current_x is x_pure_rand else topk_weights
+                        })
                     if previous_mode:
                         dispatch_args.update({'previous_event': buffer.capture()})
-                    recv_x, recv_topk_idx, recv_topk_weights, recv_num_tokens_per_expert_list, handle, event = buffer.dispatch(**dispatch_args)
+                    recv_x, recv_topk_idx, recv_topk_weights, recv_num_tokens_per_expert_list, handle, event = buffer.dispatch(
+                        **dispatch_args)
                     event.current_stream_wait() if async_mode else ()
                     recv_x = per_token_cast_back(*recv_x) if isinstance(recv_x, tuple) else recv_x
 
                     # Checks
                     rank_prefix_matrix = handle[0]
-                    assert gbl_num_tokens_per_rank[rank].item() == recv_x.size(0), f'{gbl_num_tokens_per_rank[rank].item()} != {recv_x.size(0)}'
+                    assert gbl_num_tokens_per_rank[rank].item() == recv_x.size(
+                        0), f'{gbl_num_tokens_per_rank[rank].item()} != {recv_x.size(0)}'
                     assert gbl_num_tokens_per_expert.view(num_ranks, -1)[rank].tolist() == recv_num_tokens_per_expert_list
                     if current_x is not x_pure_rand:
                         check_data(recv_x, rank_prefix_matrix)
                     recv_topk_weights_clone = None
                     if with_topk:
                         # Check `topk_idx`
-                        assert (recv_topk_idx.eq(-1) | ((recv_topk_idx >= 0) & (recv_topk_idx < (num_experts // num_ranks)))).sum().item() == recv_topk_idx.numel()
+                        assert (recv_topk_idx.eq(-1) |
+                                ((recv_topk_idx >= 0) &
+                                 (recv_topk_idx < (num_experts // num_ranks)))).sum().item() == recv_topk_idx.numel()
                         for i, count in enumerate(recv_num_tokens_per_expert_list):
                             assert recv_topk_idx.eq(i).sum().item() == count
 
                         # Check `topk_weights`
                         recv_topk_weights_clone = recv_topk_weights.clone()
                         if current_x is not x_pure_rand:
-                            recv_topk_weights[recv_topk_idx.eq(-1)] = recv_topk_weights.amax(dim=1, keepdim=True).expand_as(recv_topk_weights)[recv_topk_idx.eq(-1)]
+                            recv_topk_weights[recv_topk_idx.eq(-1)] = recv_topk_weights.amax(
+                                dim=1, keepdim=True).expand_as(recv_topk_weights)[recv_topk_idx.eq(-1)]
                             check_data(recv_topk_weights, rank_prefix_matrix)
 
                     # Test `num_worst_tokens != 0`
@@ -157,7 +176,9 @@ def test_main(args: argparse.Namespace, num_sms: int, local_rank: int, num_ranks
                     ref_x = x_pure_rand if current_x is x_pure_rand else x
                     assert calc_diff(check_x, ref_x) < 5e-6
                     if with_topk:
-                        check_topk_weights = combined_topk_weights if (current_x is x_pure_rand) else (combined_topk_weights / is_token_in_rank.sum(dim=1).unsqueeze(1))
+                        check_topk_weights = combined_topk_weights if (current_x
+                                                                       is x_pure_rand) else (combined_topk_weights /
+                                                                                             is_token_in_rank.sum(dim=1).unsqueeze(1))
                         ref_topk_weights = topk_weights_pure_rand if current_x is x_pure_rand else topk_weights
                         assert calc_diff(check_topk_weights, ref_topk_weights) < 1e-9
 
@@ -184,14 +205,18 @@ def test_main(args: argparse.Namespace, num_sms: int, local_rank: int, num_ranks
                 deep_ep.Buffer.set_num_sms(num_sms)
                 config = deep_ep.Buffer.get_dispatch_config(num_ranks)
             tune_args = {'x': current_x, 'handle': handle, 'config': config}
-            t = bench(lambda: buffer.dispatch(**tune_args))[0]
+            t = bench(lambda: buffer.dispatch(**tune_args))[0]  # noqa: B023
             if t < best_time and nvl_chunk_size > 0:
                 best_time, best_results = t, (num_sms, nvl_chunk_size)
             if local_rank == 0:
-                print(f'[tuning] SMs {num_sms}, NVL chunk {nvl_chunk_size if nvl_chunk_size else "default"}: '
-                      f'{nvl_recv_bytes / 1e9 / t:.2f} GB/s (NVL), avg_t: {t * 1e6:.2f} us', flush=True)
+                print(
+                    f'[tuning] SMs {num_sms}, NVL chunk {nvl_chunk_size if nvl_chunk_size else "default"}: '
+                    f'{nvl_recv_bytes / 1e9 / t:.2f} GB/s (NVL), {t * 1e6:.2f} us',
+                    flush=True)
         if local_rank == 0:
-            print(f'[tuning] Best dispatch ({"FP8" if isinstance(current_x, tuple) else "BF16"}): SMs {best_results[0]}, NVL chunk {best_results[1]}, {nvl_recv_bytes / 1e9 / best_time:.2f} GB/s (NVL), t: {best_time * 1e6:.2f} us', flush=True)
+            print(
+                f'[tuning] Best dispatch ({"FP8" if isinstance(current_x, tuple) else "BF16"}): SMs {best_results[0]}, NVL chunk {best_results[1]}, {nvl_recv_bytes / 1e9 / best_time:.2f} GB/s (NVL), t: {best_time * 1e6:.2f} us',
+                flush=True)
             print('', flush=True)
 
         # Gather the best config from rank 0 and the first test setting
@@ -202,9 +227,13 @@ def test_main(args: argparse.Namespace, num_sms: int, local_rank: int, num_ranks
             best_dispatch_results = all_best_fp8_results_list[0].tolist()
     dispatch_config = deep_ep.Config(best_dispatch_results[0], best_dispatch_results[1], nvl_buffer_size)
 
-    dispatch_args = {'x': x, 'num_tokens_per_rank': num_tokens_per_rank,
-                     'is_token_in_rank': is_token_in_rank, 'num_tokens_per_expert': num_tokens_per_expert,
-                     'config': dispatch_config if dispatch_config is not None else config}
+    dispatch_args = {
+        'x': x,
+        'num_tokens_per_rank': num_tokens_per_rank,
+        'is_token_in_rank': is_token_in_rank,
+        'num_tokens_per_expert': num_tokens_per_expert,
+        'config': dispatch_config if dispatch_config is not None else config
+    }
     recv_x, _, _, _, handle, _ = buffer.dispatch(**dispatch_args)
 
     # Tune combine performance
@@ -217,15 +246,19 @@ def test_main(args: argparse.Namespace, num_sms: int, local_rank: int, num_ranks
             deep_ep.Buffer.set_num_sms(num_sms)
             config = deep_ep.Buffer.get_combine_config(num_ranks)
         tune_args = {'x': recv_x, 'handle': handle, 'config': config}
-        t = bench(lambda: buffer.combine(**tune_args))[0]
+        t = bench(lambda: buffer.combine(**tune_args))[0]  # noqa: B023
         if local_rank == 0:
-            print(f'[tuning] SMs {num_sms}, NVL chunk {nvl_chunk_size if nvl_chunk_size else "default"}: '
-                  f'{combine_bf16_nvl_send_bytes / 1e9 / t:.2f} GB/s (NVL), avg_t: {t * 1e6:.2f} us', flush=True)
+            print(
+                f'[tuning] SMs {num_sms}, NVL chunk {nvl_chunk_size if nvl_chunk_size else "default"}: '
+                f'{combine_bf16_nvl_send_bytes / 1e9 / t:.2f} GB/s (NVL), {t * 1e6:.2f} us',
+                flush=True)
             if t < best_time and nvl_chunk_size > 0:
                 best_time, best_results = t, (num_sms, nvl_chunk_size)
 
     if local_rank == 0:
-        print(f'[tuning] Best combine: SMs {best_results[0]}, NVL chunk {best_results[1]}: {combine_bf16_nvl_send_bytes / 1e9 / best_time:.2f} GB/s (NVL), t: {best_time * 1e6:.2f} us', flush=True)
+        print(
+            f'[tuning] Best combine: SMs {best_results[0]}, NVL chunk {best_results[1]}: {combine_bf16_nvl_send_bytes / 1e9 / best_time:.2f} GB/s (NVL), t: {best_time * 1e6:.2f} us',
+            flush=True)
         print('', flush=True)
 
 
@@ -237,8 +270,12 @@ def test_loop(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
         ll_num_tokens, ll_hidden, ll_num_experts, ll_num_topk = 16, 5120, 256, 9
         num_rdma_bytes = deep_ep.Buffer.get_low_latency_rdma_size_hint(ll_num_tokens, ll_hidden, num_ranks, ll_num_experts)
 
-    buffer = deep_ep.Buffer(group, int(2e9), num_rdma_bytes, low_latency_mode=test_ll_compatibility,
-                            num_qps_per_rank=(ll_num_experts // num_ranks if test_ll_compatibility else 1), explicitly_destroy=True)
+    buffer = deep_ep.Buffer(group,
+                            int(2e9),
+                            num_rdma_bytes,
+                            low_latency_mode=test_ll_compatibility,
+                            num_qps_per_rank=(ll_num_experts // num_ranks if test_ll_compatibility else 1),
+                            explicitly_destroy=True)
     torch.manual_seed(rank)
 
     for i in (24, ):
@@ -259,16 +296,11 @@ def test_loop(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Test intranode EP kernels')
-    parser.add_argument('--num-processes', type=int, default=8,
-                       help='Number of processes to spawn (default: 8)')
-    parser.add_argument('--num-tokens', type=int, default=4096,
-                       help='Number of tokens (default: 4096)')
-    parser.add_argument('--hidden', type=int, default=7168,
-                       help='Hidden dimension size (default: 7168)')
-    parser.add_argument('--num-topk', type=int, default=8,
-                       help='Number of top-k experts (default: 8)')
-    parser.add_argument('--num-experts', type=int, default=256,
-                       help='Number of experts (default: 256)')
+    parser.add_argument('--num-processes', type=int, default=8, help='Number of processes to spawn (default: 8)')
+    parser.add_argument('--num-tokens', type=int, default=4096, help='Number of tokens (default: 4096)')
+    parser.add_argument('--hidden', type=int, default=7168, help='Hidden dimension size (default: 7168)')
+    parser.add_argument('--num-topk', type=int, default=8, help='Number of top-k experts (default: 8)')
+    parser.add_argument('--num-experts', type=int, default=256, help='Number of experts (default: 256)')
     args = parser.parse_args()
 
     num_processes = args.num_processes
