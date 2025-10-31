@@ -58,11 +58,12 @@ private:
     std::string nvcc_path;  // The path of the nvcc compiler
     std::string include;
     std::string library;
+    std::string objs = "";
 };
 
 class KernelCache{
 public:
-    KernelCache(int local_rank, std::string base_path);
+    KernelCache(int local_rank, std::string base_path, bool load_cached_kernels);
 
     void run_proprecess_kernel(
         HybridEpConfigInstance config, 

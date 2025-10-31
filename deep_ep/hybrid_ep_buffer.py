@@ -44,6 +44,7 @@ class HybridEPBuffer:
         num_sms_combine_api: int = 32,
         num_sms_preprocessing_api: int = 128,
         nvlink_domain_size: int = None,
+        ib_dev_name_list: list[str] = [],
     ):
         self.group = group
         self.rank = self.group.rank()
@@ -96,6 +97,8 @@ class HybridEPBuffer:
         self.config.num_of_experts_per_rank = num_local_experts
         self.config.num_of_ranks_per_node = self.num_of_ranks_per_node
         self.config.num_of_nodes = self.num_of_nodes
+        self.config.num_of_blocks_dispatch_api = self.num_sms_dispatch_api
+        self.config.num_of_blocks_combine_api = self.num_sms_combine_api
         # The SMs of preprocessing, chunk size of dispatch and combine will affact the size of intermediate buffers.
         self.config.num_of_blocks_preprocessing_api = self.num_sms_preprocessing_api
         # The fp8/bf16/fp16 data is communicated in the uint8/uint16 format.
@@ -111,10 +114,9 @@ class HybridEPBuffer:
 
         # Create C++ buffer - this will allocate all buffers during construction
         self.runtime = hybrid_ep_cpp.HybridEPBuffer(
-            self.config, self.local_rank, self.node_rank, self.group_size, os.path.dirname(os.path.abspath(__file__))
+            self.group, self.config, self.local_rank, self.node_rank, self.group_size, os.path.dirname(os.path.abspath(__file__)), ib_dev_name_list, 
+            load_cached_kernels = False
         )
-        # Exchange IPC addresses using C++ distributed communication
-        self.runtime.exchange_ipc_address(self.group)
 
     def empty_jit_cache(self):
         '''
@@ -184,9 +186,14 @@ class HybridEPBuffer:
         config.num_of_blocks_combine_api = self.num_sms_combine_api
         config.device_side_sync_combine_api = True
         # Combine stages config:
-        config.num_of_stages_g2s_combine_api = int(
-            os.getenv("NUM_OF_STAGES_G2S_COMBINE_API", "10")
-        )
+        if self.config.num_of_nodes > 1:
+            config.num_of_stages_g2s_combine_api = int(
+                os.getenv("NUM_OF_STAGES_G2S_COMBINE_API", "5")
+            )
+        else:
+            config.num_of_stages_g2s_combine_api = int(
+                os.getenv("NUM_OF_STAGES_G2S_COMBINE_API", "10")
+            )
         config.num_of_stages_s2g_combine_api = int(
             os.getenv("NUM_OF_STAGES_S2G_COMBINE_API", "2")
         )
@@ -202,8 +209,6 @@ class HybridEPBuffer:
 
         # Use the runtime kernel config to update the buffer.
         reallocated = self.runtime.update_buffer(config)
-        if reallocated:
-            self.runtime.exchange_ipc_address(self.group)
         return config
 
     def dispatch(

@@ -13,7 +13,7 @@
 
 class Executor {
 public:
-    Executor(int local_rank, int node_rank, std::string base_path);
+    Executor(int local_rank, int node_rank, std::string base_path, bool load_cached_kernels);
 
     struct DispatchArgs {
         // Input tensors
