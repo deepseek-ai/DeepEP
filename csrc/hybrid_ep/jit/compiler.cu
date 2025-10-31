@@ -59,10 +59,9 @@ std::string NVCCCompiler::build(std::string code, std::string signature, int loc
     std::filesystem::create_directories(jit_dir);
 
     // Get a unique signature for each run
-    auto now = std::chrono::high_resolution_clock::now();
-    auto ms_timepoint = std::chrono::time_point_cast<std::chrono::milliseconds>(now);
-    auto ms = ms_timepoint.time_since_epoch().count();
-    std::string timestamp_str = std::to_string(ms);
+    auto now = std::chrono::steady_clock::now();
+    auto ns  = std::chrono::duration_cast<std::chrono::nanoseconds>(now.time_since_epoch()).count();
+    std::string timestamp_str = std::to_string(ns);
     std::string extended_signature = signature + "-rank-" + std::to_string(local_rank) + "-" + timestamp_str;
 
     // Write the code to the source file
