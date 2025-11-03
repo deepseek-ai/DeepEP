@@ -40,9 +40,9 @@ class HybridEPBuffer:
         num_local_experts: int,
         use_fp8: bool = False,
         # Device-SM occupancy setting
-        num_sms_dispatch_api: int = 32,
-        num_sms_combine_api: int = 32,
-        num_sms_preprocessing_api: int = 128,
+        num_sms_dispatch_api: int = None,
+        num_sms_combine_api: int = None,
+        num_sms_preprocessing_api: int = None,
         nvlink_domain_size: int = None,
         ib_dev_name_list: list[str] = [],
     ):
@@ -81,6 +81,13 @@ class HybridEPBuffer:
 
         props = torch.cuda.get_device_properties(torch.cuda.current_device())
         sm_count = props.multi_processor_count
+        if num_sms_preprocessing_api is None:
+            num_sms_preprocessing_api = 128
+        # Inter-node case should use less SMs for the dispatch and combine APIs.
+        if num_sms_dispatch_api is None:
+            num_sms_dispatch_api = 32 if self.num_of_nodes == 1 else 8
+        if num_sms_combine_api is None:
+            num_sms_combine_api = 32 if self.num_of_nodes == 1 else 8
         assert (
             sm_count >= num_sms_preprocessing_api
             and sm_count >= num_sms_dispatch_api
@@ -114,8 +121,15 @@ class HybridEPBuffer:
 
         # Create C++ buffer - this will allocate all buffers during construction
         self.runtime = hybrid_ep_cpp.HybridEPBuffer(
-            self.group, self.config, self.local_rank, self.node_rank, self.group_size, os.path.dirname(os.path.abspath(__file__)), ib_dev_name_list, 
-            load_cached_kernels = False
+            self.group, 
+            self.config, 
+            self.local_rank, 
+            self.node_rank, 
+            self.group_size, 
+            os.path.dirname(os.path.abspath(__file__)), 
+            ib_dev_name_list, 
+            load_cached_kernels = False, 
+            use_shared_buffer = True
         )
 
     def empty_jit_cache(self):

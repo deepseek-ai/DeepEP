@@ -3,7 +3,7 @@
 
 #include "executor.cuh"
 
-Executor::Executor(int local_rank, int node_rank, std::string base_path, bool load_cached_kernels) : local_rank(local_rank), node_rank(node_rank), kernel_cache(local_rank, base_path, load_cached_kernels) {}  
+Executor::Executor(int local_rank, int node_rank, std::string base_path, bool load_cached_kernels) : local_rank(local_rank), node_rank(node_rank), kernel_cache(node_rank, local_rank, base_path, load_cached_kernels) {}  
 
 std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
 Executor::metadata_preprocess_core(
@@ -275,15 +275,6 @@ void Executor::combine_preprocess(HybridEpConfigInstance config, CombineBuffers&
         }
     }
 
-    // Set the output tensor pointers to the combine buffers.
-    if(config.num_of_nodes > 1) {
-#ifndef HYBRID_EP_BUILD_MULTINODE_ENABLE
-        throw std::runtime_error("Multi-node support is not enabled in this build.");
-#endif
-    } else {
-        combine_buffers.attn_output_token = args.combined_tokens;
-        combine_buffers.attn_output_prob = (config.backward_combine_api) ? args.combined_probs : nullptr;
-    }
     nvtxRangePop();  // End of combine_preprocess nvtx range
 }
 
@@ -300,8 +291,8 @@ void Executor::combine_core(HybridEpConfigInstance config, CombineBuffers& combi
     }
 
     // Setup output pointers
-    param.attn_output_token = reinterpret_cast<uint16_t*>(combine_buffers.attn_output_token);
-    param.attn_output_prob = reinterpret_cast<float*>(combine_buffers.attn_output_prob);
+    param.attn_output_token = reinterpret_cast<uint16_t*>(args.combined_tokens);
+    param.attn_output_prob = (config.backward_combine_api) ? reinterpret_cast<float*>(args.combined_probs) : nullptr;
 
     // Setup local buffer pointers
     param.rdma_intra_node_red_token =
@@ -337,16 +328,6 @@ void Executor::combine_core(HybridEpConfigInstance config, CombineBuffers& combi
 
 void Executor::combine_postprocess(HybridEpConfigInstance config, CombineBuffers& combine_buffers, CombineArgs& args) {
     nvtxRangePushA("combine_postprocess in hybrid-ep");
-    if(config.num_of_nodes > 1) {
-    #ifdef HYBRID_EP_BUILD_MULTINODE_ENABLE
-        auto size_of_token_data_type = get_token_data_type_size(config.token_data_type);
-        CUDA_CHECK(cudaMemcpyAsync(args.combined_tokens, combine_buffers.attn_output_token, args.num_of_tokens_per_rank * config.hidden_dim * size_of_token_data_type, cudaMemcpyDeviceToHost, args.stream));
-        if(config.backward_combine_api) {
-            CUDA_CHECK(cudaMemcpyAsync(args.combined_probs, combine_buffers.attn_output_prob, args.num_of_tokens_per_rank * config.num_of_experts_per_rank * config.num_of_ranks_per_node * config.num_of_nodes * sizeof(float), cudaMemcpyDeviceToHost, args.stream));
-        }
-    #else
-        throw std::runtime_error("Multi-node support is not enabled in this build.");
-        #endif
-    } 
+    // No postprocess is needed for the combine kernel now.
     nvtxRangePop();  // End of combine_postprocess nvtx range
 }

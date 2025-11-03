@@ -6,7 +6,7 @@
 inline std::string get_env(std::string name) {
     const char* env = std::getenv(name.c_str());
     if (env == nullptr) {
-        throw std::runtime_error("Environment variable " + name + " is not set");
+        return std::string("");
     }
     return std::string(env);
 }
@@ -28,11 +28,13 @@ NVCCCompiler::NVCCCompiler(std::string base_path): base_path(base_path) {
 #ifdef HYBRID_EP_BUILD_MULTINODE_ENABLE
     // Add the dependency of the inter-node jit
     flags += " -DHYBRID_EP_BUILD_MULTINODE_ENABLE";
-    std::string rdma_core_home = get_env("RDMA_CORE_HOME");
-    include += " -I" + rdma_core_home + "/include "
-             + " -I" + base_path + "/backend/nccl/include";
-    library += " -L" + rdma_core_home + "/lib "
-             + "-lmlx5 -libverbs ";
+    std::string rdma_core_home = RDMA_CORE_HOME;
+    if (!rdma_core_home.empty()) {
+        include += " -I" + rdma_core_home + "/include ";
+        library += " -L" + rdma_core_home + "/lib ";
+    }
+    include += " -I" + base_path + "/backend/nccl/include ";
+    library += " -lmlx5 -libverbs ";
     std::string doca_obj_path = base_path + "/backend/nccl/obj";
     objs = doca_obj_path + "/doca_gpunetio.o "
         + doca_obj_path + "/doca_gpunetio_high_level.o "
@@ -53,7 +55,7 @@ NVCCCompiler::NVCCCompiler(std::string base_path): base_path(base_path) {
 }
   
 
-std::string NVCCCompiler::build(std::string code, std::string signature, int local_rank) {
+std::string NVCCCompiler::build(std::string code, std::string signature, int local_rank, int node_rank) {
     // Create the source directory
     std::string jit_dir = base_path + "/build/jit";
     std::filesystem::create_directories(jit_dir);
@@ -62,7 +64,7 @@ std::string NVCCCompiler::build(std::string code, std::string signature, int loc
     auto now = std::chrono::steady_clock::now();
     auto ns  = std::chrono::duration_cast<std::chrono::nanoseconds>(now.time_since_epoch()).count();
     std::string timestamp_str = std::to_string(ns);
-    std::string extended_signature = signature + "-rank-" + std::to_string(local_rank) + "-" + timestamp_str;
+    std::string extended_signature = signature + "-rank-" + std::to_string(local_rank) + "-node-" + std::to_string(node_rank) + "-" + timestamp_str;
 
     // Write the code to the source file
     std::string source_path =
@@ -190,8 +192,8 @@ std::string NVCCCompiler::get_combine_code(HybridEpConfigInstance config) {
       )";
 }
 
-KernelCache::KernelCache(int local_rank, std::string base_path, bool load_cached_kernels): 
-local_rank(local_rank), base_path(base_path), nvcc_compiler(base_path) {
+KernelCache::KernelCache(int node_rank, int local_rank, std::string base_path, bool load_cached_kernels): 
+node_rank(node_rank), local_rank(local_rank), base_path(base_path), nvcc_compiler(base_path) {
     // Load all cached kernels from the cache directory
     std::string cache_dir = base_path + "/build/jit";
     std::filesystem::create_directories(cache_dir);
@@ -233,7 +235,7 @@ void KernelCache::run_proprecess_kernel(
     auto it = kernel_cache.find(preprocess_kernel_key);
     if (it == kernel_cache.end()) {
         auto preprocessing_code = nvcc_compiler.get_metadata_preprocessing_code(config);
-        auto preprocessing_path = nvcc_compiler.build(preprocessing_code, preprocess_kernel_key, local_rank);
+        auto preprocessing_path = nvcc_compiler.build(preprocessing_code, preprocess_kernel_key, local_rank, node_rank);
         kernel_cache[preprocess_kernel_key] = nvcc_compiler.get_instance(preprocessing_path, preprocess_kernel_key);
     }
     auto preprocessing_instance = kernel_cache[preprocess_kernel_key];
@@ -286,7 +288,7 @@ void KernelCache::run_dispatch_kernel(
     if (it == kernel_cache.end()) {
         // JIT Compile the kernel
         auto dispatch_code = nvcc_compiler.get_dispatch_code(config);
-        auto dispatch_path = nvcc_compiler.build(dispatch_code, dispatch_kernel_key, local_rank);
+        auto dispatch_path = nvcc_compiler.build(dispatch_code, dispatch_kernel_key, local_rank, node_rank);
         kernel_cache[dispatch_kernel_key] = nvcc_compiler.get_instance(dispatch_path, dispatch_kernel_key);
     }
     auto dispatch_instance = kernel_cache[dispatch_kernel_key];
@@ -326,7 +328,7 @@ void KernelCache::run_combine_kernel(
     if (it == kernel_cache.end()) {
         // JIT Compile the kernel
         auto combine_code = nvcc_compiler.get_combine_code(config);
-        auto combine_path = nvcc_compiler.build(combine_code, combine_kernel_key, local_rank);
+        auto combine_path = nvcc_compiler.build(combine_code, combine_kernel_key, local_rank, node_rank);
         kernel_cache[combine_kernel_key] = nvcc_compiler.get_instance(combine_path, combine_kernel_key);
     }
     auto combine_instance = kernel_cache[combine_kernel_key];

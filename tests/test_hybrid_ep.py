@@ -7,7 +7,7 @@ import torch.distributed as dist
 import os
 import deep_ep
 
-from utils import TorchRef, bench, bench_kineto, init_dist
+from utils import TorchRef, bench, bench_kineto, init_dist, count_rdma_send_from_routing_map
 
 HIDDEN_DIM = int(os.environ.get("HIDDEN_DIM", 7168))
 MAX_NUM_OF_TOKENS_PER_RANK = int(os.environ.get("MAX_NUM_OF_TOKENS_PER_RANK", 4096))
@@ -15,10 +15,10 @@ MAX_NUM_OF_TOKENS_PER_RANK = int(os.environ.get("MAX_NUM_OF_TOKENS_PER_RANK", 40
 NUM_TOKENS_PER_RANK = int(os.environ.get("NUM_TOKENS_PER_RANK", 4096))
 NUM_LOCAL_EXPERTS = int(os.environ.get("NUM_LOCAL_EXPERTS", 8))
 NUM_OF_RANKS_PER_NODE = int(os.environ.get("NUM_OF_RANKS_PER_NODE", 4))
-MUM_OF_NODES = int(os.environ.get("MUM_OF_NODES", 1))
+NUM_OF_NODES = int(os.environ.get("NUM_OF_NODES", 1))
 TOPK = int(os.environ.get("TOPK", 8))
 PAD_MULTIPLE = int(os.environ.get("PAD_MULTIPLE", 32))
-NUM_OF_EXPERTS = NUM_LOCAL_EXPERTS * NUM_OF_RANKS_PER_NODE * MUM_OF_NODES
+NUM_OF_EXPERTS = NUM_LOCAL_EXPERTS * NUM_OF_RANKS_PER_NODE * NUM_OF_NODES
 ITERATIONS = int(os.environ.get("ITERATIONS", 100))
 SEED = int(os.environ.get("SEED", 42))
 torch.manual_seed(SEED)
@@ -99,9 +99,10 @@ def test_hybrid_ep_correctness(buffer: deep_ep.HybridEPBuffer, ref: TorchRef, us
         ) = buffer.dispatch(
             hidden=hidden, scaling_factor=scaling_factor, topk_idx=topk_idx, topk_weights=topk_weights if with_probs else None, num_of_experts=NUM_OF_EXPERTS,
         )
+
         assert bitwise_equal(dispatched_hidden_ref, dispatched_hidden)
         if dispatched_probs is not None and dispatched_probs_ref is not None:
-            start, end = ref._local_expert_range()
+            start, end = ref._local_expert_range_per_node()
             masked_probs = torch.zeros_like(dispatched_probs)
             masked_probs[:, start:end] = dispatched_probs[:, start:end]
             assert bitwise_equal(dispatched_probs_ref, dispatched_probs[:, start:end])
@@ -242,12 +243,22 @@ def test_hybrid_ep_benchmark(buffer: deep_ep.HybridEPBuffer, group: dist.Process
     fp8_factor = (1 + 4 / 128) / 2
     dispatch_bf16_nvl_recv_bytes = dispatched_hidden.numel() * 2
     combine_bf16_nvl_send_bytes = dispatch_bf16_nvl_recv_bytes
+    if NUM_OF_NODES > 1:
+        local_node_id = rank // NUM_OF_RANKS_PER_NODE
+        num_rdma_send = count_rdma_send_from_routing_map(routing_map, local_node_id, NUM_OF_NODES)
+        dispatch_bf16_rdma_send_bytes = num_rdma_send * HIDDEN_DIM * 2
+        combine_bf16_rdma_recv_bytes = dispatch_bf16_rdma_send_bytes
 
     dispatch_args = {'hidden': hidden, 'scaling_factor': scaling_factor, 'topk_idx': topk_idx, 'topk_weights': topk_weights, 'num_of_experts': NUM_OF_EXPERTS}
     t = bench(lambda: buffer.dispatch(**dispatch_args))[0]
     nvl_recv_bytes = (dispatch_bf16_nvl_recv_bytes * fp8_factor) if hidden.dtype == torch.uint8 else dispatch_bf16_nvl_recv_bytes
+    if NUM_OF_NODES > 1:
+        rdma_send_bytes = dispatch_bf16_rdma_send_bytes * fp8_factor if hidden.dtype == torch.uint8 else dispatch_bf16_rdma_send_bytes
     print(f'[rank {rank}] HybridEP dispatch torch API ({"FP8" if hidden.dtype == torch.uint8 else "BF16"}): '
             f'{nvl_recv_bytes / 1e9 / t:.2f} GB/s (NVL), t: {t * 1e6:.2f} us, nvl_recv_bytes: {nvl_recv_bytes / 1e6:.2f} MB', flush=True)
+    if NUM_OF_NODES > 1:
+        print(f'[rank {rank}] HybridEP dispatch torch API ({"FP8" if hidden.dtype == torch.uint8 else "BF16"}): '
+                f'{rdma_send_bytes / 1e9 / t:.2f} GB/s (NVL), t: {t * 1e6:.2f} us, rdma_send_bytes: {rdma_send_bytes / 1e6:.2f} MB', flush=True)
 
     dispatched_hidden, dispatched_probs, _, handle= (
         buffer.dispatch(hidden=hidden, scaling_factor=scaling_factor, topk_idx=topk_idx, topk_weights=topk_weights, num_of_experts=NUM_OF_EXPERTS)
@@ -257,6 +268,9 @@ def test_hybrid_ep_benchmark(buffer: deep_ep.HybridEPBuffer, group: dist.Process
     t = bench(lambda: buffer.combine(**combine_args))[0]
     print(f'[rank {rank}] HybridEP combine torch API: '
             f'{combine_bf16_nvl_send_bytes / 1e9 / t:.2f} GB/s (NVL), t: {t * 1e6:.2f} us, combine_send_bytes: {combine_bf16_nvl_send_bytes / 1e6:.2f} MB', flush=True)
+    if NUM_OF_NODES > 1:
+        print(f'[rank {rank}] HybridEP combine torch API: '
+                    f'{combine_bf16_rdma_recv_bytes / 1e9 / t:.2f} GB/s (NVL), t: {t * 1e6:.2f} us, rdma_recv_bytes: {combine_bf16_rdma_recv_bytes / 1e6:.2f} MB', flush=True)
 
     '''
     Benchmark of the dispatch and combine with permute extension
@@ -266,6 +280,9 @@ def test_hybrid_ep_benchmark(buffer: deep_ep.HybridEPBuffer, group: dist.Process
     nvl_recv_bytes = (dispatch_bf16_nvl_recv_bytes * fp8_factor) if hidden.dtype == torch.uint8 else dispatch_bf16_nvl_recv_bytes
     print(f'[rank {rank}] HybridEP dispatch+permute torch API ({"FP8" if hidden.dtype == torch.uint8 else "BF16"}): '
             f'{nvl_recv_bytes / 1e9 / t:.2f} GB/s (NVL), t: {t * 1e6:.2f} us, nvl_recv_bytes: {nvl_recv_bytes / 1e6:.2f} MB', flush=True)
+    if NUM_OF_NODES > 1:
+        print(f'[rank {rank}] HybridEP dispatch+permute torch API ({"FP8" if hidden.dtype == torch.uint8 else "BF16"}): '
+                f'{rdma_send_bytes / 1e9 / t:.2f} GB/s (NVL), t: {t * 1e6:.2f} us, rdma_send_bytes: {rdma_send_bytes / 1e6:.2f} MB', flush=True)
 
     dispatched_hidden, dispatched_probs, _, _, handle= (
         buffer.dispatch_with_permute(hidden=hidden, scaling_factor=scaling_factor, routing_map=routing_map, probs=probs, pad_multiple=PAD_MULTIPLE)
@@ -275,7 +292,9 @@ def test_hybrid_ep_benchmark(buffer: deep_ep.HybridEPBuffer, group: dist.Process
     t = bench(lambda: buffer.combine_with_unpermute(**combine_with_unpermute_args))[0]
     print(f'[rank {rank}] HybridEP combine+unpermute torch API: '
             f'{combine_bf16_nvl_send_bytes / 1e9 / t:.2f} GB/s (NVL), t: {t * 1e6:.2f} us, combine_send_bytes: {combine_bf16_nvl_send_bytes / 1e6:.2f} MB', flush=True)
-            
+    if NUM_OF_NODES > 1:
+        print(f'[rank {rank}] HybridEP combine+unpermute torch API: '
+                f'{combine_bf16_rdma_recv_bytes / 1e9 / t:.2f} GB/s (NVL), t: {t * 1e6:.2f} us, rdma_recv_bytes: {combine_bf16_rdma_recv_bytes / 1e6:.2f} MB', flush=True)
 
     if not nsys_profile:
         # noinspection PyShadowingNames
@@ -292,8 +311,11 @@ def test_hybrid_ep_benchmark(buffer: deep_ep.HybridEPBuffer, group: dist.Process
         dispatch_t, combine_t = bench_kineto(test_func,
                                              kernel_names=('dispatch_kernel', 'combine_kernel'), barrier_comm_profiling=True,
                                              suppress_kineto_output=True)
-        print(f'[rank {rank}] HybridEP dispatch kernel ({"FP8" if hidden.dtype == torch.uint8 else "BF16"}): {nvl_recv_bytes / 1e9 / dispatch_t:.2f} GB/s, avg_t={dispatch_t * 1e6:.2f} us | '
-              f'HybridEP combine kernel: {combine_bf16_nvl_send_bytes / 1e9 / combine_t:.2f} GB/s, avg_t={combine_t * 1e6:.2f} us', flush=True)
+        print(f'[rank {rank}] HybridEP dispatch kernel(NVL) ({"FP8" if hidden.dtype == torch.uint8 else "BF16"}): {nvl_recv_bytes / 1e9 / dispatch_t:.2f} GB/s, avg_t={dispatch_t * 1e6:.2f} us | '
+              f'HybridEP combine kernel(NVL): {combine_bf16_nvl_send_bytes / 1e9 / combine_t:.2f} GB/s, avg_t={combine_t * 1e6:.2f} us', flush=True)
+        if NUM_OF_NODES > 1:
+            print(f'[rank {rank}] HybridEP dispatch kernel(RDMA) ({"FP8" if hidden.dtype == torch.uint8 else "BF16"}): {rdma_send_bytes / 1e9 / dispatch_t:.2f} GB/s, avg_t={dispatch_t * 1e6:.2f} us | '
+                  f'HybridEP combine kernel(RDMA): {combine_bf16_rdma_recv_bytes / 1e9 / combine_t:.2f} GB/s, avg_t={combine_t * 1e6:.2f} us', flush=True)
     else:
         torch.cuda.profiler.start()
         with torch.cuda.nvtx.range(f"hybrid-ep dispatch ({"FP8" if hidden.dtype == torch.uint8 else "BF16"})"):
@@ -312,29 +334,26 @@ def test_hybrid_ep_benchmark(buffer: deep_ep.HybridEPBuffer, group: dist.Process
 
 def test_main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
     rank, num_ranks, group = init_dist(local_rank, num_local_ranks)
-    try:
-        for use_fp8 in [False]:
-            buffer = deep_ep.HybridEPBuffer(
-                group=group,
-                hidden_dim=HIDDEN_DIM,
-                max_num_of_tokens_per_rank=MAX_NUM_OF_TOKENS_PER_RANK,
-                num_local_experts=NUM_LOCAL_EXPERTS,
-                use_fp8=use_fp8,
-                ib_dev_name_list=args.ib_dev_name_list,
-            )
-            
-            ref = TorchRef(
-                ep_group=group,
-                num_of_experts=NUM_OF_EXPERTS,
-                num_of_ranks_per_node=NUM_OF_RANKS_PER_NODE,
-            )
+    for use_fp8 in [True, False]:
+        buffer = deep_ep.HybridEPBuffer(
+            group=group,
+            hidden_dim=HIDDEN_DIM,
+            max_num_of_tokens_per_rank=MAX_NUM_OF_TOKENS_PER_RANK,
+            num_local_experts=NUM_LOCAL_EXPERTS,
+            use_fp8=use_fp8,
+            ib_dev_name_list=args.ib_dev_name_list,
+        )
+        
+        ref = TorchRef(
+            ep_group=group,
+            num_of_experts=NUM_OF_EXPERTS,
+            num_of_ranks_per_node=NUM_OF_RANKS_PER_NODE,
+        )
 
-            test_hybrid_ep_correctness(buffer, ref, use_fp8)
-            test_hybrid_ep_benchmark(buffer, group, use_fp8, args.nsys_profile)
-
-    finally:
-        dist.barrier()
-        dist.destroy_process_group()
+        test_hybrid_ep_correctness(buffer, ref, use_fp8)
+        test_hybrid_ep_benchmark(buffer, group, use_fp8, args.nsys_profile)
+    dist.barrier()
+    dist.destroy_process_group()
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Test intranode EP kernels')

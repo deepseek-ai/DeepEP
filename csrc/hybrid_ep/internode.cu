@@ -2,7 +2,6 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES.
 // All rights reserved
 #include "internode.cuh"
-#include <dlfcn.h>
 
 // Functions realted to get RDMA context.
 static ibv_device *ctx_find_dev(const char *ib_devname) {
@@ -284,6 +283,8 @@ void RDMACoordinator::init(
   get_gpu_handler(gpu_handler, ib_context, local_rank);
   mr_access_flag = IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_WRITE | IBV_ACCESS_REMOTE_READ |
                       IBV_ACCESS_REMOTE_ATOMIC | IBV_ACCESS_RELAXED_ORDERING;
+  
+  rmda_initialized = true;
 }
 
 void RDMACoordinator::allocate_dispatch_rdma_buffers(DispatchBuffers &dispatch_buffers) {
@@ -428,6 +429,10 @@ void RDMACoordinator::allocate_dispatch_rdma_buffers(DispatchBuffers &dispatch_b
       data->token_lkey = htobe32(attn_input_token_mr->lkey);
       data->token_raddr = dispatch_remote_info_vec[rem_idx].token_vaddr;
       data->token_rkey = htobe32(dispatch_remote_info_vec[rem_idx].token_rkey);
+      data->scaling_factor_laddr = (uint64_t)attn_input_token_scaling_factor_mr->addr;
+      data->scaling_factor_lkey = htobe32(attn_input_token_scaling_factor_mr->lkey);
+      data->scaling_factor_raddr = dispatch_remote_info_vec[rem_idx].scaling_factor_vaddr;
+      data->scaling_factor_rkey = htobe32(dispatch_remote_info_vec[rem_idx].scaling_factor_rkey);
       data->flag_laddr = (uint64_t)((uint64_t *)attn_input_flags_mr->addr + peer_idx * flag_stride);
       data->flag_lkey = htobe32(attn_input_flags_mr->lkey);
       data->flag_raddr = dispatch_remote_info_vec[rem_idx].flag_vaddr;
@@ -447,6 +452,7 @@ void RDMACoordinator::allocate_dispatch_rdma_buffers(DispatchBuffers &dispatch_b
   // Free temporary resources.
   free(my_dispatch_info);
   free(h_qps_gpu);
+  buffer_allocated = true;
 }
 
 void RDMACoordinator::allocate_combine_rdma_buffers(CombineBuffers &combine_buffers) {
@@ -543,6 +549,7 @@ void RDMACoordinator::allocate_combine_rdma_buffers(CombineBuffers &combine_buff
                                           peer_idx * prob_stride);
     }
   }
+
   exchange_remote_rmda_info(combine_remote_info_vec, my_combine_info, num_of_combine_qps);
 
   // Init queue pairs.
@@ -584,13 +591,13 @@ void RDMACoordinator::allocate_combine_rdma_buffers(CombineBuffers &combine_buff
   // Set RDMA attributes to combine buffers.
   combine_buffers.d_qps_gpu = combine_gverbs_ctx.d_qps_gpu;
   combine_buffers.mr_info = combine_mr_info_d;
-
   // Free temporary resources.
   free(my_combine_info);
   free(h_qps_gpu);
+  buffer_allocated = true;
 }    
 
-void RDMACoordinator::destory() {
+void RDMACoordinator::destroy() {
   CUDA_CHECK(cudaDeviceSynchronize());
 
   // Close memory regions 
@@ -642,60 +649,68 @@ void RDMACoordinator::destory() {
   FREE_CUDA_MEMORY(combine_gverbs_ctx.d_qps_gpu);
   FREE_CUDA_MEMORY(combine_mr_info_d);
 
-  int num_of_dispatch_qps = (buffer_config.num_of_nodes - 1) * buffer_config.num_of_blocks_dispatch_api;
-  int num_of_combine_qps = (buffer_config.num_of_nodes - 1) * buffer_config.num_of_blocks_combine_api;
-  for (int idx = 0; idx < num_of_dispatch_qps; ++idx) {
-    doca_gpu_verbs_destroy_qp_hl(dispatch_gverbs_ctx.qp_hls[idx]);
-  }
-  for (int idx = 0; idx < num_of_combine_qps; ++idx) {
-    doca_gpu_verbs_destroy_qp_hl(combine_gverbs_ctx.qp_hls[idx]);
-  }
+  // If we use doca_gpu_verbs_destroy_qp_hl and re-allocate RMDA resources, "part or all of the requested memory range is already mapped" occurs. Do not know why now, so just comment it out.
+  // int num_of_dispatch_qps = (buffer_config.num_of_nodes - 1) * buffer_config.num_of_blocks_dispatch_api;
+  // int num_of_combine_qps = (buffer_config.num_of_nodes - 1) * buffer_config.num_of_blocks_combine_api;
+  // for (int idx = 0; idx < num_of_dispatch_qps; ++idx) {
+  //   doca_gpu_verbs_destroy_qp_hl(dispatch_gverbs_ctx.qp_hls[idx]);
+  // }
+  // for (int idx = 0; idx < num_of_combine_qps; ++idx) {
+  //   doca_gpu_verbs_destroy_qp_hl(combine_gverbs_ctx.qp_hls[idx]);
+  // }
   FREE_CPU_MEMORY(dispatch_gverbs_ctx.qp_hls);
   FREE_CPU_MEMORY(dispatch_gverbs_ctx.qp_init_attr);
   FREE_CPU_MEMORY(combine_gverbs_ctx.qp_hls);
   FREE_CPU_MEMORY(combine_gverbs_ctx.qp_init_attr);
   doca_verbs_qp_attr_destroy(dispatch_gverbs_ctx.qp_attr);
   doca_verbs_qp_attr_destroy(combine_gverbs_ctx.qp_attr);
-  
-  // Dealloc protect domain.
-  ibv_dealloc_pd(ib_pd);
-  // Close device.
-  ibv_close_device(ib_context);
-  delete gpu_handler->mtable;
-  FREE_CPU_MEMORY(gpu_handler);
 
+  buffer_allocated = false;
   #undef CLOSE_MR
   #undef FREE_CUDA_MEMORY
   #undef FREE_CPU_MEMORY
 }
 
 void RDMACoordinator::exchange_remote_rmda_info(remote_info* dst, remote_info *src, int num_of_qps) {
-  // Exchange between ranks.
-  try {
-    auto torch_distributed = py::module_::import("torch.distributed");
+  auto torch_distributed = py::module_::import("torch.distributed");
+  auto num_bytes = static_cast<int64_t>(num_of_qps) *
+                static_cast<int64_t>(sizeof(remote_info));
+  torch::Tensor buffer = torch::empty({num_bytes}, at::device(at::kCUDA).dtype(at::kByte));
+  CUDA_CHECK(cudaMemcpy(buffer.data_ptr(), reinterpret_cast<void *>(src), num_of_qps * sizeof(remote_info), cudaMemcpyHostToDevice));
 
-    auto num_bytes = static_cast<int64_t>(num_of_qps) *
-                 static_cast<int64_t>(sizeof(remote_info));
-    torch::Tensor buffer = torch::empty({num_bytes}, at::device(at::kCUDA).dtype(at::kByte));
-    CUDA_CHECK(cudaMemcpy(buffer.data_ptr(), reinterpret_cast<void *>(src), num_of_qps * sizeof(remote_info), cudaMemcpyHostToDevice));
-    
-    // Get world size from process group
-    int world_size = process_group.attr("size")().cast<int>();
-    // Create empty tensors for allgather output
-    py::list output_list;
-    for (int i = 0; i < world_size; i++) {
-      output_list.append(torch::empty_like(buffer));
-    }
-    torch_distributed.attr("all_gather")(output_list, buffer, process_group);
-    
-    // Move the gathered remote info to CPU.
-    for(int i = local_rank; i < world_size; i += buffer_config.num_of_ranks_per_node) {
-      CUDA_CHECK(cudaMemcpy(dst + num_of_qps * (i / buffer_config.num_of_ranks_per_node), output_list[i].cast<torch::Tensor>().data_ptr<uint8_t>(), num_of_qps * sizeof(remote_info), cudaMemcpyDeviceToHost));
-    }
-    
-  } catch (const std::exception& e) {
-    throw std::runtime_error(
-      "C++ distributed communication failed: " + std::string(e.what())
-    );
+  // Get world size from process group
+  int world_size = process_group.attr("size")().cast<int>();
+  // Create empty tensors for allgather output
+  py::list output_list;
+  for (int i = 0; i < world_size; i++) {
+    output_list.append(torch::empty_like(buffer));
   }
+
+  torch_distributed.attr("all_gather")(output_list, buffer, process_group);
+
+  // Move the gathered remote info to CPU.
+  for(int i = local_rank; i < world_size; i += buffer_config.num_of_ranks_per_node) {
+    CUDA_CHECK(cudaMemcpy(dst + num_of_qps * (i / buffer_config.num_of_ranks_per_node), output_list[i].cast<torch::Tensor>().data_ptr<uint8_t>(), num_of_qps * sizeof(remote_info), cudaMemcpyDeviceToHost));
+  }
+}
+
+RDMACoordinator::~RDMACoordinator() {
+  if(buffer_allocated) {
+    destroy();
+  }
+  
+  if(rmda_initialized) {
+    // Dealloc protect domain.
+    ibv_dealloc_pd(ib_pd);
+    // Close device.
+    ibv_close_device(ib_context);
+    delete gpu_handler->mtable;
+    if(gpu_handler != nullptr) {
+      free(gpu_handler);
+      gpu_handler = nullptr;
+    }
+  }
+
+  rmda_initialized = false;
+  buffer_allocated = false;
 }

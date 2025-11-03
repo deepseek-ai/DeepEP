@@ -81,6 +81,7 @@ def get_extension_hybrid_ep_cpp():
         rdma_core_dir = os.getenv("RDMA_CORE_HOME", "")
         nccl_dir = os.path.join(current_dir, "third-party/nccl")        
         compile_args["nvcc"].append("-DHYBRID_EP_BUILD_MULTINODE_ENABLE")
+        compile_args["nvcc"].append(f"-DRDMA_CORE_HOME=\"{rdma_core_dir}\"")
 
         subprocess.run(["git", "submodule", "update", "--init", "--recursive"], cwd=current_dir)
         # Generate the inter-node dependency to the python package for JIT compilation

@@ -10,13 +10,11 @@ HybridEPBuffer::HybridEPBuffer(
   int group_size, 
   std::string base_path,
   std::vector<std::string> ib_dev_name_list,
-  bool load_cached_kernels
+  bool load_cached_kernels,
+  bool use_shared_buffer
 ) : process_group(process_group), buffer_config(config), local_rank(local_rank), node_rank(node_rank), group_size(group_size),
     executor(local_rank, node_rank, base_path, load_cached_kernels) {
-    if(group_size <= buffer_config.num_of_ranks_per_node) {
-      // If used on only intra-node communication, the dispatch/combine can share same buffers.
-      use_shared_buffer = true;
-    }else{
+    if(group_size > buffer_config.num_of_ranks_per_node) {
 #ifdef HYBRID_EP_BUILD_MULTINODE_ENABLE
       rdma_coordinator.init(process_group, node_rank, local_rank, buffer_config, remote_allocator, ib_dev_name_list);
 #else
@@ -98,13 +96,9 @@ void HybridEPBuffer::release_buffer() {
   free_buffer(combine_buffers.expected_intra_node_flag_value, false);
 #ifdef HYBRID_EP_BUILD_MULTINODE_ENABLE
   if(buffer_config.num_of_nodes > 1) {  
-    // Warning: this judgemennt is *necessary*, because the attn_output_* pointers will be replaced by runtime torch tensors, so they could not be nullptr.
     free_buffer(combine_buffers.attn_output_flags, false);
-    free_buffer(combine_buffers.attn_output_token, false);
-    free_buffer(combine_buffers.attn_output_prob, false);
   }
 #endif
-
   if (local_rank == 0) {
     free_buffer(combine_buffers.intra_node_write_completion_flags, true);
   }else{
@@ -121,7 +115,7 @@ void HybridEPBuffer::release_buffer() {
 
 #ifdef HYBRID_EP_BUILD_MULTINODE_ENABLE
   if(buffer_config.num_of_nodes > 1) {
-    rdma_coordinator.destory();
+    rdma_coordinator.destroy();
   }
 #endif
 }
@@ -243,47 +237,40 @@ void HybridEPBuffer::allocate_buffer() {
 }
 
 void HybridEPBuffer::exchange_remote_handle() {
-  try {
-    // Use Python's torch.distributed APIs through py::object
-    auto torch_distributed = py::module_::import("torch.distributed");
-    
-    // Move tensors to CUDA for communication
-    auto dispatch_cuda = dispatch_memory_handles.cuda();
-    auto combine_cuda = combine_memory_handles.cuda();
-    
-    // Get world size from process group
-    int world_size = process_group.attr("size")().cast<int>();
-    
-    // Create empty tensors for allgather output
-    py::list dispatch_output_list;
-    py::list combine_output_list;
-    
-    for (int i = 0; i < world_size; i++) {
-      dispatch_output_list.append(torch::empty_like(dispatch_cuda));
-      combine_output_list.append(torch::empty_like(combine_cuda));
-    }
-    
-    // Perform allgather using Python API
-    torch_distributed.attr("all_gather")(dispatch_output_list, dispatch_cuda, process_group);
-    torch_distributed.attr("all_gather")(combine_output_list, combine_cuda, process_group);
-    
-    // Convert back to C++ vectors and move to CPU
-    std::vector<torch::Tensor> dispatch_cpu_tensors;
-    std::vector<torch::Tensor> combine_cpu_tensors;
-    
-    for (int i = 0; i < world_size; i++) {
-      dispatch_cpu_tensors.push_back(dispatch_output_list[i].cast<torch::Tensor>().cpu());
-      combine_cpu_tensors.push_back(combine_output_list[i].cast<torch::Tensor>().cpu());
-    }
-    
-    // Open handles from other ranks
-    open_handles_from_other_ranks(dispatch_cpu_tensors, combine_cpu_tensors);
-    
-  } catch (const std::exception& e) {
-    throw std::runtime_error(
-      "C++ distributed communication failed: " + std::string(e.what())
-    );
+  // Use Python's torch.distributed APIs through py::object
+  auto torch_distributed = py::module_::import("torch.distributed");
+  
+  // Move tensors to CUDA for communication
+  auto dispatch_cuda = dispatch_memory_handles.cuda();
+  auto combine_cuda = combine_memory_handles.cuda();
+  
+  // Get world size from process group
+  int world_size = process_group.attr("size")().cast<int>();
+  
+  // Create empty tensors for allgather output
+  py::list dispatch_output_list;
+  py::list combine_output_list;
+  
+  for (int i = 0; i < world_size; i++) {
+    dispatch_output_list.append(torch::empty_like(dispatch_cuda));
+    combine_output_list.append(torch::empty_like(combine_cuda));
   }
+  
+  // Perform allgather using Python API
+  torch_distributed.attr("all_gather")(dispatch_output_list, dispatch_cuda, process_group);
+  torch_distributed.attr("all_gather")(combine_output_list, combine_cuda, process_group);
+  
+  // Convert back to C++ vectors and move to CPU
+  std::vector<torch::Tensor> dispatch_cpu_tensors;
+  std::vector<torch::Tensor> combine_cpu_tensors;
+  
+  for (int i = 0; i < world_size; i++) {
+    dispatch_cpu_tensors.push_back(dispatch_output_list[i].cast<torch::Tensor>().cpu());
+    combine_cpu_tensors.push_back(combine_output_list[i].cast<torch::Tensor>().cpu());
+  }
+  
+  // Open handles from other ranks
+  open_handles_from_other_ranks(dispatch_cpu_tensors, combine_cpu_tensors);
 }
 
 
@@ -407,6 +394,9 @@ bool HybridEPBuffer::update_buffer(HybridEpConfigInstance config) {
   }
 
   if(need_reallocate) {
+    if (buffer_config.num_of_nodes > 1) {
+      TORCH_WARN("Reallocate buffer for multi-node case is very slow, please check the buffer configuration to pre-allocate the buffer.");
+    }
     release_buffer();
     allocate_buffer();
   }

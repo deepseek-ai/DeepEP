@@ -8,6 +8,7 @@
 #include <c10/util/Optional.h>
 #include <torch/torch.h>
 #include <iostream>
+#include <dlfcn.h>
 #include "backend/hybrid_ep_backend.cuh"
 #include "backend/utils.cuh"
 #include "allocator/allocator.cuh"
@@ -136,9 +137,9 @@ static int setup_qp_attr_and_set_qp(struct gverbs_context *g_ctx,
 class RDMACoordinator {
 public:
     RDMACoordinator() = default;
-    ~RDMACoordinator() = default;
+    ~RDMACoordinator();
     void init(pybind11::object process_group, int node_rank, int local_rank, BufferConfig config, ExtendedMemoryAllocator allocator, std::vector<std::string> ib_dev_name_list);
-    void destory();
+    void destroy();
     void allocate_dispatch_rdma_buffers(DispatchBuffers &dispatch_buffers);
     void allocate_combine_rdma_buffers(CombineBuffers &combine_buffers);
 
@@ -156,6 +157,8 @@ private:
     struct doca_gpu *gpu_handler = nullptr;
     struct ibv_port_attr port_attr = {};
     int mr_access_flag = -1;
+    bool buffer_allocated = false;
+    bool rmda_initialized = false;
 
     // Detailed Dispatch RDMA resources
     // Memory Region

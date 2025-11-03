@@ -110,8 +110,6 @@ struct CombineBuffers {
   float *       expert_input_prob = nullptr;
   float **      expert_input_prob_all_ranks = nullptr;
   // Output buffers to attn, only used in inter-node case
-  void *        attn_output_token = nullptr;
-  void *        attn_output_prob = nullptr;
   void *        attn_output_flags = nullptr;
   // RDMA buffers for combine kernel.
   uint16_t *    rdma_intra_node_red_token = nullptr;
