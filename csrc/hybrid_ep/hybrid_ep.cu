@@ -14,6 +14,7 @@ HybridEPBuffer::HybridEPBuffer(
   bool use_shared_buffer
 ) : process_group(process_group), buffer_config(config), local_rank(local_rank), node_rank(node_rank), group_size(group_size),
     executor(local_rank, node_rank, base_path, load_cached_kernels) {
+    remote_allocator.init(/*enable_fabric = */ true);
     if(group_size > buffer_config.num_of_ranks_per_node) {
 #ifdef HYBRID_EP_BUILD_MULTINODE_ENABLE
       rdma_coordinator.init(process_group, node_rank, local_rank, buffer_config, remote_allocator, ib_dev_name_list);
@@ -21,7 +22,6 @@ HybridEPBuffer::HybridEPBuffer(
       assert(false); // inter-node communication is not supported.
 #endif
     }
-    remote_allocator.init(/*enable_fabric = */ true);
     allocate_buffer();
 }
 

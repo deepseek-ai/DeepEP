@@ -267,7 +267,7 @@ void RDMACoordinator::init(
   this->allocator = allocator;
   this->ib_dev_name_list = ib_dev_name_list;
   
-  // assert(buffer_config.num_of_nodes > 1);
+  assert(buffer_config.num_of_nodes > 1);
   // Get name of ibv device.
   const char *ib_devname = ib_dev_name_list[local_rank].c_str();
   // Find ib device and get ibv_context.
@@ -690,6 +690,7 @@ void RDMACoordinator::exchange_remote_rmda_info(remote_info* dst, remote_info *s
 
   // Move the gathered remote info to CPU.
   for(int i = local_rank; i < world_size; i += buffer_config.num_of_ranks_per_node) {
+    // printf("group rank: %d, node rank: %d, local rank: %d, num_of_qps: %d  From %d to %d\n", process_group.attr("rank")().cast<int>(), node_rank, local_rank, num_of_qps, i, i / buffer_config.num_of_ranks_per_node);
     CUDA_CHECK(cudaMemcpy(dst + num_of_qps * (i / buffer_config.num_of_ranks_per_node), output_list[i].cast<torch::Tensor>().data_ptr<uint8_t>(), num_of_qps * sizeof(remote_info), cudaMemcpyDeviceToHost));
   }
 }

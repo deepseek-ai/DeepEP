@@ -119,8 +119,9 @@ void Executor::dispatch_core(HybridEpConfigInstance config, DispatchBuffers& dis
 #endif
     
     // Launch kernel
+    CUDA_CHECK(cudaStreamSynchronize(args.stream));
     kernel_cache.run_dispatch_kernel<DType>(config, param, args.stream);
-
+    CUDA_CHECK(cudaStreamSynchronize(args.stream));
     nvtxRangePop();  // End of dispatch_core nvtx range
 }
 

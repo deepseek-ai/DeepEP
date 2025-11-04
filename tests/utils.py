@@ -659,8 +659,9 @@ def count_rdma_send_from_routing_map(routing_map: torch.Tensor, local_node_id: i
 
     # 1. reshape the routing map 
     routing_map = routing_map.reshape(num_of_tokens, num_of_nodes, num_of_experts_per_node)
-    # 2. Set the local node map to zeros
-    routing_map[:, local_node_id, :] = 0
+    # # 2. Set the local node map to zeros
+    # To align with the implementation in the DeepEP, we do not set the local node map to zeros.
+    # routing_map[:, local_node_id, :] = 0
     # 3. reduce_max for unique routed tokens for each node 
     rdma_routing_map = routing_map.max(dim=-1).values 
 
