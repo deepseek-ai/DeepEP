@@ -228,7 +228,7 @@ inline void print_ptr_info(void* p) {
   cudaPointerAttributes attr{};
   cudaError_t err = cudaPointerGetAttributes(&attr, p);
   if (err != cudaSuccess) {
-    printf("cudaPointerGetAttributes failed: %s\n", cudaGetErrorString(err));
+    fprintf(stderr, "cudaPointerGetAttributes failed: %s\n", cudaGetErrorString(err));
     return;
   }
   cudaMemoryType memory_type;
@@ -244,7 +244,7 @@ inline void print_ptr_info(void* p) {
     case cudaMemoryTypeManaged: memory_type_str = "Managed"; break;
     default: memory_type_str = "Unregistered/Unknown"; break;
   }
-  printf("type=%s, device=%d\n", memory_type_str.c_str(), attr.device);
+  fprintf(stderr, "type=%s, device=%d\n", memory_type_str.c_str(), attr.device);
 
   // If this is a device/managed pointer, try to query its allocation range (base + size)
   if (memory_type == cudaMemoryTypeDevice || memory_type == cudaMemoryTypeManaged) {
@@ -252,6 +252,6 @@ inline void print_ptr_info(void* p) {
     CUdeviceptr base = 0;
     size_t size = 0;
     CUresult r = cuMemGetAddressRange(&base, &size, reinterpret_cast<CUdeviceptr>(p));
-    printf("alloc_base=%p, alloc_size=%zu bytes\n", reinterpret_cast<void*>(base), size);
+    fprintf(stderr, "alloc_base=%p, alloc_size=%zu bytes\n", reinterpret_cast<void*>(base), size);
   }
 }

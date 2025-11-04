@@ -101,7 +101,7 @@ static int get_gpu_handler(struct doca_gpu *handler,
     handler->mtable =
         new std::unordered_map<uintptr_t, struct doca_gpu_mtable *>();
   } catch (...) {
-    printf("mtable map allocation failed\n");
+    fprintf(stderr, "mtable map allocation failed\n");
     assert(0);
   }
   cuMemFree(dev_ptr);
@@ -690,7 +690,7 @@ void RDMACoordinator::exchange_remote_rmda_info(remote_info* dst, remote_info *s
 
   // Move the gathered remote info to CPU.
   for(int i = local_rank; i < world_size; i += buffer_config.num_of_ranks_per_node) {
-    // printf("group rank: %d, node rank: %d, local rank: %d, num_of_qps: %d  From %d to %d\n", process_group.attr("rank")().cast<int>(), node_rank, local_rank, num_of_qps, i, i / buffer_config.num_of_ranks_per_node);
+    printf("group rank: %d, node rank: %d, local rank: %d, num_of_qps: %d  From %d to %d\n", process_group.attr("rank")().cast<int>(), node_rank, local_rank, num_of_qps, i, i / buffer_config.num_of_ranks_per_node);
     CUDA_CHECK(cudaMemcpy(dst + num_of_qps * (i / buffer_config.num_of_ranks_per_node), output_list[i].cast<torch::Tensor>().data_ptr<uint8_t>(), num_of_qps * sizeof(remote_info), cudaMemcpyDeviceToHost));
   }
 }

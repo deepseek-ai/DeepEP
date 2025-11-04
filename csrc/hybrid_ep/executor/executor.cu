@@ -31,7 +31,7 @@ Executor::metadata_preprocess_core(
       torch::empty({num_of_tokens_per_rank, config.num_of_nodes - 1},
                    torch::dtype(torch::kBool).device(torch::kCUDA));
   auto num_of_tokens_for_experts =
-      torch::zeros({1}, torch::dtype(torch::kInt32).device(torch::kCUDA));
+      torch::empty({1}, torch::dtype(torch::kInt32).device(torch::kCUDA));
   auto local_expert_routing_map = torch::empty(
       {num_of_tokens_per_rank * config.num_of_ranks_per_node * config.num_of_nodes, config.num_of_experts_per_rank},
       torch::dtype(torch::kBool).device(torch::kCUDA));
@@ -119,9 +119,7 @@ void Executor::dispatch_core(HybridEpConfigInstance config, DispatchBuffers& dis
 #endif
     
     // Launch kernel
-    CUDA_CHECK(cudaStreamSynchronize(args.stream));
     kernel_cache.run_dispatch_kernel<DType>(config, param, args.stream);
-    CUDA_CHECK(cudaStreamSynchronize(args.stream));
     nvtxRangePop();  // End of dispatch_core nvtx range
 }
 
@@ -176,7 +174,10 @@ Executor::dispatch_postprocess(HybridEpConfigInstance config, DispatchBuffers& d
           // otherwise, we will compute the num_permuted_tokens by summing the tokens_per_expert.
           if (num_permuted_tokens < 0) {
             if (args.use_host_meta) {
-              tokens_per_expert = tokens_per_expert.cpu();
+                auto host_opts = tokens_per_expert.options().device(torch::kCPU).pinned_memory(true);
+                torch::Tensor tokens_per_expert_pinned = torch::empty(tokens_per_expert.sizes(), host_opts);
+                tokens_per_expert_pinned.copy_(tokens_per_expert, /*non_blocking=*/false);
+                tokens_per_expert = tokens_per_expert_pinned;
             }
             num_permuted_tokens = tokens_per_expert.sum().item<int64_t>();
           }

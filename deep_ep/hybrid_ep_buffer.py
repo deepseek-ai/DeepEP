@@ -458,9 +458,13 @@ class HybridEPBuffer:
                 )
                 if use_host_meta:
                     # Put the num_dispatched_tokens_tensor on the CPU pinned memory, because this tensor also will be used in the GPU kernel
-                    num_dispatched_tokens_tensor = (
-                        num_dispatched_tokens_tensor.cpu().pin_memory()
+                    num_dispatched_tokens_tensor_pinned = torch.empty(
+                        num_dispatched_tokens_tensor.shape,
+                        device="cpu",
+                        dtype=num_dispatched_tokens_tensor.dtype,
+                        pin_memory=True,
                     )
+                    num_dispatched_tokens_tensor_pinned.copy_(num_dispatched_tokens_tensor, False)
             else:
                 (
                     sparse_to_dense_map,
