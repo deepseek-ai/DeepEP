@@ -229,6 +229,7 @@ public:
                        const std::optional<torch::Tensor>& cached_gbl_channel_prefix_matrix,
                        const std::optional<torch::Tensor>& cached_recv_gbl_rank_prefix_sum,
                        int expert_alignment,
+                       int num_worst_tokens,
                        const Config& config,
                        std::optional<EventHandle>& previous_event,
                        bool async,

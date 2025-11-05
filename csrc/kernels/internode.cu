@@ -100,6 +100,7 @@ __global__ void notify_dispatch(const int* num_tokens_per_rank,
                                 int num_experts,
                                 const bool* is_token_in_rank,
                                 int num_tokens,
+                                int num_worst_tokens,
                                 int num_channels,
                                 int expert_alignment,
                                 const int rdma_clean_offset,
@@ -236,9 +237,11 @@ __global__ void notify_dispatch(const int* num_tokens_per_rank,
                 sum += rdma_recv_num_tokens_mixed.recv_buffer(i)[NUM_MAX_NVL_PEERS + num_rdma_experts];
                 recv_rdma_rank_prefix_sum[i] = sum;
             }
-            while (ld_volatile_global(moe_recv_rdma_counter_mapped) != -1)
-                ;
-            *moe_recv_rdma_counter_mapped = sum;
+            if (num_worst_tokens == 0) {
+                while (ld_volatile_global(moe_recv_rdma_counter_mapped) != -1)
+                    ;
+                *moe_recv_rdma_counter_mapped = sum;
+            }
         }
 
         // Send numbers of tokens per rank/expert to NVL ranks
@@ -263,9 +266,11 @@ __global__ void notify_dispatch(const int* num_tokens_per_rank,
                 sum += nvl_recv_num_tokens_per_rank.buffer(src_nvl_rank)[src_rdma_rank];
                 recv_gbl_rank_prefix_sum[i] = sum;
             }
-            while (ld_volatile_global(moe_recv_counter_mapped) != -1)
-                ;
-            *moe_recv_counter_mapped = sum;
+            if (num_worst_tokens == 0) {
+                while (ld_volatile_global(moe_recv_counter_mapped) != -1)
+                    ;
+                *moe_recv_counter_mapped = sum;
+            }
         }
         if (thread_id < num_nvl_experts) {
             int sum = 0;
@@ -273,9 +278,11 @@ __global__ void notify_dispatch(const int* num_tokens_per_rank,
             for (int i = 0; i < NUM_MAX_NVL_PEERS; ++i)
                 sum += nvl_recv_num_tokens_per_expert.buffer(i)[thread_id];
             sum = (sum + expert_alignment - 1) / expert_alignment * expert_alignment;
-            while (ld_volatile_global(moe_recv_expert_counter_mapped + thread_id) != -1)
-                ;
-            moe_recv_expert_counter_mapped[thread_id] = sum;
+            if (num_worst_tokens == 0) {
+                while (ld_volatile_global(moe_recv_expert_counter_mapped + thread_id) != -1)
+                    ;
+                moe_recv_expert_counter_mapped[thread_id] = sum;
+            }
         }
 
         // Finally barrier
@@ -346,6 +353,7 @@ void notify_dispatch(const int* num_tokens_per_rank,
                      int num_experts,
                      const bool* is_token_in_rank,
                      int num_tokens,
+                     int num_worst_tokens,
                      int num_channels,
                      int hidden_int4,
                      int num_scales,
@@ -380,6 +388,7 @@ void notify_dispatch(const int* num_tokens_per_rank,
                       num_experts,                                                                                                     \
                       is_token_in_rank,                                                                                                \
                       num_tokens,                                                                                                      \
+                      num_worst_tokens,                                                                                                \
                       num_channels,                                                                                                    \
                       expert_alignment,                                                                                                \
                       rdma_clean_meta.first,                                                                                           \
@@ -455,6 +464,7 @@ __global__ void __launch_bounds__(((kNumDispatchRDMASenderWarps + 1 + NUM_MAX_NV
              const int* recv_gbl_rank_prefix_sum,
              const bool* is_token_in_rank,
              int num_tokens,
+             int num_worst_tokens,
              int hidden_int4,
              int num_scales,
              int num_topk,
@@ -1179,6 +1189,22 @@ __global__ void __launch_bounds__(((kNumDispatchRDMASenderWarps + 1 + NUM_MAX_NV
                 st_relaxed_sys_global(nvl_channel_head.buffer(), cached_channel_head_idx);
         }
     }
+
+    // Clean unused `recv_topk_idx` as -1
+    if (num_worst_tokens > 0) {
+        if (is_forwarder)
+            return;
+        // get the actual number of num_recv_tokens on the current rank
+        int num_recv_tokens = recv_gbl_rank_prefix_sum[num_ranks - 1];
+        // some ForwarderCoordinator threads exit early, so we only use non-forwarder in clean-up
+        // channel_id * num_threads is the offset of the current non-forwarder sms
+        const auto clean_start = num_recv_tokens * num_topk + channel_id * num_threads;
+        const auto clean_end = num_worst_tokens * num_topk;
+        const auto clean_stride = num_channels * num_threads;
+        #pragma unroll
+        for (int i = clean_start + thread_id; i < clean_end; i += clean_stride)
+            recv_topk_idx[i] = -1;
+    }
 }
 
 void dispatch(void* recv_x,
@@ -1200,6 +1226,7 @@ void dispatch(void* recv_x,
               const int* recv_gbl_rank_prefix_sum,
               const bool* is_token_in_rank,
               int num_tokens,
+              int num_worst_tokens,
               int hidden_int4,
               int num_scales,
               int num_topk,
@@ -1254,6 +1281,7 @@ void dispatch(void* recv_x,
                       recv_gbl_rank_prefix_sum,                                                                                \
                       is_token_in_rank,                                                                                        \
                       num_tokens,                                                                                              \
+                      num_worst_tokens,                                                                                        \
                       hidden_int4,                                                                                             \
                       num_scales,                                                                                              \
                       num_topk,                                                                                                \
