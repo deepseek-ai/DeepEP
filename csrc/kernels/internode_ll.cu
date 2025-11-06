@@ -902,7 +902,7 @@ __global__ __launch_bounds__(1024, 1) void combine(void* combined_x,
 
                 // Copy directly to local rank, or copy to buffer and issue RDMA
                 overlap ? (dst_rank = __shfl_sync(0xffffffff, static_cast<int>(__ldg(local_src_info + token_idx) >> 32), 0)) : 0;
-                if (is_rank_masked<true>(mask_buffer_ptr, dst_rank))
+                if (overlap and is_rank_masked<true>(mask_buffer_ptr, dst_rank))
                     continue;
                 const auto src_idx = __shfl_sync(0xffffffff, static_cast<int>(__ldg(local_src_info + token_idx) & 0xffffffff), 0);
                 const auto buf_ptr = reinterpret_cast<int64_t>(rdma_send_x_vec_row);
