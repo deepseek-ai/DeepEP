@@ -106,8 +106,7 @@ class Buffer:
             # Enable IBGDA
             assert num_qps_per_rank > 0
             os.environ['NVSHMEM_DISABLE_P2P'] = '0' if allow_nvlink_for_low_latency_mode else '1'
-            os.environ['NVSHMEM_IB_ENABLE_IBGDA'] = '1'
-            os.environ['NVSHMEM_IBGDA_NUM_RC_PER_PE'] = f'{num_qps_per_rank}'
+            #os.environ['NVSHMEM_IB_ENABLE_IBGDA'] = '1'
 
             # Make sure QP depth is always larger than the number of on-flight WRs, so that we can skip WQ slot check
             self.nvshmem_qp_depth = int(os.environ.get('NVSHMEM_QP_DEPTH', '1024'))
@@ -132,7 +131,7 @@ class Buffer:
             root_unique_id = nvshmem_unique_ids[0 if low_latency_mode else self.runtime.get_root_rdma_rank(True)]
 
         # Make CPP runtime available
-        self.runtime.sync(device_ids, ipc_handles, root_unique_id)
+        self.runtime.sync(device_ids, ipc_handles, root_unique_id, num_qps_per_rank)
         assert self.runtime.is_available()
 
     def destroy(self):

@@ -7,11 +7,14 @@
 #include "utils.cuh"
 
 #ifndef DISABLE_NVSHMEM
-#include "ibgda_device.cuh"
 #include "nvshmem.h"
 #endif
 
 namespace deep_ep {
+
+#ifndef DISABLE_NVSHMEM
+nvshmemx_qp_handle_t *qp_handle_device;
+#endif
 
 namespace intranode {
 
@@ -37,6 +40,7 @@ namespace internode {
 #ifndef DISABLE_NVSHMEM
 nvshmem_team_t cpu_rdma_team = NVSHMEM_TEAM_INVALID;
 nvshmem_team_config_t cpu_rdma_team_config;
+nvshmemx_qp_handle_t *qp_handle_host;
 
 std::vector<uint8_t> get_unique_id() {
     nvshmemx_uniqueid_t unique_id;
@@ -46,7 +50,7 @@ std::vector<uint8_t> get_unique_id() {
     return result;
 }
 
-int init(const std::vector<uint8_t>& root_unique_id_val, int rank, int num_ranks, bool low_latency_mode) {
+int init(const std::vector<uint8_t>& root_unique_id_val, int rank, int num_ranks, bool low_latency_mode, int num_qps_per_rank) {
     nvshmemx_uniqueid_t root_unique_id;
     nvshmemx_init_attr_t attr;
     std::memcpy(&root_unique_id, root_unique_id_val.data(), sizeof(nvshmemx_uniqueid_t));
@@ -69,6 +73,11 @@ int init(const std::vector<uint8_t>& root_unique_id_val, int rank, int num_ranks
     }
 
     nvshmem_barrier_all();
+
+    CUDA_CHECK(cudaMalloc(&qp_handle_device, num_qps_per_rank * sizeof(nvshmemx_qp_handle_t)));
+    nvshmemx_qp_create(num_qps_per_rank, &qp_handle_host);
+    assert(qp_handle_host != NULL);
+    CUDA_CHECK(cudaMemcpy(qp_handle_device, qp_handle_host, num_qps_per_rank * sizeof(nvshmemx_qp_handle_t), cudaMemcpyHostToDevice));
     return nvshmem_my_pe();
 }
 
@@ -89,6 +98,8 @@ void finalize() {
         nvshmem_team_destroy(cpu_rdma_team);
         cpu_rdma_team = NVSHMEM_TEAM_INVALID;
     }
+    //free(qp_handle_host);
+    CUDA_CHECK(cudaFree(qp_handle_device));
     nvshmem_finalize();
 }
 #endif

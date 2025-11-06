@@ -146,7 +146,8 @@ public:
 
     void sync(const std::vector<int>& device_ids,
               const std::vector<std::optional<pybind11::bytearray>>& all_gathered_handles,
-              const std::optional<pybind11::bytearray>& root_unique_id_opt);
+              const std::optional<pybind11::bytearray>& root_unique_id_opt,
+              int num_qps_per_rank);
 
     void destroy();
 
