@@ -1465,7 +1465,7 @@ Buffer::low_latency_dispatch(const torch::Tensor& x,
     auto packed_recv_x = torch::empty({num_local_experts, num_ranks * num_max_dispatch_tokens_per_rank, hidden},
                                       x.options().dtype(use_fp8 ? torch::kFloat8_e4m3fn : torch::kBFloat16));
     auto packed_recv_src_info =
-        torch::empty({num_local_experts, num_ranks * num_max_dispatch_tokens_per_rank}, torch::dtype(torch::kInt32).device(torch::kCUDA));
+        torch::empty({num_local_experts, num_ranks * num_max_dispatch_tokens_per_rank}, torch::dtype(torch::kInt64).device(torch::kCUDA));
     auto packed_recv_layout_range = torch::empty({num_local_experts, num_ranks}, torch::dtype(torch::kInt64).device(torch::kCUDA));
     auto packed_recv_count = torch::empty({num_local_experts}, torch::dtype(torch::kInt32).device(torch::kCUDA));
 
@@ -1495,7 +1495,7 @@ Buffer::low_latency_dispatch(const torch::Tensor& x,
         internode_ll::dispatch(
             packed_recv_x.data_ptr(),
             packed_recv_x_scales_ptr,
-            packed_recv_src_info.data_ptr<int>(),
+            packed_recv_src_info.data_ptr<int64_t>(),
             packed_recv_layout_range.data_ptr<int64_t>(),
             packed_recv_count.data_ptr<int>(),
             mask_buffer_ptr,
@@ -1554,6 +1554,12 @@ std::tuple<torch::Tensor, std::optional<EventHandle>, std::optional<std::functio
     const torch::Tensor& topk_weights,
     const torch::Tensor& src_info,
     const torch::Tensor& layout_range,
+    bool overlap,
+    const std::optional<torch::Tensor>& packed_recv_count,
+    const std::optional<torch::Tensor>& comp_signal,
+    int block_m,
+    int threshold,
+    int num_sms,
     const std::optional<torch::Tensor>& combine_wait_recv_cost_stats,
     int num_max_dispatch_tokens_per_rank,
     int num_experts,
@@ -1564,6 +1570,7 @@ std::tuple<torch::Tensor, std::optional<EventHandle>, std::optional<std::functio
     const std::optional<torch::Tensor>& out) {
 #ifndef DISABLE_NVSHMEM
     EP_HOST_ASSERT(low_latency_mode);
+    EP_HOST_ASSERT((!overlap || return_recv_hook) and "Overlap mode requires return_recv_hook=True");
 
     // Tensor checks
     EP_HOST_ASSERT(x.dim() == 3 and x.is_contiguous() and x.scalar_type() == torch::kBFloat16);
@@ -1577,10 +1584,16 @@ std::tuple<torch::Tensor, std::optional<EventHandle>, std::optional<std::functio
     EP_HOST_ASSERT(topk_weights.size(0) <= num_max_dispatch_tokens_per_rank);
     EP_HOST_ASSERT(topk_weights.scalar_type() == torch::kFloat32);
     EP_HOST_ASSERT(src_info.dim() == 2 and src_info.is_contiguous());
-    EP_HOST_ASSERT(src_info.scalar_type() == torch::kInt32 and x.size(0) == src_info.size(0));
+    EP_HOST_ASSERT(src_info.scalar_type() == torch::kInt64 and x.size(0) == src_info.size(0));
     EP_HOST_ASSERT(layout_range.dim() == 2 and layout_range.is_contiguous());
     EP_HOST_ASSERT(layout_range.scalar_type() == torch::kInt64);
     EP_HOST_ASSERT(layout_range.size(0) == num_experts / num_ranks and layout_range.size(1) == num_ranks);
+
+    if (comp_signal.has_value()) {
+        EP_HOST_ASSERT(comp_signal->dim() == 1 and comp_signal->is_contiguous());
+        EP_HOST_ASSERT(comp_signal->scalar_type() == torch::kInt32);
+        EP_HOST_ASSERT(comp_signal->size(0) == num_experts / num_ranks * ceil_div(num_ranks * num_max_dispatch_tokens_per_rank, 64));
+    }
 
     if (combine_wait_recv_cost_stats.has_value()) {
         EP_HOST_ASSERT(combine_wait_recv_cost_stats->scalar_type() == torch::kInt64);
@@ -1627,8 +1640,13 @@ std::tuple<torch::Tensor, std::optional<EventHandle>, std::optional<std::functio
                               x.data_ptr(),
                               topk_idx.data_ptr<topk_idx_t>(),
                               topk_weights.data_ptr<float>(),
-                              src_info.data_ptr<int>(),
+                              src_info.data_ptr<int64_t>(),
                               layout_range.data_ptr<int64_t>(),
+                              overlap,
+                              packed_recv_count.has_value() ? packed_recv_count->data_ptr<int>() : nullptr,
+                              comp_signal.has_value() ? comp_signal->data_ptr<int>() : nullptr,
+                              block_m,
+                              threshold,
                               mask_buffer_ptr,
                               combine_wait_recv_cost_stats.has_value() ? combine_wait_recv_cost_stats->data_ptr<int64_t>() : nullptr,
                               next_clean_meta.first,
@@ -1643,6 +1661,7 @@ std::tuple<torch::Tensor, std::optional<EventHandle>, std::optional<std::functio
                               use_logfmt,
                               workspace,
                               num_device_sms,
+                              num_sms,
                               launch_stream,
                               phases,
                               zero_copy);
