@@ -782,7 +782,7 @@ __global__ __launch_bounds__(1024, 1) void combine(void* combined_x,
     // Parameters for IBGDA sends outer loop, declared upfront to bypass goto initialization restrictions.
     int initial_idx, loop_bound, step_size;
     // Shared between warps in sms for overlap mode, where each sm only has one warp group
-    auto shared_vaild_signal_prefix_sum = reinterpret_cast<int*>(smem_buffer + smem_send_size - num_local_experts * sizeof(int));
+    auto shared_vaild_signal_prefix_sum = reinterpret_cast<int*>(smem_buffer + smem_send_size);
 
     // Sending phase
     if ((phases & LOW_LATENCY_SEND_PHASE) == 0)
@@ -1300,18 +1300,21 @@ void combine(void* combined_x,
     constexpr int kNumMaxUnrolls = 4;
     constexpr int kMaxNumGroups = 2;
 
-    // Send buffer size, the last `num_local_experts` ints is used for `shared_vaild_signal_prefix_sum`
+    // Send buffer size
     const int num_meta_bytes = hidden / 128 * 4;
     const int num_send_tma_bytes = 32 * sizeof(int4) * kNumMaxUnrolls + 16;
+    const int smem_send_size = num_warps * (kNumStages * num_send_tma_bytes + num_meta_bytes);
+
+    // prefix_sum size, used for shared_vaild_signal_prefix_sum
     const int num_local_experts = num_experts / num_ranks;
-    const int smem_send_size = num_warps * (kNumStages * num_send_tma_bytes + num_meta_bytes) + num_local_experts * sizeof(int);
+    const int smem_prefix_sum_size = num_local_experts * sizeof(int);
 
     // Receive buffer size
     const int num_recv_tma_bytes = 16 + hidden * 2;
     const int smem_recv_size = kMaxNumGroups * (kNumStages * num_recv_tma_bytes + hidden * 2 + kNumStages * num_meta_bytes * 3);
 
     // Total requirement
-    const int smem_size = max(smem_send_size, smem_recv_size);
+    const int smem_size = max(smem_send_size + smem_prefix_sum_size, smem_recv_size);
 
 #define COMBINE_LAUNCH_CASE(hidden)                                                                                                \
     {                                                                                                                              \
