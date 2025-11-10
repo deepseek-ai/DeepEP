@@ -1287,6 +1287,7 @@ void combine(void* combined_x,
     }
 
     // Check workspace
+    // 1 int: clean flag + num_experts ints: per-expert atomic finish counter for overlap mode
     auto atomic_clean_flag = static_cast<int*>(workspace);
     auto atomic_finish_counter_per_expert = atomic_clean_flag + 1;
     EP_HOST_ASSERT((1 + num_experts) * sizeof(int) <= NUM_WORKSPACE_BYTES);
