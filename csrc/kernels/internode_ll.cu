@@ -714,7 +714,7 @@ __forceinline__ __device__ void decode_and_accumulate(
     }
 }
 
-template <bool kUseLogFMT, int kHidden, int kNumMaxTopk, int kNumMaxExperts, int kNumMaxUnrolls>
+template <bool kUseLogFMT, int kHidden, int kNumMaxTopk, int kNumMaxUnrolls>
 __global__ __launch_bounds__(1024, 1) void combine(void* combined_x,
                                                    void* rdma_recv_x,
                                                    int* rdma_recv_flag,
@@ -744,6 +744,7 @@ __global__ __launch_bounds__(1024, 1) void combine(void* combined_x,
                                                    int num_ranks,
                                                    int num_warp_groups,
                                                    int num_warps_per_group,
+                                                   int smem_send_size,
                                                    int phases,
                                                    bool zero_copy) {
     const auto sm_id = __shfl_sync(0xffffffff, static_cast<int>(blockIdx.x), 0);
@@ -780,6 +781,8 @@ __global__ __launch_bounds__(1024, 1) void combine(void* combined_x,
 
     // Parameters for IBGDA sends outer loop, declared upfront to bypass goto initialization restrictions.
     int initial_idx, loop_bound, step_size;
+    // Shared between warps in sms for overlap mode, where each sm only has one warp group
+    auto shared_vaild_signal_prefix_sum = reinterpret_cast<int*>(smem_buffer + smem_send_size - num_local_experts * sizeof(int));
 
     // Sending phase
     if ((phases & LOW_LATENCY_SEND_PHASE) == 0)
@@ -797,8 +800,6 @@ __global__ __launch_bounds__(1024, 1) void combine(void* combined_x,
             atomic_add_release_global(atomic_clean_flag, num_experts);
     }
 
-    // Shared between warps in sms for overlap mode, where each sm only has one warp group
-    __shared__ int shared_vaild_signal_prefix_sum[kNumMaxExperts];
     __shared__ int shared_vaild_signal_sum, shared_local_expert_idx;
 
     // Compute prefix sums of valid signal counts per local expert
@@ -1264,7 +1265,6 @@ void combine(void* combined_x,
              int phases,
              bool zero_copy) {
     constexpr int kNumMaxTopk = 11;
-    constexpr int kNumMaxExperts = 288;
     int num_warp_groups, num_warps_per_group, num_recv_per_sm, num_warps;
 
     if (overlap == true and phases == LOW_LATENCY_SEND_PHASE) {
@@ -1287,12 +1287,11 @@ void combine(void* combined_x,
     }
 
     // Check workspace
-    // 1 int: clean flag + num_experts ints: per-expert atomic finish counter for overlap mode
+    // 1 int: clean flag + `num_experts` ints: per-expert atomic finish counter for overlap mode
     auto atomic_clean_flag = static_cast<int*>(workspace);
     auto atomic_finish_counter_per_expert = atomic_clean_flag + 1;
     EP_HOST_ASSERT((1 + num_experts) * sizeof(int) <= NUM_WORKSPACE_BYTES);
     EP_HOST_ASSERT(num_topk <= kNumMaxTopk);
-    EP_HOST_ASSERT(num_experts <= kNumMaxExperts);
 
     // Online cast cannot use zero-copy
     EP_HOST_ASSERT(not(zero_copy and use_logfmt));
@@ -1301,10 +1300,11 @@ void combine(void* combined_x,
     constexpr int kNumMaxUnrolls = 4;
     constexpr int kMaxNumGroups = 2;
 
-    // Send buffer size
+    // Send buffer size, the last `num_local_experts` ints is used for `shared_vaild_signal_prefix_sum`
     const int num_meta_bytes = hidden / 128 * 4;
     const int num_send_tma_bytes = 32 * sizeof(int4) * kNumMaxUnrolls + 16;
-    const int smem_send_size = num_warps * (kNumStages * num_send_tma_bytes + num_meta_bytes);
+    const int num_local_experts = num_experts / num_ranks;
+    const int smem_send_size = num_warps * (kNumStages * num_send_tma_bytes + num_meta_bytes) + num_local_experts * sizeof(int);
 
     // Receive buffer size
     const int num_recv_tma_bytes = 16 + hidden * 2;
@@ -1315,9 +1315,8 @@ void combine(void* combined_x,
 
 #define COMBINE_LAUNCH_CASE(hidden)                                                                                                \
     {                                                                                                                              \
-        auto combine_func =                                                                                                        \
-            use_logfmt ? combine<true, hidden, kNumMaxTopk, kNumMaxExperts, kNumMaxUnrolls> :                                      \
-                         combine<false, hidden, kNumMaxTopk, kNumMaxExperts, kNumMaxUnrolls>;                                      \
+       auto combine_func =                                                                                                         \
+            use_logfmt ? combine<true, hidden, kNumMaxTopk, kNumMaxUnrolls> : combine<false, hidden, kNumMaxTopk, kNumMaxUnrolls>; \
         SET_SHARED_MEMORY_FOR_TMA(combine_func);                                                                                   \
         LAUNCH_KERNEL(&cfg,                                                                                                        \
                       combine_func,                                                                                                \
@@ -1350,6 +1349,7 @@ void combine(void* combined_x,
                       num_ranks,                                                                                                   \
                       num_warp_groups,                                                                                             \
                       num_warps_per_group,                                                                                         \
+                      smem_send_size,                                                                                              \
                       phases,                                                                                                      \
                       zero_copy);                                                                                                  \
     }                                                                                                                              \
