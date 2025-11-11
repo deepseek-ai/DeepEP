@@ -374,9 +374,10 @@ void RDMACoordinator::allocate_dispatch_rdma_buffers(DispatchBuffers &dispatch_b
   dispatch_remote_info_vec = static_cast<remote_info *>(calloc(buffer_config.num_of_nodes * num_of_dispatch_qps, sizeof(remote_info)));
   remote_info *my_dispatch_info = static_cast<remote_info *>(calloc(num_of_dispatch_qps, sizeof(remote_info)));
   int token_stride = buffer_config.max_num_of_tokens_per_rank * buffer_config.hidden_dim;
+  // TODO: should be the real dyncmic num_of_tokens_per_rank 
   int flag_stride = (buffer_config.max_num_of_tokens_per_rank - 1) / buffer_config.num_of_tokens_per_chunk_dispatch_api + 1;
   int prob_stride = buffer_config.max_num_of_tokens_per_rank * buffer_config.num_of_experts_per_rank * buffer_config.num_of_ranks_per_node;
-  int scaling_factor_stride = buffer_config.max_num_of_tokens_per_rank * buffer_config.hidden_dim / 128;
+  int scaling_factor_stride = buffer_config.max_num_of_tokens_per_rank * (buffer_config.hidden_dim / 128);
   // For each queue pair to the same remote. 
   for (int qp_idx = 0; qp_idx < buffer_config.num_of_blocks_dispatch_api; ++qp_idx) {
     // For each remote.
@@ -390,8 +391,14 @@ void RDMACoordinator::allocate_dispatch_rdma_buffers(DispatchBuffers &dispatch_b
       memset(&curr_info->gid, 0, sizeof(curr_info->gid));;
       memcpy(curr_info->gid.raw, dispatch_gverbs_ctx.gid.raw, 16);
       curr_info->token_rkey = dispatch_rdma_inter_node_group_token_mr->rkey;
-      curr_info->token_vaddr = (uintptr_t)((TOKEN_DATA_TYPE *)dispatch_rdma_inter_node_group_token_mr->addr +
-                                            peer_idx * token_stride);
+      switch (dispatch_buffers.data_type) {
+        case APP_TOKEN_DATA_TYPE::UINT8:
+          curr_info->token_vaddr = (uintptr_t)((uint8_t *)dispatch_rdma_inter_node_group_token_mr->addr + peer_idx * token_stride);
+          break;
+        case APP_TOKEN_DATA_TYPE::UINT16:
+          curr_info->token_vaddr = (uintptr_t)((uint16_t *)dispatch_rdma_inter_node_group_token_mr->addr + peer_idx * token_stride);
+          break;
+      }
       curr_info->flag_rkey = dispatch_rdma_inter_node_group_flags_mr->rkey;
       curr_info->flag_vaddr = (uintptr_t)((uint64_t *)dispatch_rdma_inter_node_group_flags_mr->addr +
                                           peer_idx * flag_stride);
@@ -690,7 +697,6 @@ void RDMACoordinator::exchange_remote_rmda_info(remote_info* dst, remote_info *s
 
   // Move the gathered remote info to CPU.
   for(int i = local_rank; i < world_size; i += buffer_config.num_of_ranks_per_node) {
-    printf("group rank: %d, node rank: %d, local rank: %d, num_of_qps: %d  From %d to %d\n", process_group.attr("rank")().cast<int>(), node_rank, local_rank, num_of_qps, i, i / buffer_config.num_of_ranks_per_node);
     CUDA_CHECK(cudaMemcpy(dst + num_of_qps * (i / buffer_config.num_of_ranks_per_node), output_list[i].cast<torch::Tensor>().data_ptr<uint8_t>(), num_of_qps * sizeof(remote_info), cudaMemcpyDeviceToHost));
   }
 }

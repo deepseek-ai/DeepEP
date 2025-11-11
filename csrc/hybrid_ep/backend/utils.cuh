@@ -10,28 +10,30 @@
 #include <string>
 #include <sstream>
 #include <algorithm>
+#include <cctype>
+#include <unordered_set>
 #include <type_traits>
 #include <linux/types.h>
 #define MAX_NUM_OF_RANKS_PER_NODE 72
 
-enum class TOKEN_DATA_TYPE { UINT16, UINT8 };
+enum class APP_TOKEN_DATA_TYPE { UINT16, UINT8 };
 
-inline std::string type_to_string(TOKEN_DATA_TYPE token_data_type) {
+inline std::string type_to_string(APP_TOKEN_DATA_TYPE token_data_type) {
   switch (token_data_type) {
-  case TOKEN_DATA_TYPE::UINT16:
+  case APP_TOKEN_DATA_TYPE::UINT16:
     return "uint16_t";
-  case TOKEN_DATA_TYPE::UINT8:
+  case APP_TOKEN_DATA_TYPE::UINT8:
     return "uint8_t";
   default:
     return "unknown";
   }
 }
 
-inline int get_token_data_type_size(TOKEN_DATA_TYPE token_data_type) {
+inline int get_token_data_type_size(APP_TOKEN_DATA_TYPE token_data_type) {
   switch (token_data_type) {
-  case TOKEN_DATA_TYPE::UINT16:
+  case APP_TOKEN_DATA_TYPE::UINT16:
     return sizeof(uint16_t);
-  case TOKEN_DATA_TYPE::UINT8:
+  case APP_TOKEN_DATA_TYPE::UINT8:
     return sizeof(uint8_t);
   }
   return 0;
@@ -74,7 +76,7 @@ struct combine_memory_region_info_t {
 #endif
 
 struct DispatchBuffers {
-  TOKEN_DATA_TYPE data_type;
+  APP_TOKEN_DATA_TYPE data_type;
   // Input buffers from attn, only used in inter-node case
   void *        attn_input_token = nullptr;
   void *        attn_input_prob = nullptr;
@@ -194,15 +196,48 @@ inline std::string get_key(Args&&... args) {
   } while (0)
 
 inline std::string convert_to_nvcc_arch_flags(std::string torch_arch_list) {
+  // ; , => space
+  for (char &c : torch_arch_list) {
+    if (c == ';' || c == ',')
+      c = ' ';
+  }
+
   std::stringstream ss(torch_arch_list);
   std::string item;
   std::string nvcc_arch_flags;
+  std::unordered_set<std::string> seen_arch;
 
-  while (std::getline(ss, item, ';')) {
-    // Remove the dot from the item
+  while (ss >> item) {
+    if (item.empty()) {
+      continue;
+    }
+
+    bool emit_ptx = false;
+    auto plus_pos = item.find('+');
+    // Handle the case like 80+PTX
+    if (plus_pos != std::string::npos && plus_pos + 1 < item.size()) {
+      std::string suffix = item.substr(plus_pos + 1);
+      // ptx => PTX
+      std::transform(suffix.begin(), suffix.end(), suffix.begin(), [](unsigned char ch) {
+        return static_cast<char>(std::toupper(ch));
+      });
+      if (suffix == "PTX") {
+        emit_ptx = true;
+      }
+      item = item.substr(0, plus_pos);
+    }
+
     item.erase(std::remove(item.begin(), item.end(), '.'), item.end());
-    // Generate the nvcc flags
-    nvcc_arch_flags += "-gencode=arch=compute_" + item + ",code=sm_" + item + " ";
+    if (item.empty()) {
+      continue;
+    }
+
+    if (seen_arch.insert(item).second) {
+      nvcc_arch_flags += "-gencode=arch=compute_" + item + ",code=sm_" + item + " ";
+    }
+    if (emit_ptx) {
+      nvcc_arch_flags += "-gencode=arch=compute_" + item + ",code=compute_" + item + " ";
+    }
   }
 
   // If the nvcc_arch_flags is empty, get the cuda version from the device

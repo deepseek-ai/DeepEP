@@ -538,7 +538,7 @@ inline __device__ void N2N_warp_group_device_function(const int node_rank,
       for (int token_idx_in_chunk = INTER_NODE_GROUP::thread_rank();
            token_idx_in_chunk < NUM_OF_TOKENS_PER_CHUNK;
            token_idx_in_chunk += INTER_NODE_GROUP::size()) {
-        int token_idx = token_idx_in_chunk + chunk_base_token_idx;
+        int64_t token_idx = token_idx_in_chunk + chunk_base_token_idx;
         bool need_write = false;
         if (token_idx_in_chunk < token_range) {
           need_write = smem_attn_to_rdma_map_ptr[remote_idx + token_idx_in_chunk * (NUM_OF_NODES - 1)];
@@ -583,7 +583,7 @@ inline __device__ void N2N_warp_group_device_function(const int node_rank,
                                                       smem_mr_info_ptr[remote_idx].scaling_factor_rkey,
                                                       smem_mr_info_ptr[remote_idx].scaling_factor_laddr + token_idx * (HIDDEN_DIM / 128) * sizeof(float),
                                                       smem_mr_info_ptr[remote_idx].scaling_factor_lkey,
-                                                      token_idx * (HIDDEN_DIM / 128) * sizeof(float));
+                                                      (HIDDEN_DIM / 128) * sizeof(float));
           }
         }
         curr_wqe_idx += write_cnt * WQE_NUM_RATIO;
@@ -1563,7 +1563,7 @@ inline __device__ void inter_node_N2N_warp_group_device_function(const int node_
     for (int token_idx_in_chunk = INTER_NODE_RDMA_GROUP::thread_rank();
          token_idx_in_chunk < NUM_OF_TOKENS_PER_CHUNK;
          token_idx_in_chunk += INTER_NODE_RDMA_GROUP::size()) {
-      int token_idx = token_idx_in_chunk + chunk_id * NUM_OF_TOKENS_PER_CHUNK;
+      int64_t token_idx = token_idx_in_chunk + chunk_id * NUM_OF_TOKENS_PER_CHUNK;
       bool need_write = false;
       if (token_idx_in_chunk < token_range) {
         need_write = rdma_to_attn_map[token_idx_in_chunk + chunk_base_token_idx];

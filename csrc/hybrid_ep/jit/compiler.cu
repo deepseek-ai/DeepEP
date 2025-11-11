@@ -148,7 +148,7 @@ std::string NVCCCompiler::get_metadata_preprocessing_code(HybridEpConfigInstance
 
 std::string NVCCCompiler::get_dispatch_code(HybridEpConfigInstance config) {
   std::string token_type =
-      (config.token_data_type == TOKEN_DATA_TYPE::UINT8) ? "uint8_t" : "uint16_t";
+      (config.token_data_type == APP_TOKEN_DATA_TYPE::UINT8) ? "uint8_t" : "uint16_t";
 
   return R"(
         #include "hybrid_ep_backend.cuh"

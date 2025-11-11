@@ -14,13 +14,13 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.doc() = "HybridEP, efficiently enable the expert-parallel communication in "
               "the Hopper+ architectures";
   
-    pybind11::enum_<TOKEN_DATA_TYPE>(m, "TokenDataType")
-        .value("UINT16", TOKEN_DATA_TYPE::UINT16)
-        .value("UINT8", TOKEN_DATA_TYPE::UINT8)
+    pybind11::enum_<APP_TOKEN_DATA_TYPE>(m, "APP_TOKEN_DATA_TYPE")
+        .value("UINT16", APP_TOKEN_DATA_TYPE::UINT16)
+        .value("UINT8", APP_TOKEN_DATA_TYPE::UINT8)
         .export_values() // So we can use hybrid_ep_cpp.TYPE instead of the
-                         // hybrid_ep_cpp.TOKEN_DATA_TYPE.TYPE
+                         // hybrid_ep_cpp.APP_TOKEN_DATA_TYPE.TYPE
         .def("__str__",
-             [](const TOKEN_DATA_TYPE &type) { return type_to_string(type); });
+             [](const APP_TOKEN_DATA_TYPE &type) { return type_to_string(type); });
   
     pybind11::class_<BufferConfig>(m, "BufferConfig")
         .def(py::init<>())

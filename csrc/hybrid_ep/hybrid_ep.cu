@@ -14,7 +14,11 @@ HybridEPBuffer::HybridEPBuffer(
   bool use_shared_buffer
 ) : process_group(process_group), buffer_config(config), local_rank(local_rank), node_rank(node_rank), group_size(group_size),
     executor(local_rank, node_rank, base_path, load_cached_kernels) {
-    remote_allocator.init(/*enable_fabric = */ true);
+    bool enable_fabric = false;
+    if(buffer_config.num_of_ranks_per_node > 8) {
+      enable_fabric = true;
+    }
+    remote_allocator.init(enable_fabric);
     if(group_size > buffer_config.num_of_ranks_per_node) {
 #ifdef HYBRID_EP_BUILD_MULTINODE_ENABLE
       rdma_coordinator.init(process_group, node_rank, local_rank, buffer_config, remote_allocator, ib_dev_name_list);
@@ -393,10 +397,12 @@ bool HybridEPBuffer::update_buffer(HybridEpConfigInstance config) {
     buffer_config.token_data_type = config.token_data_type;
   }
 
+  if(buffer_config.num_of_nodes > 1 && need_reallocate) {
+    fprintf(stderr, "Reallocate buffer for multi-node case is very slow, please check the buffer configuration to pre-allocate the buffer.");
+    assert(!need_reallocate);
+  }
+
   if(need_reallocate) {
-    if (buffer_config.num_of_nodes > 1) {
-      TORCH_WARN("Reallocate buffer for multi-node case is very slow, please check the buffer configuration to pre-allocate the buffer.");
-    }
     release_buffer();
     allocate_buffer();
   }
@@ -433,7 +439,7 @@ HybridEPBuffer::dispatch(HybridEpConfigInstance config,
     assert(probs.value().is_contiguous());
     assert(probs.value().dtype() == torch::kFloat32);
   }
-  if (config.token_data_type == TOKEN_DATA_TYPE::UINT8) {
+  if (config.token_data_type == APP_TOKEN_DATA_TYPE::UINT8) {
     assert(scaling_factor.has_value());
     assert(scaling_factor.value().device().is_cuda());
     assert(scaling_factor.value().is_contiguous());
@@ -443,7 +449,7 @@ HybridEPBuffer::dispatch(HybridEpConfigInstance config,
   Executor::DispatchArgs args;
   args.hidden = hidden;
   if(with_probs) args.probs = probs.value();
-  if(config.token_data_type == TOKEN_DATA_TYPE::UINT8) args.scaling_factor = scaling_factor.value();
+  if(config.token_data_type == APP_TOKEN_DATA_TYPE::UINT8) args.scaling_factor = scaling_factor.value();
   args.sparse_to_dense_map = sparse_to_dense_map;
   args.rdma_to_attn_map = rdma_to_attn_map;
   args.attn_to_rdma_map = attn_to_rdma_map;
@@ -458,9 +464,9 @@ HybridEPBuffer::dispatch(HybridEpConfigInstance config,
   // Run the full dispatch operation
   config.forward_dispatch_api = with_probs;
   executor.dispatch_preprocess(config, dispatch_buffers, args);
-  if(config.token_data_type == TOKEN_DATA_TYPE::UINT8) {
+  if(config.token_data_type == APP_TOKEN_DATA_TYPE::UINT8) {
     executor.dispatch_core<uint8_t>(config, dispatch_buffers, args);
-  } else if (config.token_data_type == TOKEN_DATA_TYPE::UINT16) {
+  } else if (config.token_data_type == APP_TOKEN_DATA_TYPE::UINT16) {
     executor.dispatch_core<uint16_t>(config, dispatch_buffers, args);
   }else {
     throw std::runtime_error("Invalid token data type:" +  std::to_string(static_cast<int>(config.token_data_type)));
@@ -548,7 +554,7 @@ HybridEPBuffer::dispatch_with_permute(HybridEpConfigInstance config,
    assert(probs.value().is_contiguous());
    assert(probs.value().dtype() == torch::kFloat32);
  }
- if (config.token_data_type == TOKEN_DATA_TYPE::UINT8) {
+ if (config.token_data_type == APP_TOKEN_DATA_TYPE::UINT8) {
    assert(scaling_factor.has_value());
    assert(scaling_factor.value().device().is_cuda());
    assert(scaling_factor.value().is_contiguous());
@@ -558,7 +564,7 @@ HybridEPBuffer::dispatch_with_permute(HybridEpConfigInstance config,
  Executor::DispatchArgs args;
  args.hidden = hidden;
  if(with_probs) args.probs = probs.value();
- if(config.token_data_type == TOKEN_DATA_TYPE::UINT8) args.scaling_factor = scaling_factor.value();
+ if(config.token_data_type == APP_TOKEN_DATA_TYPE::UINT8) args.scaling_factor = scaling_factor.value();
  args.sparse_to_dense_map = sparse_to_dense_map;
  args.rdma_to_attn_map = rdma_to_attn_map;
  args.attn_to_rdma_map = attn_to_rdma_map;
@@ -578,9 +584,9 @@ HybridEPBuffer::dispatch_with_permute(HybridEpConfigInstance config,
  // Run the full dispatch operation
  config.forward_dispatch_api = with_probs;
  executor.dispatch_preprocess(config, dispatch_buffers, args);
- if(config.token_data_type == TOKEN_DATA_TYPE::UINT8) {
+ if(config.token_data_type == APP_TOKEN_DATA_TYPE::UINT8) {
    executor.dispatch_core<uint8_t>(config, dispatch_buffers, args);
- } else if (config.token_data_type == TOKEN_DATA_TYPE::UINT16) {
+ } else if (config.token_data_type == APP_TOKEN_DATA_TYPE::UINT16) {
    executor.dispatch_core<uint16_t>(config, dispatch_buffers, args);
  }else {
    throw std::runtime_error("Invalid token data type:" +  std::to_string(static_cast<int>(config.token_data_type)));

@@ -57,7 +57,7 @@ void Executor::dispatch_preprocess(HybridEpConfigInstance config, DispatchBuffer
         if(config.forward_dispatch_api) {
             CUDA_CHECK(cudaMemcpyAsync(dispatch_buffers.attn_input_prob, args.probs.data_ptr(), args.probs.numel() * sizeof(float), cudaMemcpyDeviceToDevice, args.stream));
         }
-        if(config.token_data_type == TOKEN_DATA_TYPE::UINT8) {
+        if(config.token_data_type == APP_TOKEN_DATA_TYPE::UINT8) {
             CUDA_CHECK(cudaMemcpyAsync(dispatch_buffers.attn_input_scaling_factor, args.scaling_factor.data_ptr(), args.scaling_factor.numel() * sizeof(float), cudaMemcpyDeviceToDevice, args.stream));
         }
 #else
@@ -67,7 +67,7 @@ void Executor::dispatch_preprocess(HybridEpConfigInstance config, DispatchBuffer
         // Set the tensor pointers to the dispatch buffers.
         dispatch_buffers.attn_input_token = args.hidden.data_ptr();
         dispatch_buffers.attn_input_prob = (config.forward_dispatch_api) ? args.probs.data_ptr() : nullptr;
-        dispatch_buffers.attn_input_scaling_factor = (config.token_data_type == TOKEN_DATA_TYPE::UINT8) ? args.scaling_factor.data_ptr() : nullptr;
+        dispatch_buffers.attn_input_scaling_factor = (config.token_data_type == APP_TOKEN_DATA_TYPE::UINT8) ? args.scaling_factor.data_ptr() : nullptr;
     }
     nvtxRangePop();  // End of dispatch_preprocess nvtx range
 }
@@ -141,7 +141,7 @@ Executor::dispatch_postprocess(HybridEpConfigInstance config, DispatchBuffers& d
         if(config.forward_dispatch_api) {
             dispatched_probs = torch::empty({0}, torch::dtype(torch::kFloat32).device(torch::kCUDA));
         }
-        if(config.token_data_type == TOKEN_DATA_TYPE::UINT8) {
+        if(config.token_data_type == APP_TOKEN_DATA_TYPE::UINT8) {
             dispatched_scaling_factor = torch::empty({0, config.hidden_dim / 128}, torch::dtype(torch::kFloat32).device(torch::kCUDA));
         }
         row_id_map = torch::empty({0, config.num_of_experts_per_rank}, torch::dtype(torch::kInt32).device(torch::kCUDA));
@@ -183,7 +183,7 @@ Executor::dispatch_postprocess(HybridEpConfigInstance config, DispatchBuffers& d
           }
         }
     
-        if (config.token_data_type == TOKEN_DATA_TYPE::UINT16) {
+        if (config.token_data_type == APP_TOKEN_DATA_TYPE::UINT16) {
           std::tie(dispatched_tokens, dispatched_scaling_factor, dispatched_probs) = permute_launcher(
               reinterpret_cast<uint16_t*>(dispatch_buffers.expert_output_token),
               reinterpret_cast<float*>(dispatch_buffers.expert_output_prob),
@@ -222,7 +222,7 @@ Executor::dispatch_postprocess(HybridEpConfigInstance config, DispatchBuffers& d
                                         probs_sz, cudaMemcpyDeviceToDevice, args.stream));
         }
 
-        if(config.token_data_type == TOKEN_DATA_TYPE::UINT8) {
+        if(config.token_data_type == APP_TOKEN_DATA_TYPE::UINT8) {
             dispatched_scaling_factor = torch::empty({
                     args.num_dispatched_tokens, 
                     config.hidden_dim / 128}, 
