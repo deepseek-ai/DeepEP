@@ -4,6 +4,7 @@ import torch
 import torch.distributed as dist
 from functools import partial
 from typing import Literal, Set
+import itertools
 
 import deep_ep
 from utils import init_dist, bench, bench_kineto, calc_diff, hash_tensor, per_token_cast_back
@@ -44,7 +45,8 @@ def test_main(num_tokens: int,
               buffer: deep_ep.Buffer,
               use_logfmt: bool = False,
               shrink_test: bool = False,
-              seed: int = 0):
+              seed: int = 0,
+              use_expert_overlap: bool = False, send_num_sms = -1, recv_num_sms = -1, num_rounds = 1):
     torch.manual_seed(seed + rank)
     random.seed(seed + rank)
 
@@ -94,12 +96,17 @@ def test_main(num_tokens: int,
                         num_times += 1
                         for _ in range((num_times % 2) + 1):
                             cumulative_local_expert_recv_stats = torch.zeros((num_local_experts, ), dtype=torch.int, device='cuda')
-                            packed_recv_x, packed_recv_count, handle, event, hook = \
-                                buffer.low_latency_dispatch(current_x, topk_idx, num_tokens, num_experts,
-                                                            use_fp8=dispatch_use_fp8, round_scale=round_scale, use_ue8m0=use_ue8m0,
-                                                            cumulative_local_expert_recv_stats=cumulative_local_expert_recv_stats,
-                                                            async_finish=not return_recv_hook, return_recv_hook=return_recv_hook)
-                            hook() if return_recv_hook else event.current_stream_wait()
+                            num_rounds = num_rounds if use_expert_overlap else 1
+                            for round_id in range(num_rounds):
+                                tmp_packed_recv_x, tmp_packed_recv_count, tmp_handle, event, hook  = \
+                                    buffer.low_latency_dispatch(current_x, topk_idx, num_tokens, num_experts,
+                                                                use_fp8=dispatch_use_fp8, round_scale=round_scale, use_ue8m0=use_ue8m0,
+                                                                use_expert_overlap=use_expert_overlap, num_rounds=num_rounds, round_id=round_id, send_num_sms=send_num_sms, recv_num_sms=recv_num_sms,
+                                                                cumulative_local_expert_recv_stats=cumulative_local_expert_recv_stats,
+                                                                async_finish=not use_expert_overlap and not return_recv_hook, return_recv_hook=use_expert_overlap or return_recv_hook)
+                                hook() if return_recv_hook or use_expert_overlap else event.current_stream_wait()
+                                if round_id == 0:
+                                    packed_recv_x, packed_recv_count, handle = tmp_packed_recv_x, tmp_packed_recv_count, tmp_handle
                         if shrink_test:
                             query_mask_buffer_and_check("dispatch", buffer, mask_status, expected_masked_ranks)
                         packed_recv_x = (packed_recv_x[0], packed_recv_x[1].contiguous()) if dispatch_use_fp8 else packed_recv_x
@@ -153,16 +160,18 @@ def test_main(num_tokens: int,
                             if zero_copy:
                                 buffer.get_next_low_latency_combine_buffer(handle)[:, :, :] = simulated_gemm_x
                             out = torch.empty((num_tokens, hidden), dtype=torch.bfloat16, device='cuda')
-                            combined_x, event, hook = buffer.low_latency_combine(simulated_gemm_x,
+                            num_rounds = num_rounds if use_expert_overlap else 1
+                            for round_id in range(num_rounds):
+                                combined_x, event, hook = buffer.low_latency_combine(simulated_gemm_x,
                                                                                  topk_idx,
                                                                                  topk_weights,
                                                                                  handle,
-                                                                                 use_logfmt=use_logfmt,
-                                                                                 async_finish=not return_recv_hook,
-                                                                                 zero_copy=zero_copy,
-                                                                                 return_recv_hook=return_recv_hook,
+                                                                                 async_finish=not use_expert_overlap and not return_recv_hook,
+                                                                                 zero_copy=zero_copy and not use_expert_overlap,
+                                                                                 return_recv_hook=use_expert_overlap or return_recv_hook,
+                                                                                 use_expert_overlap=use_expert_overlap, num_rounds=num_rounds, round_id=round_id, send_num_sms=send_num_sms, recv_num_sms=recv_num_sms,
                                                                                  out=out)
-                            hook() if return_recv_hook else event.current_stream_wait()
+                            hook() if return_recv_hook or use_expert_overlap else event.current_stream_wait()
                             if shrink_test:
                                 query_mask_buffer_and_check("combine", buffer, mask_status, expected_masked_ranks)
                             if do_check:
@@ -277,6 +286,27 @@ def test_loop(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
               use_logfmt=args.use_logfmt,
               shrink_test=args.shrink_test,
               seed=1)
+    
+    do_sbo_test = args.sbo_test
+    if do_sbo_test:
+        num_sms_options = (64, 32, 16)
+        num_rounds_options = (4,)
+        for (num_sms, num_rounds) in itertools.product(num_sms_options, num_rounds_options):
+            if rank == 0:
+                print(f"{num_sms=}, {num_rounds=}")
+            torch.distributed.barrier(group)
+            test_main(num_tokens,
+                hidden,
+                num_experts,
+                num_topk,
+                rank,
+                num_ranks,
+                group,
+                buffer,
+                use_logfmt=args.use_logfmt,
+                shrink_test=args.shrink_test,
+                seed=1,
+                use_expert_overlap=True, send_num_sms=num_sms, recv_num_sms=num_sms, num_rounds=num_rounds)
 
     do_pressure_test = args.pressure_test
     for seed in range(int(1e9) if do_pressure_test else 0):
@@ -324,6 +354,7 @@ if __name__ == '__main__':
     parser.add_argument('--use-logfmt', action='store_true', help='Whether to test LogFMT combine')
     parser.add_argument("--pressure-test", action='store_true', help='Whether to do pressure test')
     parser.add_argument("--shrink-test", action='store_true', help='Whether to simulate failure and test shrink mode')
+    parser.add_argument("--sbo-test", action='store_true', help='Whether to do SBO test')
     args = parser.parse_args()
 
     num_processes = args.num_processes
