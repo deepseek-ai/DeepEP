@@ -492,7 +492,6 @@ void dispatch(void* packed_recv_x,
               cudaStream_t stream,
               int phases) {
     constexpr int kNumMaxTopK = 11;
-    constexpr int kNumMaxExperts = 288;
     const int num_warp_groups = ceil_div(num_experts, num_device_sms);
     const int num_warps_per_group = 32 / num_warp_groups;
     EP_HOST_ASSERT(num_warp_groups > 0 and num_warps_per_group > 0);
@@ -501,7 +500,6 @@ void dispatch(void* packed_recv_x,
     const auto num_warps = num_warp_groups * num_warps_per_group;
     const auto num_sms = ceil_div(num_experts, num_warp_groups);
     EP_HOST_ASSERT(num_topk <= kNumMaxTopK);
-    EP_HOST_ASSERT(num_experts <= kNumMaxExperts);
 
     // Workspace checks
     auto atomic_counter_per_expert = static_cast<int*>(workspace);
