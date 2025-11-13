@@ -614,8 +614,10 @@ class Buffer:
             EventOverlap(event, tensors_to_record if async_finish else None), hook
 
     # noinspection PyTypeChecker
-    def low_latency_combine(self, x: torch.Tensor, topk_idx: torch.Tensor, topk_weights: torch.Tensor,
-                            handle: tuple, use_logfmt: bool = False, zero_copy: bool = False, async_finish: bool = False,
+    def low_latency_combine(self, x: torch.Tensor, topk_idx: torch.Tensor, topk_weights: torch.Tensor, handle: tuple,
+                            overlap: bool = False, packed_recv_count: torch.Tensor = None, comp_signal: torch.Tensor = None,
+                            block_m: int = 64, threshold: int = 0, num_sms: int = 3,
+                            use_logfmt: bool = False, zero_copy: bool = False, async_finish: bool = False,
                             return_recv_hook: bool = False, out: Optional[torch.Tensor] = None,
                             combine_wait_recv_cost_stats: Optional[torch.Tensor] = None) -> \
             Tuple[torch.Tensor, EventOverlap, Callable]:
@@ -635,6 +637,17 @@ class Buffer:
             topk_weights: `[num_combined_tokens, num_topk]` with `torch.float`, the expert weights selected by the dispatched
                 tokens. The received tokens will be reduced with the weights in this tensor.
             handle: the communication handle given by the `dispatch` function.
+            overlap: whether to overlap the down gemm with the combine send phase.
+            packed_recv_count: a tensor shaped `[num_local_experts]` with type `torch.int`, indicating how many tokens each
+                expert receive.
+            comp_signal: `[num_local_experts * ceil_div(num_tokens * num_max_dispatch_tokens_per_rank, block_m)]` with `torch.int32`, 
+                each element indicates the processing progress of `block_m` tokens in DeepGEMM. 
+                Note that, the fixed-length tensor is used to support cuda graph, 
+                only the first `ceil_div(num_tokens * num_ranks, block_m)` elements of each local_expert are valid.
+            block_m: set by DeepGEMM.
+            threshold: set by DeepGEMM. When a valid element in comp_signal reaches this threshold, it means that all the tokens 
+                corresponding to this element have been computed by DeepGEMM and can be sent.
+            num_sms: the number of sms used by low_latency_combine send, only needs to be set when overlap is `True`.
             use_logfmt: whether to use an internal "LogFMT with dynamic per-64-channel cast" format (10 bits).
             zero_copy: whether the tensor is already copied into the RDMA buffer, should be cooperative
                 with `get_next_low_latency_combine_buffer`.
@@ -655,6 +668,7 @@ class Buffer:
         src_info, layout_range, num_max_dispatch_tokens_per_rank, hidden, num_experts = handle
         assert self.nvshmem_qp_depth >= (num_max_dispatch_tokens_per_rank + 1) * 2
         combined_x, event, hook = self.runtime.low_latency_combine(x, topk_idx, topk_weights, src_info, layout_range,
+                                                                   overlap, packed_recv_count, comp_signal, block_m, threshold, num_sms,
                                                                    combine_wait_recv_cost_stats, num_max_dispatch_tokens_per_rank,
                                                                    num_experts, use_logfmt, zero_copy, async_finish, return_recv_hook, out)
         tensors_to_record = (x, topk_idx, topk_weights, src_info, layout_range, combined_x)
