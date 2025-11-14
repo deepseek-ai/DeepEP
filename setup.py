@@ -33,7 +33,7 @@ def to_nvcc_gencode(s: str) -> str:
 
 def get_extension_hybrid_ep_cpp():
     current_dir = os.path.dirname(os.path.abspath(__file__))
-    enable_multinode = os.getenv("HYBRID_EP_MULTINODE", "1").strip().lower() in {"1", "true", "t", "yes", "y", "on"}
+    enable_multinode = os.getenv("HYBRID_EP_MULTINODE", "0").strip().lower() in {"1", "true", "t", "yes", "y", "on"}
 
     # Default to Blackwell series
     os.environ['TORCH_CUDA_ARCH_LIST'] = os.getenv('TORCH_CUDA_ARCH_LIST', '10.0')

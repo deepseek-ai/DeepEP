@@ -86,9 +86,9 @@ class HybridEPBuffer:
             num_sms_preprocessing_api = 128
         # Inter-node case should use less SMs for the dispatch and combine APIs.
         if num_sms_dispatch_api is None:
-            num_sms_dispatch_api = 32 if self.num_of_nodes == 1 else 8
+            num_sms_dispatch_api = 32 if self.num_of_nodes == 1 else 16
         if num_sms_combine_api is None:
-            num_sms_combine_api = 32 if self.num_of_nodes == 1 else 8
+            num_sms_combine_api = 32 if self.num_of_nodes == 1 else 16
         assert (
             sm_count >= num_sms_preprocessing_api
             and sm_count >= num_sms_dispatch_api
