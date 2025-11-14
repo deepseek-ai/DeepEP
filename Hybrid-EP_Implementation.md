@@ -264,7 +264,7 @@ Here are important parameter settings in `csrc/hybrid_ep/config.cuh`. You can mo
 ### 🚧 Upcoming Features
 - **Automatic Topology Detection**: Automatic detection of GPU-NIC mapping for RDMA inter-node communication, eliminating the need for manual `--ib-dev-name-list` configuration
 - **Low Latency Mode**: Enhanced performance for latency-critical workloads
-
+- Performance optimization
 
 ### 🎯 Migration Notes
 This implementation maintains full backward compatibility with DeepEP. Users can seamlessly integrate Hybrid-EP into existing workflows without code modifications.
