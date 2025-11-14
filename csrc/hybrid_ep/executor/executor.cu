@@ -325,6 +325,7 @@ void Executor::combine_core(HybridEpConfigInstance config, CombineBuffers& combi
 
     // Launch kernel
     kernel_cache.run_combine_kernel(config, param, args.stream);
+
     nvtxRangePop();  // End of combine_core nvtx range
 }
 

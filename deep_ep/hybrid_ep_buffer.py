@@ -355,8 +355,8 @@ class HybridEPBuffer:
             sparse_to_dense_map,
             rdma_to_attn_map,
             attn_to_rdma_map,
-            num_dispatched_tokens_tensor,
-            local_expert_routing_map,
+            _,
+            _,
             num_of_tokens,
             config,
         ) = handle

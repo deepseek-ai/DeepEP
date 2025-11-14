@@ -12,7 +12,7 @@ HybridEPBuffer::HybridEPBuffer(
   std::vector<std::string> ib_dev_name_list,
   bool load_cached_kernels,
   bool use_shared_buffer
-) : process_group(process_group), buffer_config(config), local_rank(local_rank), node_rank(node_rank), group_size(group_size),
+) : process_group(process_group), buffer_config(config), local_rank(local_rank), node_rank(node_rank), group_size(group_size), use_shared_buffer(use_shared_buffer),
     executor(local_rank, node_rank, base_path, load_cached_kernels) {
     bool enable_fabric = false;
     if(buffer_config.num_of_ranks_per_node > 8) {
@@ -21,7 +21,7 @@ HybridEPBuffer::HybridEPBuffer(
     remote_allocator.init(enable_fabric);
     if(group_size > buffer_config.num_of_ranks_per_node) {
 #ifdef HYBRID_EP_BUILD_MULTINODE_ENABLE
-      rdma_coordinator.init(process_group, node_rank, local_rank, buffer_config, remote_allocator, ib_dev_name_list);
+      rdma_coordinator.init(process_group, node_rank, local_rank, buffer_config, ib_dev_name_list);
 #else
       assert(false); // inter-node communication is not supported.
 #endif
@@ -137,10 +137,10 @@ void HybridEPBuffer::allocate_buffer_for_dispatch() {
   size_t sizeof_token_data_type = get_token_data_type_size(dispatch_buffers.data_type);
 
   // Calculate buffer sizes
-  auto expert_output_token_elts = max_num_of_tokens_for_experts * buffer_config.hidden_dim;
-  auto expert_output_prob_elts = max_num_of_tokens_for_experts * 
+  auto expert_output_token_elts = max_num_of_tokens * buffer_config.hidden_dim;
+  auto expert_output_prob_elts = max_num_of_tokens * 
                                  (buffer_config.num_of_experts_per_rank * buffer_config.num_of_ranks_per_node);
-  auto expert_output_scaling_factor_elts = max_num_of_tokens_for_experts * (buffer_config.hidden_dim / 128);
+  auto expert_output_scaling_factor_elts = max_num_of_tokens * (buffer_config.hidden_dim / 128);
 
   // Allocate main buffers
   if (use_shared_buffer) {
@@ -187,8 +187,8 @@ void HybridEPBuffer::allocate_buffer_for_dispatch() {
 
 void HybridEPBuffer::allocate_buffer_for_combine() {
   // Calculate buffer sizes
-  auto expert_input_token_elts = max_num_of_tokens_for_experts * buffer_config.hidden_dim;
-  auto expert_input_prob_elts = max_num_of_tokens_for_experts *
+  auto expert_input_token_elts = max_num_of_tokens * buffer_config.hidden_dim;
+  auto expert_input_prob_elts = max_num_of_tokens *
                                 (buffer_config.num_of_experts_per_rank * buffer_config.num_of_ranks_per_node);
 
   // Allocate main buffers
@@ -228,10 +228,10 @@ void HybridEPBuffer::allocate_buffer_for_combine() {
 
 void HybridEPBuffer::allocate_buffer() {
   // Token number at the worst case, all tokens are routed to the same expert.
-  this->max_num_of_tokens_for_experts = buffer_config.max_num_of_tokens_per_rank *
+  this->max_num_of_tokens = buffer_config.max_num_of_tokens_per_rank *
                                         buffer_config.num_of_ranks_per_node *
                                         buffer_config.num_of_nodes;
-  assert(this->max_num_of_tokens_for_experts % 4 ==
+  assert(this->max_num_of_tokens % 4 ==
          0); // The number of tokens for experts should be divisible by 4, this
              // is required by the permute make_row_id_map kernel
   allocate_buffer_for_preprocessing();

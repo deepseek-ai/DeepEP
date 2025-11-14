@@ -257,14 +257,12 @@ void RDMACoordinator::init(
       int node_rank,
       int local_rank, 
       BufferConfig config, 
-      ExtendedMemoryAllocator allocator,
       std::vector<std::string> ib_dev_name_list
   ) {
   this->process_group = process_group;
   this->node_rank = node_rank;
   this->local_rank = local_rank;
   this->buffer_config = config;
-  this->allocator = allocator;
   this->ib_dev_name_list = ib_dev_name_list;
   
   assert(buffer_config.num_of_nodes > 1);

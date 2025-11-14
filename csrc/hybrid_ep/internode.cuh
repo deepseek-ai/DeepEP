@@ -11,7 +11,6 @@
 #include <dlfcn.h>
 #include "backend/hybrid_ep_backend.cuh"
 #include "backend/utils.cuh"
-#include "allocator/allocator.cuh"
 #include "config.cuh"
 
 #define RC  (0)
@@ -138,7 +137,7 @@ class RDMACoordinator {
 public:
     RDMACoordinator() = default;
     ~RDMACoordinator();
-    void init(pybind11::object process_group, int node_rank, int local_rank, BufferConfig config, ExtendedMemoryAllocator allocator, std::vector<std::string> ib_dev_name_list);
+    void init(pybind11::object process_group, int node_rank, int local_rank, BufferConfig config,  std::vector<std::string> ib_dev_name_list);
     void destroy();
     void allocate_dispatch_rdma_buffers(DispatchBuffers &dispatch_buffers);
     void allocate_combine_rdma_buffers(CombineBuffers &combine_buffers);
@@ -148,7 +147,6 @@ private:
     int node_rank = -1;
     int local_rank = -1;
     BufferConfig buffer_config;
-    ExtendedMemoryAllocator allocator;
     pybind11::object process_group;
     
     // IB basic resources

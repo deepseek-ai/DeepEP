@@ -100,7 +100,7 @@ private:
   int node_rank;
   int group_size;
   // Maximum number of tokens for experts.
-  int64_t max_num_of_tokens_for_experts; 
+  int64_t max_num_of_tokens; 
   // Only valid on intra-node communication. In this case, the dispatch/combine can share same buffers.
   bool use_shared_buffer;
 
