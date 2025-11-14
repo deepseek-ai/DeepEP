@@ -465,15 +465,16 @@ class TorchRef:
         self.ep_group = ep_group
         self.group_rank = torch.distributed.get_rank(self.ep_group)
         self.group_size = torch.distributed.get_world_size(self.ep_group)
-        self.num_of_ranks_per_node = num_of_ranks_per_node
-        # at least one node
-        self.num_of_nodes = max(1, self.group_size // self.num_of_ranks_per_node)
-        self.local_rank = self.group_rank % self.num_of_ranks_per_node
-
+        self.local_rank = self.group_rank % num_of_ranks_per_node
         self.num_of_experts = num_of_experts
-        self.num_local_experts = num_of_experts // self.num_of_ranks_per_node
+        self.num_local_experts = num_of_experts // self.group_size
 
     def _local_expert_range(self):
+        start = self.group_rank * self.num_local_experts
+        end = start + self.num_local_experts  # [start, end)
+        return start, end
+
+    def _local_expert_range_per_node(self):
         start = self.local_rank * self.num_local_experts
         end = start + self.num_local_experts  # [start, end)
         return start, end
@@ -651,3 +652,18 @@ class TorchRef:
             dispatched_probs,
             dispatched_scaling_factor,
         )
+
+def count_rdma_send_from_routing_map(routing_map: torch.Tensor, local_node_id: int, num_of_nodes: int):
+    num_of_tokens, num_of_experts = routing_map.shape
+    num_of_experts_per_node = num_of_experts // num_of_nodes
+
+    # 1. reshape the routing map 
+    routing_map = routing_map.reshape(num_of_tokens, num_of_nodes, num_of_experts_per_node)
+    # # 2. Set the local node map to zeros
+    # To align with the implementation in the DeepEP, we do not set the local node map to zeros.
+    # routing_map[:, local_node_id, :] = 0
+    # 3. reduce_max for unique routed tokens for each node 
+    rdma_routing_map = routing_map.max(dim=-1).values 
+
+    return rdma_routing_map.sum().item()
+

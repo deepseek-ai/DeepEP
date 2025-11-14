@@ -10,67 +10,124 @@
 #include <string>
 #include <sstream>
 #include <algorithm>
+#include <cctype>
+#include <unordered_set>
 #include <type_traits>
+#include <linux/types.h>
+#define MAX_NUM_OF_RANKS_PER_NODE 72
 
-enum class TOKEN_DATA_TYPE { UINT16, UINT8 };
+enum class APP_TOKEN_DATA_TYPE { UINT16, UINT8 };
 
-inline std::string type_to_string(TOKEN_DATA_TYPE token_data_type) {
+inline std::string type_to_string(APP_TOKEN_DATA_TYPE token_data_type) {
   switch (token_data_type) {
-  case TOKEN_DATA_TYPE::UINT16:
+  case APP_TOKEN_DATA_TYPE::UINT16:
     return "uint16_t";
-  case TOKEN_DATA_TYPE::UINT8:
+  case APP_TOKEN_DATA_TYPE::UINT8:
     return "uint8_t";
   default:
     return "unknown";
   }
 }
 
-inline int get_token_data_type_size(TOKEN_DATA_TYPE token_data_type) {
+inline int get_token_data_type_size(APP_TOKEN_DATA_TYPE token_data_type) {
   switch (token_data_type) {
-  case TOKEN_DATA_TYPE::UINT16:
+  case APP_TOKEN_DATA_TYPE::UINT16:
     return sizeof(uint16_t);
-  case TOKEN_DATA_TYPE::UINT8:
+  case APP_TOKEN_DATA_TYPE::UINT8:
     return sizeof(uint8_t);
   }
   return 0;
 }
 
+#ifdef HYBRID_EP_BUILD_MULTINODE_ENABLE
+struct dispatch_memory_region_info_t {
+  __be32 token_lkey;
+  __be32 token_rkey;
+  __be32 prob_lkey;
+  __be32 prob_rkey;
+  __be32 scaling_factor_lkey;
+  __be32 scaling_factor_rkey;
+  __be32 flag_lkey;
+  __be32 flag_rkey;
+  uint64_t token_laddr;
+  uint64_t token_raddr;
+  uint64_t prob_laddr;
+  uint64_t prob_raddr;
+  uint64_t scaling_factor_laddr;
+  uint64_t scaling_factor_raddr;
+  uint64_t flag_laddr;
+  uint64_t flag_raddr;
+} __attribute__((__aligned__(8)));
+
+struct combine_memory_region_info_t {
+  __be32 token_lkey;
+  __be32 token_rkey;
+  __be32 prob_lkey;
+  __be32 prob_rkey;
+  __be32 flag_lkey;
+  __be32 flag_rkey;
+  uint64_t token_laddr;
+  uint64_t token_raddr;
+  uint64_t prob_laddr;
+  uint64_t prob_raddr;
+  uint64_t flag_laddr;
+  uint64_t flag_raddr;
+} __attribute__((__aligned__(8)));
+#endif
+
 struct DispatchBuffers {
-  TOKEN_DATA_TYPE data_type;
+  APP_TOKEN_DATA_TYPE data_type;
+  // Input buffers from attn, only used in inter-node case
+  void *        attn_input_token = nullptr;
+  void *        attn_input_prob = nullptr;
+  void *        attn_input_flags = nullptr;
+  void *        attn_input_scaling_factor = nullptr;
   // Output buffers to experts
-  void *expert_output_token;
-  void **expert_output_token_all_ranks;
-  float *expert_output_prob;
-  float **expert_output_prob_all_ranks;
-  float *expert_output_scaling_factor;
-  float **expert_output_scaling_factor_all_ranks;
-  // Local temp buffer for dispatch kernel.
-  void *rdma_inter_node_group_token;
-  float *rdma_inter_node_group_prob;
-  float *rdma_inter_node_group_scaling_factor;
-  uint64_t *rdma_inter_node_group_flags;
+  void *        expert_output_token = nullptr;
+  void **       expert_output_token_all_ranks = nullptr;
+  float *       expert_output_prob = nullptr;
+  float **      expert_output_prob_all_ranks = nullptr;
+  float *       expert_output_scaling_factor = nullptr;
+  float **      expert_output_scaling_factor_all_ranks = nullptr;
+  // RDMA buffers for dispatch kernel.
+  void *        rdma_inter_node_group_token = nullptr;
+  float *       rdma_inter_node_group_prob = nullptr;
+  float *       rdma_inter_node_group_scaling_factor = nullptr;
+  uint64_t *    rdma_inter_node_group_flags = nullptr;
   // Misc flags
-  uint32_t *intra_node_write_completion_flags;
-  uint64_t *expected_rdma_flag_value;
-  uint32_t *expected_intra_node_flag_value;
+  uint32_t *    intra_node_write_completion_flags = nullptr;
+  uint64_t *    expected_rdma_flag_value = nullptr;
+  uint32_t *    expected_intra_node_flag_value = nullptr;
+#ifdef HYBRID_EP_BUILD_MULTINODE_ENABLE
+  // qp info and mr info
+  struct doca_gpu_dev_verbs_qp ** d_qps_gpu = nullptr;
+  struct dispatch_memory_region_info_t * mr_info = nullptr;
+#endif
 };
 
 struct CombineBuffers {
   // Input buffers from experts
-  uint16_t *expert_input_token;
-  uint16_t **expert_input_token_all_ranks;
-  float *expert_input_prob;
-  float **expert_input_prob_all_ranks;
-  // Local temp buffer for combine kernel.
-  uint16_t *rdma_intra_node_red_token; 
-  float *rdma_intra_node_red_prob;
-  uint16_t *rdma_inter_node_group_token;
-  float *rdma_inter_node_group_prob; 
-  uint64_t *rdma_inter_node_group_flags; 
+  uint16_t *    expert_input_token = nullptr;
+  uint16_t **   expert_input_token_all_ranks = nullptr;
+  float *       expert_input_prob = nullptr;
+  float **      expert_input_prob_all_ranks = nullptr;
+  // Output buffers to attn, only used in inter-node case
+  void *        attn_output_flags = nullptr;
+  // RDMA buffers for combine kernel.
+  uint16_t *    rdma_intra_node_red_token = nullptr;
+  float *       rdma_intra_node_red_prob = nullptr;
+  uint16_t *    rdma_inter_node_group_token = nullptr;
+  float *       rdma_inter_node_group_prob = nullptr;
+  uint64_t *    rdma_inter_node_group_flags = nullptr;
   // Misc flags
-  uint32_t *intra_node_write_completion_flags;
-  uint64_t *expected_rdma_flag_value;
-  uint32_t *expected_intra_node_flag_value; 
+  uint32_t *    intra_node_write_completion_flags = nullptr;
+  uint64_t *    expected_rdma_flag_value = nullptr;
+  uint32_t *    expected_intra_node_flag_value = nullptr;
+#ifdef HYBRID_EP_BUILD_MULTINODE_ENABLE
+  // qp info and mr info
+  struct doca_gpu_dev_verbs_qp ** d_qps_gpu = nullptr;
+  struct combine_memory_region_info_t * mr_info = nullptr;
+#endif
 };
 
 __device__ __forceinline__ bool elect_sync(uint32_t membermask) {
@@ -139,15 +196,48 @@ inline std::string get_key(Args&&... args) {
   } while (0)
 
 inline std::string convert_to_nvcc_arch_flags(std::string torch_arch_list) {
+  // ; , => space
+  for (char &c : torch_arch_list) {
+    if (c == ';' || c == ',')
+      c = ' ';
+  }
+
   std::stringstream ss(torch_arch_list);
   std::string item;
   std::string nvcc_arch_flags;
+  std::unordered_set<std::string> seen_arch;
 
-  while (std::getline(ss, item, ';')) {
-    // Remove the dot from the item
+  while (ss >> item) {
+    if (item.empty()) {
+      continue;
+    }
+
+    bool emit_ptx = false;
+    auto plus_pos = item.find('+');
+    // Handle the case like 80+PTX
+    if (plus_pos != std::string::npos && plus_pos + 1 < item.size()) {
+      std::string suffix = item.substr(plus_pos + 1);
+      // ptx => PTX
+      std::transform(suffix.begin(), suffix.end(), suffix.begin(), [](unsigned char ch) {
+        return static_cast<char>(std::toupper(ch));
+      });
+      if (suffix == "PTX") {
+        emit_ptx = true;
+      }
+      item = item.substr(0, plus_pos);
+    }
+
     item.erase(std::remove(item.begin(), item.end(), '.'), item.end());
-    // Generate the nvcc flags
-    nvcc_arch_flags += "-gencode=arch=compute_" + item + ",code=sm_" + item + " ";
+    if (item.empty()) {
+      continue;
+    }
+
+    if (seen_arch.insert(item).second) {
+      nvcc_arch_flags += "-gencode=arch=compute_" + item + ",code=sm_" + item + " ";
+    }
+    if (emit_ptx) {
+      nvcc_arch_flags += "-gencode=arch=compute_" + item + ",code=compute_" + item + " ";
+    }
   }
 
   // If the nvcc_arch_flags is empty, get the cuda version from the device
@@ -173,7 +263,7 @@ inline void print_ptr_info(void* p) {
   cudaPointerAttributes attr{};
   cudaError_t err = cudaPointerGetAttributes(&attr, p);
   if (err != cudaSuccess) {
-    printf("cudaPointerGetAttributes failed: %s\n", cudaGetErrorString(err));
+    fprintf(stderr, "cudaPointerGetAttributes failed: %s\n", cudaGetErrorString(err));
     return;
   }
   cudaMemoryType memory_type;
@@ -189,7 +279,7 @@ inline void print_ptr_info(void* p) {
     case cudaMemoryTypeManaged: memory_type_str = "Managed"; break;
     default: memory_type_str = "Unregistered/Unknown"; break;
   }
-  printf("type=%s, device=%d\n", memory_type_str.c_str(), attr.device);
+  fprintf(stderr, "type=%s, device=%d\n", memory_type_str.c_str(), attr.device);
 
   // If this is a device/managed pointer, try to query its allocation range (base + size)
   if (memory_type == cudaMemoryTypeDevice || memory_type == cudaMemoryTypeManaged) {
@@ -197,6 +287,6 @@ inline void print_ptr_info(void* p) {
     CUdeviceptr base = 0;
     size_t size = 0;
     CUresult r = cuMemGetAddressRange(&base, &size, reinterpret_cast<CUdeviceptr>(p));
-    printf("alloc_base=%p, alloc_size=%zu bytes\n", reinterpret_cast<void*>(base), size);
+    fprintf(stderr, "alloc_base=%p, alloc_size=%zu bytes\n", reinterpret_cast<void*>(base), size);
   }
 }

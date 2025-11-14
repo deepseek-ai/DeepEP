@@ -3,7 +3,7 @@
 
 #include "executor.cuh"
 
-Executor::Executor(int local_rank, int node_rank, std::string base_path) : local_rank(local_rank), node_rank(node_rank), kernel_cache(local_rank, base_path) {}  
+Executor::Executor(int local_rank, int node_rank, std::string base_path, bool load_cached_kernels) : local_rank(local_rank), node_rank(node_rank), kernel_cache(node_rank, local_rank, base_path, load_cached_kernels) {}  
 
 std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
 Executor::metadata_preprocess_core(
@@ -31,7 +31,7 @@ Executor::metadata_preprocess_core(
       torch::empty({num_of_tokens_per_rank, config.num_of_nodes - 1},
                    torch::dtype(torch::kBool).device(torch::kCUDA));
   auto num_of_tokens_for_experts =
-      torch::zeros({1}, torch::dtype(torch::kInt32).device(torch::kCUDA));
+      torch::empty({1}, torch::dtype(torch::kInt32).device(torch::kCUDA));
   auto local_expert_routing_map = torch::empty(
       {num_of_tokens_per_rank * config.num_of_ranks_per_node * config.num_of_nodes, config.num_of_experts_per_rank},
       torch::dtype(torch::kBool).device(torch::kCUDA));
@@ -49,8 +49,26 @@ Executor::metadata_preprocess_core(
 }
 
 void Executor::dispatch_preprocess(HybridEpConfigInstance config, DispatchBuffers& dispatch_buffers, DispatchArgs& args) {
-    // Empty now, will be filled with D2D in the inter-node case
     nvtxRangePushA("dispatch_preprocess in hybrid-ep");
+    if(config.num_of_nodes > 1) {
+#ifdef HYBRID_EP_BUILD_MULTINODE_ENABLE
+        auto sizeof_token_data_type = get_token_data_type_size(config.token_data_type);
+        CUDA_CHECK(cudaMemcpyAsync(dispatch_buffers.attn_input_token, args.hidden.data_ptr(), args.hidden.numel() * sizeof_token_data_type, cudaMemcpyDeviceToDevice, args.stream));
+        if(config.forward_dispatch_api) {
+            CUDA_CHECK(cudaMemcpyAsync(dispatch_buffers.attn_input_prob, args.probs.data_ptr(), args.probs.numel() * sizeof(float), cudaMemcpyDeviceToDevice, args.stream));
+        }
+        if(config.token_data_type == APP_TOKEN_DATA_TYPE::UINT8) {
+            CUDA_CHECK(cudaMemcpyAsync(dispatch_buffers.attn_input_scaling_factor, args.scaling_factor.data_ptr(), args.scaling_factor.numel() * sizeof(float), cudaMemcpyDeviceToDevice, args.stream));
+        }
+#else
+        throw std::runtime_error("Multi-node support is not enabled in this build.");
+#endif
+    } else {
+        // Set the tensor pointers to the dispatch buffers.
+        dispatch_buffers.attn_input_token = args.hidden.data_ptr();
+        dispatch_buffers.attn_input_prob = (config.forward_dispatch_api) ? args.probs.data_ptr() : nullptr;
+        dispatch_buffers.attn_input_scaling_factor = (config.token_data_type == APP_TOKEN_DATA_TYPE::UINT8) ? args.scaling_factor.data_ptr() : nullptr;
+    }
     nvtxRangePop();  // End of dispatch_preprocess nvtx range
 }
 
@@ -63,9 +81,9 @@ void Executor::dispatch_core(HybridEpConfigInstance config, DispatchBuffers& dis
 
     hybrid_ep::dispatch_kernel_param_t<DType> param;
     // Setup input pointers
-    param.attn_input_token = reinterpret_cast<DType*>(args.hidden.data_ptr());
-    param.attn_input_prob = (config.forward_dispatch_api) ? reinterpret_cast<float*>(args.probs.data_ptr()) : nullptr;
-    param.attn_input_token_scaling_factor = (config.token_data_type == TOKEN_DATA_TYPE::UINT8) ? reinterpret_cast<float*>(args.scaling_factor.data_ptr()) : nullptr;
+    param.attn_input_token = reinterpret_cast<DType*>(dispatch_buffers.attn_input_token);
+    param.attn_input_prob = reinterpret_cast<float*>(dispatch_buffers.attn_input_prob);
+    param.attn_input_token_scaling_factor = reinterpret_cast<float*>(dispatch_buffers.attn_input_scaling_factor);
     
     // Setup output pointers
     for (int i = 0; i < config.num_of_ranks_per_node; i++) {
@@ -95,10 +113,13 @@ void Executor::dispatch_core(HybridEpConfigInstance config, DispatchBuffers& dis
     param.num_of_tokens_per_rank = args.num_of_tokens_per_rank;
     param.expected_rdma_flag_value = dispatch_buffers.expected_rdma_flag_value;
     param.expected_intra_node_flag_value = dispatch_buffers.expected_intra_node_flag_value;
+#ifdef HYBRID_EP_BUILD_MULTINODE_ENABLE
+    param.d_qps_gpu = dispatch_buffers.d_qps_gpu;
+    param.mr_info = dispatch_buffers.mr_info;
+#endif
     
     // Launch kernel
     kernel_cache.run_dispatch_kernel<DType>(config, param, args.stream);
-
     nvtxRangePop();  // End of dispatch_core nvtx range
 }
 
@@ -120,11 +141,11 @@ Executor::dispatch_postprocess(HybridEpConfigInstance config, DispatchBuffers& d
         if(config.forward_dispatch_api) {
             dispatched_probs = torch::empty({0}, torch::dtype(torch::kFloat32).device(torch::kCUDA));
         }
-        if(config.token_data_type == TOKEN_DATA_TYPE::UINT8) {
+        if(config.token_data_type == APP_TOKEN_DATA_TYPE::UINT8) {
             dispatched_scaling_factor = torch::empty({0, config.hidden_dim / 128}, torch::dtype(torch::kFloat32).device(torch::kCUDA));
         }
         row_id_map = torch::empty({0, config.num_of_experts_per_rank}, torch::dtype(torch::kInt32).device(torch::kCUDA));
-        tokens_per_expert = torch::full({config.num_of_experts_per_rank}, 0, torch::dtype(torch::kInt32).device(torch::kCUDA));
+        tokens_per_expert = torch::zeros({config.num_of_experts_per_rank}, torch::dtype(torch::kInt32).device(torch::kCUDA));
         return std::make_tuple(dispatched_tokens, dispatched_probs, dispatched_scaling_factor, row_id_map, tokens_per_expert);
     }
 
@@ -153,13 +174,16 @@ Executor::dispatch_postprocess(HybridEpConfigInstance config, DispatchBuffers& d
           // otherwise, we will compute the num_permuted_tokens by summing the tokens_per_expert.
           if (num_permuted_tokens < 0) {
             if (args.use_host_meta) {
-              tokens_per_expert = tokens_per_expert.cpu();
+                auto host_opts = tokens_per_expert.options().device(torch::kCPU).pinned_memory(true);
+                torch::Tensor tokens_per_expert_pinned = torch::empty(tokens_per_expert.sizes(), host_opts);
+                tokens_per_expert_pinned.copy_(tokens_per_expert, /*non_blocking=*/false);
+                tokens_per_expert = tokens_per_expert_pinned;
             }
             num_permuted_tokens = tokens_per_expert.sum().item<int64_t>();
           }
         }
     
-        if (config.token_data_type == TOKEN_DATA_TYPE::UINT16) {
+        if (config.token_data_type == APP_TOKEN_DATA_TYPE::UINT16) {
           std::tie(dispatched_tokens, dispatched_scaling_factor, dispatched_probs) = permute_launcher(
               reinterpret_cast<uint16_t*>(dispatch_buffers.expert_output_token),
               reinterpret_cast<float*>(dispatch_buffers.expert_output_prob),
@@ -198,7 +222,7 @@ Executor::dispatch_postprocess(HybridEpConfigInstance config, DispatchBuffers& d
                                         probs_sz, cudaMemcpyDeviceToDevice, args.stream));
         }
 
-        if(config.token_data_type == TOKEN_DATA_TYPE::UINT8) {
+        if(config.token_data_type == APP_TOKEN_DATA_TYPE::UINT8) {
             dispatched_scaling_factor = torch::empty({
                     args.num_dispatched_tokens, 
                     config.hidden_dim / 128}, 
@@ -252,6 +276,7 @@ void Executor::combine_preprocess(HybridEpConfigInstance config, CombineBuffers&
                                                 cudaMemcpyDeviceToDevice, args.stream));
         }
     }
+
     nvtxRangePop();  // End of combine_preprocess nvtx range
 }
 
@@ -268,8 +293,8 @@ void Executor::combine_core(HybridEpConfigInstance config, CombineBuffers& combi
     }
 
     // Setup output pointers
-    param.attn_output_token = args.combined_tokens;
-    param.attn_output_prob = (config.backward_combine_api) ? args.combined_probs : nullptr;
+    param.attn_output_token = reinterpret_cast<uint16_t*>(args.combined_tokens);
+    param.attn_output_prob = (config.backward_combine_api) ? reinterpret_cast<float*>(args.combined_probs) : nullptr;
 
     // Setup local buffer pointers
     param.rdma_intra_node_red_token =
@@ -293,14 +318,19 @@ void Executor::combine_core(HybridEpConfigInstance config, CombineBuffers& combi
     param.expected_rdma_flag_value = combine_buffers.expected_rdma_flag_value;
     param.expected_intra_node_flag_value =
         combine_buffers.expected_intra_node_flag_value;
+#ifdef HYBRID_EP_BUILD_MULTINODE_ENABLE
+    param.d_qps_gpu = combine_buffers.d_qps_gpu;
+    param.mr_info = combine_buffers.mr_info;
+#endif
 
     // Launch kernel
     kernel_cache.run_combine_kernel(config, param, args.stream);
+
     nvtxRangePop();  // End of combine_core nvtx range
 }
 
 void Executor::combine_postprocess(HybridEpConfigInstance config, CombineBuffers& combine_buffers, CombineArgs& args) {
     nvtxRangePushA("combine_postprocess in hybrid-ep");
-    // TODO: Implement the combine postprocessing
+    // No postprocess is needed for the combine kernel now.
     nvtxRangePop();  // End of combine_postprocess nvtx range
 }

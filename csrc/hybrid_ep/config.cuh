@@ -16,8 +16,10 @@ struct BufferConfig {
   int num_of_experts_per_rank;
   int num_of_ranks_per_node;
   int num_of_nodes;
-  TOKEN_DATA_TYPE token_data_type;
+  APP_TOKEN_DATA_TYPE token_data_type;
   int num_of_blocks_preprocessing_api;
+  int num_of_blocks_dispatch_api;
+  int num_of_blocks_combine_api;
   int num_of_tokens_per_chunk_dispatch_api;
   int num_of_tokens_per_chunk_combine_api;
 
@@ -53,7 +55,7 @@ struct HybridEpConfigInstance {
   /*
    *  Dispatch API Config
    */
-  TOKEN_DATA_TYPE token_data_type;
+  APP_TOKEN_DATA_TYPE token_data_type;
   int num_of_stages_dispatch_api;
   int num_of_tokens_per_chunk_dispatch_api;
   int num_of_blocks_dispatch_api;

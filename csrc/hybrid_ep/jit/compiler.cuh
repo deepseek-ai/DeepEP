@@ -39,7 +39,7 @@ public:
     * @param local_rank The local rank of the current process
     * @return std::string The path of the compiled .so file
     */
-    std::string build(std::string code, std::string signature, int local_rank);
+    std::string build(std::string code, std::string signature, int local_rank, int node_rank);
 
     /**
     * @brief Get the compiled function pointer from the compiled .so file
@@ -58,11 +58,12 @@ private:
     std::string nvcc_path;  // The path of the nvcc compiler
     std::string include;
     std::string library;
+    std::string objs = "";
 };
 
 class KernelCache{
 public:
-    KernelCache(int local_rank, std::string base_path);
+    KernelCache(int node_rank, int local_rank, std::string base_path, bool load_cached_kernels);
 
     void run_proprecess_kernel(
         HybridEpConfigInstance config, 
@@ -97,4 +98,5 @@ private:
     std::unordered_map<std::string, std::any> kernel_cache;
     std::string base_path;  // The path of the installed package
     int local_rank;   // Used to generate the unique signature for each rank
+    int node_rank;    // Used to generate the unique signature for each node
 };

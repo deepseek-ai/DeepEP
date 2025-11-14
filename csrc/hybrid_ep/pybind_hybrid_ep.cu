@@ -14,13 +14,13 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.doc() = "HybridEP, efficiently enable the expert-parallel communication in "
               "the Hopper+ architectures";
   
-    pybind11::enum_<TOKEN_DATA_TYPE>(m, "TokenDataType")
-        .value("UINT16", TOKEN_DATA_TYPE::UINT16)
-        .value("UINT8", TOKEN_DATA_TYPE::UINT8)
+    pybind11::enum_<APP_TOKEN_DATA_TYPE>(m, "APP_TOKEN_DATA_TYPE")
+        .value("UINT16", APP_TOKEN_DATA_TYPE::UINT16)
+        .value("UINT8", APP_TOKEN_DATA_TYPE::UINT8)
         .export_values() // So we can use hybrid_ep_cpp.TYPE instead of the
-                         // hybrid_ep_cpp.TOKEN_DATA_TYPE.TYPE
+                         // hybrid_ep_cpp.APP_TOKEN_DATA_TYPE.TYPE
         .def("__str__",
-             [](const TOKEN_DATA_TYPE &type) { return type_to_string(type); });
+             [](const APP_TOKEN_DATA_TYPE &type) { return type_to_string(type); });
   
     pybind11::class_<BufferConfig>(m, "BufferConfig")
         .def(py::init<>())
@@ -31,6 +31,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         .def_readwrite("num_of_nodes", &BufferConfig::num_of_nodes)
         .def_readwrite("token_data_type", &BufferConfig::token_data_type)
         .def_readwrite("num_of_blocks_preprocessing_api", &BufferConfig::num_of_blocks_preprocessing_api)
+        .def_readwrite("num_of_blocks_dispatch_api", &BufferConfig::num_of_blocks_dispatch_api)
+        .def_readwrite("num_of_blocks_combine_api", &BufferConfig::num_of_blocks_combine_api)
         .def_readwrite("num_of_tokens_per_chunk_dispatch_api", &BufferConfig::num_of_tokens_per_chunk_dispatch_api)
         .def_readwrite("num_of_tokens_per_chunk_combine_api", &BufferConfig::num_of_tokens_per_chunk_combine_api)
         .def("__repr__", [](const BufferConfig &config) {
@@ -41,7 +43,11 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
                  " num_of_ranks_per_node=" + std::to_string(config.num_of_ranks_per_node) +
                  " num_of_nodes=" + std::to_string(config.num_of_nodes) +
                  " token_data_type=" + type_to_string(config.token_data_type) +
-                 " num_of_blocks_preprocessing_api=" + std::to_string(config.num_of_blocks_preprocessing_api) +
+                 " num_of_blocks_preprocessing_api=" + std::to_string(config.num_of_blocks_preprocessing_api) + 
+                 " num_of_blocks_dispatch_api=" + std::to_string(config.num_of_blocks_dispatch_api) + 
+                 " num_of_blocks_combine_api=" + std::to_string(config.num_of_blocks_combine_api) + 
+                 " num_of_tokens_per_chunk_dispatch_api=" + std::to_string(config.num_of_tokens_per_chunk_dispatch_api) + 
+                 " num_of_tokens_per_chunk_combine_api=" + std::to_string(config.num_of_tokens_per_chunk_combine_api) + 
                  ">";
         });
 
@@ -101,9 +107,17 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         });
   
     pybind11::class_<HybridEPBuffer>(m, "HybridEPBuffer")
-        .def(py::init<BufferConfig, int, int, int, std::string>())
+        .def(py::init<py::object, BufferConfig, int, int, int, std::string, std::vector<std::string>, bool, bool>(),
+            py::arg("process_group"),
+            py::arg("config"),
+            py::arg("local_rank"),
+            py::arg("node_rank"),
+            py::arg("group_size"),
+            py::arg("base_path"),
+            py::arg("ib_dev_name_list") = std::vector<std::string>{},
+            py::arg("load_cached_kernels") = false,
+            py::arg("use_shared_buffer") = true)
         .def("update_buffer", &HybridEPBuffer::update_buffer, py::arg("config"))
-        .def("exchange_ipc_address", &HybridEPBuffer::exchange_ipc_address)
         .def("metadata_preprocessing", &HybridEPBuffer::metadata_preprocessing,
              py::kw_only(), py::arg("config"), py::arg("routing_map"), py::arg("num_of_tokens_per_rank"))
         .def("dispatch", &HybridEPBuffer::dispatch, py::kw_only(), 
@@ -112,7 +126,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
              py::arg("scaling_factor") = c10::nullopt,
              py::arg("sparse_to_dense_map"), py::arg("rdma_to_attn_map"),
              py::arg("attn_to_rdma_map"), py::arg("num_dispatched_tokens_tensor"),
-             py::arg("num_dispatched_tokens") = -1, py::arg("num_of_tokens_per_rank"),
+             py::arg("num_dispatched_tokens") = std::nullopt, py::arg("num_of_tokens_per_rank"),
              py::arg("with_probs"))
         .def("combine", &HybridEPBuffer::combine, py::kw_only(), 
              py::arg("config"), py::arg("hidden"),
@@ -126,16 +140,17 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
              py::arg("scaling_factor") = c10::nullopt,
              py::arg("sparse_to_dense_map"), py::arg("rdma_to_attn_map"),
              py::arg("attn_to_rdma_map"), py::arg("num_dispatched_tokens_tensor"),
-             py::arg("local_expert_routing_map"), py::arg("row_id_map"), py::arg("num_dispatched_tokens") = -1,
-             py::arg("num_permuted_tokens") = -1,
-             py::arg("num_of_tokens_per_rank"), py::arg("pad_multiple") = 0, py::arg("use_host_meta") = false,
+             py::arg("local_expert_routing_map"), py::arg("row_id_map"), py::arg("num_dispatched_tokens") = std::nullopt,
+             py::arg("num_permuted_tokens") = std::nullopt,
+             py::arg("num_of_tokens_per_rank"), py::arg("pad_multiple") = std::nullopt, py::arg("use_host_meta") = false,
              py::arg("with_probs") = false)
         .def("combine_with_unpermute", &HybridEPBuffer::combine_with_unpermute, py::kw_only(), 
              py::arg("config"), py::arg("hidden"),
              py::arg("probs") = c10::nullopt,
              py::arg("sparse_to_dense_map"), py::arg("rdma_to_attn_map"),
              py::arg("attn_to_rdma_map"), py::arg("num_dispatched_tokens_tensor"),
-             py::arg("row_id_map"), py::arg("num_dispatched_tokens") = -1,
-             py::arg("num_of_tokens_per_rank"), py::arg("pad_multiple") = 0,
+             py::arg("row_id_map"), py::arg("num_dispatched_tokens") = std::nullopt,
+             py::arg("num_of_tokens_per_rank"), py::arg("pad_multiple") = std::nullopt,
              py::arg("with_probs") = false);    
+    
   }
