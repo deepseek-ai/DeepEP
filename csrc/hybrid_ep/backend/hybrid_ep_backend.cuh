@@ -1592,7 +1592,7 @@ inline __device__ void inter_node_N2N_warp_group_device_function(const int node_
                                                     DOCA_GPUNETIO_IB_MLX5_WQE_CTRL_CQ_UPDATE, 0,
                                                     smem_mr_info_ptr[rdma_remote_node_id].prob_raddr + token_idx * (NUM_OF_EXPERTS_PER_RANK * NUM_OF_RANKS_PER_NODE) * sizeof(float),
                                                     smem_mr_info_ptr[rdma_remote_node_id].prob_rkey,
-                                                    smem_mr_info_ptr[rdma_remote_node_id].prob_laddr + token_idx * (NUM_OF_EXPERTS_PER_RANK * NUM_OF_RANKS_PER_NODE) * sizeof(float),
+                                                    smem_mr_info_ptr[rdma_remote_node_id].prob_laddr + (rdma_remote_node_id * num_of_tokens_per_rank + token_idx) * (NUM_OF_EXPERTS_PER_RANK * NUM_OF_RANKS_PER_NODE) * sizeof(float),
                                                     smem_mr_info_ptr[rdma_remote_node_id].prob_lkey,
                                                     (NUM_OF_EXPERTS_PER_RANK * NUM_OF_RANKS_PER_NODE) * sizeof(float));
         }

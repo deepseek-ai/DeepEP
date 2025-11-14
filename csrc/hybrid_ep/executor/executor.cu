@@ -145,7 +145,7 @@ Executor::dispatch_postprocess(HybridEpConfigInstance config, DispatchBuffers& d
             dispatched_scaling_factor = torch::empty({0, config.hidden_dim / 128}, torch::dtype(torch::kFloat32).device(torch::kCUDA));
         }
         row_id_map = torch::empty({0, config.num_of_experts_per_rank}, torch::dtype(torch::kInt32).device(torch::kCUDA));
-        tokens_per_expert = torch::full({config.num_of_experts_per_rank}, 0, torch::dtype(torch::kInt32).device(torch::kCUDA));
+        tokens_per_expert = torch::zeros({config.num_of_experts_per_rank}, torch::dtype(torch::kInt32).device(torch::kCUDA));
         return std::make_tuple(dispatched_tokens, dispatched_probs, dispatched_scaling_factor, row_id_map, tokens_per_expert);
     }
 

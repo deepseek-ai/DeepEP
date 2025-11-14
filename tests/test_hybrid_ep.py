@@ -62,10 +62,10 @@ def init_tensor(
 
     for i in range(seq_len):
         # Force balanced routing for testing
-        selected_experts = torch.tensor([
-            ((i * topk) % num_of_experts + val) % num_of_experts for val in range(topk)
-        ], device="cuda")
-        # selected_experts = torch.randperm(num_of_experts, device="cuda")[:topk]
+        # selected_experts = torch.tensor([
+        #     ((i * topk) % num_of_experts + val) % num_of_experts for val in range(topk)
+        # ], device="cuda")
+        selected_experts = torch.randperm(num_of_experts, device="cuda")[:topk]
         topk_idx[i, :] = selected_experts.to(torch.int64)
         topk_weights[i, :] = torch.ones(topk, device="cuda", dtype=torch.float32)
         routing_map[i, selected_experts] = True
@@ -137,55 +137,7 @@ def test_hybrid_ep_correctness(buffer: deep_ep.HybridEPBuffer, ref: TorchRef, us
 
         assert torch.allclose(combined_hidden, hidden.to(torch.bfloat16), atol=2e-5, rtol=1e-2)
         if combined_probs is not None and probs is not None:
-            if not bitwise_equal(combined_probs, probs):
-                print("Rank %d without permute: combined_probs is not equal to probs" % torch.distributed.get_rank(), flush=True)
-            #     rank = torch.distributed.get_rank()
-            #     diff = (combined_probs - probs).abs()
-            #     mismatch_rows = torch.nonzero(diff.sum(dim=1) > 0).view(-1)
-            #     for row_idx in mismatch_rows.tolist():
-            #         combined_row = combined_probs[row_idx]
-            #         ref_row = probs[row_idx]
-            #         combined_idx = torch.nonzero(combined_row > 0, as_tuple=False).view(-1).tolist()
-            #         ref_idx = torch.nonzero(ref_row > 0, as_tuple=False).view(-1).tolist()
-            #         combined_set = set(combined_idx)
-            #         ref_set = set(ref_idx)
-            #         missing_idx = sorted(ref_set - combined_set)
-            #         extra_idx = sorted(combined_set - ref_set)
-            #         gpu_device = torch.cuda.current_device()
-
-            #         def describe_indices(indices: list[int]) -> list[str]:
-            #             descriptions = []
-            #             for expert_idx in indices:
-            #                 expert_rank = expert_idx // NUM_LOCAL_EXPERTS
-            #                 node_idx = (
-            #                     expert_rank // NUM_OF_RANKS_PER_NODE
-            #                     if NUM_OF_RANKS_PER_NODE > 0
-            #                     else 0
-            #                 )
-            #                 local_rank = (
-            #                     expert_rank % NUM_OF_RANKS_PER_NODE
-            #                     if NUM_OF_RANKS_PER_NODE > 0
-            #                     else 0
-            #                 )
-            #                 descriptions.append(
-            #                     f"{expert_idx}(dst_rank={expert_rank}, node={node_idx}, local_rank={local_rank})"
-            #                 )
-            #             return descriptions
-
-            #         missing_desc = describe_indices(missing_idx)
-            #         extra_desc = describe_indices(extra_idx)
-
-            #         row_sum = combined_row.sum().item()
-            #         ref_row_sum = ref_row.sum().item()
-            #         print(
-            #             f"combine mismatch [rank {rank}, device {gpu_device}] mismatch row {row_idx}: "
-            #             f"row_sum={row_sum:.6f}, ref_row_sum={ref_row_sum:.6f}, "
-            #             f"row_sum_vs_topk={row_sum:.6f}/{TOPK}, "
-            #             f"combined_idx={combined_idx}, ref_idx={ref_idx}, "
-            #             f"missing_idx={missing_desc}, extra_idx={extra_desc}",
-            #             flush=True,
-            #         )
-            # assert bitwise_equal(combined_probs, probs)
+            assert bitwise_equal(combined_probs, probs)
 
     # Dispatch with permute correctness check
     for with_probs in [True, False]:
@@ -244,14 +196,13 @@ def test_hybrid_ep_correctness(buffer: deep_ep.HybridEPBuffer, ref: TorchRef, us
         dispatched_hidden = dispatched_hidden.to(torch.bfloat16)  
         hidden_to_combine = dispatched_hidden
         probs_to_combine = dispatched_probs
-
+ 
         # The check for the combine
         combined_hidden, combined_probs = buffer.combine_with_unpermute(
             hidden=hidden_to_combine,
             probs=probs_to_combine,
             handle=handle,
             pad_multiple=PAD_MULTIPLE,
-            num_dispatched_tokens=num_dispatched_tokens_tensor.item(),
         )
 
         # The reconstucted value should be TOPK times larger than the input hidden
@@ -261,8 +212,7 @@ def test_hybrid_ep_correctness(buffer: deep_ep.HybridEPBuffer, ref: TorchRef, us
             combined_hidden, hidden.to(torch.bfloat16), atol=2e-5, rtol=1e-2
         )
         if combined_probs is not None and probs is not None:
-            print("Rank %d with permute: combined_probs is not equal to probs" % torch.distributed.get_rank(), flush=True)
-            # assert bitwise_equal(combined_probs, probs)
+            assert bitwise_equal(combined_probs, probs)
 
     print(f'[rank {torch.distributed.get_rank()}] Correctness check passed ({"FP8" if hidden.dtype == torch.uint8 else "BF16"})')
 
@@ -397,8 +347,7 @@ def test_main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
             num_of_ranks_per_node=NUM_OF_RANKS_PER_NODE,
         )
 
-        for _ in range(30):
-            test_hybrid_ep_correctness(buffer, ref, use_fp8)
+        test_hybrid_ep_correctness(buffer, ref, use_fp8)
         test_hybrid_ep_benchmark(buffer, group, use_fp8, args.nsys_profile)
     dist.barrier()
     dist.destroy_process_group()
