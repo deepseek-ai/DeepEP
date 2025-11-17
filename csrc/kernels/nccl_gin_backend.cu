@@ -1,8 +1,5 @@
 #ifdef ENABLE_NCCL_GIN
 
-#include <cuda.h>  // For CUDA Driver API (cuInit)
-#include <unistd.h>
-
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
@@ -13,9 +10,6 @@
 #include "configs.cuh"
 #include "cuda_runtime.h"
 #include "exception.cuh"
-#include "ibgda_device.cuh"
-#include "launch.cuh"
-#include "mpi.h"
 #include "nccl.h"
 #include "nccl_device/gin.h"
 #include "nccl_device/gin/gin_device_api.h"  // Only include device API in .cu files
@@ -88,12 +82,13 @@ int NCCLGINBackend::init(const std::vector<uint8_t>& root_unique_id_val, int ran
         EP_HOST_ASSERT(root_unique_id_val.size() == expected_ids * single_id_size &&
                        "Number of unique IDs doesn't match NUM_MAX_NVL_PEERS * qps_per_rank");
 
-        if (rank == 0)
+        if (rank == 0) {
             printf("[NCCL GIN Backend] Initializing %d communicator(s) (qps_per_rank=%d) for rank %d/%d\n",
                    num_comms_,
                    qps_per_rank,
                    rank,
                    num_ranks);
+        }
 
         // Configure NCCL with GIN support
         ncclConfig_t config = NCCL_CONFIG_INITIALIZER;
@@ -118,7 +113,6 @@ int NCCLGINBackend::init(const std::vector<uint8_t>& root_unique_id_val, int ran
             }
         }
 
-        // Always use vector approach (even for single communicator)
         nccl_comms_.resize(num_comms_);
         for (int i = 0; i < num_comms_; i++) {
             ncclUniqueId id;
@@ -133,10 +127,10 @@ int NCCLGINBackend::init(const std::vector<uint8_t>& root_unique_id_val, int ran
             std::memcpy(&id, root_unique_id_val.data() + id_offset, single_id_size);
 
             NCCLCHECK(ncclCommInitRankConfig(&nccl_comms_[i], comm_nranks, id, comm_rank, &config));
-            cudaError_t cuda_err = cudaGetLastError();
+            cudaGetLastError();  // Clear any pending errors
 
             NCCLCHECK(ncclGinConnectOnce(nccl_comms_[i]));
-            cudaGetLastError();
+            cudaGetLastError();  // Clear any pending errors
         }
 
         if (rank == 0)
@@ -150,15 +144,13 @@ int NCCLGINBackend::init(const std::vector<uint8_t>& root_unique_id_val, int ran
         // Only Low Latency mode uses dispatch signals
         if (low_latency_mode) {
             int num_local_experts = qps_per_rank;
-            signals_per_buffer_per_ctx_ = num_local_experts * comm_nranks;  // dispatch path (and combine uses num_experts equal to this)
-            int signals_per_ctx_total = signals_per_buffer_per_ctx_ * 2;    // double buffered (per buffer)
+            int signals_per_buffer_per_ctx = num_local_experts * comm_nranks;  // dispatch path (and combine uses num_experts equal to this)
+            int signals_per_ctx_total = signals_per_buffer_per_ctx * 2;        // double buffered (per buffer)
             num_dispatch_signals_ = signals_per_ctx_total;
         } else {
             // High Throughput mode doesn't use dispatch signals
             num_dispatch_signals_ = 0;
-            signals_per_buffer_per_ctx_ = 0;
         }
-        num_dispatch_counters_ = 0;  // We don't use NCCL GIN counters - only signals
 
         // The assumption is that kDecoupled is false when initializing SymBuffers in internode.cu
         // IMPORTANT: Use global num_ranks, not comm_nranks, because kernels use global topology
@@ -260,10 +252,6 @@ void NCCLGINBackend::finalize() {
             }
             nccl_comms_.clear();
             // Free device arrays
-            if (d_gin_ctxs_) {
-                cudaFree(d_gin_ctxs_);
-                d_gin_ctxs_ = nullptr;
-            }
             if (d_nccl_dev_wins_) {
                 cudaFree(d_nccl_dev_wins_);
                 d_nccl_dev_wins_ = nullptr;
@@ -345,7 +333,6 @@ void* NCCLGINBackend::alloc(size_t size, size_t alignment) {
         wins_nccl.push_back(dev_wins_multi_nccl_[c][0]);
     }
     mem_handle_.ptr = ptr;
-    mem_handle_.size = size;
     if (d_nccl_dev_wins_ != nullptr && num_comms_ > 0) {
         if (rank_ == 0) {
             printf("[NCCL GIN Backend - Memory Alloc] Rank %d: Copying %lu NCCL windows to GPU\n", rank_, wins_nccl.size());
@@ -469,11 +456,6 @@ void NCCLGINBackend::get_unique_id(void* unique_id) {
 ncclWindow_t* NCCLGINBackend::get_device_nccl_windows() {
     EP_HOST_ASSERT(initialized_);
     return d_nccl_dev_wins_;
-}
-
-// Factory function for creating NCCL GIN backend
-std::unique_ptr<CommunicationBackend> create_nccl_gin_backend() {
-    return std::make_unique<NCCLGINBackend>();
 }
 
 }  // namespace internode

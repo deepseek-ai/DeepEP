@@ -12,8 +12,7 @@ namespace internode {
 
 // Backend type enumeration
 enum class BackendType {
-    NVSHMEM,   // Original NVSHMEM backend
-    NCCL_GIN,  // New NCCL GIN backend
+    NCCL_GIN,  // NCCL GIN backend for GPU-initiated communication
     AUTO       // Auto-select based on environment
 };
 
@@ -85,7 +84,7 @@ public:
     // Get total number of ranks in the communication group.
     virtual int get_num_ranks() const = 0;
 
-    // Get backend type (NVSHMEM or NCCL_GIN).
+    // Get backend type.
     virtual BackendType get_backend_type() const = 0;
 
     // Factory method
@@ -94,7 +93,7 @@ public:
 
 // ===== Backend Selection Utilities =====
 
-// Parse backend type from string (e.g., "nccl_gin", "nvshmem").
+// Parse backend type from string (e.g., "nccl_gin", "auto").
 BackendType parse_backend_type(const std::string& backend_str);
 
 // Auto-detect backend type from environment (checks DEEP_EP_BACKEND env var).

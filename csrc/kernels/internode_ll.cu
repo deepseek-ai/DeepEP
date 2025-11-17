@@ -4,6 +4,7 @@
 #include "launch.cuh"
 
 #ifdef ENABLE_NCCL_GIN
+#include "nccl_device/gin/gin_device_api.h"
 #include "nccl_gin_backend.h"
 // Use the defined constant for contexts per communicator
 // Each communicator has NCCL_GIN_NUM_CONTEXTS_PER_COMM contexts
@@ -382,11 +383,13 @@ __global__ __launch_bounds__(1024, 1) void dispatch(void* packed_recv_x,
                             auto comm_id = dst_expert_local_idx / NCCL_GIN_NUM_CONTEXTS_PER_COMM;
                             auto ctx_id = dst_expert_local_idx % NCCL_GIN_NUM_CONTEXTS_PER_COMM;
                             ncclGin net(dcomms[comm_id], ctx_id);
-                            net.put(ncclTeamWorld(dcomms[comm_id]),
+                            ncclTeam world = ncclTeamWorld(dcomms[comm_id]);
+                            auto nccl_window = nccl_windows[comm_id];
+                            net.put(world,
                                     dst_rank,
-                                    nccl_windows[comm_id],
+                                    nccl_window,
                                     expected_dst_offset,
-                                    nccl_windows[comm_id],
+                                    nccl_window,
                                     expected_src_offset,
                                     num_bytes_per_msg,
                                     ncclGin_None{},  // no signal
@@ -422,9 +425,8 @@ __global__ __launch_bounds__(1024, 1) void dispatch(void* packed_recv_x,
     } else if (warp_id == num_warps - 1) {
         EP_DEVICE_ASSERT(num_sms > 1);
         if (sm_id == 0) {
-#ifdef ENABLE_NCCL_GIN
-            // do nothing for GIN
-#else
+#ifndef ENABLE_NCCL_GIN
+            // NCCL GIN does not require QP assertions, only IBGDA does
             // The first SM is also responsible for checking QPs
             EP_DEVICE_ASSERT(ibgda_get_state()->num_rc_per_pe >= num_local_experts);
 #endif
@@ -528,11 +530,13 @@ __global__ __launch_bounds__(1024, 1) void dispatch(void* packed_recv_x,
                 auto ctx_id = dst_expert_local_idx % NCCL_GIN_NUM_CONTEXTS_PER_COMM;
                 auto signal_id = signals_base + dst_expert_local_idx * num_ranks + rank;
                 ncclGin net(dcomms[comm_id], ctx_id);
-                net.put(ncclTeamWorld(dcomms[comm_id]),
+                ncclTeam world = ncclTeamWorld(dcomms[comm_id]);
+                auto nccl_window = nccl_windows[comm_id];
+                net.put(world,
                         dst_rank,
-                        nccl_windows[comm_id],
+                        nccl_window,
                         dst_offset,
-                        nccl_windows[comm_id],
+                        nccl_window,
                         0,
                         0,  // 0 bytes transfer
                         ncclGin_SignalAdd{signal_id, (uint64_t)num_tokens_sent + 1},
@@ -1268,11 +1272,13 @@ __global__ __launch_bounds__(1024, 1) void combine(void* combined_x,
                         EP_DEVICE_ASSERT(comm_id >= 0 && comm_id < num_gin_comms);
 
                         ncclGin net(dcomms[comm_id], ctx_id);
-                        net.put(ncclTeamWorld(dcomms[comm_id]),
+                        ncclTeam world = ncclTeamWorld(dcomms[comm_id]);
+                        auto nccl_window = nccl_windows[comm_id];
+                        net.put(world,
                                 dst_rank,
-                                nccl_windows[comm_id],
+                                nccl_window,
                                 expected_dst_offset,
-                                nccl_windows[comm_id],
+                                nccl_window,
                                 expected_buf_offset,
                                 hidden * sizeof(nv_bfloat16),
                                 ncclGin_None{},  // no signal
@@ -1318,12 +1324,14 @@ __global__ __launch_bounds__(1024, 1) void combine(void* combined_x,
                     EP_DEVICE_ASSERT(comm_id >= 0 && comm_id < num_gin_comms);
 
                     ncclGin net(dcomms[comm_id], ctx_id);
+                    ncclTeam world = ncclTeamWorld(dcomms[comm_id]);
+                    auto nccl_window = nccl_windows[comm_id];
 
-                    net.put(ncclTeamWorld(dcomms[comm_id]),
+                    net.put(world,
                             dst_rank,
-                            nccl_windows[comm_id],
+                            nccl_window,
                             dst_offset,
-                            nccl_windows[comm_id],
+                            nccl_window,
                             0,
                             0,  // 0 bytes transfer
                             ncclGin_SignalAdd{signal_id, 1},

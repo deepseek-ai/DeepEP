@@ -4,7 +4,6 @@
 #include <nccl.h>
 
 #include <array>
-#include <mutex>
 #include <vector>
 
 #include "nccl_device.h"
@@ -25,10 +24,6 @@ namespace internode {
 
 struct NcclGinMemHandle {
     void* ptr = nullptr;
-    size_t size = 0;
-    void* ginHostWins[DEEP_EP_GIN_MAX_CONTEXTS] = {};           // Array of host window handles
-    ncclGinWindow_t ginDevWins[DEEP_EP_GIN_MAX_CONTEXTS] = {};  // Array of device window handles
-    ncclWindow_t ncclWins[DEEP_EP_GIN_MAX_CONTEXTS] = {};       // Array of NCCL window handles
 };
 
 class NCCLGINBackend : public CommunicationBackend {
@@ -65,9 +60,6 @@ public:
     int get_max_num_channels() const;
     ncclDevComm* get_device_communicators() const;
 
-    // For future phases - access to the NCCL communicator
-    // ncclComm_t get_nccl_comm() const;
-
 private:
     bool initialized_ = false;
     bool p2p_disabled_ = false;  // True if P2P/NVLink is disabled
@@ -83,19 +75,14 @@ private:
     // Per-communicator registration (multi-communicator path)
     std::vector<std::array<ncclWindow_t, DEEP_EP_GIN_MAX_CONTEXTS>> dev_wins_multi_nccl_;
 
-    // GIN signal and counter management (new API)
-    uint32_t signal_base_id_ = 0;
-    uint32_t counter_base_id_ = 0;
+    // GIN signal management
     int num_dispatch_signals_ = 0;  // total allocated signals across all contexts and buffers
     int num_total_signals_ = 0;
-    int num_dispatch_counters_ = 0;  // currently unused
 
     // Multi-context tracking
     int num_comms_ = 1;
-    int signals_per_buffer_per_ctx_ = 0;  // number of signals per buffer for one context
 
-    // Device arrays for contexts and windows
-    ncclGinCtx_M<-1u>* d_gin_ctxs_ = nullptr;  // New API contexts
+    // Device arrays for windows
     ncclWindow_t* d_nccl_dev_wins_ = nullptr;
 
     // The assumption is that DeepSeek (256 experts) runs on at least 8 GPUs, hence 32 channels
