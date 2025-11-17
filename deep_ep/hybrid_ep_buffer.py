@@ -60,6 +60,8 @@ class HybridEPBuffer:
         # Number of ranks in the first nvlink domain.
         if use_mnnvl is None:
             use_mnnvl = os.getenv("USE_MNNVL", "0").strip().lower() in {"1", "true", "t", "yes", "y", "on"}
+        if int(os.getenv("NVLINK_DOMAIN_SIZE", "8")) > 8: # For compatibility 
+            use_mnnvl = True
         self.nvlink_domain_size = 72 if use_mnnvl else 8
         assert (
             rank_stride <= self.nvlink_domain_size
