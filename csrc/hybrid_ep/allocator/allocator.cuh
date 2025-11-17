@@ -36,8 +36,8 @@ class ExtendedMemoryAllocator {
   bool get_fabric_status() { return enable_fabric_; }
 
  private:
-  bool support_fabric_;
-  bool enable_fabric_;
+  bool support_fabric_ = false;
+  bool enable_fabric_ = false;
   size_t fabric_granularity_;
   CUdevice device_;
   CUmemAllocationProp fabric_prop_ = {};

@@ -11,13 +11,10 @@ HybridEPBuffer::HybridEPBuffer(
   std::string base_path,
   std::vector<std::string> ib_dev_name_list,
   bool load_cached_kernels,
-  bool use_shared_buffer
+  bool use_shared_buffer,
+  bool enable_fabric
 ) : process_group(process_group), buffer_config(config), local_rank(local_rank), node_rank(node_rank), group_size(group_size), use_shared_buffer(use_shared_buffer),
     executor(local_rank, node_rank, base_path, load_cached_kernels) {
-    bool enable_fabric = false;
-    if(buffer_config.num_of_ranks_per_node > 8) {
-      enable_fabric = true;
-    }
     remote_allocator.init(enable_fabric);
     if(group_size > buffer_config.num_of_ranks_per_node) {
 #ifdef HYBRID_EP_BUILD_MULTINODE_ENABLE

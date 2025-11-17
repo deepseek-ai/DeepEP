@@ -107,7 +107,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         });
   
     pybind11::class_<HybridEPBuffer>(m, "HybridEPBuffer")
-        .def(py::init<py::object, BufferConfig, int, int, int, std::string, std::vector<std::string>, bool, bool>(),
+        .def(py::init<py::object, BufferConfig, int, int, int, std::string, std::vector<std::string>, bool, bool, bool>(),
             py::arg("process_group"),
             py::arg("config"),
             py::arg("local_rank"),
@@ -116,7 +116,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
             py::arg("base_path"),
             py::arg("ib_dev_name_list") = std::vector<std::string>{},
             py::arg("load_cached_kernels") = false,
-            py::arg("use_shared_buffer") = true)
+            py::arg("use_shared_buffer") = true,
+            py::arg("enable_fabric") = false)
         .def("update_buffer", &HybridEPBuffer::update_buffer, py::arg("config"))
         .def("metadata_preprocessing", &HybridEPBuffer::metadata_preprocessing,
              py::kw_only(), py::arg("config"), py::arg("routing_map"), py::arg("num_of_tokens_per_rank"))

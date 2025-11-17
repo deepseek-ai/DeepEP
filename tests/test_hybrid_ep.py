@@ -199,8 +199,6 @@ def test_hybrid_ep_correctness(buffer: deep_ep.HybridEPBuffer, ref: TorchRef, us
                 dispatched_scaling_factor_ref, dispatched_scaling_factor
             )
 
-        # Simulate the permute and expert and unpermute. The expert is identity op
-        copy_times = local_expert_routing_map.sum(dim=1)
         # The combine only support bf16
         dispatched_hidden = dispatched_hidden.to(torch.bfloat16)  
         hidden_to_combine = dispatched_hidden

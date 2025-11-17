@@ -13,6 +13,7 @@ bool ExtendedMemoryAllocator::support_fabric() {
     CU_CHECK(
         cuDeviceGetAttribute(&support, CU_DEVICE_ATTRIBUTE_HANDLE_TYPE_FABRIC_SUPPORTED, device));
     if (!support) {
+      printf("[Warning] Device %d does not support fabric memory handle.\n", device);
       return false;
     }
   }
@@ -28,10 +29,12 @@ size_t inline get_size_align_to_granularity(size_t size_raw, size_t granularity)
 }
 
 void ExtendedMemoryAllocator::init(bool enable_fabric) {
-  this->support_fabric_ = this->support_fabric();
-  enable_fabric_ = enable_fabric;
+  if (enable_fabric) {
+    this->support_fabric_ = support_fabric();
+    this->enable_fabric_ = enable_fabric && this->support_fabric_;
+  }
 
-  if (support_fabric_ && enable_fabric_) {
+  if (this->enable_fabric_) {
     int device_id = -1;
     // It seems a dummy call to set the device. but it is useful to prevent the invalid device context error in gb..
     CUDA_CHECK(cudaGetDevice(&device_id));
@@ -47,9 +50,6 @@ void ExtendedMemoryAllocator::init(bool enable_fabric) {
     access_desc.location.type = CU_MEM_LOCATION_TYPE_DEVICE;
     access_desc.location.id = device_;
     access_desc.flags = CU_MEM_ACCESS_FLAGS_PROT_READWRITE;
-  }
-  if (!support_fabric_) {
-    enable_fabric_ = false;
   }
 }
 

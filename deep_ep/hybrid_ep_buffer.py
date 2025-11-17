@@ -44,7 +44,7 @@ class HybridEPBuffer:
         num_sms_dispatch_api: int = None,
         num_sms_combine_api: int = None,
         num_sms_preprocessing_api: int = None,
-        nvlink_domain_size: int = None,
+        use_mnnvl: bool = None,
         ib_dev_name_list: list[str] = [],
     ):
         self.group = group
@@ -58,13 +58,13 @@ class HybridEPBuffer:
         global_ranks = torch.distributed.get_process_group_ranks(self.group)
         rank_stride = global_ranks[1] - global_ranks[0]
         # Number of ranks in the first nvlink domain.
-        if nvlink_domain_size is None:
-            nvlink_domain_size = int(os.getenv("NVLINK_DOMAIN_SIZE", "8"))
+        if use_mnnvl is None:
+            use_mnnvl = os.getenv("USE_MNNVL", "0").strip().lower() in {"1", "true", "t", "yes", "y", "on"}
+        self.nvlink_domain_size = 72 if use_mnnvl else 8
         assert (
-            rank_stride <= nvlink_domain_size
+            rank_stride <= self.nvlink_domain_size
         ), "The rank stride should be less than or equal to the nvlink domain size."
-        num_of_ranks_per_node = min(nvlink_domain_size // rank_stride, self.group_size)
-        self.nvlink_domain_size = nvlink_domain_size
+        num_of_ranks_per_node = min(self.nvlink_domain_size // rank_stride, self.group_size)
 
         assert (
             self.group_size % num_of_ranks_per_node == 0
@@ -130,7 +130,8 @@ class HybridEPBuffer:
             os.path.dirname(os.path.abspath(__file__)), 
             ib_dev_name_list, 
             load_cached_kernels = False, 
-            use_shared_buffer = True
+            use_shared_buffer = True,
+            enable_fabric = use_mnnvl, # If use_mnnvl is True, the fabric memory handle will be used.
         )
 
     def empty_jit_cache(self):
