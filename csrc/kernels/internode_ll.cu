@@ -437,9 +437,7 @@ __global__ __launch_bounds__(1024, 1) void dispatch(void* packed_recv_x,
                 next_clean[i] = 0;
 
             // Clear signals for next dispatch
-            // Only reset signals that are actually used (optimization):
-            // - With NVLink: skip intra-node signals (they use P2P)
-            // - Without NVLink: skip local expert signals (they don't use signals)
+            // Optimization: skip signal resets on single-node runs where P2P is guaranteed
             const int signals_per_buffer = num_experts;
             const int total_resets = signals_per_buffer * num_gin_comms;
 
@@ -449,17 +447,10 @@ __global__ __launch_bounds__(1024, 1) void dispatch(void* packed_recv_x,
                 const int signal_idx = idx / num_gin_comms;
                 const int comm_id = idx % num_gin_comms;
 
-                // Skip if this signal won't be used
-                // When NVLink is enabled: intra-node communication uses P2P (no signals)
+                // Skip signal resets on single-node runs (P2P guaranteed, no signals needed)
                 bool skip = false;
-                if (!d_p2p_disabled) {
-                    // Dispatch signal pattern: signal_idx = local_expert_idx * num_ranks + src_rank
-                    const int local_expert_idx = signal_idx / num_ranks;
-                    const int src_rank = signal_idx % num_ranks;
-
-                    int src_node = src_rank / NUM_GPUS_PER_NODE_LOW_LATENCY;
-                    int my_node = rank / NUM_GPUS_PER_NODE_LOW_LATENCY;
-                    skip = (src_node == my_node);
+                if (!d_p2p_disabled && num_ranks <= NUM_GPUS_PER_NODE_LOW_LATENCY) {
+                    skip = true;
                 }
 
                 if (!skip) {
@@ -1077,9 +1068,7 @@ __global__ __launch_bounds__(1024, 1) void combine(void* combined_x,
 
 #ifdef ENABLE_NCCL_GIN
         // Clear signals for next combine
-        // Only reset signals that are actually used (optimization):
-        // - With NVLink: skip intra-node signals (they use P2P)
-        // - Without NVLink: skip local expert signals (they don't use signals)
+        // Optimization: skip signal resets on single-node runs where P2P is guaranteed
         const int signals_per_buffer = num_experts;
         const int total_resets = signals_per_buffer * num_gin_comms;
 
@@ -1088,16 +1077,10 @@ __global__ __launch_bounds__(1024, 1) void combine(void* combined_x,
             const int signal_idx = idx / num_gin_comms;
             const int comm_id = idx % num_gin_comms;
 
-            // Skip if this signal won't be used
-            // When NVLink is enabled: intra-node communication uses P2P (no signals)
+            // Skip signal resets on single-node runs (P2P guaranteed, no signals needed)
             bool skip = false;
-            if (!d_p2p_disabled) {
-                // Combine signal pattern: signal_idx = global_expert_idx
-                const int dst_rank = signal_idx / num_local_experts;
-
-                int dst_node = dst_rank / NUM_GPUS_PER_NODE_LOW_LATENCY;
-                int my_node = rank / NUM_GPUS_PER_NODE_LOW_LATENCY;
-                skip = (dst_node == my_node);
+            if (!d_p2p_disabled && num_ranks <= NUM_GPUS_PER_NODE_LOW_LATENCY) {
+                skip = true;
             }
 
             if (!skip) {
