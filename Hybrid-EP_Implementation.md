@@ -149,7 +149,7 @@ This document introduces the Hybrid Expert Parallel (Hybrid-EP) implementation t
 ```
 csrc/hybrid_ep/
 ├── hybrid_ep.cu                   # Main CUDA implementation
-├── internode.cu                   # Main RMDA CUDA implementation
+├── internode.cu                   # Main RDMA CUDA implementation
 ├── pybind_hybrid_ep.cu            # PyBind bindings
 ├── config.cuh                     # Config definitions required by hybrid-EP kernels
 ├── allocator/                     # Allocator for memory accessible by remote ranks
@@ -198,8 +198,10 @@ pip install .
 
 > **⚠️ Important Note for RDMA Inter-node Configuration**  
 > Currently, the RDMA inter-node kernel implementation requires manual specification of nic names for each GPU. You need to provide the mapping between GPUs and their corresponding IB device names via the `--ib-dev-name-list` parameter. See `tests/test_hybrid_ep.py` for detailed usage examples.
-> 
+>  In addition, when using the RDMA part, after setting num-tokens-per-rank during initialization, all subsequent communications must use the same value. Currently, dynamic sequence length is not supported.
+>
 > **Automatic topology detection will be supported soon.**
+> **Dynamic sequence length will be supported soon.**
 
 Refer to `tests/test_hybrid_ep.py` for comprehensive usage examples including:
 - Multi-node configuration

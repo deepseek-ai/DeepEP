@@ -282,7 +282,7 @@ void RDMACoordinator::init(
   mr_access_flag = IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_WRITE | IBV_ACCESS_REMOTE_READ |
                       IBV_ACCESS_REMOTE_ATOMIC | IBV_ACCESS_RELAXED_ORDERING;
   
-  rmda_initialized = true;
+  rdma_initialized = true;
 }
 
 void RDMACoordinator::allocate_dispatch_rdma_buffers(DispatchBuffers &dispatch_buffers) {
@@ -408,7 +408,7 @@ void RDMACoordinator::allocate_dispatch_rdma_buffers(DispatchBuffers &dispatch_b
                                                     peer_idx * scaling_factor_stride);
     }
   }
-  exchange_remote_rmda_info(dispatch_remote_info_vec, my_dispatch_info, num_of_dispatch_qps);
+  exchange_remote_rdma_info(dispatch_remote_info_vec, my_dispatch_info, num_of_dispatch_qps);
 
   // Init queue pairs.
   setup_qp_attr_and_set_qp(&dispatch_gverbs_ctx, ib_context, dispatch_remote_info_vec, dispatch_gverbs_ctx.qp_attr,
@@ -555,7 +555,7 @@ void RDMACoordinator::allocate_combine_rdma_buffers(CombineBuffers &combine_buff
     }
   }
 
-  exchange_remote_rmda_info(combine_remote_info_vec, my_combine_info, num_of_combine_qps);
+  exchange_remote_rdma_info(combine_remote_info_vec, my_combine_info, num_of_combine_qps);
 
   // Init queue pairs.
   setup_qp_attr_and_set_qp(&combine_gverbs_ctx, ib_context, combine_remote_info_vec, combine_gverbs_ctx.qp_attr,
@@ -654,7 +654,7 @@ void RDMACoordinator::destroy() {
   FREE_CUDA_MEMORY(combine_gverbs_ctx.d_qps_gpu);
   FREE_CUDA_MEMORY(combine_mr_info_d);
 
-  // If we use doca_gpu_verbs_destroy_qp_hl and re-allocate RMDA resources, "part or all of the requested memory range is already mapped" occurs. Do not know why now, so just comment it out.
+  // If we use doca_gpu_verbs_destroy_qp_hl and re-allocate RDMA resources, "part or all of the requested memory range is already mapped" occurs. Do not know why now, so just comment it out.
   // int num_of_dispatch_qps = (buffer_config.num_of_nodes - 1) * buffer_config.num_of_blocks_dispatch_api;
   // int num_of_combine_qps = (buffer_config.num_of_nodes - 1) * buffer_config.num_of_blocks_combine_api;
   // for (int idx = 0; idx < num_of_dispatch_qps; ++idx) {
@@ -676,7 +676,7 @@ void RDMACoordinator::destroy() {
   #undef FREE_CPU_MEMORY
 }
 
-void RDMACoordinator::exchange_remote_rmda_info(remote_info* dst, remote_info *src, int num_of_qps) {
+void RDMACoordinator::exchange_remote_rdma_info(remote_info* dst, remote_info *src, int num_of_qps) {
   auto torch_distributed = py::module_::import("torch.distributed");
   auto num_bytes = static_cast<int64_t>(num_of_qps) *
                 static_cast<int64_t>(sizeof(remote_info));
@@ -704,7 +704,7 @@ RDMACoordinator::~RDMACoordinator() {
     destroy();
   }
   
-  if(rmda_initialized) {
+  if(rdma_initialized) {
     // Dealloc protect domain.
     ibv_dealloc_pd(ib_pd);
     // Close device.
@@ -716,6 +716,6 @@ RDMACoordinator::~RDMACoordinator() {
     }
   }
 
-  rmda_initialized = false;
+  rdma_initialized = false;
   buffer_allocated = false;
 }

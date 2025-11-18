@@ -156,7 +156,7 @@ private:
     struct ibv_port_attr port_attr = {};
     int mr_access_flag = -1;
     bool buffer_allocated = false;
-    bool rmda_initialized = false;
+    bool rdma_initialized = false;
 
     // Detailed Dispatch RDMA resources
     // Memory Region
@@ -190,5 +190,5 @@ private:
     struct gverbs_context combine_gverbs_ctx;
     struct combine_memory_region_info_t *combine_mr_info_d = nullptr;  
 
-    void exchange_remote_rmda_info(remote_info* dst, remote_info *src, int num_of_qps);
+    void exchange_remote_rdma_info(remote_info* dst, remote_info *src, int num_of_qps);
 };
