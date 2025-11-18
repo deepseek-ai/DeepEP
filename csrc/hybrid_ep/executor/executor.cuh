@@ -94,3 +94,4 @@ private:
     int local_rank;
     int node_rank;
 };
+

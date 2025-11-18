@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT 
 // SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 
+#include <cuda_runtime.h>
 #include <pybind11/functional.h>
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
@@ -13,6 +14,8 @@ namespace py = pybind11;
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.doc() = "HybridEP, efficiently enable the expert-parallel communication in "
               "the Hopper+ architectures";
+    
+    m.def("copy_tensor_with_SM", &copy_tensor_with_SM, py::arg("dst"), py::arg("src"));
   
     pybind11::enum_<APP_TOKEN_DATA_TYPE>(m, "APP_TOKEN_DATA_TYPE")
         .value("UINT16", APP_TOKEN_DATA_TYPE::UINT16)

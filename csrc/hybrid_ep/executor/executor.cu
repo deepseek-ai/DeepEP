@@ -176,8 +176,14 @@ Executor::dispatch_postprocess(HybridEpConfigInstance config, DispatchBuffers& d
             if (args.use_host_meta) {
                 auto host_opts = tokens_per_expert.options().device(torch::kCPU).pinned_memory(true);
                 torch::Tensor tokens_per_expert_pinned = torch::empty(tokens_per_expert.sizes(), host_opts);
-                tokens_per_expert_pinned.copy_(tokens_per_expert, /*non_blocking=*/false);
+                copy_with_SM(
+                    tokens_per_expert_pinned.data_ptr(), 
+                    tokens_per_expert.data_ptr(), 
+                    tokens_per_expert.nbytes(), 
+                    args.stream
+                );
                 tokens_per_expert = tokens_per_expert_pinned;
+                cudaStreamSynchronize(args.stream);
             }
             num_permuted_tokens = tokens_per_expert.sum().item<int64_t>();
           }
@@ -334,3 +340,4 @@ void Executor::combine_postprocess(HybridEpConfigInstance config, CombineBuffers
     // No postprocess is needed for the combine kernel now.
     nvtxRangePop();  // End of combine_postprocess nvtx range
 }
+

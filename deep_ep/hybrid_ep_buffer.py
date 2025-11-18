@@ -470,7 +470,12 @@ class HybridEPBuffer:
                         dtype=num_dispatched_tokens_tensor.dtype,
                         pin_memory=True,
                     )
-                    num_dispatched_tokens_tensor_pinned.copy_(num_dispatched_tokens_tensor, False)
+                    hybrid_ep_cpp.copy_tensor_with_SM(
+                        num_dispatched_tokens_tensor_pinned, 
+                        num_dispatched_tokens_tensor
+                    )
+                    torch.cuda.current_stream().synchronize()
+                    num_dispatched_tokens_tensor = num_dispatched_tokens_tensor_pinned
             else:
                 (
                     sparse_to_dense_map,

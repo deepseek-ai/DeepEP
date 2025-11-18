@@ -114,4 +114,20 @@
      return static_cast<DType>(value);
    }
  }
+
+__global__ static void copy_with_SM_kernel(void* dst, void* src, size_t size) {
+  int idx = blockIdx.x * blockDim.x + threadIdx.x;
+  for(int i = idx; i < size; i += blockDim.x * gridDim.x) {
+    (reinterpret_cast<char*>(dst))[i] = (reinterpret_cast<char*>(src))[i];
+  }
+}
+
+inline void copy_with_SM(void* dst, void* src, size_t size, cudaStream_t stream) {
+  copy_with_SM_kernel<<<1, 256, 0, stream>>>(dst, src, size);
+}
+
+inline void copy_tensor_with_SM(torch::Tensor dst, torch::Tensor src) {
+  copy_with_SM(dst.data_ptr(), src.data_ptr(), dst.nbytes(), at::cuda::getCurrentCUDAStream());
+}
+ 
  
