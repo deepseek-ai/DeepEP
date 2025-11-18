@@ -172,7 +172,7 @@ def get_extension_deep_ep_cpp():
     include_dirs = ['csrc/']
     library_dirs = []
     nvcc_dlink = []
-    extra_link_args = []
+    extra_link_args = ['-lcuda']
 
     # NVSHMEM flags
     if disable_nvshmem:
