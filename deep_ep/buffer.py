@@ -684,9 +684,9 @@ class Buffer:
                 `[num_local_experts, num_max_dispatch_tokens_per_rank * num_ranks, hidden // 512]` with type `torch.int`.
                 Notice that, the last-two-dimension of the scaling tensors are in column-major for TMA compatibility.
                 with `use_nvfp4=True`: the first element is a `torch.Tensor` shaped as
-                `[num_local_experts, hidden // 2, num_max_dispatch_tokens_per_rank * num_ranks]` with `torch.uint8`.
+                `[num_max_dispatch_tokens_per_rank * num_ranks, hidden // 2, num_local_experts]` with `torch.uint8`.
                 The second tensor is the corresponding scales for the first element with shape
-                `[32, 4, num_max_dispatch_tokens_per_rank * num_ranks // 128, 4, hidden // 64, num_local_experts]` with `torch.uint8`.
+                `[32, 4, num_max_dispatch_tokens_per_rank * num_ranks // 128, 4, hidden // 64, num_local_experts]` with `torch.float8_e4m3fn`.
                 With `use_fp8=False and use_nvfp4=False`, the result would be a tensor shaped as
                 `[num_local_experts, num_max_dispatch_tokens_per_rank * num_ranks, hidden]` with `torch.bfloat16`.
                 Moreover, not all tokens are valid, only some of the `num_max_dispatch_tokens_per_rank * num_ranks` are,
