@@ -12,6 +12,117 @@
 #include "kernels/api.cuh"
 #include "kernels/configs.cuh"
 
+namespace shared_memory {
+void cu_mem_set_access_all(void* ptr, size_t size) {
+    int device_count;
+    CUDA_CHECK(cudaGetDeviceCount(&device_count));
+
+    CUmemAccessDesc access_desc[device_count];
+    for (int idx = 0; idx < device_count; ++idx) {
+        access_desc[idx].location.type = CU_MEM_LOCATION_TYPE_DEVICE;
+        access_desc[idx].location.id = idx;
+        access_desc[idx].flags = CU_MEM_ACCESS_FLAGS_PROT_READWRITE;
+    }
+
+    CU_CHECK(cuMemSetAccess((CUdeviceptr)ptr, size, access_desc, device_count));
+}
+
+void cu_mem_free(void* ptr) {
+    CUmemGenericAllocationHandle handle;
+    CU_CHECK(cuMemRetainAllocationHandle(&handle, ptr));
+
+    size_t size = 0;
+    CU_CHECK(cuMemGetAddressRange(NULL, &size, (CUdeviceptr)ptr));
+
+    CU_CHECK(cuMemUnmap((CUdeviceptr)ptr, size));
+    CU_CHECK(cuMemAddressFree((CUdeviceptr)ptr, size));
+    CU_CHECK(cuMemRelease(handle));
+}
+
+size_t get_size_align_to_granularity(size_t size_raw, size_t granularity) {
+    size_t size = (size_raw + granularity - 1) & ~(granularity - 1);
+    if (size == 0)
+        size = granularity;
+    return size;
+}
+
+SharedMemoryAllocator::SharedMemoryAllocator(bool use_fabric) : use_fabric(use_fabric) {}
+
+void SharedMemoryAllocator::malloc(void** ptr, size_t size_raw) {
+    if (use_fabric) {
+        CUdevice device;
+        CU_CHECK(cuCtxGetDevice(&device));
+
+        CUmemAllocationProp prop = {};
+        prop.type = CU_MEM_ALLOCATION_TYPE_PINNED;
+        prop.location.type = CU_MEM_LOCATION_TYPE_DEVICE;
+        prop.requestedHandleTypes = CU_MEM_HANDLE_TYPE_FABRIC;
+        prop.location.id = device;
+
+        size_t granularity = 0;
+        CU_CHECK(cuMemGetAllocationGranularity(&granularity, &prop, CU_MEM_ALLOC_GRANULARITY_MINIMUM));
+
+        size_t size = get_size_align_to_granularity(size_raw, granularity);
+
+        CUmemGenericAllocationHandle handle;
+        CU_CHECK(cuMemCreate(&handle, size, &prop, 0));
+
+        CU_CHECK(cuMemAddressReserve((CUdeviceptr*)ptr, size, granularity, 0, 0));
+        CU_CHECK(cuMemMap((CUdeviceptr)*ptr, size, 0, handle, 0));
+        cu_mem_set_access_all(*ptr, size);
+    } else {
+        CUDA_CHECK(cudaMalloc(ptr, size_raw));
+    }
+}
+
+void SharedMemoryAllocator::free(void* ptr) {
+    if (use_fabric) {
+        cu_mem_free(ptr);
+    } else {
+        CUDA_CHECK(cudaFree(ptr));
+    }
+}
+
+void SharedMemoryAllocator::get_mem_handle(MemHandle* mem_handle, void* ptr) {
+    size_t size = 0;
+    CU_CHECK(cuMemGetAddressRange(NULL, &size, (CUdeviceptr)ptr));
+
+    mem_handle->size = size;
+
+    if (use_fabric) {
+        CUmemGenericAllocationHandle handle;
+        CU_CHECK(cuMemRetainAllocationHandle(&handle, ptr));
+
+        CU_CHECK(cuMemExportToShareableHandle(&mem_handle->inner.cu_mem_fabric_handle, handle, CU_MEM_HANDLE_TYPE_FABRIC, 0));
+    } else {
+        CUDA_CHECK(cudaIpcGetMemHandle(&mem_handle->inner.cuda_ipc_mem_handle, ptr));
+    }
+}
+
+void SharedMemoryAllocator::open_mem_handle(void** ptr, MemHandle* mem_handle) {
+    if (use_fabric) {
+        size_t size = mem_handle->size;
+
+        CUmemGenericAllocationHandle handle;
+        CU_CHECK(cuMemImportFromShareableHandle(&handle, &mem_handle->inner.cu_mem_fabric_handle, CU_MEM_HANDLE_TYPE_FABRIC));
+
+        CU_CHECK(cuMemAddressReserve((CUdeviceptr*)ptr, size, 0, 0, 0));
+        CU_CHECK(cuMemMap((CUdeviceptr)*ptr, size, 0, handle, 0));
+        cu_mem_set_access_all(*ptr, size);
+    } else {
+        CUDA_CHECK(cudaIpcOpenMemHandle(ptr, mem_handle->inner.cuda_ipc_mem_handle, cudaIpcMemLazyEnablePeerAccess));
+    }
+}
+
+void SharedMemoryAllocator::close_mem_handle(void* ptr) {
+    if (use_fabric) {
+        cu_mem_free(ptr);
+    } else {
+        CUDA_CHECK(cudaIpcCloseMemHandle(ptr));
+    }
+}
+}  // namespace shared_memory
+
 namespace deep_ep {
 
 Buffer::Buffer(int rank,
@@ -20,7 +131,8 @@ Buffer::Buffer(int rank,
                int64_t num_rdma_bytes,
                bool low_latency_mode,
                bool explicitly_destroy,
-               bool enable_shrink)
+               bool enable_shrink,
+               bool use_fabric)
     : rank(rank),
       num_ranks(num_ranks),
       num_nvl_bytes(num_nvl_bytes),
@@ -28,7 +140,8 @@ Buffer::Buffer(int rank,
       enable_shrink(enable_shrink),
       low_latency_mode(low_latency_mode),
       explicitly_destroy(explicitly_destroy),
-      comm_stream(at::cuda::getStreamFromPool(true)) {
+      comm_stream(at::cuda::getStreamFromPool(true)),
+      shared_memory_allocator(use_fabric) {
     // Metadata memory
     int64_t barrier_signal_bytes = NUM_MAX_NVL_PEERS * sizeof(int);
     int64_t buffer_ptr_bytes = NUM_MAX_NVL_PEERS * sizeof(void*);
@@ -66,8 +179,9 @@ Buffer::Buffer(int rank,
 
     if (num_nvl_bytes > 0) {
         // Local IPC: alloc local memory and set local IPC handles
-        CUDA_CHECK(cudaMalloc(&buffer_ptrs[nvl_rank], num_nvl_bytes + barrier_signal_bytes + buffer_ptr_bytes + barrier_signal_ptr_bytes));
-        CUDA_CHECK(cudaIpcGetMemHandle(&ipc_handles[nvl_rank], buffer_ptrs[nvl_rank]));
+        shared_memory_allocator.malloc(&buffer_ptrs[nvl_rank],
+                                       num_nvl_bytes + barrier_signal_bytes + buffer_ptr_bytes + barrier_signal_ptr_bytes);
+        shared_memory_allocator.get_mem_handle(&ipc_handles[nvl_rank], buffer_ptrs[nvl_rank]);
         buffer_ptrs_gpu = reinterpret_cast<void**>(static_cast<uint8_t*>(buffer_ptrs[nvl_rank]) + num_nvl_bytes + barrier_signal_bytes);
 
         // Set barrier signals
@@ -136,7 +250,8 @@ int Buffer::get_local_device_id() const {
 }
 
 pybind11::bytearray Buffer::get_local_ipc_handle() const {
-    return {ipc_handles[nvl_rank].reserved, CUDA_IPC_HANDLE_SIZE};
+    const shared_memory::MemHandle& handle = ipc_handles[nvl_rank];
+    return {reinterpret_cast<const char*>(&handle), sizeof(handle)};
 }
 
 pybind11::bytearray Buffer::get_local_nvshmem_unique_id() const {
@@ -176,11 +291,11 @@ void Buffer::destroy() {
         if (is_available()) {
             for (int i = 0; i < num_nvl_ranks; ++i)
                 if (i != nvl_rank)
-                    CUDA_CHECK(cudaIpcCloseMemHandle(buffer_ptrs[i]));
+                    shared_memory_allocator.close_mem_handle(buffer_ptrs[i]);
         }
 
         // Free local buffer and error flag
-        CUDA_CHECK(cudaFree(buffer_ptrs[nvl_rank]));
+        shared_memory_allocator.free(buffer_ptrs[nvl_rank]);
     }
 
     // Free NVSHMEM
@@ -220,13 +335,13 @@ void Buffer::sync(const std::vector<int>& device_ids,
         for (int i = 0, offset = rdma_rank * num_nvl_ranks; i < num_nvl_ranks; ++i) {
             EP_HOST_ASSERT(all_gathered_handles[offset + i].has_value());
             auto handle_str = std::string(all_gathered_handles[offset + i].value());
-            EP_HOST_ASSERT(handle_str.size() == CUDA_IPC_HANDLE_SIZE);
+            EP_HOST_ASSERT(handle_str.size() == shared_memory::HANDLE_SIZE);
             if (offset + i != rank) {
-                std::memcpy(ipc_handles[i].reserved, handle_str.c_str(), CUDA_IPC_HANDLE_SIZE);
-                CUDA_CHECK(cudaIpcOpenMemHandle(&buffer_ptrs[i], ipc_handles[i], cudaIpcMemLazyEnablePeerAccess));
+                std::memcpy(&ipc_handles[i], handle_str.c_str(), shared_memory::HANDLE_SIZE);
+                shared_memory_allocator.open_mem_handle(&buffer_ptrs[i], &ipc_handles[i]);
                 barrier_signal_ptrs[i] = reinterpret_cast<int*>(static_cast<uint8_t*>(buffer_ptrs[i]) + num_nvl_bytes);
             } else {
-                EP_HOST_ASSERT(std::memcmp(ipc_handles[i].reserved, handle_str.c_str(), CUDA_IPC_HANDLE_SIZE) == 0);
+                EP_HOST_ASSERT(std::memcmp(&ipc_handles[i], handle_str.c_str(), shared_memory::HANDLE_SIZE) == 0);
             }
         }
 
@@ -825,6 +940,7 @@ Buffer::internode_dispatch(const torch::Tensor& x,
                            const std::optional<torch::Tensor>& cached_gbl_channel_prefix_matrix,
                            const std::optional<torch::Tensor>& cached_recv_gbl_rank_prefix_sum,
                            int expert_alignment,
+                           int num_worst_tokens,
                            const Config& config,
                            std::optional<EventHandle>& previous_event,
                            bool async,
@@ -997,6 +1113,7 @@ Buffer::internode_dispatch(const torch::Tensor& x,
                                    num_experts,
                                    is_token_in_rank.data_ptr<bool>(),
                                    num_tokens,
+                                   num_worst_tokens,
                                    num_channels,
                                    hidden_int4,
                                    num_scales,
@@ -1018,30 +1135,35 @@ Buffer::internode_dispatch(const torch::Tensor& x,
                                    low_latency_mode);
 
         // Synchronize total received tokens and tokens per expert
-        auto start_time = std::chrono::high_resolution_clock::now();
-        while (true) {
-            // Read total count
-            num_recv_tokens = static_cast<int>(*moe_recv_counter);
-            num_rdma_recv_tokens = static_cast<int>(*moe_recv_rdma_counter);
+        if (num_worst_tokens > 0) {
+            num_recv_tokens = num_worst_tokens;
+            num_rdma_recv_tokens = num_worst_tokens;
+        } else {
+            auto start_time = std::chrono::high_resolution_clock::now();
+            while (true) {
+                // Read total count
+                num_recv_tokens = static_cast<int>(*moe_recv_counter);
+                num_rdma_recv_tokens = static_cast<int>(*moe_recv_rdma_counter);
 
-            // Read per-expert count
-            bool ready = (num_recv_tokens >= 0) and (num_rdma_recv_tokens >= 0);
-            for (int i = 0; i < num_local_experts and ready; ++i)
-                ready &= moe_recv_expert_counter[i] >= 0;
+                // Read per-expert count
+                bool ready = (num_recv_tokens >= 0) and (num_rdma_recv_tokens >= 0);
+                for (int i = 0; i < num_local_experts and ready; ++i)
+                    ready &= moe_recv_expert_counter[i] >= 0;
 
-            if (ready)
-                break;
+                if (ready)
+                    break;
 
-            // Timeout check
-            if (std::chrono::duration_cast<std::chrono::seconds>(std::chrono::high_resolution_clock::now() - start_time).count() >
-                NUM_CPU_TIMEOUT_SECS) {
-                printf("Global rank: %d, num_recv_tokens: %d, num_rdma_recv_tokens: %d\n", rank, num_recv_tokens, num_rdma_recv_tokens);
-                for (int i = 0; i < num_local_experts; ++i)
-                    printf("moe_recv_expert_counter[%d]: %d\n", i, moe_recv_expert_counter[i]);
-                throw std::runtime_error("DeepEP error: timeout (dispatch CPU)");
+                // Timeout check
+                if (std::chrono::duration_cast<std::chrono::seconds>(std::chrono::high_resolution_clock::now() - start_time).count() >
+                    NUM_CPU_TIMEOUT_SECS) {
+                    printf("Global rank: %d, num_recv_tokens: %d, num_rdma_recv_tokens: %d\n", rank, num_recv_tokens, num_rdma_recv_tokens);
+                    for (int i = 0; i < num_local_experts; ++i)
+                        printf("moe_recv_expert_counter[%d]: %d\n", i, moe_recv_expert_counter[i]);
+                    throw std::runtime_error("DeepEP error: timeout (dispatch CPU)");
+                }
             }
+            num_recv_tokens_per_expert_list = std::vector<int>(moe_recv_expert_counter, moe_recv_expert_counter + num_local_experts);
         }
-        num_recv_tokens_per_expert_list = std::vector<int>(moe_recv_expert_counter, moe_recv_expert_counter + num_local_experts);
     }
 
     // Allocate new tensors
@@ -1098,6 +1220,7 @@ Buffer::internode_dispatch(const torch::Tensor& x,
                         recv_gbl_rank_prefix_sum.data_ptr<int>(),
                         is_token_in_rank.data_ptr<bool>(),
                         num_tokens,
+                        num_worst_tokens,
                         hidden_int4,
                         num_scales,
                         num_topk,
@@ -1758,7 +1881,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         .def("current_stream_wait", &deep_ep::EventHandle::current_stream_wait);
 
     pybind11::class_<deep_ep::Buffer>(m, "Buffer")
-        .def(pybind11::init<int, int, int64_t, int64_t, bool, bool, bool>())
+        .def(pybind11::init<int, int, int64_t, int64_t, bool, bool, bool, bool>())
         .def("is_available", &deep_ep::Buffer::is_available)
         .def("get_num_rdma_ranks", &deep_ep::Buffer::get_num_rdma_ranks)
         .def("get_rdma_rank", &deep_ep::Buffer::get_rdma_rank)
