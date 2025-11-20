@@ -20,6 +20,9 @@
 #define FINISHED_SUM_TAG 1024
 #define NUM_WAIT_NANOSECONDS 500
 
+// Internode buffer index for NCCL GIN signal allocation
+#define INTERNODE_BUFFER_IDX 2
+
 #ifndef ENABLE_FAST_DEBUG
 #define NUM_CPU_TIMEOUT_SECS 100
 #define NUM_TIMEOUT_CYCLES 200000000000ull  // 200G cycles ~= 100s

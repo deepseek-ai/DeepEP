@@ -19,9 +19,6 @@
 
 using namespace cooperative_groups;
 
-// Static constant for internode buffer index
-constexpr int internode_buffer_idx = 2;
-
 namespace deep_ep {
 
 namespace internode {
@@ -506,7 +503,7 @@ void notify_dispatch(const int* num_tokens_per_rank,
     auto dcomms = backend->get_device_communicators();
     int num_gin_comms = backend->get_num_gin_comms();
     auto nccl_windows = backend->get_device_nccl_windows();
-    auto signals_base = backend->get_signals_base(internode_buffer_idx);
+    auto signals_base = backend->get_signals_base(INTERNODE_BUFFER_IDX);
 
     EP_HOST_ASSERT(dcomms != nullptr);
     EP_HOST_ASSERT(num_gin_comms >= 1);
@@ -1538,7 +1535,7 @@ void dispatch(void* recv_x,
     auto dcomms = backend->get_device_communicators();
     int num_gin_comms = backend->get_num_gin_comms();
     auto nccl_windows = backend->get_device_nccl_windows();
-    auto signals_base = backend->get_signals_base(internode_buffer_idx);
+    auto signals_base = backend->get_signals_base(INTERNODE_BUFFER_IDX);
 
     EP_HOST_ASSERT(dcomms != nullptr);
     EP_HOST_ASSERT(num_gin_comms >= 1);
@@ -1925,7 +1922,7 @@ void cached_notify(int hidden_int4,
     auto gin_base_ptr = backend->get_gin_base_ptr();
     auto dcomms = backend->get_device_communicators();
     int num_gin_comms = backend->get_num_gin_comms();
-    auto signals_base = backend->get_signals_base(internode_buffer_idx);
+    auto signals_base = backend->get_signals_base(INTERNODE_BUFFER_IDX);
 
     EP_HOST_ASSERT(dcomms != nullptr);
     EP_HOST_ASSERT(num_gin_comms >= 1);
@@ -2861,7 +2858,7 @@ void combine(cudaDataType_t type,
     int num_gin_comms = backend->get_num_gin_comms();
     auto dcomms = backend->get_device_communicators();
     auto nccl_windows = backend->get_device_nccl_windows();
-    auto signals_base = backend->get_signals_base(internode_buffer_idx);
+    auto signals_base = backend->get_signals_base(INTERNODE_BUFFER_IDX);
 
     EP_HOST_ASSERT(num_gin_comms >= 1);
     EP_HOST_ASSERT(rdma_buffer_ptr == gin_base_ptr);

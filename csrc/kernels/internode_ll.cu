@@ -124,6 +124,104 @@ __forceinline__ __device__ void barrier(int thread_id, int rank, int num_ranks, 
     __syncthreads();
 }
 
+#ifdef ENABLE_NCCL_GIN
+// NCCL GIN barrier with per-rank timeout tracking
+template <int kNumThreads>
+__forceinline__ __device__ void nccl_gin_barrier(int thread_id, int rank, ncclDevComm& dcomm, ncclGin& net, 
+                                                  int* mask_buffer_ptr, int barrier_index = 0) {
+    EP_DEVICE_ASSERT(kNumThreads >= dcomm.nRanks);
+    
+    // If no masking, use simple global barrier (fast path)
+    if (mask_buffer_ptr == nullptr) {
+        ncclBarrierSession<ncclCoopCta> barrier(ncclCoopCta(), ncclTeamTagWorld(), net, barrier_index);
+        barrier.sync(ncclCoopCta(), cuda::memory_order_relaxed, ncclGinFenceLevel::Relaxed);
+        return;
+    }
+    
+    // Per-rank barrier with timeout tracking using signal array
+    // Each rank gets its own signal: signals_base + barrier_index * num_ranks + rank
+    
+    // Early exit if this rank is masked (no need to participate in barrier)
+    if (is_rank_masked(mask_buffer_ptr, rank)) {
+        return;
+    }
+    
+    int num_ranks = dcomm.nRanks;
+    ncclTeam world = ncclTeamWorld(dcomm);
+    unsigned int my_signal_idx = barrier_index * num_ranks + rank;
+    
+    // Step 0: Flush all pending operations (equivalent to NVSHMEM's quiet)
+    // This ensures all prior operations complete before starting the barrier
+    net.flush(ncclCoopCta());
+    
+    // Step 1: Update local signal counter and read back the value
+    __shared__ uint64_t local_signal_value;
+    if (thread_id == 0) {
+        // Increment my own signal to indicate I've arrived at the barrier
+        net.signal(
+            world,
+            rank,
+            ncclGin_SignalInc{my_signal_idx},
+            ncclCoopThread(),
+            ncclGin_None(),
+            cuda::thread_scope_system
+        );
+        // Read current signal value for tracking
+        local_signal_value = net.readSignal(my_signal_idx);
+    }
+    __syncthreads();
+    
+    // Step 2a: Signal all other non-masked ranks (send phase)
+    // Each thread handles one destination rank (one-to-one mapping guaranteed by kNumThreads >= nRanks)
+    if (thread_id < num_ranks && thread_id != rank) {
+        const auto dst_rank = thread_id;
+        if (not is_rank_masked(mask_buffer_ptr, dst_rank)) {
+            // Signal the destination rank (send our signal to them)
+            net.signal(
+                world,
+                dst_rank,
+                ncclGin_SignalInc{my_signal_idx},
+                ncclCoopThread(),
+                ncclGin_None(),
+                cuda::thread_scope_system
+            );
+        }
+    }
+    __syncthreads();
+    
+    // Step 2b: Wait for signals from all other non-masked ranks (wait phase)
+    // Each thread handles one destination rank (one-to-one mapping guaranteed by kNumThreads >= nRanks)
+    if (thread_id < num_ranks && thread_id != rank) {
+        const auto dst_rank = thread_id;
+        if (not is_rank_masked(mask_buffer_ptr, dst_rank)) {
+            // Wait for destination rank's signal with timeout
+            auto start_time = clock64();
+            uint64_t wait_recv_cost = 0;
+            unsigned int src_signal_idx = barrier_index * num_ranks + dst_rank;
+            uint64_t expected_signal = local_signal_value;  // We expect dst_rank to reach same counter value
+            
+            // Poll with timeout
+            uint64_t cur_value;
+            do {
+                cur_value = net.readSignal(src_signal_idx);
+                wait_recv_cost = clock64() - start_time;
+            } while (cur_value < expected_signal && wait_recv_cost <= NUM_TIMEOUT_CYCLES);
+            
+            // Mask rank if timeout
+            if (wait_recv_cost > NUM_TIMEOUT_CYCLES) {
+                printf("Warning: DeepEP timeout for NCCL GIN barrier, rank %d, dst_rank %d, barrier_idx %d\n", 
+                       rank, dst_rank, barrier_index);
+                atomicExch(mask_buffer_ptr + dst_rank, 1);
+            }
+        }
+    }
+    __syncthreads();
+    
+    // Step 3: Ensure all memory operations are visible (flush any pending ops)
+    net.flush(ncclCoopCta());
+}
+#endif
+
 template <int kNumThreads>
 __launch_bounds__(kNumThreads, 1) __global__ void clean_low_latency_buffer(int* clean_0,
                                                                            int num_clean_int_0,
@@ -134,9 +232,11 @@ __launch_bounds__(kNumThreads, 1) __global__ void clean_low_latency_buffer(int* 
                                                                            int* mask_buffer_ptr,
                                                                            int* sync_buffer_ptr,
 #ifdef ENABLE_NCCL_GIN
-                                                                           ncclDevComm* dcomms) {
+                                                                           ncclDevComm* dcomms,
+                                                                           unsigned signals_base) {
 #else
-                                                                           void* dcomms) {
+                                                                           void* dcomms,
+                                                                           unsigned signals_base) {
 #endif
     auto thread_id = static_cast<int>(threadIdx.x);
 
@@ -144,12 +244,8 @@ __launch_bounds__(kNumThreads, 1) __global__ void clean_low_latency_buffer(int* 
 #ifdef ENABLE_NCCL_GIN
     auto dcomm = dcomms[0];
     ncclGin net(dcomm, 0);
+    nccl_gin_barrier<kNumThreads>(thread_id, rank, dcomm, net, mask_buffer_ptr, signals_base);
 
-    // World barrier - synchronizes all ranks with all block threads participating
-    {
-        ncclBarrierSession<ncclCoopCta> barrier(ncclCoopCta(), ncclTeamTagWorld(), net, 0);
-        barrier.sync(ncclCoopCta(), cuda::memory_order_relaxed, ncclGinFenceLevel::Relaxed);
-    }
 #else
     if (sync_buffer_ptr == nullptr)
         nvshmemx_barrier_all_block();
@@ -166,11 +262,7 @@ __launch_bounds__(kNumThreads, 1) __global__ void clean_low_latency_buffer(int* 
 
         // Barrier after cleaning (make sure the low-latency mode works fine)
 #ifdef ENABLE_NCCL_GIN
-    // World barrier - synchronizes all ranks with all block threads participating
-    {
-        ncclBarrierSession<ncclCoopCta> barrier(ncclCoopCta(), ncclTeamTagWorld(), net, 0);
-        barrier.sync(ncclCoopCta(), cuda::memory_order_relaxed, ncclGinFenceLevel::Relaxed);
-    }
+    nccl_gin_barrier<kNumThreads>(thread_id, rank, dcomm, net, mask_buffer_ptr, signals_base);
 #else
     if (sync_buffer_ptr == nullptr)
         nvshmemx_barrier_all_block();
@@ -194,10 +286,12 @@ void clean_low_latency_buffer(int* clean_0,
     auto* backend = dynamic_cast<deep_ep::internode::NCCLGINBackend*>(deep_ep::internode::get_backend());
     EP_HOST_ASSERT(backend != nullptr);
     auto dcomms = backend->get_device_communicators();
+    auto signals_base = backend->get_signals_base(INTERNODE_BUFFER_IDX); // reuse HT signals for this -- we will clear them in the notify phase
 
     EP_HOST_ASSERT(dcomms != nullptr);
 #else
     void* dcomms = nullptr;
+    unsigned signals_base = 0;
 #endif
 
     SETUP_LAUNCH_CONFIG(1, kNumThreads, stream);
@@ -212,7 +306,8 @@ void clean_low_latency_buffer(int* clean_0,
                   num_ranks,
                   mask_buffer_ptr,
                   sync_buffer_ptr,
-                  dcomms);
+                  dcomms,
+                  signals_base);
 }
 
 template <bool kUseFP8, bool kUseUE8M0, int kHidden>
