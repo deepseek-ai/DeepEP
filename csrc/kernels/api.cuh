@@ -171,9 +171,11 @@ void notify_dispatch(const int* num_tokens_per_rank,
                      int** barrier_signal_ptrs,
                      int rank,
                      cudaStream_t stream,
-                     int64_t num_rdma_bytes,
-                     int64_t num_nvl_bytes,
-                     bool low_latency_mode);
+                     uint64_t num_rdma_bytes,
+                     uint64_t num_nvl_bytes,
+                     bool low_latency_mode,
+                     bool decoupled_mode,
+                     int num_max_dispatch_tokens_per_rank);
 
 void dispatch(void* recv_x,
               float* recv_x_scales,
@@ -212,7 +214,11 @@ void dispatch(void* recv_x,
               bool is_cached_dispatch,
               cudaStream_t stream,
               int num_channels,
-              bool low_latency_mode);
+              bool low_latency_mode,
+              bool decoupled_mode,
+              bool return_recv_hook,
+              int phases,
+              int num_max_dispatch_tokens_per_ran);
 
 void cached_notify(int hidden_int4,
                    int num_scales,
@@ -232,10 +238,13 @@ void cached_notify(int hidden_int4,
                    int** barrier_signal_ptrs,
                    int rank,
                    cudaStream_t stream,
-                   int64_t num_rdma_bytes,
-                   int64_t num_nvl_bytes,
+                   uint64_t num_rdma_bytes,
+                   uint64_t num_nvl_bytes,
                    bool is_cached_dispatch,
-                   bool low_latency_mode);
+                   bool low_latency_mode,
+                   bool decoupled_mode,
+                   bool return_recv_hook,
+                   int num_max_dispatch_tokens_per_rank);
 
 void combine(cudaDataType_t type,
              void* combined_x,
@@ -265,7 +274,11 @@ void combine(cudaDataType_t type,
              int num_ranks,
              cudaStream_t stream,
              int num_channels,
-             bool low_latency_mode);
+             bool low_latency_mode,
+             bool decoupled_mode,
+             bool return_recv_hook,
+             int phases,
+             int num_max_dispatch_tokens_per_rank);
 
 }  // namespace internode
 
