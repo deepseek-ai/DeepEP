@@ -240,3 +240,7 @@ def bench_kineto(fn,
 
 def hash_tensor(t: torch.Tensor):
     return t.view(torch.int).sum().item()
+
+
+def ceil_div(a, b):
+    return (a + b - 1) // b
