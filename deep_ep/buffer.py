@@ -89,8 +89,12 @@ class Buffer:
         self.low_latency_mode = low_latency_mode
         self.explicitly_destroy = explicitly_destroy
         self.enable_shrink = enable_shrink
+        disable_ll_dispatch_opt = Buffer.disable_ll_dispatch_opt()
+        if not disable_ll_dispatch_opt and enable_shrink: # 目前优化了 ll dispatch 分层算法，那么就不支持 shrink 模式了
+            print("DeepEP [ERROR] not support shrink, disable it", flush=True)
+            enable_shrink = False
         self.runtime = deep_ep_cpp.Buffer(self.rank, self.group_size, num_nvl_bytes, num_rdma_bytes, low_latency_mode, explicitly_destroy,
-                                          enable_shrink, use_fabric)
+                                          enable_shrink, disable_ll_dispatch_opt, use_fabric)
 
         # Synchronize device IDs
         local_device_id = self.runtime.get_local_device_id()
@@ -135,6 +139,13 @@ class Buffer:
         self.runtime.sync(device_ids, ipc_handles, root_unique_id)
         assert self.runtime.is_available()
 
+    @staticmethod
+    def disable_ll_dispatch_opt() -> bool:
+        disable_ll_dispatch_opt = False
+        if int(os.environ.get('DEEPEP_DISABLE_LL_DISPATCH_OPT', '0')) == 1:
+            disable_ll_dispatch_opt = True
+        return disable_ll_dispatch_opt
+    
     def destroy(self):
         """
         Destroy the cpp runtime and release resources.
@@ -186,7 +197,7 @@ class Buffer:
         Returns:
             size: the RDMA buffer size recommended.
         """
-        return deep_ep_cpp.get_low_latency_rdma_size_hint(num_max_dispatch_tokens_per_rank, hidden, num_ranks, num_experts)
+        return deep_ep_cpp.get_low_latency_rdma_size_hint(Buffer.disable_ll_dispatch_opt(), num_max_dispatch_tokens_per_rank, hidden, num_ranks, num_experts)
 
     def get_comm_stream(self) -> torch.Stream:
         """

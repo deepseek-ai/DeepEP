@@ -282,7 +282,8 @@ void clean_low_latency_buffer(int* clean_0,
                               int* sync_buffer,
                               cudaStream_t stream);
 
-void dispatch(void* packed_recv_x,
+void dispatch(bool dispatch_ll_dispatch_opt,
+              void* packed_recv_x,
               void* packed_recv_x_scales,
               int64_t* packed_recv_src_info,
               int64_t* packed_recv_layout_range,
@@ -312,7 +313,8 @@ void dispatch(void* packed_recv_x,
               cudaStream_t stream,
               int phases);
 
-void combine(void* combined_x,
+void combine(bool dispatch_ll_dispatch_opt,
+             void* combined_x,
              void* rdma_recv_x,
              int* rdma_recv_flag,
              void* rdma_send_x,
