@@ -53,6 +53,7 @@ public:
 
 private:
     std::string base_path;  // The path of the installed package
+    std::string jit_dir;    // The path of the jit library
     std::string flags;      // The flags required by nvcc compiler, which contains the
     // base flags(-O3, -arch...), include files, library files
     std::string nvcc_path;  // The path of the nvcc compiler

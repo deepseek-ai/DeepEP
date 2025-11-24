@@ -12,6 +12,12 @@ inline std::string get_env(std::string name) {
 }
 
 NVCCCompiler::NVCCCompiler(std::string base_path): base_path(base_path) {
+    std::string home_dir = get_env("HOME");
+    if (home_dir.empty()) {
+        home_dir = "/tmp";  // Fallback to /tmp if HOME is not set
+    }
+    jit_dir = home_dir + "/.deepep/hybrid_ep/jit";
+
     nvcc_path = get_env("CUDA_HOME") + "/bin/nvcc";
 
     // Init the flags to compiler
@@ -57,7 +63,6 @@ NVCCCompiler::NVCCCompiler(std::string base_path): base_path(base_path) {
 
 std::string NVCCCompiler::build(std::string code, std::string signature, int local_rank, int node_rank) {
     // Create the source directory
-    std::string jit_dir = base_path + "/build/jit";
     std::filesystem::create_directories(jit_dir);
 
     // Get a unique signature for each run
@@ -113,7 +118,7 @@ std::any NVCCCompiler::get_instance(std::string library_path, std::string kernel
     }
 
     // Unique the compiled lib from different rank
-    std::string unique_library_path = base_path + "/build/jit/" + kernel_key + ".so";
+    std::string unique_library_path = jit_dir + "/" + kernel_key + ".so";
     std::string unique_command = "mv " + library_path + " " + unique_library_path;
     if(library_path != unique_library_path) {
         auto ret = std::system(unique_command.c_str());
