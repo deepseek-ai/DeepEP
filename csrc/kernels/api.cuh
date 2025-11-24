@@ -166,7 +166,8 @@ void combine(void* combined_x,
              int num_topk, int num_experts, int rank, int num_ranks,
              bool use_logfmt,
              void* workspace, int num_device_sms,
-             cudaStream_t stream, int phases, bool zero_copy);
+             cudaStream_t stream, int phases, bool zero_copy,
+             bool overlap, uint32_t* src_signals, uint32_t src_signal_expect_value);
 
 } // namespace internode_ll
 
