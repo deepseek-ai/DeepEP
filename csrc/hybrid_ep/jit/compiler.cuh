@@ -97,6 +97,7 @@ public:
 private:
     NVCCCompiler nvcc_compiler;
     std::unordered_map<std::string, std::any> kernel_cache;
+    std::string jit_dir;    // The path of the jit directory
     std::string base_path;  // The path of the installed package
     int local_rank;   // Used to generate the unique signature for each rank
     int node_rank;    // Used to generate the unique signature for each node

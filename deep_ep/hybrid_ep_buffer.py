@@ -194,7 +194,10 @@ class HybridEPBuffer:
         config.device_side_sync_dispatch_api = True
         # Dispatch stages config:
         config.num_of_stages_dispatch_api = int(
-            os.getenv("NUM_OF_STAGES_DISPATCH_API", "10")
+            os.getenv("NUM_OF_STAGES_DISPATCH_API", "12")
+        )
+        config.num_of_in_flight_s2g_dispatch_api = int(
+            os.getenv("NUM_OF_IN_FLIGHT_S2G_DISPATCH_API", "10")
         )
         config.num_of_tokens_per_chunk_dispatch_api = int(
             os.getenv("NUM_OF_TOKENS_PER_CHUNK_DISPATCH_API", "128")

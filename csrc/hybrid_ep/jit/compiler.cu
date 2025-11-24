@@ -11,12 +11,16 @@ inline std::string get_env(std::string name) {
     return std::string(env);
 }
 
-NVCCCompiler::NVCCCompiler(std::string base_path): base_path(base_path) {
+std::string get_jit_dir() {
     std::string home_dir = get_env("HOME");
     if (home_dir.empty()) {
         home_dir = "/tmp";  // Fallback to /tmp if HOME is not set
     }
-    jit_dir = home_dir + "/.deepep/hybrid_ep/jit";
+    return home_dir + "/.deepep/hybrid_ep/jit";
+}
+
+NVCCCompiler::NVCCCompiler(std::string base_path): base_path(base_path) {
+    jit_dir = get_jit_dir();
 
     nvcc_path = get_env("CUDA_HOME") + "/bin/nvcc";
 
@@ -165,7 +169,7 @@ std::string NVCCCompiler::get_dispatch_code(HybridEpConfigInstance config) {
          std::to_string(config.hidden_dim) + ", " + std::to_string(config.max_num_of_tokens_per_rank) + ", " +
          std::to_string(config.num_of_ranks_per_node) + ", " + std::to_string(config.num_of_nodes) + ", " +
          std::to_string(config.num_of_experts_per_rank) + ">::dispatch<" + token_type + ", " +
-         std::to_string(config.num_of_stages_dispatch_api) + ", " + std::to_string(config.num_of_tokens_per_chunk_dispatch_api) + ", " +
+         std::to_string(config.num_of_stages_dispatch_api) + ", " + std::to_string(config.num_of_in_flight_s2g_dispatch_api) + ", " + std::to_string(config.num_of_tokens_per_chunk_dispatch_api) + ", " +
          std::to_string(config.num_of_blocks_dispatch_api) + ", " + (config.forward_dispatch_api ? "true" : "false") + ", " +
          (config.device_side_sync_dispatch_api ? "true" : "false") + R"(>;
             return func_ptr;
@@ -198,12 +202,12 @@ std::string NVCCCompiler::get_combine_code(HybridEpConfigInstance config) {
 }
 
 KernelCache::KernelCache(int node_rank, int local_rank, std::string base_path, bool load_cached_kernels): 
-node_rank(node_rank), local_rank(local_rank), base_path(base_path), nvcc_compiler(base_path) {
+node_rank(node_rank), local_rank(local_rank), nvcc_compiler(base_path) {
     // Load all cached kernels from the cache directory
-    std::string cache_dir = base_path + "/build/jit";
-    std::filesystem::create_directories(cache_dir);
+    jit_dir = get_jit_dir();
+    std::filesystem::create_directories(jit_dir);
     if(load_cached_kernels) {
-        for (const auto& entry : std::filesystem::directory_iterator(cache_dir)) {
+        for (const auto& entry : std::filesystem::directory_iterator(jit_dir)) {
             if (entry.path().extension() == ".so") {
                 std::string kernel_key = entry.path().stem().string();
                 kernel_cache[kernel_key] = nvcc_compiler.get_instance(entry.path().string(), kernel_key);
@@ -283,6 +287,7 @@ void KernelCache::run_dispatch_kernel(
         config.num_of_nodes,
         type_to_string(config.token_data_type),
         config.num_of_stages_dispatch_api,
+        config.num_of_in_flight_s2g_dispatch_api,
         config.num_of_tokens_per_chunk_dispatch_api,
         config.num_of_blocks_dispatch_api,
         config.forward_dispatch_api,

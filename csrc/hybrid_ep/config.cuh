@@ -57,6 +57,7 @@ struct HybridEpConfigInstance {
    */
   APP_TOKEN_DATA_TYPE token_data_type;
   int num_of_stages_dispatch_api;
+  int num_of_in_flight_s2g_dispatch_api;
   int num_of_tokens_per_chunk_dispatch_api;
   int num_of_blocks_dispatch_api;
   bool forward_dispatch_api;
