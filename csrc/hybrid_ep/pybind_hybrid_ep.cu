@@ -14,9 +14,7 @@ namespace py = pybind11;
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.doc() = "HybridEP, efficiently enable the expert-parallel communication in "
               "the Hopper+ architectures";
-    
-    m.def("copy_tensor_with_SM", &copy_tensor_with_SM, py::arg("dst"), py::arg("src"));
-  
+      
     pybind11::enum_<APP_TOKEN_DATA_TYPE>(m, "APP_TOKEN_DATA_TYPE")
         .value("UINT16", APP_TOKEN_DATA_TYPE::UINT16)
         .value("UINT8", APP_TOKEN_DATA_TYPE::UINT8)

@@ -26,9 +26,10 @@ public:
         torch::Tensor attn_to_rdma_map;
         c10::optional<torch::Tensor> num_dispatched_tokens_tensor;  // Used in the permute
         c10::optional<torch::Tensor> local_expert_routing_map;      // Used in the permute
-        // Used in the sync-free permute
+
         int64_t num_dispatched_tokens = -1;
-        // Cached permute
+        // Used in the permute case, use up-bound to avoid synchronization to get the real num_dispatched_tokens from the pinned memory
+        int64_t max_num_dispatched_tokens = -1;
         c10::optional<torch::Tensor> row_id_map;
         int64_t num_permuted_tokens = -1;
         // Misc

@@ -452,8 +452,7 @@ HybridEPBuffer::dispatch(HybridEpConfigInstance config,
   args.attn_to_rdma_map = attn_to_rdma_map;
   args.num_dispatched_tokens_tensor = num_dispatched_tokens_tensor;
   args.num_dispatched_tokens = (num_dispatched_tokens.has_value()) ? 
-                                num_dispatched_tokens.value() : 
-                                num_dispatched_tokens_tensor.value().item<int64_t>();
+                                num_dispatched_tokens.value() : -1;
   args.num_of_tokens_per_rank = num_of_tokens_per_rank;
   args.enable_permute = false;
   args.stream = at::cuda::getCurrentCUDAStream();
@@ -568,8 +567,8 @@ HybridEPBuffer::dispatch_with_permute(HybridEpConfigInstance config,
  args.local_expert_routing_map = local_expert_routing_map;
  args.num_dispatched_tokens_tensor = num_dispatched_tokens_tensor;
  args.num_dispatched_tokens = (num_dispatched_tokens.has_value()) ? 
-                                num_dispatched_tokens.value() : 
-                                num_dispatched_tokens_tensor.value().item<int64_t>();
+                                num_dispatched_tokens.value() : -1;
+ args.max_num_dispatched_tokens = this->max_num_of_tokens;
  args.row_id_map = row_id_map;
  args.num_permuted_tokens = (num_permuted_tokens.has_value()) ? num_permuted_tokens.value() : -1;
  args.pad_multiple = (pad_multiple.has_value()) ? pad_multiple.value() : 0;
@@ -635,8 +634,7 @@ HybridEPBuffer::combine_with_unpermute(HybridEpConfigInstance config,
   args.attn_to_rdma_map = attn_to_rdma_map;
   args.num_dispatched_tokens_tensor = num_dispatched_tokens_tensor;
   args.num_dispatched_tokens = (num_dispatched_tokens.has_value()) ? 
-                                num_dispatched_tokens.value() : 
-                                num_dispatched_tokens_tensor.value().item<int64_t>();
+                                num_dispatched_tokens.value() : -1;
   args.row_id_map = row_id_map;
   args.pad_multiple = (pad_multiple.has_value()) ? pad_multiple.value() : 0;
   args.num_of_tokens_per_rank = num_of_tokens_per_rank;

@@ -321,6 +321,8 @@ class HybridEPBuffer:
             ) = handle
 
         if num_dispatched_tokens is None:
+            # Synchronize the stream to make sure the data in the pinned_memory_buffer: num_dispatched_tokens_tensor is ready.
+            torch.cuda.current_stream().synchronize()
             num_dispatched_tokens = num_dispatched_tokens_tensor.item()
 
         dispatched_token, dispatched_probs, dispatched_scaling_factor = (
@@ -462,20 +464,6 @@ class HybridEPBuffer:
                     routing_map=global_routing_map,
                     num_of_tokens_per_rank=num_of_tokens_per_rank,
                 )
-                if use_host_meta:
-                    # Put the num_dispatched_tokens_tensor on the CPU pinned memory, because this tensor also will be used in the GPU kernel
-                    num_dispatched_tokens_tensor_pinned = torch.empty(
-                        num_dispatched_tokens_tensor.shape,
-                        device="cpu",
-                        dtype=num_dispatched_tokens_tensor.dtype,
-                        pin_memory=True,
-                    )
-                    hybrid_ep_cpp.copy_tensor_with_SM(
-                        num_dispatched_tokens_tensor_pinned, 
-                        num_dispatched_tokens_tensor
-                    )
-                    torch.cuda.current_stream().synchronize()
-                    num_dispatched_tokens_tensor = num_dispatched_tokens_tensor_pinned
             else:
                 (
                     sparse_to_dense_map,
