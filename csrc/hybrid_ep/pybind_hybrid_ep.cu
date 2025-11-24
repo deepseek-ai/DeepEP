@@ -108,14 +108,13 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         });
   
     pybind11::class_<HybridEPBuffer>(m, "HybridEPBuffer")
-        .def(py::init<py::object, BufferConfig, int, int, int, std::string, std::vector<std::string>, bool, bool, bool>(),
+        .def(py::init<py::object, BufferConfig, int, int, int, std::string, bool, bool, bool>(),
             py::arg("process_group"),
             py::arg("config"),
             py::arg("local_rank"),
             py::arg("node_rank"),
             py::arg("group_size"),
             py::arg("base_path"),
-            py::arg("ib_dev_name_list") = std::vector<std::string>{},
             py::arg("load_cached_kernels") = false,
             py::arg("use_shared_buffer") = true,
             py::arg("enable_fabric") = false)

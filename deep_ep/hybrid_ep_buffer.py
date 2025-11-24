@@ -44,8 +44,7 @@ class HybridEPBuffer:
         num_sms_dispatch_api: int = None,
         num_sms_combine_api: int = None,
         num_sms_preprocessing_api: int = None,
-        use_mnnvl: bool = None,
-        ib_dev_name_list: list[str] = [],
+        use_mnnvl: bool = None
     ):
         self.group = group
         self.rank = self.group.rank()
@@ -130,7 +129,6 @@ class HybridEPBuffer:
             self.node_rank, 
             self.group_size, 
             os.path.dirname(os.path.abspath(__file__)), 
-            ib_dev_name_list, 
             load_cached_kernels = False, 
             use_shared_buffer = True,
             enable_fabric = use_mnnvl, # If use_mnnvl is True, the fabric memory handle will be used.

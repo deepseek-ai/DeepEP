@@ -354,8 +354,7 @@ def test_main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
             hidden_dim=HIDDEN_DIM,
             max_num_of_tokens_per_rank=MAX_NUM_OF_TOKENS_PER_RANK,
             num_local_experts=NUM_LOCAL_EXPERTS,
-            use_fp8=use_fp8,
-            ib_dev_name_list=args.ib_dev_name_list,
+            use_fp8=use_fp8
         )
         
         ref = TorchRef(
@@ -375,7 +374,5 @@ if __name__ == "__main__":
                        help='Number of processes to spawn (default: 4)')
     parser.add_argument('--nsys-profile', action='store_true', default=False,
                        help='benchmark with nsys profile or not (default: False)')
-    parser.add_argument('--ib-dev-name-list', nargs='+', type=str, default=[],
-                       help='IB device name list (default: [])')
     args = parser.parse_args()
     torch.multiprocessing.spawn(test_main, args=(args.num_processes, args), nprocs=args.num_processes)

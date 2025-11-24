@@ -256,20 +256,23 @@ void RDMACoordinator::init(
       pybind11::object process_group,
       int node_rank,
       int local_rank, 
-      BufferConfig config, 
-      std::vector<std::string> ib_dev_name_list
+      BufferConfig config
   ) {
   this->process_group = process_group;
   this->node_rank = node_rank;
   this->local_rank = local_rank;
   this->buffer_config = config;
-  this->ib_dev_name_list = ib_dev_name_list;
-  
   assert(buffer_config.num_of_nodes > 1);
+  
+  std::vector<int> gpu_idx_vec;
+  for (int i = 0; i < buffer_config.num_of_ranks_per_node; ++i) {
+    gpu_idx_vec.push_back(i);
+  }
   // Get name of ibv device.
-  const char *ib_devname = ib_dev_name_list[local_rank].c_str();
+  const char *net_name;
+  hybrid_ep::get_nic(gpu_idx_vec, local_rank, &net_name);
   // Find ib device and get ibv_context.
-  struct ibv_device *ib_dev = ctx_find_dev(ib_devname);
+  struct ibv_device *ib_dev = ctx_find_dev(net_name);
 
   ib_context = ibv_open_device(ib_dev);;
   ibv_query_port(ib_context, IB_PORT, &port_attr);

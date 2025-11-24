@@ -66,6 +66,7 @@ def get_extension_hybrid_ep_cpp():
     libraries = ["cuda", "nvtx3interop"]
     extra_objects = []
     runtime_library_dirs = []
+    extra_link_args = []
 
     # Add dependency for jit
     compile_args["nvcc"].append(f'-DSM_ARCH="{os.environ["TORCH_CUDA_ARCH_LIST"]}"')
@@ -82,6 +83,7 @@ def get_extension_hybrid_ep_cpp():
         nccl_dir = os.path.join(current_dir, "third-party/nccl")        
         compile_args["nvcc"].append("-DHYBRID_EP_BUILD_MULTINODE_ENABLE")
         compile_args["nvcc"].append(f"-DRDMA_CORE_HOME=\"{rdma_core_dir}\"")
+        extra_link_args.append(f"-l:libnvidia-ml.so.1")
 
         subprocess.run(["git", "submodule", "update", "--init", "--recursive"], cwd=current_dir)
         # Generate the inter-node dependency to the python package for JIT compilation
@@ -128,6 +130,7 @@ def get_extension_hybrid_ep_cpp():
     print(f' > Includes: {include_dirs}')
     print(f' > Libraries: {libraries}')
     print(f' > Library dirs: {library_dirs}')
+    print(f' > Extra link args: {extra_link_args}')
     print(f' > Compilation flags: {compile_args}')
     print(f' > Extra objects: {extra_objects}')
     print(f' > Runtime library dirs: {runtime_library_dirs}')
@@ -143,6 +146,7 @@ def get_extension_hybrid_ep_cpp():
         extra_compile_args=compile_args,
         extra_objects=extra_objects,
         runtime_library_dirs=runtime_library_dirs,
+        extra_link_args=extra_link_args,
     )
 
     return extension_hybrid_ep_cpp

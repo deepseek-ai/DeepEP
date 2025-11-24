@@ -9,7 +9,6 @@ HybridEPBuffer::HybridEPBuffer(
   int node_rank, 
   int group_size, 
   std::string base_path,
-  std::vector<std::string> ib_dev_name_list,
   bool load_cached_kernels,
   bool use_shared_buffer,
   bool enable_fabric
@@ -18,7 +17,7 @@ HybridEPBuffer::HybridEPBuffer(
     remote_allocator.init(enable_fabric);
     if(group_size > buffer_config.num_of_ranks_per_node) {
 #ifdef HYBRID_EP_BUILD_MULTINODE_ENABLE
-      rdma_coordinator.init(process_group, node_rank, local_rank, buffer_config, ib_dev_name_list);
+      rdma_coordinator.init(process_group, node_rank, local_rank, buffer_config);
 #else
       assert(false); // inter-node communication is not supported.
 #endif
