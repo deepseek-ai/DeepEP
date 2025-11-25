@@ -89,3 +89,4 @@ rm -rf build/ dist/ *.egg-info/ *.so;
 ## Important Notes
 
 - When switching between NCCL GIN and NVSHMEM backends, always rebuild and reinstall
+- By default, DeepEP uses NCCL as the communication backend for PyTorch Distributed that is used as a launcher for dispatch/combine primitives. However, the NCCL backend in PyTorch Distributed requires NCCL_P2P_DISABLE=1 on EOS, which is only possible for running high throughput kernels. NCCL_P2P_DISABLE=1 must not be set when running low latency kernels with NVLink; for this case, the Gloo communication backend for PyTorch Distributed can be used. [FIXME: This needs investigation. There is no reason for NCCL_P2P_DISABLE=1 to be set for running PyTorch Distributed with NCCL backend.]
