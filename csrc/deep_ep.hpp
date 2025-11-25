@@ -21,6 +21,34 @@
 #define TORCH_EXTENSION_NAME deep_ep_cpp
 #endif
 
+namespace shared_memory {
+
+union MemHandleInner {
+    cudaIpcMemHandle_t cuda_ipc_mem_handle;
+    CUmemFabricHandle cu_mem_fabric_handle;
+};
+
+struct MemHandle {
+    MemHandleInner inner;
+    size_t size;
+};
+
+constexpr size_t HANDLE_SIZE = sizeof(MemHandle);
+
+class SharedMemoryAllocator {
+public:
+    SharedMemoryAllocator(bool use_fabric);
+    void malloc(void** ptr, size_t size);
+    void free(void* ptr);
+    void get_mem_handle(MemHandle* mem_handle, void* ptr);
+    void open_mem_handle(void** ptr, MemHandle* mem_handle);
+    void close_mem_handle(void* ptr);
+
+private:
+    bool use_fabric;
+};
+}  // namespace shared_memory
+
 namespace deep_ep {
 
 struct Buffer {
@@ -48,7 +76,7 @@ private:
     int num_device_sms;
     int rank, rdma_rank, nvl_rank;
     int num_ranks, num_rdma_ranks, num_nvl_ranks;
-    cudaIpcMemHandle_t ipc_handles[NUM_MAX_NVL_PEERS];
+    shared_memory::MemHandle ipc_handles[NUM_MAX_NVL_PEERS];
 
     // Stream for communication
     at::cuda::CUDAStream comm_stream;
@@ -80,8 +108,17 @@ private:
     volatile int* moe_recv_rdma_counter = nullptr;
     int* moe_recv_rdma_counter_mapped = nullptr;
 
+    shared_memory::SharedMemoryAllocator shared_memory_allocator;
+
 public:
-    Buffer(int rank, int num_ranks, int64_t num_nvl_bytes, int64_t num_rdma_bytes, bool low_latency_mode,bool disable_nvlink_for_normal_mode, bool explicitly_destroy);
+    Buffer(int rank,
+           int num_ranks,
+           int64_t num_nvl_bytes,
+           int64_t num_rdma_bytes,
+           bool low_latency_mode,
+           bool disable_nvlink_for_normal_mode,
+           bool explicitly_destroy,
+           bool use_fabric);
 
     ~Buffer() noexcept(false);
 

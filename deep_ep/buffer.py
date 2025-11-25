@@ -36,6 +36,7 @@ class Buffer:
                  allow_nvlink_for_normal_mode: bool = True,
                  allow_nvlink_for_low_latency_mode: bool = True,
                  allow_mnnvl: bool = False,
+                 use_fabric: bool = False,
                  explicitly_destroy: bool = False,
                  comm: Optional["mpi4py.MPI.Comm"] = None) -> None:
         """
@@ -54,6 +55,7 @@ class Buffer:
                 Warning: PCIe connections may lead to errors due to memory ordering issues,
                 please make sure all connections are via NVLink.
             allow_mnnvl: whether to allow MNNVL
+            use_fabric: whether to use fabric API for memory buffers.
             explicitly_destroy: If this flag is set to True, you need to explicitly call `destroy()` to release resources;
                 otherwise, the resources will be released by the destructor.
                 Note: Releasing resources in the destructor may cause Python's exception handling process to hang.
@@ -86,7 +88,8 @@ class Buffer:
         self.low_latency_mode = low_latency_mode
         self.disable_nvlink_for_normal_mode = not allow_nvlink_for_normal_mode
         self.explicitly_destroy = explicitly_destroy
-        self.runtime = deep_ep_cpp.Buffer(self.rank, self.group_size, num_nvl_bytes, num_rdma_bytes, low_latency_mode, self.disable_nvlink_for_normal_mode,explicitly_destroy)
+        self.runtime = deep_ep_cpp.Buffer(self.rank, self.group_size, num_nvl_bytes, num_rdma_bytes, low_latency_mode, 
+                                          self.disable_nvlink_for_normal_mode,explicitly_destroy, use_fabric)
 
         # Synchronize device IDs
         local_device_id = self.runtime.get_local_device_id()
@@ -684,9 +687,9 @@ class Buffer:
                 `[num_local_experts, num_max_dispatch_tokens_per_rank * num_ranks, hidden // 512]` with type `torch.int`.
                 Notice that, the last-two-dimension of the scaling tensors are in column-major for TMA compatibility.
                 with `use_nvfp4=True`: the first element is a `torch.Tensor` shaped as
-                `[num_local_experts, hidden // 2, num_max_dispatch_tokens_per_rank * num_ranks]` with `torch.uint8`.
+                `[num_max_dispatch_tokens_per_rank * num_ranks, hidden // 2, num_local_experts]` with `torch.uint8`.
                 The second tensor is the corresponding scales for the first element with shape
-                `[32, 4, num_max_dispatch_tokens_per_rank * num_ranks // 128, 4, hidden // 64, num_local_experts]` with `torch.uint8`.
+                `[32, 4, num_max_dispatch_tokens_per_rank * num_ranks // 128, 4, hidden // 64, num_local_experts]` with `torch.float8_e4m3fn`.
                 With `use_fp8=False and use_nvfp4=False`, the result would be a tensor shaped as
                 `[num_local_experts, num_max_dispatch_tokens_per_rank * num_ranks, hidden]` with `torch.bfloat16`.
                 Moreover, not all tokens are valid, only some of the `num_max_dispatch_tokens_per_rank * num_ranks` are,
