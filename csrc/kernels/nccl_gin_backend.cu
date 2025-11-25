@@ -6,15 +6,26 @@
 #include <stdexcept>
 #include <vector>
 
-#include "comm.h"  // For access to ncclComm internal structure
 #include "configs.cuh"
 #include "cuda_runtime.h"
 #include "exception.cuh"
 #include "nccl.h"
+#include "nccl_device/core.h"  // For NCCL_DEV_COMM_REQUIREMENTS_INITIALIZER
 #include "nccl_device/gin.h"
-#include "nccl_device/gin/gin_device_api.h"  // Only include device API in .cu files
+#include "nccl_device/gin/gin_device_api.h"
 #include "nccl_gin_backend.h"
 #include "utils.cuh"
+
+// NCCL error checking macro - pattern from official NCCL examples
+// See: nccl/examples/common/include/nccl_utils.h
+#define NCCLCHECK(cmd) do {                                      \
+  ncclResult_t res = cmd;                                        \
+  if (res != ncclSuccess) {                                      \
+    fprintf(stderr, "DeepEP NCCL error %s:%d '%s'\n",            \
+        __FILE__,__LINE__,ncclGetErrorString(res));              \
+    throw std::runtime_error("NCCL operation failed");           \
+  }                                                              \
+} while(0)
 
 // Use NCCL's NCCLCHECK for functions that can return errors
 
@@ -90,10 +101,6 @@ int NCCLGINBackend::init(const std::vector<uint8_t>& root_unique_id_val, int ran
                    num_ranks);
         }
 
-        // Configure NCCL with GIN support
-        ncclConfig_t config = NCCL_CONFIG_INITIALIZER;
-        config.blocking = 1;
-
         // Get current device
         int current_device = -1;
         CUDA_CHECK(cudaGetDevice(&current_device));
@@ -126,19 +133,19 @@ int NCCLGINBackend::init(const std::vector<uint8_t>& root_unique_id_val, int ran
             }
             std::memcpy(&id, root_unique_id_val.data() + id_offset, single_id_size);
 
-            NCCLCHECK(ncclCommInitRankConfig(&nccl_comms_[i], comm_nranks, id, comm_rank, &config));
-            cudaGetLastError();  // Clear any pending errors
-
-            NCCLCHECK(ncclGinConnectOnce(nccl_comms_[i]));
+            // Initialize NCCL communicator using public API (no config needed for GIN)
+            // GIN support is automatically available in the communicator
+            NCCLCHECK(ncclCommInitRank(&nccl_comms_[i], comm_nranks, id, comm_rank));
             cudaGetLastError();  // Clear any pending errors
         }
 
         if (rank == 0)
             printf("[NCCL GIN Backend] Rank %d successfully initialized %d communicator(s)\n", comm_rank, num_comms_);
 
-        // Verify NCCL allocated enough contexts for our usage
+        // Verify we have communicators initialized
+        // Note: We assume NCCL GIN provides NCCL_GIN_NUM_CONTEXTS_PER_COMM (4) contexts per communicator
+        // This is a build-time configuration in NCCL GIN
         EP_HOST_ASSERT(num_comms_ > 0);
-        EP_HOST_ASSERT(nccl_comms_[0]->sharedRes->ginState.ginCommCount >= NCCL_GIN_NUM_CONTEXTS_PER_COMM);
 
         // Allocate signals per context per buffer (double buffered total)
         // Only Low Latency mode uses dispatch signals
@@ -170,7 +177,7 @@ int NCCLGINBackend::init(const std::vector<uint8_t>& root_unique_id_val, int ran
         dcomms_ = new ncclDevComm_t[num_comms_];
         for (int c = 0; c < num_comms_; ++c) {
             dcomms_[c] = ncclDevComm_t{};  // Initialize to default
-            ncclDevCommRequirements reqs = {};
+            ncclDevCommRequirements reqs = NCCL_DEV_COMM_REQUIREMENTS_INITIALIZER;
             reqs.barrierCount = MAX_BARRIER_SESSIONS;
             reqs.ginSignalCount = num_total_signals_ + MAX_BARRIER_SESSIONS;
             reqs.ginForceEnable = true;
@@ -245,7 +252,6 @@ void NCCLGINBackend::finalize() {
             // Destroy all communicators
             for (auto& c : nccl_comms_) {
                 if (c) {
-                    ncclGinFinalize(c);
                     ncclCommFinalize(c);
                     ncclCommDestroy(c);
                 }

@@ -1,4 +1,5 @@
 import os
+import sys
 import subprocess
 import setuptools
 import importlib
@@ -74,25 +75,20 @@ if __name__ == '__main__':
                 include_dirs.append(nccl_gin_src_include)
                 print(f'Added NCCL GIN src include: {nccl_gin_src_include}')
 
-                # Add plugin subdirectory for nccl_tuner.h
-                # FIXME why is this needed?
-                nccl_gin_plugin_include = f'{nccl_gin_src_include}/plugin'
-                if os.path.exists(nccl_gin_plugin_include):
-                    include_dirs.append(nccl_gin_plugin_include)
-                    print(f'Added NCCL GIN plugin include: {nccl_gin_plugin_include}')
-
             # Add NCCL GIN library path
             nccl_gin_lib = f'{nccl_gin_home}/build/lib'
             if os.path.exists(nccl_gin_lib):
                 library_dirs.append(nccl_gin_lib)
                 print(f'Added NCCL GIN library directory: {nccl_gin_lib}')
+                # Add rpath to ensure NCCL GIN is used at runtime
+                extra_link_args.extend([f'-Wl,-rpath,{nccl_gin_lib}'])
+                print(f'Added NCCL GIN rpath: {nccl_gin_lib}')
 
             sources.extend(['csrc/kernels/nccl_gin_backend.cu'])  # FIXME: this should add internode.cu and internode_ll.cu
 
-            # Add NCCL linking
-            extra_link_args.extend(['-lnccl', '-lnccl_static', '-Wl,--allow-multiple-definition'])
-            print('Added NCCL GIN library linking: -lnccl -lnccl_static')
-            print('Added linker flag: -Wl,--allow-multiple-definition')
+            # Add NCCL linking - dynamic only for external applications
+            extra_link_args.extend([f'-L{nccl_gin_lib}', '-lnccl'])
+            print('Added NCCL GIN library linking: -lnccl (dynamic)')
 
             if not os.path.exists(nccl_gin_build_include) and not os.path.exists(nccl_gin_src_include):
                 print(f'Warning: NCCL GIN include directories not found in {nccl_gin_home}')

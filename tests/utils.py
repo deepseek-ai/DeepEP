@@ -47,7 +47,7 @@ def init_dist(local_rank: int, num_local_ranks: int):
 
     sig = inspect.signature(dist.init_process_group)
     # Allow backend to be configured via environment variable
-    backend = os.getenv('TORCH_DISTRIBUTED_BACKEND', 'gloo')
+    backend = os.getenv('TORCH_DISTRIBUTED_BACKEND', 'nccl')
     params = {
         'backend': backend,
         'init_method': f'tcp://{ip}:{port}',
