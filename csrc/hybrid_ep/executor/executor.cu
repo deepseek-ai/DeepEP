@@ -49,7 +49,7 @@ Executor::metadata_preprocess_core(
   return std::make_tuple(sparse_to_dense_map, rdma_to_attn_map, attn_to_rdma_map, num_of_tokens_for_experts, local_expert_routing_map);
 }
 
-void Executor::dispatch_preprocess(HybridEpConfigInstance config, DispatchBuffers& dispatch_buffers, DispatchArgs& args) {
+std::tuple<torch::Tensor, torch::Tensor> Executor::dispatch_preprocess(HybridEpConfigInstance config, DispatchBuffers& dispatch_buffers, DispatchArgs& args) {
     nvtxRangePushA("dispatch_preprocess in hybrid-ep");
     if(config.num_of_nodes > 1) {
 #ifdef HYBRID_EP_BUILD_MULTINODE_ENABLE
@@ -70,7 +70,41 @@ void Executor::dispatch_preprocess(HybridEpConfigInstance config, DispatchBuffer
         dispatch_buffers.attn_input_prob = (config.forward_dispatch_api) ? args.probs.data_ptr() : nullptr;
         dispatch_buffers.attn_input_scaling_factor = (config.token_data_type == APP_TOKEN_DATA_TYPE::UINT8) ? args.scaling_factor.data_ptr() : nullptr;
     }
+
+    torch::Tensor row_id_map;
+    torch::Tensor tokens_per_expert;
+
+    if(args.enable_permute) {
+        if(args.row_id_map.has_value()){
+            assert(args.num_permuted_tokens >= 0);
+            row_id_map = args.row_id_map.value();
+        } else {
+            assert(args.local_expert_routing_map.has_value());
+            std::tie(row_id_map, tokens_per_expert) = permute_processing(
+                args.local_expert_routing_map.value().data_ptr<bool>(), 
+                args.num_dispatched_tokens_tensor.value(),
+                args.max_num_dispatched_tokens, 
+                config.num_of_experts_per_rank, 
+                args.pad_multiple, 
+                args.stream
+            );
+            args.row_id_map = row_id_map;
+
+            // If we want to put the tokens_per_expert/num_dispatched_tokens_tensor can be used in the host, we need to synchronize the stream.
+            if (args.use_host_meta) {
+                cudaStreamSynchronize(args.stream);
+                if (args.num_permuted_tokens < 0) {
+                    args.num_permuted_tokens = tokens_per_expert.sum().item<int64_t>();
+                }
+                if (args.num_dispatched_tokens < 0) {
+                    args.num_dispatched_tokens = args.num_dispatched_tokens_tensor.value().item<int64_t>();
+                }
+            }
+        }
+    }
     nvtxRangePop();  // End of dispatch_preprocess nvtx range
+
+    return std::make_tuple(row_id_map, tokens_per_expert);
 }
 
 template void Executor::dispatch_core<uint8_t>(HybridEpConfigInstance config, DispatchBuffers& dispatch_buffers, DispatchArgs& args);
@@ -124,7 +158,7 @@ void Executor::dispatch_core(HybridEpConfigInstance config, DispatchBuffers& dis
     nvtxRangePop();  // End of dispatch_core nvtx range
 }
 
-std::tuple<torch::Tensor, c10::optional<torch::Tensor>, c10::optional<torch::Tensor>, torch::Tensor, torch::Tensor>
+std::tuple<torch::Tensor, c10::optional<torch::Tensor>, c10::optional<torch::Tensor> >
 Executor::dispatch_postprocess(HybridEpConfigInstance config, DispatchBuffers& dispatch_buffers, DispatchArgs& args) {
     nvtxRangePushA("dispatch_postprocess in hybrid-ep");
 
@@ -133,49 +167,19 @@ Executor::dispatch_postprocess(HybridEpConfigInstance config, DispatchBuffers& d
     torch::Tensor dispatched_tokens;
     c10::optional<torch::Tensor> dispatched_probs;
     c10::optional<torch::Tensor> dispatched_scaling_factor;
-    // Possible ouput from the permute part
-    torch::Tensor row_id_map, tokens_per_expert;
 
     if(args.enable_permute) {
         // Use permute kernel to avoid standalone D2D memory copy
         assert(args.num_dispatched_tokens_tensor.has_value());
-
-        if (args.row_id_map.has_value()) {
-          // The row_id_map is valid, which means that the cached model is used.
-          // Then we will use the values in args directly.
-          assert(args.num_permuted_tokens >= 0);
-          row_id_map = args.row_id_map.value();
-        } else {
-          // Otherwise, we will compute the row_id_map/tokens_per_expert by preprocessing kernel.
-          assert(args.local_expert_routing_map.has_value());
-    
-          std::tie(row_id_map, tokens_per_expert) = permute_processing(
-              args.local_expert_routing_map.value().data_ptr<bool>(), 
-              args.num_dispatched_tokens_tensor.value(),
-              args.max_num_dispatched_tokens, 
-              config.num_of_experts_per_rank, 
-              args.pad_multiple, 
-              args.stream
-            );
-    
-          // If we want to put the tokens_per_expert/num_dispatched_tokens_tensor can be used in the host, we need to synchronize the stream.
-          if (args.use_host_meta) {
-            cudaStreamSynchronize(args.stream);
-            if (args.num_permuted_tokens < 0) {
-                args.num_permuted_tokens = tokens_per_expert.sum().item<int64_t>();
-            }
-            if (args.num_dispatched_tokens < 0) {
-                args.num_dispatched_tokens = args.num_dispatched_tokens_tensor.value().item<int64_t>();
-            }
-          }
-        }
+        assert(args.row_id_map.has_value());
+        assert(args.num_permuted_tokens >= 0);
     
         // Prepare the arguments for the permute kernel
         PermuteArgs permute_args;
         permute_args.tokens_ptr = reinterpret_cast<void*>(dispatch_buffers.expert_output_token);
         permute_args.probs_ptr = reinterpret_cast<float*>(dispatch_buffers.expert_output_prob);
         permute_args.scaling_factor_ptr = reinterpret_cast<float*>(dispatch_buffers.expert_output_scaling_factor);
-        permute_args.row_id_map = row_id_map;
+        permute_args.row_id_map = args.row_id_map.value();
         permute_args.hidden_size = config.hidden_dim;
         permute_args.scales_per_token = config.hidden_dim / 128;
         permute_args.num_dispatched_token_tensor = args.num_dispatched_tokens_tensor.value();
@@ -238,7 +242,7 @@ Executor::dispatch_postprocess(HybridEpConfigInstance config, DispatchBuffers& d
     }
 
     nvtxRangePop();  // End of dispatch_postprocess nvtx range
-    return std::make_tuple(dispatched_tokens, dispatched_probs, dispatched_scaling_factor, row_id_map, tokens_per_expert);
+    return std::make_tuple(dispatched_tokens, dispatched_probs, dispatched_scaling_factor);
 }
 
 void Executor::combine_preprocess(HybridEpConfigInstance config, CombineBuffers& combine_buffers, CombineArgs& args) {

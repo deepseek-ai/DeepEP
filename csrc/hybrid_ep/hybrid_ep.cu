@@ -468,7 +468,7 @@ HybridEPBuffer::dispatch(HybridEpConfigInstance config,
   }else {
     throw std::runtime_error("Invalid token data type:" +  std::to_string(static_cast<int>(config.token_data_type)));
   }
-  auto [dispatched_tokens, dispatched_probs, dispatched_scaling_factor, row_id_map, tokens_per_expert] = executor.dispatch_postprocess(config, dispatch_buffers, args);
+  auto [dispatched_tokens, dispatched_probs, dispatched_scaling_factor] = executor.dispatch_postprocess(config, dispatch_buffers, args);
 
   return std::make_tuple(dispatched_tokens, dispatched_probs, dispatched_scaling_factor);
 }
@@ -580,7 +580,7 @@ HybridEPBuffer::dispatch_with_permute(HybridEpConfigInstance config,
  
  // Run the full dispatch operation
  config.forward_dispatch_api = with_probs;
- executor.dispatch_preprocess(config, dispatch_buffers, args);
+ auto [result_row_id_map, result_tokens_per_expert] = executor.dispatch_preprocess(config, dispatch_buffers, args);
  if(config.token_data_type == APP_TOKEN_DATA_TYPE::UINT8) {
    executor.dispatch_core<uint8_t>(config, dispatch_buffers, args);
  } else if (config.token_data_type == APP_TOKEN_DATA_TYPE::UINT16) {
@@ -589,7 +589,9 @@ HybridEPBuffer::dispatch_with_permute(HybridEpConfigInstance config,
    throw std::runtime_error("Invalid token data type:" +  std::to_string(static_cast<int>(config.token_data_type)));
  }
 
- return executor.dispatch_postprocess(config, dispatch_buffers, args);
+ auto [dispatched_tokens, dispatched_probs, dispatched_scaling_factor] = executor.dispatch_postprocess(config, dispatch_buffers, args);
+
+ return std::make_tuple(dispatched_tokens, dispatched_probs, dispatched_scaling_factor, result_row_id_map, result_tokens_per_expert);
 }
 
 std::tuple<torch::Tensor, torch::Tensor>

@@ -73,12 +73,13 @@ public:
         int num_of_tokens_per_rank
     );
 
-    void dispatch_preprocess(
-        HybridEpConfigInstance config, DispatchBuffers& dispatch_buffers, DispatchArgs& args); // Now is empty op, will be filled with D2D in the inter-node case
+    std::tuple<torch::Tensor, torch::Tensor> 
+    dispatch_preprocess(
+        HybridEpConfigInstance config, DispatchBuffers& dispatch_buffers, DispatchArgs& args);
     template<typename DType> 
     void dispatch_core(
         HybridEpConfigInstance config, DispatchBuffers& dispatch_buffers, DispatchArgs& args);
-    std::tuple<torch::Tensor, c10::optional<torch::Tensor>, c10::optional<torch::Tensor>, torch::Tensor, torch::Tensor> 
+    std::tuple<torch::Tensor, c10::optional<torch::Tensor>, c10::optional<torch::Tensor> > 
     dispatch_postprocess(
         HybridEpConfigInstance config, DispatchBuffers& dispatch_buffers, DispatchArgs& args); 
 
@@ -87,7 +88,7 @@ public:
     void combine_core(
         HybridEpConfigInstance config, CombineBuffers& combine_buffers, CombineArgs& args);
     void combine_postprocess(
-        HybridEpConfigInstance config, CombineBuffers& combine_buffers, CombineArgs& args); // Now is empty op, will be filled with D2D in the inter-node case
+        HybridEpConfigInstance config, CombineBuffers& combine_buffers, CombineArgs& args); 
 
 private:
     KernelCache kernel_cache;
