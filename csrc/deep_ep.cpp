@@ -132,14 +132,14 @@ Buffer::Buffer(int rank,
                bool low_latency_mode,
                bool explicitly_destroy,
                bool enable_shrink,
-               bool disable_ll_dispatch_opt,
-               bool use_fabric)
+               bool use_fabric,
+               bool disable_ll_layered)
     : rank(rank),
       num_ranks(num_ranks),
       num_nvl_bytes(num_nvl_bytes),
       num_rdma_bytes(num_rdma_bytes),
       enable_shrink(enable_shrink),
-      _disable_ll_dispatch_opt(disable_ll_dispatch_opt),
+      _disable_ll_layered(disable_ll_layered),
       low_latency_mode(low_latency_mode),
       explicitly_destroy(explicitly_destroy),
       comm_stream(at::cuda::getStreamFromPool(true)),
@@ -1501,7 +1501,7 @@ void Buffer::clean_low_latency_buffer(int num_max_dispatch_tokens_per_rank, int 
 #ifndef DISABLE_NVSHMEM
     EP_HOST_ASSERT(low_latency_mode);
 
-    auto layout = LowLatencyLayout(_disable_ll_dispatch_opt, rdma_buffer_ptr, num_max_dispatch_tokens_per_rank, hidden, num_ranks, num_experts);
+    auto layout = LowLatencyLayout(_disable_ll_layered, rdma_buffer_ptr, num_max_dispatch_tokens_per_rank, hidden, num_ranks, num_experts);
     auto clean_meta_0 = layout.buffers[0].clean_meta();
     auto clean_meta_1 = layout.buffers[1].clean_meta();
 
@@ -1573,7 +1573,7 @@ Buffer::low_latency_dispatch(const torch::Tensor& x,
     auto num_local_experts = num_experts / num_ranks;
 
     // Buffer control
-    LowLatencyLayout layout(_disable_ll_dispatch_opt, rdma_buffer_ptr, num_max_dispatch_tokens_per_rank, hidden, num_ranks, num_experts);
+    LowLatencyLayout layout(_disable_ll_layered, rdma_buffer_ptr, num_max_dispatch_tokens_per_rank, hidden, num_ranks, num_experts);
     EP_HOST_ASSERT(layout.total_bytes <= num_rdma_bytes);
     auto buffer = layout.buffers[low_latency_buffer_idx];
     auto next_buffer = layout.buffers[low_latency_buffer_idx ^= 1];
@@ -1618,7 +1618,7 @@ Buffer::low_latency_dispatch(const torch::Tensor& x,
     auto next_clean_meta = next_buffer.clean_meta();
     auto launcher = [=](int phases) {
         internode_ll::dispatch(
-            _disable_ll_dispatch_opt, 
+            _disable_ll_layered,
             packed_recv_x.data_ptr(),
             packed_recv_x_scales_ptr,
             packed_recv_src_info.data_ptr<int64_t>(),
@@ -1732,7 +1732,7 @@ std::tuple<torch::Tensor, std::optional<EventHandle>, std::optional<std::functio
     auto num_combined_tokens = static_cast<int>(topk_weights.size(0));
 
     // Buffer control
-    LowLatencyLayout layout(_disable_ll_dispatch_opt, rdma_buffer_ptr, num_max_dispatch_tokens_per_rank, hidden, num_ranks, num_experts);
+    LowLatencyLayout layout(_disable_ll_layered, rdma_buffer_ptr, num_max_dispatch_tokens_per_rank, hidden, num_ranks, num_experts);
     EP_HOST_ASSERT(layout.total_bytes <= num_rdma_bytes);
     auto buffer = layout.buffers[low_latency_buffer_idx];
     auto next_buffer = layout.buffers[low_latency_buffer_idx ^= 1];
@@ -1759,7 +1759,7 @@ std::tuple<torch::Tensor, std::optional<EventHandle>, std::optional<std::functio
     // Kernel launch
     auto next_clean_meta = next_buffer.clean_meta();
     auto launcher = [=](int phases) {
-        internode_ll::combine(_disable_ll_dispatch_opt, 
+        internode_ll::combine(_disable_ll_layered,
                               combined_x.data_ptr(),
                               buffer.combine_rdma_recv_data_buffer,
                               buffer.combine_rdma_recv_flag_buffer,
@@ -1820,7 +1820,7 @@ std::tuple<torch::Tensor, std::optional<EventHandle>, std::optional<std::functio
 
 torch::Tensor Buffer::get_next_low_latency_combine_buffer(int num_max_dispatch_tokens_per_rank, int hidden, int num_experts) const {
 #ifndef DISABLE_NVSHMEM
-    LowLatencyLayout layout(_disable_ll_dispatch_opt, rdma_buffer_ptr, num_max_dispatch_tokens_per_rank, hidden, num_ranks, num_experts);
+    LowLatencyLayout layout(_disable_ll_layered, rdma_buffer_ptr, num_max_dispatch_tokens_per_rank, hidden, num_ranks, num_experts);
 
     auto buffer = layout.buffers[low_latency_buffer_idx];
     auto dtype = torch::kBFloat16;

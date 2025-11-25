@@ -70,7 +70,7 @@ private:
 
     // Shrink mode buffer
     bool enable_shrink = false;
-    bool _disable_ll_dispatch_opt = false;
+    bool _disable_ll_layered = false;
     int* mask_buffer_ptr = nullptr;
     int* sync_buffer_ptr = nullptr;
 
@@ -121,8 +121,8 @@ public:
            bool low_latency_mode,
            bool explicitly_destroy,
            bool enable_shrink,
-           bool _disable_ll_dispatch_opt,
-           bool use_fabric);
+           bool use_fabric,
+           bool _disable_ll_layered);
 
     ~Buffer() noexcept(false);
 

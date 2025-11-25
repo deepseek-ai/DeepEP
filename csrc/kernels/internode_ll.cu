@@ -1,12 +1,10 @@
+#include <cstdint>
+
 #include "configs.cuh"
 #include "exception.cuh"
 #include "ibgda_device.cuh"
-#include "utils.cuh"
-#include <cstdint>
-#include "cooperative_groups.h"
 #include "launch.cuh"
-
-namespace cg = cooperative_groups;
+#include "utils.cuh"
 
 namespace deep_ep {
 
@@ -132,7 +130,7 @@ void clean_low_latency_buffer(int* clean_0,
 }
 
 template <bool kUseFP8, bool kUseUE8M0, int kHidden>
-__global__ __launch_bounds__(1024, 1) void dispatch(bool disable_ll_dispatch_opt,
+__global__ __launch_bounds__(1024, 1) void dispatch(bool disable_ll_layered,
                                                     void* packed_recv_x,
                                                     void* packed_recv_x_scales,
                                                     int64_t* packed_recv_src_info,
@@ -171,18 +169,18 @@ __global__ __launch_bounds__(1024, 1) void dispatch(bool disable_ll_dispatch_opt
     const auto responsible_expert_idx = sm_id * num_warp_groups + warp_group_id;
 
     const auto num_nvl_ranks = NUM_MAX_NVL_PEERS;
-    const auto num_nodes = num_ranks/num_nvl_ranks;
+    const auto num_nodes = num_ranks / num_nvl_ranks;
     int* data_ready_counter = reinterpret_cast<int*>(rdma_recv_count + num_experts);
     int* next_clean_data_ready_counter = reinterpret_cast<int*>(next_clean + num_experts);
-    auto* data_ready_send_buffer = reinterpret_cast<int*>(data_ready_counter) +
-            num_nodes * num_max_dispatch_tokens_per_rank * num_nvl_ranks;
-    if (!disable_ll_dispatch_opt) {
+    auto* data_ready_send_buffer =
+        reinterpret_cast<int*>(data_ready_counter) + num_nodes * num_max_dispatch_tokens_per_rank * num_nvl_ranks;
+    if (!disable_ll_layered) {
         if (thread_id < num_nvl_ranks) {
-            st_na_global(reinterpret_cast<int*>(data_ready_send_buffer)+thread_id, 2); // set to 1
+            st_na_global(reinterpret_cast<int*>(data_ready_send_buffer) + thread_id, 2);  // set to 2
         }
         __syncthreads();
+        EP_DEVICE_ASSERT(num_ranks % num_nvl_ranks == 0);
     }
-    EP_DEVICE_ASSERT(num_ranks % num_nvl_ranks == 0);
 
     // May extract UE8M0 from the scales
     using scale_t = std::conditional_t<kUseUE8M0, uint8_t, float>;
@@ -204,7 +202,7 @@ __global__ __launch_bounds__(1024, 1) void dispatch(bool disable_ll_dispatch_opt
     EP_DEVICE_ASSERT(num_bytes_per_msg % sizeof(int4) == 0);
     // } open dispatch opt {
     const size_t num_bytes_per_meta = sizeof(int4);
-    const size_t num_bytes_per_data =  (kUseFP8 ? (kHidden + num_scales * sizeof(float)) : (kHidden * sizeof(nv_bfloat16)));
+    const size_t num_bytes_per_data = (kUseFP8 ? (kHidden + num_scales * sizeof(float)) : (kHidden * sizeof(nv_bfloat16)));
     const size_t num_bytes_per_msg_new = num_bytes_per_meta + num_bytes_per_data;
     EP_DEVICE_ASSERT(num_bytes_per_msg_new % sizeof(int4) == 0);
 
@@ -232,7 +230,7 @@ __global__ __launch_bounds__(1024, 1) void dispatch(bool disable_ll_dispatch_opt
         for (int token_idx = sm_id; token_idx < num_tokens; token_idx += num_sms) {
             const auto x_int4 = static_cast<const int4*>(x) + token_idx * hidden_bf16_int4;
             auto rdma_x_src_idx = reinterpret_cast<int*>(static_cast<uint8_t*>(rdma_x) + token_idx * num_bytes_per_msg);
-            if (!disable_ll_dispatch_opt) {
+            if (!disable_ll_layered) {
                 rdma_x_src_idx = reinterpret_cast<int*>(static_cast<uint8_t*>(rdma_x) + token_idx * num_bytes_per_msg_new);
             }
             const auto rdma_x_vec = reinterpret_cast<vec_t*>(reinterpret_cast<uint8_t*>(rdma_x_src_idx) + sizeof(int4));
@@ -285,52 +283,62 @@ __global__ __launch_bounds__(1024, 1) void dispatch(bool disable_ll_dispatch_opt
 
             // Issue IBGDA sends
             if (dst_expert_idx >= 0) {
-                int send_node_id = dst_expert_idx >= 0 ? dst_expert_idx/num_local_experts/num_nvl_ranks : -1;
+                int send_node_id = dst_expert_idx >= 0 ? dst_expert_idx / num_local_experts / num_nvl_ranks : -1;
                 int slot_idx = lane_id == 0 ? atomicAdd(atomic_counter_per_expert + dst_expert_idx, 1) : 0;
                 slot_idx = __shfl_sync(0xffffffff, slot_idx, 0);
                 const auto dst_rank = dst_expert_idx / num_local_experts;
                 const auto dst_expert_local_idx = dst_expert_idx % num_local_experts;
-                auto real_write_dst_rank = dst_rank / num_nvl_ranks * num_nvl_ranks + rank % num_nvl_ranks; // send data to same gpu_device_id_rank(same-rail rdma traffic)
-                auto real_dst_expert_id= real_write_dst_rank * num_local_experts + dst_expert_local_idx;
-                if (!disable_ll_dispatch_opt) {
-                    if (not is_rank_masked<true>(mask_buffer_ptr, real_write_dst_rank)) { // send token
-                        { // avoid sending repeatedly to the same node
+                auto real_write_dst_rank = dst_rank / num_nvl_ranks * num_nvl_ranks +
+                    rank % num_nvl_ranks;  // send data to same gpu_device_id_rank(same-rail rdma traffic)
+                auto real_dst_expert_id = real_write_dst_rank * num_local_experts + dst_expert_local_idx;
+                if (!disable_ll_layered) {
+                    if (not is_rank_masked<true>(mask_buffer_ptr, real_write_dst_rank)) {  // send token
+                        {                                                                  // avoid sending repeatedly to the same node
                             EP_DEVICE_ASSERT(num_topk <= 32);
-                            auto tmp_dst_expert_id = lane_id < num_topk ? static_cast<int>(__ldg(topk_idx + token_idx * num_topk + lane_id)) : -1;
-                            auto tmp_dst_node_id = tmp_dst_expert_id >= 0 ? tmp_dst_expert_id/num_local_experts/num_nvl_ranks : -1;
+                            auto tmp_dst_expert_id =
+                                lane_id < num_topk ? static_cast<int>(__ldg(topk_idx + token_idx * num_topk + lane_id)) : -1;
+                            auto tmp_dst_node_id = tmp_dst_expert_id >= 0 ? tmp_dst_expert_id / num_local_experts / num_nvl_ranks : -1;
                             #pragma unroll
-                            for (int i = 0; i < warp_id; ++ i) {
-                                auto dst_node_id = __shfl_sync(0xffffffff, tmp_dst_node_id, i); // broadcast
-                                if (dst_node_id == send_node_id) { // whether to send repeatedly
+                            for (int i = 0; i < warp_id; ++i) {
+                                auto dst_node_id = __shfl_sync(0xffffffff, tmp_dst_node_id, i);  // broadcast
+                                if (dst_node_id == send_node_id) {                               // whether to send repeatedly
                                     send_node_id = -1;
                                     break;
                                 }
                             }
                         }
 
-                        if (send_node_id != -1) { // send token
-                            const auto src_ptr = reinterpret_cast<uint64_t>(rdma_x_src_idx)+num_bytes_per_meta;
+                        if (send_node_id != -1) {  // send token
+                            const auto src_ptr = reinterpret_cast<uint64_t>(rdma_x_src_idx) + num_bytes_per_meta;
                             const auto dst_ptr = reinterpret_cast<uint64_t>(rdma_recv_x_data) +
-                                        (rank/num_nvl_ranks) * num_max_dispatch_tokens_per_rank * num_bytes_per_data +
-                                        token_idx * num_bytes_per_data;
+                                (rank / num_nvl_ranks) * num_max_dispatch_tokens_per_rank * num_bytes_per_data +
+                                token_idx * num_bytes_per_data;
                             const auto dst_p2p_ptr = nvshmemi_get_p2p_ptr(dst_ptr, rank, real_write_dst_rank);
-                            if (dst_p2p_ptr == 0) { // one token only send once to a node
-                                nvshmemi_ibgda_put_nbi_warp(dst_ptr, src_ptr, num_bytes_per_data, real_write_dst_rank, dst_expert_local_idx, lane_id, slot_idx);
+                            if (dst_p2p_ptr == 0) {  // one token only send once to a node
+                                nvshmemi_ibgda_put_nbi_warp(
+                                    dst_ptr, src_ptr, num_bytes_per_data, real_write_dst_rank, dst_expert_local_idx, lane_id, slot_idx);
                             } else {
                                 // NOTES: only 2 load iterations for 7K hidden with 8 unrolls
                                 const auto* src_int4_ptr = reinterpret_cast<const int4*>(src_ptr);
                                 const auto* dst_int4_ptr = reinterpret_cast<int4*>(dst_p2p_ptr);
-                                UNROLLED_WARP_COPY(7, lane_id, num_bytes_per_data/sizeof(int4), dst_int4_ptr, src_int4_ptr, ld_nc_global, st_na_global);
+                                UNROLLED_WARP_COPY(
+                                    7, lane_id, num_bytes_per_data / sizeof(int4), dst_int4_ptr, src_int4_ptr, ld_nc_global, st_na_global);
                             }
                         }
-                        if (send_node_id != -1) { // send data ready flag
+                        if (send_node_id != -1) {  // send data ready flag
                             const auto src_ptr = reinterpret_cast<uint64_t>(data_ready_send_buffer);
                             const auto data_ready_counter_ptr = reinterpret_cast<uint64_t>(data_ready_counter) +
-                                (rank/num_nvl_ranks)  * num_max_dispatch_tokens_per_rank * num_nvl_ranks * sizeof(int) +
+                                (rank / num_nvl_ranks) * num_max_dispatch_tokens_per_rank * num_nvl_ranks * sizeof(int) +
                                 token_idx * num_nvl_ranks * sizeof(int);
                             const auto data_ready_counter_p2p_ptr = nvshmemi_get_p2p_ptr(data_ready_counter_ptr, rank, real_write_dst_rank);
-                            if (data_ready_counter_p2p_ptr == 0) { // one token only send once to a node
-                                nvshmemi_ibgda_put_nbi_warp(data_ready_counter_ptr, uint64_t(src_ptr), num_nvl_ranks*sizeof(int), real_write_dst_rank, dst_expert_local_idx, lane_id, slot_idx+1);
+                            if (data_ready_counter_p2p_ptr == 0) {  // one token only send once to a node
+                                nvshmemi_ibgda_put_nbi_warp(data_ready_counter_ptr,
+                                                            uint64_t(src_ptr),
+                                                            num_nvl_ranks * sizeof(int),
+                                                            real_write_dst_rank,
+                                                            dst_expert_local_idx,
+                                                            lane_id,
+                                                            slot_idx + 1);
                             } else {
                                 const auto* src_int_ptr = reinterpret_cast<const int*>(src_ptr);
                                 const auto* dst_int_ptr = reinterpret_cast<int*>(data_ready_counter_p2p_ptr);
@@ -341,42 +349,44 @@ __global__ __launch_bounds__(1024, 1) void dispatch(bool disable_ll_dispatch_opt
                     // send meta
                     const auto src_ptr = reinterpret_cast<uint64_t>(rdma_x_src_idx);
                     const auto dst_ptr = reinterpret_cast<uint64_t>(rdma_recv_x_meta) +
-                                        dst_expert_local_idx * num_ranks * num_max_dispatch_tokens_per_rank * num_bytes_per_meta +
-                                        rank * num_max_dispatch_tokens_per_rank * num_bytes_per_meta +
-                                        slot_idx * num_bytes_per_meta;
+                        dst_expert_local_idx * num_ranks * num_max_dispatch_tokens_per_rank * num_bytes_per_meta +
+                        rank * num_max_dispatch_tokens_per_rank * num_bytes_per_meta + slot_idx * num_bytes_per_meta;
                     const auto dst_p2p_ptr = nvshmemi_get_p2p_ptr(dst_ptr, rank, dst_rank);
                     if (not is_rank_masked<true>(mask_buffer_ptr, dst_rank)) {
                         if (dst_p2p_ptr == 0) {
-                            nvshmemi_ibgda_put_nbi_warp(dst_ptr, src_ptr, num_bytes_per_meta, dst_rank, dst_expert_local_idx, lane_id, slot_idx);
+                            nvshmemi_ibgda_put_nbi_warp(
+                                dst_ptr, src_ptr, num_bytes_per_meta, dst_rank, dst_expert_local_idx, lane_id, slot_idx);
                         } else {
                             // NOTES: only 2 load iterations for 7K hidden with 8 unrolls
                             const auto* src_int4_ptr = reinterpret_cast<const int4*>(src_ptr);
                             const auto* dst_int4_ptr = reinterpret_cast<int4*>(dst_p2p_ptr);
-                            UNROLLED_WARP_COPY(1, lane_id, num_bytes_per_meta/sizeof(int4), dst_int4_ptr, src_int4_ptr, ld_nc_global, st_na_global);
+                            UNROLLED_WARP_COPY(
+                                1, lane_id, num_bytes_per_meta / sizeof(int4), dst_int4_ptr, src_int4_ptr, ld_nc_global, st_na_global);
                         }
                     }
                 }
-                if (disable_ll_dispatch_opt) {
-                const auto src_ptr = reinterpret_cast<uint64_t>(rdma_x_src_idx);
-                const auto dst_ptr = reinterpret_cast<uint64_t>(rdma_recv_x) +
-                    dst_expert_local_idx * num_ranks * num_max_dispatch_tokens_per_rank * num_bytes_per_msg +
-                    rank * num_max_dispatch_tokens_per_rank * num_bytes_per_msg + slot_idx * num_bytes_per_msg;
-                const auto dst_p2p_ptr = nvshmemi_get_p2p_ptr(dst_ptr, rank, dst_rank);
-                if (not is_rank_masked<true>(mask_buffer_ptr, dst_rank)) {
-                    if (dst_p2p_ptr == 0) {
-                        nvshmemi_ibgda_put_nbi_warp(dst_ptr, src_ptr, num_bytes_per_msg, dst_rank, dst_expert_local_idx, lane_id, slot_idx);
-                    } else {
-                        // NOTES: only 2 load iterations for 7K hidden with 8 unrolls
-                        const auto* src_int4_ptr = reinterpret_cast<const int4*>(src_ptr);
-                        const auto* dst_int4_ptr = reinterpret_cast<int4*>(dst_p2p_ptr);
-                        UNROLLED_WARP_COPY(8, lane_id, num_int4_per_msg, dst_int4_ptr, src_int4_ptr, ld_nc_global, st_na_global);
+                if (disable_ll_layered) {
+                    const auto src_ptr = reinterpret_cast<uint64_t>(rdma_x_src_idx);
+                    const auto dst_ptr = reinterpret_cast<uint64_t>(rdma_recv_x) +
+                        dst_expert_local_idx * num_ranks * num_max_dispatch_tokens_per_rank * num_bytes_per_msg +
+                        rank * num_max_dispatch_tokens_per_rank * num_bytes_per_msg + slot_idx * num_bytes_per_msg;
+                    const auto dst_p2p_ptr = nvshmemi_get_p2p_ptr(dst_ptr, rank, dst_rank);
+                    if (not is_rank_masked<true>(mask_buffer_ptr, dst_rank)) {
+                        if (dst_p2p_ptr == 0) {
+                            nvshmemi_ibgda_put_nbi_warp(
+                                dst_ptr, src_ptr, num_bytes_per_msg, dst_rank, dst_expert_local_idx, lane_id, slot_idx);
+                        } else {
+                            // NOTES: only 2 load iterations for 7K hidden with 8 unrolls
+                            const auto* src_int4_ptr = reinterpret_cast<const int4*>(src_ptr);
+                            const auto* dst_int4_ptr = reinterpret_cast<int4*>(dst_p2p_ptr);
+                            UNROLLED_WARP_COPY(8, lane_id, num_int4_per_msg, dst_int4_ptr, src_int4_ptr, ld_nc_global, st_na_global);
+                        }
                     }
-                }
                 }
                 // Increase counter after finishing
                 __syncwarp();
                 lane_id == 0 ? atomic_add_release_global(atomic_finish_counter_per_expert + dst_expert_idx, 1) : 0;
-                if (!disable_ll_dispatch_opt) {
+                if (!disable_ll_layered) {
                     lane_id == 0 ? atomic_add_release_global(atomic_finish_counter_per_expert + real_dst_expert_id, 1) : 0;
                 }
             }
@@ -386,7 +396,7 @@ __global__ __launch_bounds__(1024, 1) void dispatch(bool disable_ll_dispatch_opt
         if (sm_id == 0) {
             // The first SM is also responsible for checking QPs
             EP_DEVICE_ASSERT(ibgda_get_state()->num_rc_per_pe >= num_local_experts);
-            if (disable_ll_dispatch_opt) {
+            if (disable_ll_layered) {
                 // The first SM is also responsible for cleaning the next buffer
                 #pragma unroll
                 for (int i = lane_id; i < num_next_clean_int; i += 32)
@@ -412,15 +422,15 @@ __global__ __launch_bounds__(1024, 1) void dispatch(bool disable_ll_dispatch_opt
             auto idx = static_cast<int>(__ldg(topk_idx + i));
             if (idx >= expert_begin_idx and idx < expert_end_idx)
                 expert_count[idx - expert_begin_idx]++;
-            if (!disable_ll_dispatch_opt) { // only open ll dispatch opt, should do
+            if (!disable_ll_layered) {  // only open ll dispatch opt, should do
                 if (idx < 0)
                     continue;
                 const auto dst_rank = idx / num_local_experts;
                 const auto dst_expert_local_idx = idx % num_local_experts;
                 auto real_write_dst_rank = dst_rank / num_nvl_ranks * num_nvl_ranks + rank % num_nvl_ranks;
-                auto real_dst_expert_id= real_write_dst_rank * num_local_experts + dst_expert_local_idx;
+                auto real_dst_expert_id = real_write_dst_rank * num_local_experts + dst_expert_local_idx;
                 if (real_dst_expert_id >= expert_begin_idx and real_dst_expert_id < expert_end_idx)
-                    waiting_flag[real_dst_expert_id - expert_begin_idx] ++;
+                    waiting_flag[real_dst_expert_id - expert_begin_idx]++;
             }
         }
 
@@ -429,7 +439,7 @@ __global__ __launch_bounds__(1024, 1) void dispatch(bool disable_ll_dispatch_opt
         for (int i = expert_begin_idx; i < expert_end_idx; ++i) {
             auto sum = warp_reduce_sum(expert_count[i - expert_begin_idx]);
             auto waiting_flag_sum = 0;
-            if (!disable_ll_dispatch_opt) { // only open ll dispatch opt, should do
+            if (!disable_ll_layered) {  // only open ll dispatch opt, should do
                 waiting_flag_sum = warp_reduce_sum(waiting_flag[i - expert_begin_idx]);
             }
             if (lane_id == 0) {
@@ -439,25 +449,25 @@ __global__ __launch_bounds__(1024, 1) void dispatch(bool disable_ll_dispatch_opt
         }
     }
 
-    if (!disable_ll_dispatch_opt and sm_id == num_sms-1) { // only open ll dispatch opt, should do
+    if (!disable_ll_layered and sm_id == num_sms - 1) {  // only open ll dispatch opt, should do
         // The first SM is also responsible for cleaning the next buffer
         #pragma unroll
-        for (int i = thread_id; i < num_experts; i += blockDim.x) // clean for combine
+        for (int i = thread_id; i < num_experts; i += blockDim.x)  // clean for combine
             next_clean[i] = 0;
         // clean data ready flag
         #pragma unroll 8
-        for (int i = thread_id; i < num_max_dispatch_tokens_per_rank*num_ranks; i += blockDim.x) {
-            int token_idx = i/num_ranks;
-            int rank_id = i%num_ranks;
+        for (int i = thread_id; i < num_max_dispatch_tokens_per_rank * num_ranks; i += blockDim.x) {
+            int token_idx = i / num_ranks;
+            int rank_id = i % num_ranks;
             {
-                auto node_id = rank_id/num_nvl_ranks;
-                auto nvl_rank_id = rank_id%num_nvl_ranks;
+                auto node_id = rank_id / num_nvl_ranks;
+                auto nvl_rank_id = rank_id % num_nvl_ranks;
                 auto* data_ready_flag_ptr = reinterpret_cast<int*>(next_clean_data_ready_counter) +
-                    node_id * num_max_dispatch_tokens_per_rank * num_nvl_ranks +
-                    token_idx * num_nvl_ranks +
-                    rank % num_nvl_ranks;
-                EP_DEVICE_ASSERT(data_ready_flag_ptr-next_clean_data_ready_counter < num_max_dispatch_tokens_per_rank*num_nodes*num_nvl_ranks*sizeof(int));
-                const auto data_ready_p2p_src_ptr = nvshmemi_get_p2p_ptr(uint64_t(data_ready_flag_ptr), rank, rank/num_nvl_ranks*num_nvl_ranks + nvl_rank_id);
+                    node_id * num_max_dispatch_tokens_per_rank * num_nvl_ranks + token_idx * num_nvl_ranks + rank % num_nvl_ranks;
+                EP_DEVICE_ASSERT(data_ready_flag_ptr - next_clean_data_ready_counter <
+                                 num_max_dispatch_tokens_per_rank * num_nodes * num_nvl_ranks * sizeof(int));
+                const auto data_ready_p2p_src_ptr =
+                    nvshmemi_get_p2p_ptr(uint64_t(data_ready_flag_ptr), rank, rank / num_nvl_ranks * num_nvl_ranks + nvl_rank_id);
                 reinterpret_cast<int*>(data_ready_p2p_src_ptr)[0] = 0;
             }
         }
@@ -512,15 +522,15 @@ LOW_LATENCY_DISPATCH_RECV:
         const auto src_rank = responsible_expert_idx / num_local_experts;
         const auto local_expert_idx = responsible_expert_idx % num_local_experts;
         uint8_t* rdma_recv_x_uint8 = nullptr;
-        if (disable_ll_dispatch_opt) {
+        if (disable_ll_layered) {
             rdma_recv_x_uint8 = static_cast<uint8_t*>(rdma_recv_x) +
                 local_expert_idx * num_ranks * num_max_dispatch_tokens_per_rank * num_bytes_per_msg +
                 src_rank * num_max_dispatch_tokens_per_rank * num_bytes_per_msg;
         }
-        if (!disable_ll_dispatch_opt) {
+        if (!disable_ll_layered) {
             rdma_recv_x_uint8 = static_cast<uint8_t*>(rdma_recv_x_meta) +
-                    local_expert_idx * num_ranks * num_max_dispatch_tokens_per_rank * num_bytes_per_meta +
-                    src_rank * num_max_dispatch_tokens_per_rank * num_bytes_per_meta;
+                local_expert_idx * num_ranks * num_max_dispatch_tokens_per_rank * num_bytes_per_meta +
+                src_rank * num_max_dispatch_tokens_per_rank * num_bytes_per_meta;
         }
         const auto recv_x_int4 =
             static_cast<int4*>(packed_recv_x) + local_expert_idx * num_ranks * num_max_dispatch_tokens_per_rank * hidden_int4;
@@ -582,8 +592,8 @@ LOW_LATENCY_DISPATCH_RECV:
         EP_DEVICE_ASSERT(num_scales <= 64);
         for (int i = sub_warp_id; i < num_recv_tokens; i += num_warps_per_group) {
             // Copy source info
-            int4 * src_data = nullptr;
-            if (!disable_ll_dispatch_opt) {
+            int4* src_data = nullptr;
+            if (!disable_ll_layered) {
                 const auto src_src_idx = reinterpret_cast<int*>(rdma_recv_x_uint8 + i * num_bytes_per_meta);
                 int src_token_idx = 0;
                 if (lane_id == 0) {
@@ -592,29 +602,35 @@ LOW_LATENCY_DISPATCH_RECV:
                 }
                 src_token_idx = __shfl_sync(0xffffffff, src_token_idx, 0);
                 const auto data_ready_flag_src_ptr = reinterpret_cast<int*>(data_ready_counter) +
-                                (src_rank/num_nvl_ranks) * num_max_dispatch_tokens_per_rank * num_nvl_ranks +
-                                src_token_idx * num_nvl_ranks +
-                                rank % num_nvl_ranks;
-                const auto src_data_ready_flag_p2p_ptr = reinterpret_cast<int*>(nvshmemi_get_p2p_ptr(uint64_t(data_ready_flag_src_ptr), rank, real_read_src_rank));
-                if (lane_id ==0 ) {
+                    (src_rank / num_nvl_ranks) * num_max_dispatch_tokens_per_rank * num_nvl_ranks + src_token_idx * num_nvl_ranks +
+                    rank % num_nvl_ranks;
+                const auto src_data_ready_flag_p2p_ptr =
+                    reinterpret_cast<int*>(nvshmemi_get_p2p_ptr(uint64_t(data_ready_flag_src_ptr), rank, real_read_src_rank));
+                if (lane_id == 0) {
                     int tmp = 0;
                     auto start_time = clock64();
-                    while (tmp != 2){ // wait for data to be ready
+                    while (tmp != 2) {  // wait for data to be ready
                         tmp = ld_acquire_sys_global(src_data_ready_flag_p2p_ptr);
                         if (clock64() - start_time >= NUM_TIMEOUT_CYCLES) {
-                            printf("DeepEP ll dispatch recv data timeout,src_rank:%d, dst_rank: %d, real_read_src_rank:%d,src_token_idx:%d dst RDMA lane: %d, num_recv_tokens: %d\n",
-                                src_rank, rank, real_read_src_rank,src_token_idx, lane_id, num_recv_tokens);
+                            printf(
+                                "DeepEP ll dispatch recv data timeout,src_rank:%d, dst_rank: %d, real_read_src_rank:%d,src_token_idx:%d "
+                                "dst RDMA lane: %d, num_recv_tokens: %d\n",
+                                src_rank,
+                                rank,
+                                real_read_src_rank,
+                                src_token_idx,
+                                lane_id,
+                                num_recv_tokens);
                             trap();
                         }
                     }
                 }
                 __syncwarp();
                 const auto src_ptr = reinterpret_cast<uint64_t>(rdma_recv_x_data) +
-                                (src_rank/num_nvl_ranks) * num_max_dispatch_tokens_per_rank * num_bytes_per_data +
-                                src_token_idx * num_bytes_per_data;
+                    (src_rank / num_nvl_ranks) * num_max_dispatch_tokens_per_rank * num_bytes_per_data + src_token_idx * num_bytes_per_data;
                 src_data = reinterpret_cast<int4*>(nvshmemi_get_p2p_ptr(src_ptr, rank, real_read_src_rank));
             }
-            if (disable_ll_dispatch_opt) {
+            if (disable_ll_layered) {
                 const auto src_src_idx = reinterpret_cast<int*>(rdma_recv_x_uint8 + i * num_bytes_per_msg);
                 if (lane_id == 0)
                     recv_src_info[recv_token_begin_idx + i] = pack2<int, int64_t>(ld_nc_global(src_src_idx), src_rank);
@@ -653,7 +669,7 @@ LOW_LATENCY_DISPATCH_RECV:
     }
 }
 
-void dispatch(bool disable_ll_dispatch_opt,
+void dispatch(bool disable_ll_layered,
               void* packed_recv_x,
               void* packed_recv_x_scales,
               int64_t* packed_recv_src_info,
@@ -711,7 +727,7 @@ void dispatch(bool disable_ll_dispatch_opt,
             dispatch_func = dispatch<true, true, hidden>;    \
         LAUNCH_KERNEL(&cfg,                                  \
                       dispatch_func,                         \
-                      disable_ll_dispatch_opt,               \
+                      disable_ll_layered,                    \
                       packed_recv_x,                         \
                       packed_recv_x_scales,                  \
                       packed_recv_src_info,                  \
@@ -906,7 +922,7 @@ __forceinline__ __device__ void decode_and_accumulate(
 }
 
 template <bool kUseLogFMT, int kHidden, int kNumMaxTopk, int kNumMaxUnrolls>
-__global__ __launch_bounds__(1024, 1) void combine(bool disable_ll_dispatch_opt,
+__global__ __launch_bounds__(1024, 1) void combine(bool disable_ll_layered,
                                                    void* combined_x,
                                                    void* rdma_recv_x,
                                                    int* rdma_recv_flag,
@@ -984,25 +1000,25 @@ __global__ __launch_bounds__(1024, 1) void combine(bool disable_ll_dispatch_opt,
         goto LOW_LATENCY_COMBINE_RECV;
 
     // Clean up next buffer
-    if (!disable_ll_dispatch_opt and sm_id == num_sms-1) {
+    if (!disable_ll_layered and sm_id == num_sms - 1) {
         #pragma unroll
         for (int i = thread_id; i < num_experts; i += num_threads)
             next_clean[i] = 0;
 
         // clean data ready flag
         #pragma unroll 8
-        for (int i = thread_id; i < num_max_dispatch_tokens_per_rank*num_ranks; i += num_threads) {
-            int token_idx = i/num_ranks;
-            int rank_id = i%num_ranks;
+        for (int i = thread_id; i < num_max_dispatch_tokens_per_rank * num_ranks; i += num_threads) {
+            int token_idx = i / num_ranks;
+            int rank_id = i % num_ranks;
             {
-                auto node_id = rank_id/num_nvl_ranks;
-                auto nvl_rank_id = rank_id%num_nvl_ranks;
+                auto node_id = rank_id / num_nvl_ranks;
+                auto nvl_rank_id = rank_id % num_nvl_ranks;
                 auto* data_ready_flag_ptr = reinterpret_cast<int*>(next_clean_data_ready_counter) +
-                    node_id * num_max_dispatch_tokens_per_rank * num_nvl_ranks +
-                    token_idx * num_nvl_ranks +
-                    rank % num_nvl_ranks;
-                EP_DEVICE_ASSERT(data_ready_flag_ptr-next_clean_data_ready_counter < num_max_dispatch_tokens_per_rank*num_nodes*num_nvl_ranks*sizeof(int));
-                const auto data_ready_p2p_src_ptr = nvshmemi_get_p2p_ptr(uint64_t(data_ready_flag_ptr), rank, rank/num_nvl_ranks*num_nvl_ranks + nvl_rank_id);
+                    node_id * num_max_dispatch_tokens_per_rank * num_nvl_ranks + token_idx * num_nvl_ranks + rank % num_nvl_ranks;
+                EP_DEVICE_ASSERT(data_ready_flag_ptr - next_clean_data_ready_counter <
+                                 num_max_dispatch_tokens_per_rank * num_nodes * num_nvl_ranks * sizeof(int));
+                const auto data_ready_p2p_src_ptr =
+                    nvshmemi_get_p2p_ptr(uint64_t(data_ready_flag_ptr), rank, rank / num_nvl_ranks * num_nvl_ranks + nvl_rank_id);
                 reinterpret_cast<int*>(data_ready_p2p_src_ptr)[0] = 0;
             }
         }
@@ -1011,7 +1027,7 @@ __global__ __launch_bounds__(1024, 1) void combine(bool disable_ll_dispatch_opt,
         if (thread_id == 0)
             atomic_add_release_global(atomic_clean_flag, num_experts);
     }
-    if (disable_ll_dispatch_opt) {
+    if (disable_ll_layered) {
         if (sm_id == 0 and warp_group_id == 0 and sub_warp_id == 0) {
             #pragma unroll
             for (int i = lane_id; i < num_next_clean_int; i += 32)
@@ -1033,20 +1049,19 @@ __global__ __launch_bounds__(1024, 1) void combine(bool disable_ll_dispatch_opt,
             shared_local_expert_idx = 0;
             #pragma unroll
             for (int i = 1; i < num_local_experts; i++) {
-                shared_vaild_signal_prefix_sum[i] = shared_vaild_signal_prefix_sum[i-1] + 
-                                                    (packed_recv_count[i] == 0 ? 1 : ceil_div(packed_recv_count[i], block_m));
+                shared_vaild_signal_prefix_sum[i] =
+                    shared_vaild_signal_prefix_sum[i - 1] + (packed_recv_count[i] == 0 ? 1 : ceil_div(packed_recv_count[i], block_m));
             }
-            shared_vaild_signal_sum = shared_vaild_signal_prefix_sum[num_local_experts-1];
+            shared_vaild_signal_sum = shared_vaild_signal_prefix_sum[num_local_experts - 1];
         }
         __syncthreads();
     }
 
     // Issue IBGDA sends, non-overlap mode only loops once
     initial_idx = overlap ? sm_id : responsible_expert_idx;
-    loop_bound  = overlap ? shared_vaild_signal_sum : num_experts;
-    step_size   = overlap ? num_sms : num_experts;
+    loop_bound = overlap ? shared_vaild_signal_sum : num_experts;
+    step_size = overlap ? num_sms : num_experts;
     for (int vaild_signal_idx = initial_idx; vaild_signal_idx < loop_bound; vaild_signal_idx += step_size) {
-
         // Find the owning local_expert_idx by scanning the prefix-sum array
         if (overlap) {
             if (sub_warp_id == 0 and lane_id == 0) {
@@ -1076,12 +1091,13 @@ __global__ __launch_bounds__(1024, 1) void combine(bool disable_ll_dispatch_opt,
         if (overlap) {
             num_tokens_per_expert = packed_recv_count[local_expert_idx];
             num_signal_per_expert = ceil_div(num_ranks * num_max_dispatch_tokens_per_rank, block_m);
-            local_expert_signal_idx = (local_expert_idx == 0) ? vaild_signal_idx : 
-                                      vaild_signal_idx - shared_vaild_signal_prefix_sum[local_expert_idx-1];
+            local_expert_signal_idx =
+                (local_expert_idx == 0) ? vaild_signal_idx : vaild_signal_idx - shared_vaild_signal_prefix_sum[local_expert_idx - 1];
             gemm_comp_signal = comp_signal + num_signal_per_expert * local_expert_idx + local_expert_signal_idx;
 
             if (sub_warp_id == 0 and lane_id == 0 and num_tokens_per_expert != 0) {
-                while (ld_acquire_global(gemm_comp_signal) != threshold);
+                while (ld_acquire_global(gemm_comp_signal) != threshold)
+                    ;
             }
             __syncthreads();
         }
@@ -1119,7 +1135,8 @@ __global__ __launch_bounds__(1024, 1) void combine(bool disable_ll_dispatch_opt,
         // Issue IBGDA send
         if (overlap or (not is_rank_masked<true>(mask_buffer_ptr, dst_rank))) {
             auto token_start_idx = overlap ? local_expert_signal_idx * block_m : offset;
-            auto token_end_idx = overlap ? min((local_expert_signal_idx + 1) * block_m, num_tokens_per_expert) : (offset + num_tokens_to_send);
+            auto token_end_idx =
+                overlap ? min((local_expert_signal_idx + 1) * block_m, num_tokens_per_expert) : (offset + num_tokens_to_send);
             for (int token_idx = sub_warp_id + token_start_idx; token_idx < token_end_idx; token_idx += num_warps_per_group) {
                 const auto x_int4 = local_x + token_idx * hidden_bf16_int4;
                 const auto rdma_send_type_row = reinterpret_cast<int*>(rdma_send_x_vec + token_idx * num_bytes_per_slot);
@@ -1203,7 +1220,7 @@ __global__ __launch_bounds__(1024, 1) void combine(bool disable_ll_dispatch_opt,
         }
 
         asm volatile("bar.sync %0, %1;" ::"r"(warp_group_id + 1), "r"(num_warps_per_group * 32));
-        
+
         auto send_finish_flag = [&](int dst_rank) {
             while (ld_acquire_global(atomic_clean_flag) == 0)
                 ;
@@ -1218,7 +1235,7 @@ __global__ __launch_bounds__(1024, 1) void combine(bool disable_ll_dispatch_opt,
             }
             atomic_add_release_global(atomic_clean_flag, -1);
         };
-        
+
         if (overlap) {
             // Put the finishing flag for overlap mode
             bool put_finish_flag = false;
@@ -1240,8 +1257,7 @@ __global__ __launch_bounds__(1024, 1) void combine(bool disable_ll_dispatch_opt,
                     atomic_finish_counter_per_expert[local_expert_idx] = 0;
             }
             __syncthreads();
-        }
-        else {
+        } else {
             // Put the finishing flag for non-overlap mode
             EP_DEVICE_ASSERT(num_warps_per_group > 1 and num_warp_groups < 16);
             if (sub_warp_id == 1 and lane_id == 0) {
@@ -1456,7 +1472,7 @@ LOW_LATENCY_COMBINE_RECV:
     }
 }
 
-void combine(bool disable_ll_dispatch_opt,
+void combine(bool disable_ll_layered,
              void* combined_x,
              void* rdma_recv_x,
              int* rdma_recv_flag,
@@ -1499,16 +1515,14 @@ void combine(bool disable_ll_dispatch_opt,
         EP_HOST_ASSERT(num_warp_groups > 0 and num_warps_per_group > 0 and num_recv_per_sm >= 0 and block_m > 0 and threshold > 0);
 
         num_warps = num_warp_groups * num_warps_per_group;
-    }
-    else {
+    } else {
         num_warp_groups = ceil_div(num_experts, num_device_sms);
         num_warps_per_group = 32 / num_warp_groups;
         num_recv_per_sm = ceil_div(num_combined_tokens, num_device_sms);
         EP_HOST_ASSERT(num_warp_groups > 0 and num_warps_per_group > 0 and num_recv_per_sm >= 0);
 
         num_warps = num_warp_groups * num_warps_per_group;
-        num_sms =
-            max(ceil_div(num_experts, num_warp_groups), num_recv_per_sm == 0 ? 1 : ceil_div(num_combined_tokens, num_recv_per_sm));
+        num_sms = max(ceil_div(num_experts, num_warp_groups), num_recv_per_sm == 0 ? 1 : ceil_div(num_combined_tokens, num_recv_per_sm));
     }
 
     // Check workspace
@@ -1548,7 +1562,7 @@ void combine(bool disable_ll_dispatch_opt,
         SET_SHARED_MEMORY_FOR_TMA(combine_func);                                                                                   \
         LAUNCH_KERNEL(&cfg,                                                                                                        \
                       combine_func,                                                                                                \
-                      disable_ll_dispatch_opt,                                                                                     \
+                      disable_ll_layered,                                                                                          \
                       combined_x,                                                                                                  \
                       rdma_recv_x,                                                                                                 \
                       rdma_recv_flag,                                                                                              \

@@ -89,12 +89,12 @@ class Buffer:
         self.low_latency_mode = low_latency_mode
         self.explicitly_destroy = explicitly_destroy
         self.enable_shrink = enable_shrink
-        disable_ll_dispatch_opt = Buffer.disable_ll_dispatch_opt()
-        if not disable_ll_dispatch_opt and enable_shrink: # 目前优化了 ll dispatch 分层算法，那么就不支持 shrink 模式了
+        disable_ll_layered = Buffer.disable_ll_layered()
+        if not disable_ll_layered and enable_shrink:  # Currently, the layered algorithm for ll dispatch has been optimized, so the shrink mode is no longer supported.
             print("DeepEP [ERROR] not support shrink, disable it", flush=True)
             enable_shrink = False
         self.runtime = deep_ep_cpp.Buffer(self.rank, self.group_size, num_nvl_bytes, num_rdma_bytes, low_latency_mode, explicitly_destroy,
-                                          enable_shrink, disable_ll_dispatch_opt, use_fabric)
+                                          enable_shrink, use_fabric, disable_ll_layered)
 
         # Synchronize device IDs
         local_device_id = self.runtime.get_local_device_id()
@@ -140,12 +140,12 @@ class Buffer:
         assert self.runtime.is_available()
 
     @staticmethod
-    def disable_ll_dispatch_opt() -> bool:
-        disable_ll_dispatch_opt = False
+    def disable_ll_layered() -> bool:
+        disable_ll_layered = False
         if int(os.environ.get('DEEPEP_DISABLE_LL_DISPATCH_OPT', '0')) == 1:
-            disable_ll_dispatch_opt = True
-        return disable_ll_dispatch_opt
-    
+            disable_ll_layered = True
+        return disable_ll_layered
+
     def destroy(self):
         """
         Destroy the cpp runtime and release resources.
@@ -197,7 +197,8 @@ class Buffer:
         Returns:
             size: the RDMA buffer size recommended.
         """
-        return deep_ep_cpp.get_low_latency_rdma_size_hint(Buffer.disable_ll_dispatch_opt(), num_max_dispatch_tokens_per_rank, hidden, num_ranks, num_experts)
+        return deep_ep_cpp.get_low_latency_rdma_size_hint(Buffer.disable_ll_layered(), num_max_dispatch_tokens_per_rank, hidden, num_ranks,
+                                                          num_experts)
 
     def get_comm_stream(self) -> torch.Stream:
         """
@@ -651,12 +652,12 @@ class Buffer:
             overlap: whether to overlap the down gemm with the combine send phase.
             packed_recv_count: a tensor shaped `[num_local_experts]` with type `torch.int`, indicating how many tokens each
                 expert receive.
-            comp_signal: `[num_local_experts * ceil_div(num_tokens * num_max_dispatch_tokens_per_rank, block_m)]` with `torch.int32`, 
-                each element indicates the processing progress of `block_m` tokens in DeepGEMM. 
-                Note that, the fixed-length tensor is used to support cuda graph, 
+            comp_signal: `[num_local_experts * ceil_div(num_tokens * num_max_dispatch_tokens_per_rank, block_m)]` with `torch.int32`,
+                each element indicates the processing progress of `block_m` tokens in DeepGEMM.
+                Note that, the fixed-length tensor is used to support cuda graph,
                 only the first `ceil_div(num_tokens * num_ranks, block_m)` elements of each local_expert are valid.
             block_m: set by DeepGEMM.
-            threshold: set by DeepGEMM. When a valid element in comp_signal reaches this threshold, it means that all the tokens 
+            threshold: set by DeepGEMM. When a valid element in comp_signal reaches this threshold, it means that all the tokens
                 corresponding to this element have been computed by DeepGEMM and can be sent.
             num_sms: the number of sms used by low_latency_combine send, only needs to be set when overlap is `True`.
             use_logfmt: whether to use an internal "LogFMT with dynamic per-64-channel cast" format (10 bits).
@@ -678,8 +679,8 @@ class Buffer:
         """
         src_info, layout_range, num_max_dispatch_tokens_per_rank, hidden, num_experts = handle
         assert self.nvshmem_qp_depth >= (num_max_dispatch_tokens_per_rank + 1) * 2
-        combined_x, event, hook = self.runtime.low_latency_combine(x, topk_idx, topk_weights, src_info, layout_range,
-                                                                   overlap, packed_recv_count, comp_signal, block_m, threshold, num_sms,
+        combined_x, event, hook = self.runtime.low_latency_combine(x, topk_idx, topk_weights, src_info, layout_range, overlap,
+                                                                   packed_recv_count, comp_signal, block_m, threshold, num_sms,
                                                                    combine_wait_recv_cost_stats, num_max_dispatch_tokens_per_rank,
                                                                    num_experts, use_logfmt, zero_copy, async_finish, return_recv_hook, out)
         tensors_to_record = (x, topk_idx, topk_weights, src_info, layout_range, combined_x)
