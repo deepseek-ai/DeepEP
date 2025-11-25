@@ -160,32 +160,32 @@ def test_main(num_tokens: int,
                                     comp_signal = torch.zeros(num_local_experts * total_num_per_expert, dtype=torch.int32, device='cuda')
                                     for i in range(num_local_experts):
                                         vaild_num = ceil_div(packed_recv_count[i], block_m)
-                                        comp_signal[i * total_num_per_expert : i * total_num_per_expert + vaild_num] = threshold
+                                        comp_signal[i * total_num_per_expert:i * total_num_per_expert + vaild_num] = threshold
                                     combined_x, event, hook = buffer.low_latency_combine(simulated_gemm_x,
-                                                                                        topk_idx,
-                                                                                        topk_weights,
-                                                                                        handle,
-                                                                                        overlap=True,
-                                                                                        packed_recv_count=packed_recv_count,
-                                                                                        comp_signal=comp_signal,
-                                                                                        block_m=block_m,
-                                                                                        threshold=threshold,
-                                                                                        num_sms=num_sms,
-                                                                                        use_logfmt=use_logfmt,
-                                                                                        async_finish=not return_recv_hook,
-                                                                                        zero_copy=zero_copy,
-                                                                                        return_recv_hook=return_recv_hook,
-                                                                                        out=out)
+                                                                                         topk_idx,
+                                                                                         topk_weights,
+                                                                                         handle,
+                                                                                         overlap=True,
+                                                                                         packed_recv_count=packed_recv_count,
+                                                                                         comp_signal=comp_signal,
+                                                                                         block_m=block_m,
+                                                                                         threshold=threshold,
+                                                                                         num_sms=num_sms,
+                                                                                         use_logfmt=use_logfmt,
+                                                                                         async_finish=not return_recv_hook,
+                                                                                         zero_copy=zero_copy,
+                                                                                         return_recv_hook=return_recv_hook,
+                                                                                         out=out)
                                 else:
                                     combined_x, event, hook = buffer.low_latency_combine(simulated_gemm_x,
-                                                                                        topk_idx,
-                                                                                        topk_weights,
-                                                                                        handle,
-                                                                                        use_logfmt=use_logfmt,
-                                                                                        async_finish=not return_recv_hook,
-                                                                                        zero_copy=zero_copy,
-                                                                                        return_recv_hook=return_recv_hook,
-                                                                                        out=out)
+                                                                                         topk_idx,
+                                                                                         topk_weights,
+                                                                                         handle,
+                                                                                         use_logfmt=use_logfmt,
+                                                                                         async_finish=not return_recv_hook,
+                                                                                         zero_copy=zero_copy,
+                                                                                         return_recv_hook=return_recv_hook,
+                                                                                         out=out)
                                 hook() if return_recv_hook else event.current_stream_wait()
                                 if shrink_test:
                                     query_mask_buffer_and_check("combine", buffer, mask_status, expected_masked_ranks)
@@ -197,10 +197,12 @@ def test_main(num_tokens: int,
                                         failed_topk_idx = torch.zeros_like(topk_idx, device='cuda', dtype=torch.bool)
                                         failed_topk_idx[valid_topk_idx] = fail_owner_mask.index_select(0, topk_idx[valid_topk_idx])
                                         topk_idx[failed_topk_idx] = -1
-                                    diff = calc_diff(current_x * topk_weights.masked_fill(topk_idx == -1, 0).sum(dim=1).view(-1, 1), combined_x)
+                                    diff = calc_diff(current_x * topk_weights.masked_fill(topk_idx == -1, 0).sum(dim=1).view(-1, 1),
+                                                     combined_x)
                                     assert torch.isnan(combined_x).sum().item() == 0
                                     if not round_scale:
-                                        assert diff < (9e-4 if dispatch_use_fp8 else 1e-5), f'Error: {diff=}, {dispatch_use_fp8=}, {zero_copy=}'
+                                        assert diff < (9e-4
+                                                       if dispatch_use_fp8 else 1e-5), f'Error: {diff=}, {dispatch_use_fp8=}, {zero_copy=}'
                                     hash_value ^= hash_tensor(combined_x)
 
                         # Clean buffer API
