@@ -256,6 +256,9 @@ static int setup_qp_attr_and_set_qp(struct gverbs_context *g_ctx, struct ibv_con
   return 0;
 }
 
+void RDMACoordinator::update_config(BufferConfig config) {
+  this->buffer_config = config;
+}
 
 void RDMACoordinator::init(  
       pybind11::object process_group,

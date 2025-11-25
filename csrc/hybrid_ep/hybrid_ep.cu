@@ -377,6 +377,7 @@ bool HybridEPBuffer::update_buffer(HybridEpConfigInstance config) {
   // If new config requires bigger buffer, we will release the old buffer and allocate a new one.
   bool need_reallocate = false;
   
+  need_reallocate |= grow_to(buffer_config.max_num_of_tokens_per_rank, config.max_num_of_tokens_per_rank);
   need_reallocate |= grow_to(buffer_config.hidden_dim,             config.hidden_dim);
   need_reallocate |= grow_to(buffer_config.num_of_experts_per_rank,config.num_of_experts_per_rank);
   need_reallocate |= grow_to(buffer_config.num_of_ranks_per_node,  config.num_of_ranks_per_node);
@@ -399,6 +400,7 @@ bool HybridEPBuffer::update_buffer(HybridEpConfigInstance config) {
   }
 
   if(need_reallocate) {
+    rdma_coordinator.update_config(buffer_config);
     release_buffer();
     allocate_buffer();
   }

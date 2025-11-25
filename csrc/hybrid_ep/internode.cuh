@@ -140,6 +140,7 @@ public:
     RDMACoordinator() = default;
     ~RDMACoordinator();
     void init(pybind11::object process_group, int node_rank, int local_rank, BufferConfig config);
+    void update_config(BufferConfig config);
     void destroy();
     void allocate_dispatch_rdma_buffers(DispatchBuffers &dispatch_buffers);
     void allocate_combine_rdma_buffers(CombineBuffers &combine_buffers);

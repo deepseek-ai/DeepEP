@@ -1707,7 +1707,7 @@ inline __device__ void inter_node_N2N_warp_group_device_function(const int node_
                                                   DOCA_GPUNETIO_IB_MLX5_WQE_CTRL_CQ_UPDATE, 0,
                                                   smem_mr_info_ptr[rdma_remote_node_id].token_raddr + token_idx * HIDDEN_DIM * sizeof(uint16_t),
                                                   smem_mr_info_ptr[rdma_remote_node_id].token_rkey,
-                                                  smem_mr_info_ptr[rdma_remote_node_id].token_laddr + local_token_idx * HIDDEN_DIM * sizeof(uint16_t),                                                  smem_mr_info_ptr[rdma_remote_node_id].token_lkey,
+                                                  smem_mr_info_ptr[rdma_remote_node_id].token_laddr + local_token_idx * HIDDEN_DIM * sizeof(uint16_t),                                  smem_mr_info_ptr[rdma_remote_node_id].token_lkey,
                                                   HIDDEN_DIM * sizeof(uint16_t));
         if constexpr(BACKWARD_COMBINE) {
           my_wqe_idx += write_cnt;
@@ -1717,7 +1717,7 @@ inline __device__ void inter_node_N2N_warp_group_device_function(const int node_
                                                     DOCA_GPUNETIO_IB_MLX5_WQE_CTRL_CQ_UPDATE, 0,
                                                     smem_mr_info_ptr[rdma_remote_node_id].prob_raddr + token_idx * (NUM_OF_EXPERTS_PER_RANK * NUM_OF_RANKS_PER_NODE) * sizeof(float),
                                                     smem_mr_info_ptr[rdma_remote_node_id].prob_rkey,
-                                                    smem_mr_info_ptr[rdma_remote_node_id].prob_laddr + local_token_idx * (NUM_OF_EXPERTS_PER_RANK * NUM_OF_RANKS_PER_NODE) * sizeof(float),                                                    smem_mr_info_ptr[rdma_remote_node_id].prob_lkey,
+                                                    smem_mr_info_ptr[rdma_remote_node_id].prob_laddr + local_token_idx * (NUM_OF_EXPERTS_PER_RANK * NUM_OF_RANKS_PER_NODE) * sizeof(float),                                   smem_mr_info_ptr[rdma_remote_node_id].prob_lkey,
                                                     (NUM_OF_EXPERTS_PER_RANK * NUM_OF_RANKS_PER_NODE) * sizeof(float));
         }
       }
@@ -3177,7 +3177,7 @@ public:
     using INTRA_NODE_S2G_GROUP = warp_group<3, 1>;
 #endif
     // The shared memory needed by the dispatch kernel.
-    using dispatch_kernel_smem_t = dispatch_kernel_dynamic_shared_memory_buffer_t<TOKEN_DATA_TYPE, NUM_OF_STAGES, HIDDEN_DIM, NUM_OF_TOKENS_PER_CHUNK, NUM_OF_EXPERTS_PER_RANK, NUM_OF_RANKS_PER_NODE, NUM_OF_NODES, FORWARD_DISPATCH>;
+    using dispatch_kernel_smem_t = dispatch_kernel_dynamic_shared_memory_buffer_t<TOKEN_DATA_TYPE, NUM_OF_STAGES, HIDDEN_DIM, NUM_OF_TOKENS_PER_CHUNK,NUM_OF_EXPERTS_PER_RANK, NUM_OF_RANKS_PER_NODE, NUM_OF_NODES, FORWARD_DISPATCH>;
     // The dispatch kernel to be launched.
     const auto dispatch_kernel_ptr = dispatch_kernel<TOKEN_DATA_TYPE, INTER_NODE_GROUP, INTRA_NODE_G2S_GROUP, INTRA_NODE_S2G_GROUP, NUM_OF_STAGES,
                                                      NUM_OF_IN_FLIGHT_S2G, NUM_OF_TOKENS_PER_CHUNK, HIDDEN_DIM, MAX_NUM_OF_TOKENS_PER_RANK,
