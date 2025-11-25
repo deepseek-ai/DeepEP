@@ -394,8 +394,8 @@ bool HybridEPBuffer::update_buffer(HybridEpConfigInstance config) {
   }
 
   if(buffer_config.num_of_nodes > 1 && need_reallocate) {
-    fprintf(stderr, "Reallocate buffer for multi-node case is very slow, please check the buffer configuration to pre-allocate the buffer.");
-    assert(!need_reallocate);
+    TORCH_WARN("Reallocating HybridEP buffers in multi-node mode is very slow; "
+               "adjust buffer_config to pre-allocate sufficient capacity.");
   }
 
   if(need_reallocate) {

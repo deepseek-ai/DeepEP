@@ -102,7 +102,7 @@ class HybridEPBuffer:
         # Initialize the BufferConfig for the hybrid-ep buffer allocation.
         self.config = hybrid_ep_cpp.BufferConfig()
         self.config.hidden_dim = hidden_dim
-        self.config.max_num_of_tokens_per_rank = max_num_of_tokens_per_rank
+        self.config.max_num_of_tokens_per_rank = max(max_num_of_tokens_per_rank, 1024)
         self.config.num_of_experts_per_rank = num_local_experts
         self.config.num_of_ranks_per_node = self.num_of_ranks_per_node
         self.config.num_of_nodes = self.num_of_nodes
@@ -165,8 +165,6 @@ class HybridEPBuffer:
             if max_num_of_tokens_per_rank is not None
             else self.config.max_num_of_tokens_per_rank
         )
-        if self.num_of_nodes > 1:
-            assert self.config.max_num_of_tokens_per_rank == max_num_of_tokens_per_rank, "Dynamic sequence length is not supported in the multi-node case."
         config.max_num_of_tokens_per_rank = max(
             config.max_num_of_tokens_per_rank, self.config.max_num_of_tokens_per_rank
         )

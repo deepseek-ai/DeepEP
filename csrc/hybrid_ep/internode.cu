@@ -143,20 +143,28 @@ int create_and_place_qps(struct gverbs_context *g_ctx,
   return status;
 }
 
-static int setup_qp_attr_for_modify(struct doca_verbs_qp_attr *qp_attr,
-                                    struct remote_info *rem_dest,
-                                    struct ibv_context *ib_context) {
+static int setup_qp_attr_for_modify(struct ibv_port_attr *port_attr, struct doca_verbs_qp_attr *qp_attr, 
+  struct remote_info *l_info, struct remote_info *r_info,
+  struct ibv_context *ib_context) {
   int status = 0;
-  status = doca_verbs_qp_attr_set_dest_qp_num(qp_attr, rem_dest->qpn);
+  status = doca_verbs_qp_attr_set_dest_qp_num(qp_attr, r_info->qpn);
   assert(status == 0);
   struct doca_verbs_ah *ah = nullptr;
   status = doca_verbs_ah_create(ib_context, &ah);
   assert(status == 0);
-  status = doca_verbs_ah_set_dlid(ah, rem_dest->lid);
+  if (port_attr->link_layer == IBV_LINK_LAYER_INFINIBAND) {
+    status = doca_verbs_ah_set_addr_type(ah, DOCA_VERBS_ADDR_TYPE_IB_NO_GRH);
+  } else {
+    status = doca_verbs_ah_set_addr_type(ah, DOCA_VERBS_ADDR_TYPE_IPv4);
+  }
+  assert(status == 0);
+  status = doca_verbs_ah_set_dlid(ah, r_info->lid);
+  assert(status == 0);
+  status = doca_verbs_ah_set_gid(ah, *((struct doca_verbs_gid *)(&r_info->gid)));
   assert(status == 0);
   status = doca_verbs_ah_set_sl(ah, 0);
   assert(status == 0);
-  status = doca_verbs_ah_set_sgid_index(ah, rem_dest->gid_index);
+  status = doca_verbs_ah_set_sgid_index(ah, l_info->gid_index);
   assert(status == 0);
   status = doca_verbs_qp_attr_set_ah_attr(qp_attr, ah);
   assert(status == 0);
@@ -166,8 +174,7 @@ static int setup_qp_attr_for_modify(struct doca_verbs_qp_attr *qp_attr,
   assert(status == 0);
   status = doca_verbs_qp_attr_set_sq_psn(qp_attr, 0);
   assert(status == 0);
-  status =
-      doca_verbs_qp_attr_set_path_mtu(qp_attr, DOCA_VERBS_MTU_SIZE_1K_BYTES);
+  status = doca_verbs_qp_attr_set_path_mtu(qp_attr, DOCA_VERBS_MTU_SIZE_1K_BYTES);
   assert(status == 0);
   status = doca_verbs_qp_attr_set_min_rnr_timer(qp_attr, 1);
   assert(status == 0);
@@ -179,6 +186,7 @@ static int setup_qp_attr_for_modify(struct doca_verbs_qp_attr *qp_attr,
   assert(status == 0);
   return 0;
 }
+
 
 int doca_gpunetio_test_change_qp_state(struct doca_gpu_verbs_qp_hl *qp,
                                        struct doca_verbs_qp_attr *qp_attr,
@@ -225,32 +233,29 @@ int doca_gpunetio_test_change_qp_state(struct doca_gpu_verbs_qp_hl *qp,
   return 0;
 }
 
-static int setup_qp_attr_and_set_qp(struct gverbs_context *g_ctx,
-                                    struct ibv_context *ib_context,
-                                    struct remote_info *rem_dest,
-                                    struct doca_verbs_qp_attr *qp_attr,
-                                    int num_of_blocks, int num_of_nodes,
-                                    int node_rank, uint32_t qp_cnt) {
-  int attr_mask = DOCA_VERBS_QP_ATTR_NEXT_STATE |
-                  DOCA_VERBS_QP_ATTR_ALLOW_REMOTE_WRITE |
-                  DOCA_VERBS_QP_ATTR_ALLOW_REMOTE_READ |
-                  DOCA_VERBS_QP_ATTR_PORT_NUM | DOCA_VERBS_QP_ATTR_PKEY_INDEX;
+static int setup_qp_attr_and_set_qp(struct gverbs_context *g_ctx, struct ibv_context *ib_context, struct ibv_port_attr *port_attr,
+  struct remote_info *rem_dest, struct doca_verbs_qp_attr *qp_attr,
+  int num_of_blocks, int num_of_nodes, int node_rank, uint32_t qp_cnt) {
+  int attr_mask = DOCA_VERBS_QP_ATTR_NEXT_STATE | DOCA_VERBS_QP_ATTR_ALLOW_REMOTE_WRITE |
+                  DOCA_VERBS_QP_ATTR_ALLOW_REMOTE_READ | DOCA_VERBS_QP_ATTR_PORT_NUM |
+                  DOCA_VERBS_QP_ATTR_PKEY_INDEX;
   for (int qp_idx = 0; qp_idx < num_of_blocks; ++qp_idx) {
     for (int peer_idx = 0; peer_idx < num_of_nodes - 1; ++peer_idx) {
       int actual_node_idx = peer_idx < node_rank ? peer_idx : (peer_idx + 1);
-      int actual_idx_in_node =
-          peer_idx < node_rank ? (node_rank - 1) : node_rank;
-      int my_idx = peer_idx + qp_idx * (num_of_nodes - 1);
-      int rem_idx = actual_node_idx * qp_cnt + qp_idx * (num_of_nodes - 1) +
-                    actual_idx_in_node;
+      int actual_idx_in_node = peer_idx < node_rank ? (node_rank - 1) : node_rank;
+      int curr_qp_idx = peer_idx + qp_idx * (num_of_nodes - 1);
+      int local_idx = curr_qp_idx + node_rank * qp_cnt;
+      int rem_idx = actual_node_idx * qp_cnt + qp_idx * (num_of_nodes - 1) + actual_idx_in_node;
+      struct remote_info *l_info = &rem_dest[local_idx];
       struct remote_info *r_info = &rem_dest[rem_idx];
-      struct doca_gpu_verbs_qp_hl *qp = g_ctx->qp_hls[my_idx];
-      setup_qp_attr_for_modify(qp_attr, r_info, ib_context);
+      struct doca_gpu_verbs_qp_hl *qp = g_ctx->qp_hls[curr_qp_idx];
+      setup_qp_attr_for_modify(port_attr, qp_attr, l_info, r_info, ib_context);
       doca_gpunetio_test_change_qp_state(qp, qp_attr, attr_mask);
     }
   }
   return 0;
 }
+
 
 void RDMACoordinator::init(  
       pybind11::object process_group,
@@ -275,9 +280,13 @@ void RDMACoordinator::init(
   struct ibv_device *ib_dev = ctx_find_dev(net_name);
 
   ib_context = ibv_open_device(ib_dev);;
-  ibv_query_port(ib_context, IB_PORT, &port_attr);
   auto transport_type = ib_context->device->transport_type;
   assert(transport_type == IBV_TRANSPORT_IB);
+  ibv_query_port(ib_context, IB_PORT, &port_attr);
+  uint8_t link_layer = port_attr.link_layer;
+  assert(link_layer == IBV_LINK_LAYER_INFINIBAND || link_layer == IBV_LINK_LAYER_ETHERNET);
+  hybrid_ep::ncclIbGetGidIndex(ib_context, IB_PORT, &port_attr, &gid_index);
+
   // Alloc protect domain.
   ib_pd = ibv_alloc_pd(ib_context);
   gpu_handler = (struct doca_gpu *)calloc(1, sizeof(struct doca_gpu));
@@ -358,9 +367,7 @@ void RDMACoordinator::allocate_dispatch_rdma_buffers(DispatchBuffers &dispatch_b
   // Set dispatch queue pair attributes.
   int num_of_dispatch_qps = (buffer_config.num_of_nodes - 1) * buffer_config.num_of_blocks_dispatch_api;
   memset(&dispatch_gverbs_ctx, 0, sizeof(gverbs_context));
-  if (GID_INDEX != -1) {
-    ibv_query_gid(ib_context, IB_PORT, GID_INDEX, &dispatch_gverbs_ctx.gid);
-  }
+  ibv_query_gid(ib_context, IB_PORT, gid_index, &dispatch_gverbs_ctx.gid);
   dispatch_gverbs_ctx.qp_init_attr = (struct doca_gpu_verbs_qp_init_attr_hl *)calloc(1, sizeof(struct doca_gpu_verbs_qp_init_attr_hl));
   setup_qp_init_attr(dispatch_gverbs_ctx.qp_init_attr, gpu_handler, ib_pd, 3 * buffer_config.max_num_of_tokens_per_rank + 1);
   dispatch_gverbs_ctx.qp_hls = (struct doca_gpu_verbs_qp_hl **)calloc(sizeof(struct doca_gpu_verbs_qp_hl *), num_of_dispatch_qps);
@@ -388,7 +395,7 @@ void RDMACoordinator::allocate_dispatch_rdma_buffers(DispatchBuffers &dispatch_b
       struct remote_info *curr_info = my_dispatch_info + idx;
       curr_info->lid = port_attr.lid;
       curr_info->qpn = doca_verbs_qp_get_qpn(dispatch_gverbs_ctx.qp_hls[idx]->qp);
-      curr_info->gid_index = GID_INDEX;
+      curr_info->gid_index = gid_index;
       memset(&curr_info->gid, 0, sizeof(curr_info->gid));;
       memcpy(curr_info->gid.raw, dispatch_gverbs_ctx.gid.raw, 16);
       curr_info->token_rkey = dispatch_rdma_inter_node_group_token_mr->rkey;
@@ -414,7 +421,8 @@ void RDMACoordinator::allocate_dispatch_rdma_buffers(DispatchBuffers &dispatch_b
   exchange_remote_rdma_info(dispatch_remote_info_vec, my_dispatch_info, num_of_dispatch_qps);
 
   // Init queue pairs.
-  setup_qp_attr_and_set_qp(&dispatch_gverbs_ctx, ib_context, dispatch_remote_info_vec, dispatch_gverbs_ctx.qp_attr,
+  setup_qp_attr_and_set_qp(&dispatch_gverbs_ctx, ib_context, &port_attr,
+    dispatch_remote_info_vec, dispatch_gverbs_ctx.qp_attr,
     buffer_config.num_of_blocks_dispatch_api, buffer_config.num_of_nodes, node_rank, num_of_dispatch_qps);
   // Move queue pairs to GPU.
   doca_gpu_dev_verbs_qp **h_qps_gpu = (doca_gpu_dev_verbs_qp**)calloc(sizeof(*h_qps_gpu), num_of_dispatch_qps);
@@ -515,9 +523,7 @@ void RDMACoordinator::allocate_combine_rdma_buffers(CombineBuffers &combine_buff
   // Set combine queue pair attributes.
   int num_of_combine_qps = (buffer_config.num_of_nodes - 1) * buffer_config.num_of_blocks_combine_api;
   memset(&combine_gverbs_ctx, 0, sizeof(gverbs_context));
-  if (GID_INDEX != -1) {
-    ibv_query_gid(ib_context, IB_PORT, GID_INDEX, &combine_gverbs_ctx.gid);
-  }
+  ibv_query_gid(ib_context, IB_PORT, gid_index, &combine_gverbs_ctx.gid);
   combine_gverbs_ctx.qp_init_attr = (struct doca_gpu_verbs_qp_init_attr_hl *)calloc(1, sizeof(struct doca_gpu_verbs_qp_init_attr_hl));
   setup_qp_init_attr(combine_gverbs_ctx.qp_init_attr, gpu_handler, ib_pd, 2 * buffer_config.max_num_of_tokens_per_rank + 1);
   combine_gverbs_ctx.qp_hls = (struct doca_gpu_verbs_qp_hl **)calloc(sizeof(struct doca_gpu_verbs_qp_hl *), num_of_combine_qps);
@@ -543,7 +549,7 @@ void RDMACoordinator::allocate_combine_rdma_buffers(CombineBuffers &combine_buff
       struct remote_info *curr_info = my_combine_info + idx;
       curr_info->lid = port_attr.lid;
       curr_info->qpn = doca_verbs_qp_get_qpn(combine_gverbs_ctx.qp_hls[idx]->qp);
-      curr_info->gid_index = GID_INDEX;
+      curr_info->gid_index = gid_index;
       memset(&curr_info->gid, 0, sizeof(curr_info->gid));;
       memcpy(curr_info->gid.raw, combine_gverbs_ctx.gid.raw, 16);
       curr_info->token_rkey = combine_rdma_inter_node_group_token_mr->rkey;
@@ -561,7 +567,8 @@ void RDMACoordinator::allocate_combine_rdma_buffers(CombineBuffers &combine_buff
   exchange_remote_rdma_info(combine_remote_info_vec, my_combine_info, num_of_combine_qps);
 
   // Init queue pairs.
-  setup_qp_attr_and_set_qp(&combine_gverbs_ctx, ib_context, combine_remote_info_vec, combine_gverbs_ctx.qp_attr,
+  setup_qp_attr_and_set_qp(&combine_gverbs_ctx, ib_context, &port_attr,
+    combine_remote_info_vec, combine_gverbs_ctx.qp_attr,
     buffer_config.num_of_blocks_combine_api, buffer_config.num_of_nodes, node_rank, num_of_combine_qps);
   // Move queue pairs to GPU.
   doca_gpu_dev_verbs_qp **h_qps_gpu = (doca_gpu_dev_verbs_qp**)calloc(sizeof(*h_qps_gpu), num_of_combine_qps);

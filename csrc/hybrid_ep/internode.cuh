@@ -12,6 +12,7 @@
 #include "backend/hybrid_ep_backend.cuh"
 #include "backend/utils.cuh"
 #include "backend/topo_detection.cuh"
+#include "backend/ibvcore.h"
 #include "config.cuh"
 
 #define RC  (0)
@@ -40,7 +41,6 @@ constexpr int32_t DEF_HOP_LIMIT = 64;
 constexpr int32_t DEF_RX_RDMA = 128;
 constexpr int32_t DEF_TX_BW = 512;
 constexpr int32_t EQ_NUM = 0;
-constexpr int32_t GID_INDEX = 0;
 constexpr int32_t GVERBS_WQ_BUF_LOC = DOCA_GPU_MEM_TYPE_GPU;
 constexpr int32_t GVERBS_CQ_BUF_LOC = DOCA_GPU_MEM_TYPE_GPU;
 constexpr int32_t GVERBS_USE_ASYNC_STIRE_RELEASE = 0;
@@ -121,14 +121,15 @@ void setup_qp_init_attr(struct doca_gpu_verbs_qp_init_attr_hl *qp_init_attr,
 int create_and_place_qps(struct gverbs_context *g_ctx,
                          struct doca_gpu_verbs_qp_init_attr_hl *qp_init_attr,
                          int num_qps);
-static int setup_qp_attr_for_modify(struct doca_verbs_qp_attr *qp_attr,
-                                    struct remote_info *rem_dest,
+static int setup_qp_attr_for_modify(struct ibv_port_attr *port_attr, struct doca_verbs_qp_attr *qp_attr, 
+                                    struct remote_info *l_info, struct remote_info *r_info,
                                     struct ibv_context *ib_context);
 int doca_gpunetio_test_change_qp_state(struct doca_gpu_verbs_qp_hl *qp,
                                        struct doca_verbs_qp_attr *qp_attr,
                                        int attr_mask);
 static int setup_qp_attr_and_set_qp(struct gverbs_context *g_ctx,
                                     struct ibv_context *ib_context,
+                                    struct ibv_port_attr *port_attr,
                                     struct remote_info *rem_dest,
                                     struct doca_verbs_qp_attr *qp_attr,
                                     int num_of_blocks, int num_of_nodes,
@@ -144,6 +145,7 @@ public:
     void allocate_combine_rdma_buffers(CombineBuffers &combine_buffers);
 
 private:
+    int gid_index = 0;
     int node_rank = -1;
     int local_rank = -1;
     BufferConfig buffer_config;

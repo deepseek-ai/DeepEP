@@ -498,8 +498,8 @@ template<typename INTER_NODE_GROUP,
          typename SMEM_TYPE,
          int NUM_OF_STAGES,
          int HIDDEN_DIM,
-         int NUM_OF_EXPERTS_PER_RANK,
          int NUM_OF_TOKENS_PER_CHUNK,
+         int NUM_OF_EXPERTS_PER_RANK,
          int NUM_OF_RANKS_PER_NODE,
          int NUM_OF_NODES,
          int NUM_OF_BLOCKS,
@@ -665,12 +665,14 @@ inline __device__ void N2N_warp_group_device_function(const int node_rank,
 #endif
 
 // Device function for intra-node G2S warp for dispatch kernel. There can be only 1 intra-node G2S warp per CUDA block!
-template<typename TOKEN_DATA_TYPE,
+template<typename INTRA_NODE_G2S_GROUP,
+         typename TOKEN_DATA_TYPE,
          typename SMEM_TYPE,
          int NUM_OF_STAGES, 
          int HIDDEN_DIM,
-         int NUM_OF_EXPERTS_PER_RANK,
          int NUM_OF_TOKENS_PER_CHUNK,
+         int MAX_NUM_OF_TOKENS_PER_RANK,
+         int NUM_OF_EXPERTS_PER_RANK,
          int NUM_OF_RANKS_PER_NODE,
          int NUM_OF_NODES,
          int NUM_OF_BLOCKS,
@@ -685,7 +687,7 @@ inline __device__ void G2S_warp_group_device_function(const int node_rank,
                                                       const TOKEN_DATA_TYPE* rdma_inter_node_group_token,
                                                       const float* rdma_inter_node_group_prob,
                                                       const float* rdma_inter_node_group_scaling_factor,
-                                                      const uint64_t* rdma_inter_node_group_flags,
+                                                      uint64_t* rdma_inter_node_group_flags,
                                                       SMEM_TYPE* smem_buffer_ptr)
 {
   // Load rdma_to_attn_map using LDG.128. Each token will need 1 bool from this map.
@@ -698,6 +700,7 @@ inline __device__ void G2S_warp_group_device_function(const int node_rank,
   const int remainder_chunk_size = num_of_tokens_per_rank % NUM_OF_TOKENS_PER_CHUNK; 
   // How many chunks per rank. Including full chunks and the remainder chunk.
   const int num_of_chunks_per_rank = ((num_of_tokens_per_rank - 1) / NUM_OF_TOKENS_PER_CHUNK) + 1;
+  const int max_num_of_chunks_per_rank = ((MAX_NUM_OF_TOKENS_PER_RANK - 1) / NUM_OF_TOKENS_PER_CHUNK) + 1;
   // The rdma_to_attn_map need to be paded to multiple of rdma_to_attn_map_load_t per node.
   // The largest size of rdma_to_attn_map_load_t allowed in all Hybrid-EP kernels are 16B(16 bools), so need to be paded to 16B per node.
   // That means the size of rdma_to_attn_map should be rdma_to_attn_map_size_per_node * NUM_OF_NODES.
@@ -729,7 +732,7 @@ inline __device__ void G2S_warp_group_device_function(const int node_rank,
         // The chunks of local node is the attn input buffers, which are always ready to be consumed.
         // The chunks of remote node is the rdma_inter_node_group buffers, which is produced by remote RDMA Write operation. Should poll the flag produced by remote RDMA Atomic FA before consumed.
         if(node_id != node_rank){
-          const uint64_t* flag_location = rdma_inter_node_group_flags + (rdma_buffer_tile_id * num_of_chunks_per_rank + i);
+          const uint64_t* flag_location = rdma_inter_node_group_flags + (rdma_buffer_tile_id * max_num_of_chunks_per_rank + i);
           uint64_t rdma_flag = 0;
           do{
             rdma_flag = 0;
@@ -749,7 +752,7 @@ inline __device__ void G2S_warp_group_device_function(const int node_rank,
         // For other node's attn token and properties, read from rdma_inter_node_group buffers.
         // For this node's attn token and properties, read from attn input buffers.
         if(node_id != node_rank){
-          int chunk_first_token_id = rdma_buffer_tile_id * num_of_tokens_per_rank + i * NUM_OF_TOKENS_PER_CHUNK;
+          int chunk_first_token_id = rdma_buffer_tile_id * MAX_NUM_OF_TOKENS_PER_RANK + i * NUM_OF_TOKENS_PER_CHUNK;
           token_load_base_addr = rdma_inter_node_group_token + chunk_first_token_id * HIDDEN_DIM;
           if constexpr(FORWARD_DISPATCH){
             prob_load_base_addr = rdma_inter_node_group_prob + chunk_first_token_id * (NUM_OF_EXPERTS_PER_RANK * NUM_OF_RANKS_PER_NODE);
@@ -843,6 +846,17 @@ inline __device__ void G2S_warp_group_device_function(const int node_rank,
       }
     }
   }
+  #ifdef HYBRID_EP_BUILD_MULTINODE_ENABLE
+  // Update residue flags.
+  int residue_flag_count = max_num_of_chunks_per_rank - num_of_chunks_per_rank;
+  for (int node_id = blockIdx.x; node_id < NUM_OF_NODES - 1; node_id += gridDim.x) {
+    uint64_t *residue_flag_base_ptr = rdma_inter_node_group_flags + (node_id * max_num_of_chunks_per_rank + num_of_chunks_per_rank);
+    for (int flag_id = INTRA_NODE_G2S_GROUP::thread_rank(); flag_id < residue_flag_count; flag_id += INTRA_NODE_G2S_GROUP::size()) {
+      residue_flag_base_ptr[flag_id] = *expected_flag_value;
+    }
+  }
+  #endif // HYBRID_EP_BUILD_MULTINODE_ENABLE
+
 }
 
 // Device function for intra-node S2G warp group for dispatch kernel.
@@ -852,8 +866,8 @@ template<typename INTRA_NODE_S2G_GROUP,
          int NUM_OF_STAGES, 
          int NUM_OF_IN_FLIGHT_S2G,
          int HIDDEN_DIM,
-         int NUM_OF_EXPERTS_PER_RANK,
          int NUM_OF_TOKENS_PER_CHUNK,
+         int NUM_OF_EXPERTS_PER_RANK,
          int NUM_OF_RANKS_PER_NODE,
          int NUM_OF_NODES,
          int NUM_OF_BLOCKS,
@@ -1264,6 +1278,7 @@ template<typename INTRA_NODE_RED_GROUP,
          int NUM_OF_STAGES_S2G,
          int HIDDEN_DIM,
          int NUM_OF_TOKENS_PER_CHUNK,
+         int MAX_NUM_OF_TOKENS_PER_RANK,
          int NUM_OF_EXPERTS_PER_RANK,
          int NUM_OF_RANKS_PER_NODE,
          int NUM_OF_NODES,
@@ -1334,6 +1349,7 @@ inline __device__ void intra_node_red_warp_group_device_function(const int node_
     int chunk_id = i / (NUM_OF_NODES - 1);
     // Which node this chunk belongs to in output rdma reduction buffers.
     int rdma_remote_node_id = node_id > node_rank ? node_id - 1 : node_id;
+    int rdma_intra_node_red_id = rdma_remote_node_id * MAX_NUM_OF_TOKENS_PER_RANK + chunk_id * NUM_OF_TOKENS_PER_CHUNK;
     // How many rdma_to_attn load iter for this chunk.
     int num_of_routing_info_load_iter_for_current_chunk;
     // How many token for this chunk.
@@ -1349,12 +1365,10 @@ inline __device__ void intra_node_red_warp_group_device_function(const int node_
     const rdma_to_attn_map_load_t* rdma_to_attn_map_load_base_addr = reinterpret_cast<const rdma_to_attn_map_load_t*>(rdma_to_attn_map + 
                                                                       (node_id * rdma_to_attn_map_size_per_node + chunk_id * NUM_OF_TOKENS_PER_CHUNK));
 
-    uint16_t* rdma_intra_node_red_token_base_ptr = rdma_intra_node_red_token + (rdma_remote_node_id * num_of_tokens_per_rank + chunk_id * NUM_OF_TOKENS_PER_CHUNK) * HIDDEN_DIM;
+    uint16_t* rdma_intra_node_red_token_base_ptr = rdma_intra_node_red_token + rdma_intra_node_red_id * HIDDEN_DIM;
     float* rdma_intra_node_red_prob_base_ptr;
     if constexpr(BACKWARD_COMBINE){
-      rdma_intra_node_red_prob_base_ptr = rdma_intra_node_red_prob + 
-                                          (rdma_remote_node_id * num_of_tokens_per_rank + chunk_id * NUM_OF_TOKENS_PER_CHUNK) * 
-                                          (NUM_OF_EXPERTS_PER_RANK * NUM_OF_RANKS_PER_NODE);
+      rdma_intra_node_red_prob_base_ptr = rdma_intra_node_red_prob + rdma_intra_node_red_id * (NUM_OF_EXPERTS_PER_RANK * NUM_OF_RANKS_PER_NODE);
     }
 
     // How many dst token entry of current chunk have been in-flight.
@@ -1675,6 +1689,7 @@ inline __device__ void inter_node_N2N_warp_group_device_function(const int node_
          token_idx_in_chunk < NUM_OF_TOKENS_PER_CHUNK;
          token_idx_in_chunk += INTER_NODE_RDMA_GROUP::size()) {
       int64_t token_idx = token_idx_in_chunk + chunk_id * NUM_OF_TOKENS_PER_CHUNK;
+      int64_t local_token_idx = rdma_remote_node_id * MAX_NUM_OF_TOKENS_PER_RANK + token_idx;
       bool need_write = false;
       if (token_idx_in_chunk < token_range) {
         need_write = rdma_to_attn_map[token_idx_in_chunk + chunk_base_token_idx];
@@ -1692,8 +1707,7 @@ inline __device__ void inter_node_N2N_warp_group_device_function(const int node_
                                                   DOCA_GPUNETIO_IB_MLX5_WQE_CTRL_CQ_UPDATE, 0,
                                                   smem_mr_info_ptr[rdma_remote_node_id].token_raddr + token_idx * HIDDEN_DIM * sizeof(uint16_t),
                                                   smem_mr_info_ptr[rdma_remote_node_id].token_rkey,
-                                                  smem_mr_info_ptr[rdma_remote_node_id].token_laddr + (rdma_remote_node_id * num_of_tokens_per_rank + token_idx) * HIDDEN_DIM * sizeof(uint16_t),
-                                                  smem_mr_info_ptr[rdma_remote_node_id].token_lkey,
+                                                  smem_mr_info_ptr[rdma_remote_node_id].token_laddr + local_token_idx * HIDDEN_DIM * sizeof(uint16_t),                                                  smem_mr_info_ptr[rdma_remote_node_id].token_lkey,
                                                   HIDDEN_DIM * sizeof(uint16_t));
         if constexpr(BACKWARD_COMBINE) {
           my_wqe_idx += write_cnt;
@@ -1703,8 +1717,7 @@ inline __device__ void inter_node_N2N_warp_group_device_function(const int node_
                                                     DOCA_GPUNETIO_IB_MLX5_WQE_CTRL_CQ_UPDATE, 0,
                                                     smem_mr_info_ptr[rdma_remote_node_id].prob_raddr + token_idx * (NUM_OF_EXPERTS_PER_RANK * NUM_OF_RANKS_PER_NODE) * sizeof(float),
                                                     smem_mr_info_ptr[rdma_remote_node_id].prob_rkey,
-                                                    smem_mr_info_ptr[rdma_remote_node_id].prob_laddr + (rdma_remote_node_id * num_of_tokens_per_rank + token_idx) * (NUM_OF_EXPERTS_PER_RANK * NUM_OF_RANKS_PER_NODE) * sizeof(float),
-                                                    smem_mr_info_ptr[rdma_remote_node_id].prob_lkey,
+                                                    smem_mr_info_ptr[rdma_remote_node_id].prob_laddr + local_token_idx * (NUM_OF_EXPERTS_PER_RANK * NUM_OF_RANKS_PER_NODE) * sizeof(float),                                                    smem_mr_info_ptr[rdma_remote_node_id].prob_lkey,
                                                     (NUM_OF_EXPERTS_PER_RANK * NUM_OF_RANKS_PER_NODE) * sizeof(float));
         }
       }
@@ -1749,6 +1762,7 @@ template<typename SMEM_TYPE,
          int NUM_OF_STAGES_G2S, 
          int HIDDEN_DIM, 
          int NUM_OF_TOKENS_PER_CHUNK,
+         int MAX_NUM_OF_TOKENS_PER_RANK,
          int NUM_OF_EXPERTS_PER_RANK,
          int NUM_OF_RANKS_PER_NODE,
          int NUM_OF_NODES,
@@ -1765,7 +1779,7 @@ inline __device__ void inter_node_G2S_warp_group_device_function(const int node_
                                                                  float* const* remote_expert_input_prob,
                                                                  const uint16_t* rdma_inter_node_group_token,
                                                                  const float* rdma_inter_node_group_prob,
-                                                                 const uint64_t* rdma_inter_node_group_flags,
+                                                                 uint64_t* rdma_inter_node_group_flags,
                                                                  SMEM_TYPE* smem_buffer_ptr)
 {
   // The warps from inter-node G2S warp group will be divided into multiple independent pipeline. 
@@ -1795,6 +1809,7 @@ inline __device__ void inter_node_G2S_warp_group_device_function(const int node_
   const int remainder_chunk_size = num_of_tokens_per_rank % NUM_OF_TOKENS_PER_CHUNK;
   // How many chunks per rank. Including full chunks and the remainder chunk.
   const int num_of_chunks_per_rank = ((num_of_tokens_per_rank - 1) / NUM_OF_TOKENS_PER_CHUNK) + 1;
+  const int max_num_of_chunks_per_rank = ((MAX_NUM_OF_TOKENS_PER_RANK - 1) / NUM_OF_TOKENS_PER_CHUNK) + 1;
   // Total number of chunks to process in the output buffer(attn buffer). output buffer(attn buffer) will only have 1 rank's tokens.
   const int total_num_of_chunks = num_of_chunks_per_rank;
   // The rdma_to_attn_map need to be paded to multiple of rdma_to_attn_map_load_t per node.
@@ -1939,7 +1954,7 @@ inline __device__ void inter_node_G2S_warp_group_device_function(const int node_
             if(attn_to_rdma_map_load_addr[rdma_buffer_tile_id]){
               // If the current chunk is not ready yet, wait for related rdma inter-node group buffer chunks ready first.
               if(rdma_flag_clear[n - 1] == false){
-                const uint64_t* flag_location = rdma_inter_node_group_flags + (rdma_buffer_tile_id * num_of_chunks_per_rank + i);
+                const uint64_t* flag_location = rdma_inter_node_group_flags + (rdma_buffer_tile_id * max_num_of_chunks_per_rank + i);
                 uint64_t rdma_flag = 0;
                 do{
                   rdma_flag = 0;
@@ -1958,7 +1973,7 @@ inline __device__ void inter_node_G2S_warp_group_device_function(const int node_
               // Load the src token from this rdma inter-node group buffer chunk to shared memory entry.
               uint32_t total_tx_size = 0;
               const uint16_t* rdma_inter_node_group_token_load_addr = rdma_inter_node_group_token + 
-                                                                      (rdma_buffer_tile_id * num_of_tokens_per_rank + 
+                                                                      (rdma_buffer_tile_id * MAX_NUM_OF_TOKENS_PER_RANK + 
                                                                       i * NUM_OF_TOKENS_PER_CHUNK + 
                                                                       j * NUM_OF_TOKENS_PER_GROUP + k) * HIDDEN_DIM;
               cuda::ptx::cp_async_bulk(cuda::ptx::space_shared,
@@ -1972,7 +1987,7 @@ inline __device__ void inter_node_G2S_warp_group_device_function(const int node_
 
               if constexpr(BACKWARD_COMBINE){
                 const float* rdma_inter_node_group_prob_load_addr = rdma_inter_node_group_prob + 
-                                                                    (rdma_buffer_tile_id * num_of_tokens_per_rank + 
+                                                                    (rdma_buffer_tile_id * MAX_NUM_OF_TOKENS_PER_RANK + 
                                                                     i * NUM_OF_TOKENS_PER_CHUNK + 
                                                                     j * NUM_OF_TOKENS_PER_GROUP + k) * (NUM_OF_EXPERTS_PER_RANK * NUM_OF_RANKS_PER_NODE);
 
@@ -2006,6 +2021,16 @@ inline __device__ void inter_node_G2S_warp_group_device_function(const int node_
       }
     }
   }
+  #ifdef HYBRID_EP_BUILD_MULTINODE_ENABLE
+  // Update residue flags.
+  int residue_flag_count = max_num_of_chunks_per_rank - num_of_chunks_per_rank;
+  for (int node_id = blockIdx.x; node_id < NUM_OF_NODES - 1; node_id += gridDim.x) {
+    uint64_t *residue_flag_base_ptr = rdma_inter_node_group_flags + (node_id * max_num_of_chunks_per_rank + num_of_chunks_per_rank);
+    for (int flag_id = INTER_NODE_G2S_GROUP::thread_rank(); flag_id < residue_flag_count; flag_id += INTER_NODE_G2S_GROUP::size()) {
+      residue_flag_base_ptr[flag_id] = *expected_flag_value;
+    }
+  }
+  #endif // HYBRID_EP_BUILD_MULTINODE_ENABLE
 }
 
 // Device function for inter-node reduction warp group for combine kernel.
@@ -2420,6 +2445,7 @@ template<typename TOKEN_DATA_TYPE,
          int NUM_OF_TOKENS_PER_CHUNK,
          // Model configuration.
          int HIDDEN_DIM,
+         int MAX_NUM_OF_TOKENS_PER_RANK,
          int NUM_OF_EXPERTS_PER_RANK,
          int NUM_OF_RANKS_PER_NODE,
          int NUM_OF_NODES,
@@ -2479,20 +2505,22 @@ __global__ void dispatch_kernel(const __grid_constant__ dispatch_kernel_param_t<
     // Inter-node warps groups.
     if constexpr(NUM_OF_NODES != 1){
       N2N_warp_group_device_function
-      <INTER_NODE_GROUP, TOKEN_DATA_TYPE, cur_smem_t, NUM_OF_STAGES, HIDDEN_DIM, NUM_OF_EXPERTS_PER_RANK, NUM_OF_TOKENS_PER_CHUNK, NUM_OF_RANKS_PER_NODE, NUM_OF_NODES, NUM_OF_BLOCKS, FORWARD_DISPATCH>
+      <INTER_NODE_GROUP, TOKEN_DATA_TYPE, cur_smem_t, NUM_OF_STAGES, HIDDEN_DIM, NUM_OF_TOKENS_PER_CHUNK, NUM_OF_EXPERTS_PER_RANK, NUM_OF_RANKS_PER_NODE, NUM_OF_NODES, NUM_OF_BLOCKS, FORWARD_DISPATCH>
       (param.node_rank, param.num_of_tokens_per_rank, param.attn_to_rdma_map, reinterpret_cast<doca_gpu_dev_verbs_qp**>(param.d_qps_gpu), reinterpret_cast<dispatch_memory_region_info_t*>(param.mr_info), smem_buffer_ptr);
     }
 #endif
   }else if(threadIdx_x_int < INTER_NODE_GROUP::size() + INTRA_NODE_G2S_GROUP::size()){
     // Intra-node G2S warp groups.
     G2S_warp_group_device_function
-    <TOKEN_DATA_TYPE, cur_smem_t, NUM_OF_STAGES, HIDDEN_DIM, NUM_OF_EXPERTS_PER_RANK, NUM_OF_TOKENS_PER_CHUNK, NUM_OF_RANKS_PER_NODE, NUM_OF_NODES, NUM_OF_BLOCKS, FORWARD_DISPATCH>
-    (param.node_rank, param.num_of_tokens_per_rank, param.expected_rdma_flag_value, param.rdma_to_attn_map, param.attn_input_token, param.attn_input_prob, param.attn_input_token_scaling_factor, param.rdma_inter_node_group_token,
-    param.rdma_inter_node_group_prob, param.rdma_inter_node_group_scaling_factor, param.rdma_inter_node_group_flags, smem_buffer_ptr);
+    <INTRA_NODE_G2S_GROUP, TOKEN_DATA_TYPE, cur_smem_t, NUM_OF_STAGES, HIDDEN_DIM, NUM_OF_TOKENS_PER_CHUNK,
+     MAX_NUM_OF_TOKENS_PER_RANK, NUM_OF_EXPERTS_PER_RANK, NUM_OF_RANKS_PER_NODE, NUM_OF_NODES, NUM_OF_BLOCKS, FORWARD_DISPATCH>
+    (param.node_rank, param.num_of_tokens_per_rank, param.expected_rdma_flag_value, param.rdma_to_attn_map,
+     param.attn_input_token, param.attn_input_prob, param.attn_input_token_scaling_factor, param.rdma_inter_node_group_token,
+     param.rdma_inter_node_group_prob, param.rdma_inter_node_group_scaling_factor, param.rdma_inter_node_group_flags, smem_buffer_ptr);
   }else if(threadIdx_x_int < INTER_NODE_GROUP::size() + INTRA_NODE_G2S_GROUP::size() + INTRA_NODE_S2G_GROUP::size()){
     // Intra-node S2G warp groups.
     S2G_warp_group_device_function
-    <INTRA_NODE_S2G_GROUP, TOKEN_DATA_TYPE, cur_smem_t, NUM_OF_STAGES, NUM_OF_IN_FLIGHT_S2G, HIDDEN_DIM, NUM_OF_EXPERTS_PER_RANK, NUM_OF_TOKENS_PER_CHUNK, NUM_OF_RANKS_PER_NODE, NUM_OF_NODES, NUM_OF_BLOCKS, FORWARD_DISPATCH>
+    <INTRA_NODE_S2G_GROUP, TOKEN_DATA_TYPE, cur_smem_t, NUM_OF_STAGES, NUM_OF_IN_FLIGHT_S2G, HIDDEN_DIM, NUM_OF_TOKENS_PER_CHUNK, NUM_OF_EXPERTS_PER_RANK, NUM_OF_RANKS_PER_NODE, NUM_OF_NODES, NUM_OF_BLOCKS, FORWARD_DISPATCH>
     (param.local_rank, param.node_rank, param.num_of_tokens_per_rank, param.rdma_to_attn_map, param.sparse_to_dense_map, param.expert_output_token, param.expert_output_prob,
     param.expert_output_scaling_factor, smem_buffer_ptr);
   }else{
@@ -2591,8 +2619,8 @@ __global__ void combine_kernel(const __grid_constant__ combine_kernel_param_t pa
     // Intra-node reduction warp group.
     if constexpr(NUM_OF_NODES != 1){
       intra_node_red_warp_group_device_function
-      <INTRA_NODE_RED_GROUP, cur_smem_t, NUM_OF_STAGES_G2S, NUM_OF_STAGES_S2G, HIDDEN_DIM, NUM_OF_TOKENS_PER_CHUNK, NUM_OF_EXPERTS_PER_RANK, 
-      NUM_OF_RANKS_PER_NODE, NUM_OF_NODES, NUM_OF_BLOCKS, NUM_OF_ADDITIONAL_IN_FLIGHT_S2G, BACKWARD_COMBINE>
+      <INTRA_NODE_RED_GROUP, cur_smem_t, NUM_OF_STAGES_G2S, NUM_OF_STAGES_S2G, HIDDEN_DIM, NUM_OF_TOKENS_PER_CHUNK, MAX_NUM_OF_TOKENS_PER_RANK,
+      NUM_OF_EXPERTS_PER_RANK, NUM_OF_RANKS_PER_NODE, NUM_OF_NODES, NUM_OF_BLOCKS, NUM_OF_ADDITIONAL_IN_FLIGHT_S2G, BACKWARD_COMBINE>
       (param.node_rank, param.num_of_tokens_per_rank, param.rdma_to_attn_map, param.rdma_intra_node_red_token, param.rdma_intra_node_red_prob, smem_buffer_ptr);
     }
   }else if(threadIdx_x_int < INTRA_NODE_RED_GROUP::size() + INTER_NODE_RED_GROUP::size()){
@@ -2611,7 +2639,7 @@ __global__ void combine_kernel(const __grid_constant__ combine_kernel_param_t pa
   }else if(threadIdx_x_int < INTRA_NODE_RED_GROUP::size() + INTER_NODE_RED_GROUP::size() + INTRA_NODE_G2S_GROUP::size() + INTER_NODE_G2S_GROUP::size()){
     // Inter-node G2S warp group.
     inter_node_G2S_warp_group_device_function
-    <cur_smem_t, INTER_NODE_G2S_GROUP, NUM_OF_STAGES_G2S, HIDDEN_DIM, NUM_OF_TOKENS_PER_CHUNK, NUM_OF_EXPERTS_PER_RANK, NUM_OF_RANKS_PER_NODE, NUM_OF_NODES, NUM_OF_BLOCKS,
+    <cur_smem_t, INTER_NODE_G2S_GROUP, NUM_OF_STAGES_G2S, HIDDEN_DIM, NUM_OF_TOKENS_PER_CHUNK, MAX_NUM_OF_TOKENS_PER_RANK, NUM_OF_EXPERTS_PER_RANK, NUM_OF_RANKS_PER_NODE, NUM_OF_NODES, NUM_OF_BLOCKS,
     NUM_OF_TOKENS_PER_GROUP, BACKWARD_COMBINE>
     (param.node_rank, param.num_of_tokens_per_rank, param.expected_rdma_flag_value, param.rdma_to_attn_map, param.attn_to_rdma_map, param.sparse_to_dense_map, param.expert_input_token, param.expert_input_prob,
     param.rdma_inter_node_group_token, param.rdma_inter_node_group_prob, param.rdma_inter_node_group_flags, smem_buffer_ptr);
@@ -3151,7 +3179,8 @@ public:
     // The shared memory needed by the dispatch kernel.
     using dispatch_kernel_smem_t = dispatch_kernel_dynamic_shared_memory_buffer_t<TOKEN_DATA_TYPE, NUM_OF_STAGES, HIDDEN_DIM, NUM_OF_TOKENS_PER_CHUNK, NUM_OF_EXPERTS_PER_RANK, NUM_OF_RANKS_PER_NODE, NUM_OF_NODES, FORWARD_DISPATCH>;
     // The dispatch kernel to be launched.
-    const auto dispatch_kernel_ptr = dispatch_kernel<TOKEN_DATA_TYPE, INTER_NODE_GROUP, INTRA_NODE_G2S_GROUP, INTRA_NODE_S2G_GROUP, NUM_OF_STAGES, NUM_OF_IN_FLIGHT_S2G, NUM_OF_TOKENS_PER_CHUNK, HIDDEN_DIM,
+    const auto dispatch_kernel_ptr = dispatch_kernel<TOKEN_DATA_TYPE, INTER_NODE_GROUP, INTRA_NODE_G2S_GROUP, INTRA_NODE_S2G_GROUP, NUM_OF_STAGES,
+                                                     NUM_OF_IN_FLIGHT_S2G, NUM_OF_TOKENS_PER_CHUNK, HIDDEN_DIM, MAX_NUM_OF_TOKENS_PER_RANK,
                                                      NUM_OF_EXPERTS_PER_RANK, NUM_OF_RANKS_PER_NODE, NUM_OF_NODES, NUM_OF_BLOCKS, FORWARD_DISPATCH>;
 
     // Configure dynamic shared memory for the dispatch kernel.
