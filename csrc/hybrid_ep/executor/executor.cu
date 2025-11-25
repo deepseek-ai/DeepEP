@@ -115,8 +115,8 @@ void Executor::dispatch_core(HybridEpConfigInstance config, DispatchBuffers& dis
     param.expected_rdma_flag_value = dispatch_buffers.expected_rdma_flag_value;
     param.expected_intra_node_flag_value = dispatch_buffers.expected_intra_node_flag_value;
 #ifdef HYBRID_EP_BUILD_MULTINODE_ENABLE
-    param.d_qps_gpu = dispatch_buffers.d_qps_gpu;
-    param.mr_info = dispatch_buffers.mr_info;
+    param.d_qps_gpu = reinterpret_cast<void **>(dispatch_buffers.d_qps_gpu);
+    param.mr_info = reinterpret_cast<void*>(dispatch_buffers.mr_info);
 #endif
     
     // Launch kernel
@@ -335,8 +335,8 @@ void Executor::combine_core(HybridEpConfigInstance config, CombineBuffers& combi
     param.expected_intra_node_flag_value =
         combine_buffers.expected_intra_node_flag_value;
 #ifdef HYBRID_EP_BUILD_MULTINODE_ENABLE
-    param.d_qps_gpu = combine_buffers.d_qps_gpu;
-    param.mr_info = combine_buffers.mr_info;
+    param.d_qps_gpu = reinterpret_cast<void **>(combine_buffers.d_qps_gpu);
+    param.mr_info = reinterpret_cast<void*>(combine_buffers.mr_info);
 #endif
 
     // Launch kernel

@@ -26,14 +26,16 @@ NVCCCompiler::NVCCCompiler(std::string base_path): base_path(base_path) {
 
     // Init the flags to compiler
     std::string sm_arch_flags = convert_to_nvcc_arch_flags(SM_ARCH);
-    flags = "-std=c++17 " + sm_arch_flags +
+    std::string flags = "-std=c++17 " + sm_arch_flags +
             " -O3 --expt-relaxed-constexpr "
             " -Xcompiler -fPIC -shared ";
     // Add the include path of the hybrid-ep library
-    include = " -I" + base_path + "/backend" 
+    std::string include = " -I" + base_path + "/backend" 
             + " -I" + get_env("CUDA_HOME") + "/include ";
     // Add the library path of the hybrid-ep library
-    library = "-L" + get_env("CUDA_HOME") + "/lib64 -lcudart ";
+    std::string library = "-L" + get_env("CUDA_HOME") + "/lib64 -lcudart ";
+
+    intra_node_flags = flags + " " + include + " " + library;
 
 #ifdef HYBRID_EP_BUILD_MULTINODE_ENABLE
     // Add the dependency of the inter-node jit
@@ -61,11 +63,11 @@ NVCCCompiler::NVCCCompiler(std::string base_path): base_path(base_path) {
         + doca_obj_path + "/doca_gpunetio_log.o ";
 #endif
 
-    flags = flags + " " + include + " " + library;
+    inter_node_flags = flags + " " + include + " " + library;
 }
   
 
-std::string NVCCCompiler::build(std::string code, std::string signature, int local_rank, int node_rank) {
+std::string NVCCCompiler::build(std::string code, std::string signature, int local_rank, int node_rank, int num_of_nodes) {
     // Create the source directory
     std::filesystem::create_directories(jit_dir);
 
@@ -84,14 +86,19 @@ std::string NVCCCompiler::build(std::string code, std::string signature, int loc
     out.write(code.data(), code.size());
     out.close();
 
-    // Compile the code
     std::string output_path =
         jit_dir + "/" + extended_signature + ".so";
     // Remove the output .so file if it exists
     remove(output_path.c_str());
-    std::string compile_command = 
-        nvcc_path + " " + flags + " " + source_path + " " + objs + " -o " + output_path;
+    // Choose the flags based on the number of nodes
+    std::string compile_command;
+    if(num_of_nodes > 1) {
+        compile_command = nvcc_path + " " + inter_node_flags + " " + source_path + " " + objs + " -o " + output_path;
+    }else {
+        compile_command = nvcc_path + " " + intra_node_flags + " " + source_path + " -o " + output_path;
+    }
 
+    // Run the compile command
     auto ret = std::system(compile_command.c_str());
     if (ret != 0) {
         throw std::runtime_error("Failed to compile the code, compile command: " + compile_command);
@@ -244,7 +251,7 @@ void KernelCache::run_proprecess_kernel(
     auto it = kernel_cache.find(preprocess_kernel_key);
     if (it == kernel_cache.end()) {
         auto preprocessing_code = nvcc_compiler.get_metadata_preprocessing_code(config);
-        auto preprocessing_path = nvcc_compiler.build(preprocessing_code, preprocess_kernel_key, local_rank, node_rank);
+        auto preprocessing_path = nvcc_compiler.build(preprocessing_code, preprocess_kernel_key, local_rank, node_rank, config.num_of_nodes);
         kernel_cache[preprocess_kernel_key] = nvcc_compiler.get_instance(preprocessing_path, preprocess_kernel_key);
     }
     auto preprocessing_instance = kernel_cache[preprocess_kernel_key];
@@ -298,7 +305,7 @@ void KernelCache::run_dispatch_kernel(
     if (it == kernel_cache.end()) {
         // JIT Compile the kernel
         auto dispatch_code = nvcc_compiler.get_dispatch_code(config);
-        auto dispatch_path = nvcc_compiler.build(dispatch_code, dispatch_kernel_key, local_rank, node_rank);
+        auto dispatch_path = nvcc_compiler.build(dispatch_code, dispatch_kernel_key, local_rank, node_rank, config.num_of_nodes);
         kernel_cache[dispatch_kernel_key] = nvcc_compiler.get_instance(dispatch_path, dispatch_kernel_key);
     }
     auto dispatch_instance = kernel_cache[dispatch_kernel_key];
@@ -338,7 +345,7 @@ void KernelCache::run_combine_kernel(
     if (it == kernel_cache.end()) {
         // JIT Compile the kernel
         auto combine_code = nvcc_compiler.get_combine_code(config);
-        auto combine_path = nvcc_compiler.build(combine_code, combine_kernel_key, local_rank, node_rank);
+        auto combine_path = nvcc_compiler.build(combine_code, combine_kernel_key, local_rank, node_rank, config.num_of_nodes);
         kernel_cache[combine_kernel_key] = nvcc_compiler.get_instance(combine_path, combine_kernel_key);
     }
     auto combine_instance = kernel_cache[combine_kernel_key];
