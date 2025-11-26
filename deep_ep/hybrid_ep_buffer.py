@@ -44,6 +44,7 @@ class HybridEPBuffer:
         num_sms_dispatch_api: int = None,
         num_sms_combine_api: int = None,
         num_sms_preprocessing_api: int = None,
+        num_sms_permute_api: int = None,
         use_mnnvl: bool = None
     ):
         self.group = group
@@ -84,7 +85,9 @@ class HybridEPBuffer:
         props = torch.cuda.get_device_properties(torch.cuda.current_device())
         sm_count = props.multi_processor_count
         if num_sms_preprocessing_api is None:
-            num_sms_preprocessing_api = 128
+            num_sms_preprocessing_api = 108
+        if num_sms_permute_api is None:
+            num_sms_permute_api = sm_count * 8
         # Inter-node case should use less SMs for the dispatch and combine APIs.
         if num_sms_dispatch_api is None:
             num_sms_dispatch_api = 32 if self.num_of_nodes == 1 else 16
@@ -95,10 +98,12 @@ class HybridEPBuffer:
             and sm_count >= num_sms_dispatch_api
             and sm_count >= num_sms_combine_api
         ), "check the sms occupancy setting"
+        # Used SMs for preprocessing of dispatch and permute.
         self.num_sms_preprocessing_api = num_sms_preprocessing_api
         self.num_sms_dispatch_api = num_sms_dispatch_api
         self.num_sms_combine_api = num_sms_combine_api
-
+        self.num_sms_permute_api = num_sms_permute_api
+        
         # Initialize the BufferConfig for the hybrid-ep buffer allocation.
         self.config = hybrid_ep_cpp.BufferConfig()
         self.config.hidden_dim = hidden_dim
@@ -110,6 +115,7 @@ class HybridEPBuffer:
         self.config.num_of_blocks_combine_api = self.num_sms_combine_api
         # The SMs of preprocessing, chunk size of dispatch and combine will affact the size of intermediate buffers.
         self.config.num_of_blocks_preprocessing_api = self.num_sms_preprocessing_api
+        self.config.num_of_blocks_permute_api = self.num_sms_permute_api
         # The fp8/bf16/fp16 data is communicated in the uint8/uint16 format.
         self.config.token_data_type = (
             hybrid_ep_cpp.UINT8 if self.use_fp8 else hybrid_ep_cpp.UINT16
@@ -181,6 +187,7 @@ class HybridEPBuffer:
         config.num_of_threads_per_block_preprocessing_api = int(
             os.getenv("NUM_OF_THREADS_PER_BLOCK_PREPROCESSING_API", "512")
         )
+        config.num_of_blocks_permute_api = self.num_sms_permute_api
 
         # Dispatch API Config
         if use_fp8 is None:

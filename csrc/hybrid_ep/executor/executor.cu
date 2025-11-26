@@ -86,6 +86,7 @@ std::tuple<torch::Tensor, torch::Tensor> Executor::dispatch_preprocess(HybridEpC
                 args.max_num_dispatched_tokens, 
                 config.num_of_experts_per_rank, 
                 args.pad_multiple, 
+                config.num_of_blocks_preprocessing_api,
                 args.stream
             );
             args.row_id_map = row_id_map;
@@ -193,7 +194,8 @@ Executor::dispatch_postprocess(HybridEpConfigInstance config, DispatchBuffers& d
         permute_args.with_probs = config.forward_dispatch_api;
         permute_args.token_options = args.hidden.options();
         permute_args.stream = args.stream;
-
+        permute_args.num_of_blocks_permute_api = config.num_of_blocks_permute_api;
+        
         if(config.token_data_type == APP_TOKEN_DATA_TYPE::UINT16) {
             std::tie(dispatched_tokens, dispatched_scaling_factor, dispatched_probs) = 
                 permute_launcher<uint16_t, float, float>(permute_args);
@@ -279,7 +281,8 @@ void Executor::combine_preprocess(HybridEpConfigInstance config, CombineBuffers&
         unpermute_args.num_ranks_per_node = config.num_of_ranks_per_node;
         unpermute_args.with_probs = config.backward_combine_api;
         unpermute_args.stream = args.stream;
-
+        unpermute_args.num_of_blocks_permute_api = config.num_of_blocks_permute_api;
+        
         unpermute_launcher<uint16_t, float>(unpermute_args);
     
     }else{

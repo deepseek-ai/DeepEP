@@ -348,7 +348,7 @@ def test_hybrid_ep_benchmark(buffer: deep_ep.HybridEPBuffer, group: dist.Process
 
 def test_main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
     _, _, group = init_dist(local_rank, num_local_ranks)
-    for use_fp8 in [True, False]:
+    for use_fp8 in [False, True]:
         buffer = deep_ep.HybridEPBuffer(
             group=group,
             hidden_dim=HIDDEN_DIM,

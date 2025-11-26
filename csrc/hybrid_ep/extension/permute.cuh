@@ -32,6 +32,7 @@ struct PermuteArgs {
   int local_rank;
   bool use_fp8;
   bool with_probs;
+  int num_of_blocks_permute_api;
   torch::TensorOptions token_options; // To record the Dtype of the input tokens from the expert mlp, maybe bf16/fp16/fp8...
   cudaStream_t stream;
 };
@@ -57,6 +58,7 @@ struct UnpermuteArgs {
   int local_rank;
   int num_ranks_per_node;
   bool with_probs;
+  int num_of_blocks_permute_api;
   cudaStream_t stream;
 };
 
@@ -78,6 +80,7 @@ struct UnpermuteArgs {
      int max_num_dispatched_tokens,
      int num_of_local_experts,
      int pad_multiple,
+     int num_of_blocks,
      cudaStream_t stream);
  
  /**

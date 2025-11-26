@@ -20,6 +20,7 @@ struct BufferConfig {
   int num_of_blocks_preprocessing_api;
   int num_of_blocks_dispatch_api;
   int num_of_blocks_combine_api;
+  int num_of_blocks_permute_api;
   int num_of_tokens_per_chunk_dispatch_api;
   int num_of_tokens_per_chunk_combine_api;
 
@@ -51,6 +52,7 @@ struct HybridEpConfigInstance {
    */
   int num_of_threads_per_block_preprocessing_api;
   int num_of_blocks_preprocessing_api;
+  int num_of_blocks_permute_api;
 
   /*
    *  Dispatch API Config

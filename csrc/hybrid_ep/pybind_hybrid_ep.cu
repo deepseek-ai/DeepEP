@@ -34,6 +34,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         .def_readwrite("num_of_blocks_preprocessing_api", &BufferConfig::num_of_blocks_preprocessing_api)
         .def_readwrite("num_of_blocks_dispatch_api", &BufferConfig::num_of_blocks_dispatch_api)
         .def_readwrite("num_of_blocks_combine_api", &BufferConfig::num_of_blocks_combine_api)
+        .def_readwrite("num_of_blocks_permute_api", &BufferConfig::num_of_blocks_permute_api)
         .def_readwrite("num_of_tokens_per_chunk_dispatch_api", &BufferConfig::num_of_tokens_per_chunk_dispatch_api)
         .def_readwrite("num_of_tokens_per_chunk_combine_api", &BufferConfig::num_of_tokens_per_chunk_combine_api)
         .def("__repr__", [](const BufferConfig &config) {
@@ -47,6 +48,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
                  " num_of_blocks_preprocessing_api=" + std::to_string(config.num_of_blocks_preprocessing_api) + 
                  " num_of_blocks_dispatch_api=" + std::to_string(config.num_of_blocks_dispatch_api) + 
                  " num_of_blocks_combine_api=" + std::to_string(config.num_of_blocks_combine_api) + 
+                 " num_of_blocks_permute_api=" + std::to_string(config.num_of_blocks_permute_api) + 
                  " num_of_tokens_per_chunk_dispatch_api=" + std::to_string(config.num_of_tokens_per_chunk_dispatch_api) + 
                  " num_of_tokens_per_chunk_combine_api=" + std::to_string(config.num_of_tokens_per_chunk_combine_api) + 
                  ">";
@@ -69,6 +71,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
             &HybridEpConfigInstance::num_of_threads_per_block_preprocessing_api)
         .def_readwrite("num_of_blocks_preprocessing_api",
                        &HybridEpConfigInstance::num_of_blocks_preprocessing_api)
+        .def_readwrite("num_of_blocks_permute_api",
+                       &HybridEpConfigInstance::num_of_blocks_permute_api)
         // Dispatch API Config
         .def_readwrite("token_data_type", &HybridEpConfigInstance::token_data_type)
         .def_readwrite("num_of_stages_dispatch_api",
