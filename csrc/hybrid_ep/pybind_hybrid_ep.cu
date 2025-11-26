@@ -37,6 +37,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         .def_readwrite("num_of_blocks_permute_api", &BufferConfig::num_of_blocks_permute_api)
         .def_readwrite("num_of_tokens_per_chunk_dispatch_api", &BufferConfig::num_of_tokens_per_chunk_dispatch_api)
         .def_readwrite("num_of_tokens_per_chunk_combine_api", &BufferConfig::num_of_tokens_per_chunk_combine_api)
+        .def("is_valid", &BufferConfig::is_valid)
         .def("__repr__", [](const BufferConfig &config) {
           return "<BufferConfig hidden_dim=" +
                  std::to_string(config.hidden_dim) + " max_num_of_tokens_per_rank=" +
@@ -105,6 +106,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
                        &HybridEpConfigInstance::backward_combine_api)
         .def_readwrite("device_side_sync_combine_api",
                        &HybridEpConfigInstance::device_side_sync_combine_api)
+        .def("is_valid", &HybridEpConfigInstance::is_valid)
         .def("__repr__", [](const HybridEpConfigInstance &config) {
           return "<HybridEpConfigInstance hidden_dim=" +
                  std::to_string(config.hidden_dim) + " max_num_of_tokens_per_rank=" +

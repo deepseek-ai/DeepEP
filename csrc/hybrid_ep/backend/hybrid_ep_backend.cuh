@@ -2468,8 +2468,6 @@ __global__ void dispatch_kernel(const __grid_constant__ dispatch_kernel_param_t<
   // Currently, we use TMA to copy prob data, which need at least 16B size and alignment(which requires expert per node to be multiple of 4).
   // We need to add padding or not using TMA for prob, if we want to support other scenario.
   static_assert((NUM_OF_EXPERTS_PER_RANK * NUM_OF_RANKS_PER_NODE * sizeof(float)) % 16 == 0, "Currently, expert per node must be multiple of 4(So the prob for each token is multiple of 16B) to make TMA work.");
-  // If FP8 token is used, HIDDEN_DIM must be multiple of 512 to make scaling factor multiple of 16B to make TMA work.
-  static_assert(((HIDDEN_DIM / 128) * sizeof(float)) % 16 == 0, "Currently, scaling factor per token must be multiple of 16B.");
 
 
   // Shared memory used over 48KB, should use dynamic shared memory.

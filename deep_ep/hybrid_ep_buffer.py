@@ -127,6 +127,8 @@ class HybridEPBuffer:
             os.getenv("NUM_OF_TOKENS_PER_CHUNK_COMBINE_API", "128")
         )
 
+        assert self.config.is_valid(), "The buffer config is not valid."
+
         # Create C++ buffer - this will allocate all buffers during construction
         self.runtime = hybrid_ep_cpp.HybridEPBuffer(
             self.group, 
@@ -233,8 +235,10 @@ class HybridEPBuffer:
             os.getenv("NUM_OF_ADDITIONAL_IN_FLIGHT_S2G_COMBINE_API", "2")
         )
 
+        assert config.is_valid(), "The config is not valid."
+
         # Use the runtime kernel config to update the buffer.
-        reallocated = self.runtime.update_buffer(config)
+        self.runtime.update_buffer(config)
         return config
 
     def dispatch(

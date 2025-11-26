@@ -29,7 +29,11 @@ struct BufferConfig {
    */
    bool is_valid(){
     bool valid = true;
-    valid &= (hidden_dim % 512 == 0);
+    if (token_data_type == APP_TOKEN_DATA_TYPE::UINT8) {
+      valid &= (hidden_dim % 512 == 0);
+    } else {
+      valid &= (hidden_dim % 256 == 0);
+    }
     valid &= ((num_of_experts_per_rank * num_of_ranks_per_node) % 4 == 0);
     valid &= (num_of_ranks_per_node % 2 == 0);
     return valid;
@@ -82,7 +86,11 @@ struct HybridEpConfigInstance {
    */
   bool is_valid(){
     bool valid = true;
-    valid &= (hidden_dim % 512 == 0);
+    if (token_data_type == APP_TOKEN_DATA_TYPE::UINT8) {
+      valid &= (hidden_dim % 512 == 0);
+    } else {
+      valid &= (hidden_dim % 256 == 0);
+    }
     valid &= ((num_of_experts_per_rank * num_of_ranks_per_node) % 4 == 0);
     valid &= (num_of_ranks_per_node % 2 == 0);
     return valid;
