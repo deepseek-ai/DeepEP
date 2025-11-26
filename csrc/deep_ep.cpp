@@ -263,7 +263,7 @@ pybind11::bytearray Buffer::get_local_nvshmem_unique_id() const {
 
     // Pass qps_per_rank to determine how many NCCL communicators are needed
     // For NVSHMEM: returns 1 unique ID
-    // For NCCL GIN: returns qps_per_rank unique IDs (one per communicator)
+    // For NCCL: returns qps_per_rank unique IDs (one per communicator)
     auto unique_id_vec = internode::get_unique_id(qps_per_rank, num_ranks);
 
     // Return packed unique IDs as a single bytearray
@@ -314,7 +314,7 @@ void Buffer::destroy() {
         internode::barrier();
         internode::free(rdma_buffer_ptr);
         if (enable_shrink) {
-#ifdef ENABLE_NCCL_GIN
+#ifdef ENABLE_NCCL
             CUDA_CHECK(cudaFree(mask_buffer_ptr));
             CUDA_CHECK(cudaFree(sync_buffer_ptr));
 #else
@@ -375,14 +375,14 @@ void Buffer::sync(const std::vector<int>& device_ids,
         std::memcpy(root_unique_id.data(), root_unique_id_str.c_str(), root_unique_id_opt->size());
 
         // Determine the rank and num_ranks to pass to internode::init()
-        // For NCCL-GIN: always use rank and num_ranks (the backend handles comm splitting)
+        // For NCCL: always use rank and num_ranks (the backend handles comm splitting)
         // For NVSHMEM: use rdma_rank and num_rdma_ranks in HT mode, rank and num_ranks in LL mode
         int init_rank, init_num_ranks;
         const char* backend_env = std::getenv("DEEP_EP_BACKEND");
-        bool is_nccl_gin = (backend_env && std::string(backend_env) == "nccl_gin");
+        bool is_nccl = (backend_env && std::string(backend_env) == "nccl");
 
-        if (is_nccl_gin) {
-            // NCCL-GIN: always pass global rank and num_ranks
+        if (is_nccl) {
+            // NCCL: always pass global rank and num_ranks
             init_rank = rank;
             init_num_ranks = num_ranks;
         } else {
@@ -404,7 +404,7 @@ void Buffer::sync(const std::vector<int>& device_ids,
         if (enable_shrink) {
             int num_mask_buffer_bytes = num_ranks * sizeof(int);
             int num_sync_buffer_bytes = num_ranks * sizeof(int);
-#ifdef ENABLE_NCCL_GIN
+#ifdef ENABLE_NCCL
             CUDA_CHECK(cudaMalloc(&mask_buffer_ptr, num_ranks * sizeof(int)));
             CUDA_CHECK(cudaMalloc(&sync_buffer_ptr, num_ranks * sizeof(int)));
 #else

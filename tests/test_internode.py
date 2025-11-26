@@ -396,7 +396,7 @@ if __name__ == '__main__':
     parser.add_argument('--num-experts', type=int, default=256, help='Number of experts (default: 256')
     parser.add_argument('--test-ll-compatibility',
                         action='store_true',
-                        default=False,
+                        default=True,
                         help='whether to test compatibility with low-latency kernels')
     args = parser.parse_args()
 

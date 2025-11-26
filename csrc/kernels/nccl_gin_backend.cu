@@ -1,4 +1,4 @@
-#ifdef ENABLE_NCCL_GIN
+#ifdef ENABLE_NCCL
 
 #include <cstdlib>
 #include <cstring>
@@ -60,7 +60,7 @@ int NCCLGINBackend::init(const std::vector<uint8_t>& root_unique_id_val, int ran
             comm_rank = rank;
             comm_nranks = num_ranks;
             if (rank == 0)
-                printf("[NCCL GIN Backend] LOW LATENCY MODE: Rank %d connecting to all %d ranks\n", rank, num_ranks);
+                printf("[NCCL Backend] LOW LATENCY MODE: Rank %d connecting to all %d ranks\n", rank, num_ranks);
         } else {
             // HIGH THROUGHPUT MODE: Connect only to symmetric RDMA ranks
             color = rank % gpus_per_server;
@@ -69,7 +69,7 @@ int NCCLGINBackend::init(const std::vector<uint8_t>& root_unique_id_val, int ran
             comm_rank = group_rank;
 
             printf(
-                "[NCCL GIN Backend] HIGH THROUGHPUT MODE: Rank %d (color=%d, group_rank=%d) "
+                "[NCCL Backend] HIGH THROUGHPUT MODE: Rank %d (color=%d, group_rank=%d) "
                 "connecting to %d symmetric ranks [",
                 rank,
                 color,
@@ -89,12 +89,12 @@ int NCCLGINBackend::init(const std::vector<uint8_t>& root_unique_id_val, int ran
         // (generated for worst-case HT mode, LL mode uses only the first qps_per_rank IDs)
         size_t single_id_size = sizeof(ncclUniqueId);
         size_t expected_ids = gpus_per_server * qps_per_rank;  // Always NUM_MAX_NVL_PEERS * qps_per_rank
-        // printf("[NCCL GIN Backend] Expected IDs: %zu, Actual IDs: %zu\n", expected_ids, root_unique_id_val.size() / single_id_size);
+        // printf("[NCCL Backend] Expected IDs: %zu, Actual IDs: %zu\n", expected_ids, root_unique_id_val.size() / single_id_size);
         EP_HOST_ASSERT(root_unique_id_val.size() == expected_ids * single_id_size &&
                        "Number of unique IDs doesn't match NUM_MAX_NVL_PEERS * qps_per_rank");
 
         if (rank == 0) {
-            printf("[NCCL GIN Backend] Initializing %d communicator(s) (qps_per_rank=%d) for rank %d/%d\n",
+            printf("[NCCL Backend] Initializing %d communicator(s) (qps_per_rank=%d) for rank %d/%d\n",
                    num_comms_,
                    qps_per_rank,
                    rank,
@@ -115,7 +115,7 @@ int NCCLGINBackend::init(const std::vector<uint8_t>& root_unique_id_val, int ran
                 throw std::runtime_error("GPU count mismatch: NUM_GPUS_PER_NODE_LOW_LATENCY is set to " +
                                          std::to_string(NUM_GPUS_PER_NODE_LOW_LATENCY) + " but system has " +
                                          std::to_string(actual_gpu_count) +
-                                         " GPUs. When using low-latency mode with NCCL GIN backend, "
+                                         " GPUs. When using low-latency mode with NCCL backend, "
                                          "please recompile with matching NUM_GPUS_PER_NODE_LOW_LATENCY in csrc/kernels/configs.cuh");
             }
         }
@@ -140,7 +140,7 @@ int NCCLGINBackend::init(const std::vector<uint8_t>& root_unique_id_val, int ran
         }
 
         if (rank == 0)
-            printf("[NCCL GIN Backend] Rank %d successfully initialized %d communicator(s)\n", comm_rank, num_comms_);
+            printf("[NCCL Backend] Rank %d successfully initialized %d communicator(s)\n", comm_rank, num_comms_);
 
         // Verify we have communicators initialized
         // Note: We assume NCCL GIN provides NCCL_GIN_NUM_CONTEXTS_PER_COMM (4) contexts per communicator
@@ -162,8 +162,8 @@ int NCCLGINBackend::init(const std::vector<uint8_t>& root_unique_id_val, int ran
         // The assumption is that kDecoupled is false when initializing SymBuffers in internode.cu
         // IMPORTANT: Use global num_ranks, not comm_nranks, because kernels use global topology
         const auto num_rdma_ranks = std::max(num_ranks / NUM_MAX_NVL_PEERS, 1);
-        int rdma_channel_head_signals = num_rdma_ranks * max_num_channels_;
-        int rdma_channel_tail_signals = num_rdma_ranks * max_num_channels_;
+        int rdma_channel_head_signals = num_rdma_ranks * NCCL_MAX_NUM_CHANNELS;
+        int rdma_channel_tail_signals = num_rdma_ranks * NCCL_MAX_NUM_CHANNELS;
         // Adding signals for high throughput and low latency kernels
         num_total_signals_ = rdma_channel_head_signals + rdma_channel_tail_signals + num_dispatch_signals_;
 
@@ -184,7 +184,7 @@ int NCCLGINBackend::init(const std::vector<uint8_t>& root_unique_id_val, int ran
             NCCLCHECK(ncclDevCommCreate(nccl_comms_[c], &reqs, &dcomms_[c]));
         }
         if (rank == 0)
-            printf("[NCCL GIN Backend] Rank %d created %d device communication(s) with %d barrier sessions each\n",
+            printf("[NCCL Backend] Rank %d created %d device communication(s) with %d barrier sessions each\n",
                    comm_rank,
                    num_comms_,
                    MAX_BARRIER_SESSIONS);
@@ -208,11 +208,11 @@ int NCCLGINBackend::init(const std::vector<uint8_t>& root_unique_id_val, int ran
         initialized_ = true;
 
         if (rank == 0)
-            printf("[NCCL GIN Backend] Initialized global rank %d/%d (comm rank %d/%d)\n", rank_, num_ranks_, comm_rank_, comm_nranks_);
+            printf("[NCCL Backend] Initialized global rank %d/%d (comm rank %d/%d)\n", rank_, num_ranks_, comm_rank_, comm_nranks_);
         return rank_;
 
     } catch (const std::exception& e) {
-        fprintf(stderr, "[NCCL GIN Backend] Initialization failed: %s\n", e.what());
+        fprintf(stderr, "[NCCL Backend] Initialization failed: %s\n", e.what());
         throw;
     }
 }
@@ -220,7 +220,7 @@ int NCCLGINBackend::init(const std::vector<uint8_t>& root_unique_id_val, int ran
 void NCCLGINBackend::finalize() {
     if (initialized_) {
         if (rank_ == 0)
-            printf("[NCCL GIN Backend] Finalizing rank %d\n", rank_);
+            printf("[NCCL Backend] Finalizing rank %d\n", rank_);
 
         try {
             // Destroy device communicators
@@ -230,7 +230,7 @@ void NCCLGINBackend::finalize() {
                         ncclResult_t res = ncclDevCommDestroy(nccl_comms_[c], &dcomms_[c]);
                         if (res != ncclSuccess) {
                             fprintf(stderr,
-                                    "[NCCL GIN Backend] Warning: Failed to destroy device communication %d: %s\n",
+                                    "[NCCL Backend] Warning: Failed to destroy device communication %d: %s\n",
                                     c,
                                     ncclGetErrorString(res));
                         }
@@ -263,9 +263,9 @@ void NCCLGINBackend::finalize() {
                 d_nccl_dev_wins_ = nullptr;
             }
             if (rank_ == 0)
-                printf("[NCCL GIN Backend] Destroyed NCCL communicator\n");
+                printf("[NCCL Backend] Destroyed NCCL communicator\n");
         } catch (const std::exception& e) {
-            fprintf(stderr, "[NCCL GIN Backend] Error during finalization: %s\n", e.what());
+            fprintf(stderr, "[NCCL Backend] Error during finalization: %s\n", e.what());
         }
 
         initialized_ = false;
@@ -274,7 +274,7 @@ void NCCLGINBackend::finalize() {
 
 void NCCLGINBackend::barrier() {
     if (!initialized_) {
-        throw std::runtime_error("NCCL GIN backend not initialized");
+        throw std::runtime_error("NCCL backend not initialized");
     }
     if (d_barrier_var_ == nullptr) {
         throw std::runtime_error("Barrier variable not allocated");
@@ -302,10 +302,10 @@ void NCCLGINBackend::barrier() {
 
 void* NCCLGINBackend::alloc(size_t size, size_t alignment) {
     if (!initialized_) {
-        throw std::runtime_error("NCCL GIN backend not initialized");
+        throw std::runtime_error("NCCL backend not initialized");
     }
     if (mem_handle_.ptr != nullptr) {
-        throw std::runtime_error("NCCL GIN backend only supports a single allocation at a time.");
+        throw std::runtime_error("NCCL backend only supports a single allocation at a time.");
     }
 
     void* ptr = nullptr;
@@ -315,7 +315,7 @@ void* NCCLGINBackend::alloc(size_t size, size_t alignment) {
         throw std::runtime_error(std::string("Failed to allocate NCCL memory: ") + ncclGetErrorString(res));
     }
     if (rank_ == 0)
-        printf("[NCCL GIN Backend - Memory Alloc] Rank %d: Allocated ptr=%p, size=%lu\n", rank_, ptr, size);
+        printf("[NCCL Backend - Memory Alloc] Rank %d: Allocated ptr=%p, size=%lu\n", rank_, ptr, size);
 
     // Multi-communicator: register with each communicator and gather ctx0 windows
     dev_wins_multi_nccl_.clear();
@@ -324,7 +324,7 @@ void* NCCLGINBackend::alloc(size_t size, size_t alignment) {
     wins_nccl.reserve(num_comms_);
 
     for (int c = 0; c < num_comms_; ++c) {
-        // printf("[NCCL GIN Backend - Memory Alloc] Rank %d: Registering comm %d/%d\n", rank_, c, num_comms_);
+        // printf("[NCCL Backend - Memory Alloc] Rank %d: Registering comm %d/%d\n", rank_, c, num_comms_);
         //  Register with ncclCommWindowRegister
         ncclResult_t r = ncclCommWindowRegister(nccl_comms_[c], ptr, size, dev_wins_multi_nccl_[c].data(), 0);
         if (r != ncclSuccess) {
@@ -341,14 +341,14 @@ void* NCCLGINBackend::alloc(size_t size, size_t alignment) {
     mem_handle_.ptr = ptr;
     if (d_nccl_dev_wins_ != nullptr && num_comms_ > 0) {
         if (rank_ == 0) {
-            printf("[NCCL GIN Backend - Memory Alloc] Rank %d: Copying %lu NCCL windows to GPU\n", rank_, wins_nccl.size());
+            printf("[NCCL Backend - Memory Alloc] Rank %d: Copying %lu NCCL windows to GPU\n", rank_, wins_nccl.size());
             fflush(stdout);
         }
 
         cudaError_t e2 = cudaMemcpy(d_nccl_dev_wins_, wins_nccl.data(), wins_nccl.size() * sizeof(ncclWindow_t), cudaMemcpyHostToDevice);
         if (e2 != cudaSuccess) {
             printf(
-                "[NCCL GIN Backend - Memory Alloc] Rank %d: NCCL window copy FAILED: %s (error %d)\n", rank_, cudaGetErrorString(e2), e2);
+                "[NCCL Backend - Memory Alloc] Rank %d: NCCL window copy FAILED: %s (error %d)\n", rank_, cudaGetErrorString(e2), e2);
             fflush(stdout);
             for (int c = 0; c < num_comms_; ++c) {
                 ncclCommWindowDeregister(nccl_comms_[c], dev_wins_multi_nccl_[c][0]);
@@ -359,12 +359,12 @@ void* NCCLGINBackend::alloc(size_t size, size_t alignment) {
         }
 
         if (rank_ == 0) {
-            printf("[NCCL GIN Backend - Memory Alloc] Rank %d: Successfully copied windows to GPU\n", rank_);
+            printf("[NCCL Backend - Memory Alloc] Rank %d: Successfully copied windows to GPU\n", rank_);
             fflush(stdout);
         }
     }
     if (rank_ == 0) {
-        printf("[NCCL GIN Backend - Memory Alloc] Rank %d: Registered windows and returning ptr=%p, size=%lu\n", rank_, ptr, size);
+        printf("[NCCL Backend - Memory Alloc] Rank %d: Registered windows and returning ptr=%p, size=%lu\n", rank_, ptr, size);
         fflush(stdout);
     }
     return ptr;
@@ -382,7 +382,7 @@ void NCCLGINBackend::free(void* ptr) {
             ncclResult_t r = ncclCommWindowDeregister(nccl_comms_[c], dev_wins_multi_nccl_[c][0]);
             if (r != ncclSuccess) {
                 fprintf(
-                    stderr, "[NCCL GIN Backend] Warning: Failed to deregister NCCL comm windows (comm %d): %s\n", c, ncclGetErrorString(r));
+                    stderr, "[NCCL Backend] Warning: Failed to deregister NCCL comm windows (comm %d): %s\n", c, ncclGetErrorString(r));
             }
         }
         dev_wins_multi_nccl_.clear();
@@ -390,7 +390,7 @@ void NCCLGINBackend::free(void* ptr) {
         // Free the memory
         ncclResult_t res2 = ncclMemFree(mem_handle_.ptr);
         if (res2 != ncclSuccess) {
-            fprintf(stderr, "[NCCL GIN Backend] Warning: Failed to free NCCL memory: %s\n", ncclGetErrorString(res2));
+            fprintf(stderr, "[NCCL Backend] Warning: Failed to free NCCL memory: %s\n", ncclGetErrorString(res2));
         }
 
         // Reset the handle
@@ -400,7 +400,7 @@ void NCCLGINBackend::free(void* ptr) {
 
 void* NCCLGINBackend::get_gin_base_ptr() {
     if (!initialized_ || mem_handle_.ptr == nullptr) {
-        throw std::runtime_error("NCCL GIN memory not allocated or backend not initialized.");
+        throw std::runtime_error("NCCL memory not allocated or backend not initialized.");
     }
     return mem_handle_.ptr;
 }
@@ -408,7 +408,7 @@ void* NCCLGINBackend::get_gin_base_ptr() {
 unsigned NCCLGINBackend::get_signals_base(int buffer_idx) const {
     EP_HOST_ASSERT(buffer_idx == 0 || buffer_idx == 1 || buffer_idx == 2);
     if (!initialized_ || num_total_signals_ == 0) {
-        throw std::runtime_error("NCCL GIN backend not initialized or no signals allocated");
+        throw std::runtime_error("NCCL backend not initialized or no signals allocated");
     }
 
     // Signal layout: [dispatch buffer 0][dispatch buffer 1][channel signals]
@@ -427,16 +427,12 @@ int NCCLGINBackend::get_num_gin_comms() const {
 
 ncclDevComm_t* NCCLGINBackend::get_device_communicators() const {
     if (!initialized_) {
-        throw std::runtime_error("NCCL GIN backend not initialized");
+        throw std::runtime_error("NCCL backend not initialized");
     }
     if (d_dcomms_ == nullptr) {
         throw std::runtime_error("Device communicators not allocated");
     }
     return d_dcomms_;
-}
-
-int NCCLGINBackend::get_max_num_channels() const {
-    return max_num_channels_;
 }
 
 int NCCLGINBackend::get_rank() const {
@@ -448,7 +444,7 @@ int NCCLGINBackend::get_num_ranks() const {
 }
 
 BackendType NCCLGINBackend::get_backend_type() const {
-    return BackendType::NCCL_GIN;
+    return BackendType::NCCL;
 }
 
 bool NCCLGINBackend::is_p2p_disabled() const {
@@ -467,4 +463,4 @@ ncclWindow_t* NCCLGINBackend::get_device_nccl_windows() {
 }  // namespace internode
 }  // namespace deep_ep
 
-#endif  // ENABLE_NCCL_GIN
+#endif  // ENABLE_NCCL

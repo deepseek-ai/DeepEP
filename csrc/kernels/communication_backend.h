@@ -12,8 +12,8 @@ namespace internode {
 
 // Backend type enumeration
 enum class BackendType {
-    NCCL_GIN,  // NCCL GIN backend for GPU-initiated communication
-    AUTO       // Auto-select based on environment
+    NCCL,  // NCCL backend with GIN (GPU-Initiated RDMA) support
+    AUTO   // Auto-select based on environment
 };
 
 /**
@@ -93,7 +93,7 @@ public:
 
 // ===== Backend Selection Utilities =====
 
-// Parse backend type from string (e.g., "nccl_gin", "auto").
+// Parse backend type from string (e.g., "nccl", "auto").
 BackendType parse_backend_type(const std::string& backend_str);
 
 // Auto-detect backend type from environment (checks DEEP_EP_BACKEND env var).

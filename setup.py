@@ -55,25 +55,25 @@ if __name__ == '__main__':
     extra_link_args = ['-lcuda']
 
     # NCCL Enable
-    if os.getenv('ENABLE_NCCL_GIN', '0') == '1':
-        cxx_flags.append('-DENABLE_NCCL_GIN')
-        nvcc_flags.append('-DENABLE_NCCL_GIN')
-        print('NCCL GIN backend enabled via ENABLE_NCCL_GIN=1')
+    if os.getenv('ENABLE_NCCL', '0') == '1':
+        cxx_flags.append('-DENABLE_NCCL')
+        nvcc_flags.append('-DENABLE_NCCL')
+        print('NCCL backend enabled via ENABLE_NCCL=1')
 
-        # Add NCCL GIN include paths
-        nccl_gin_home = os.getenv('NCCL_GIN_HOME', None)
-        if nccl_gin_home and os.path.exists(nccl_gin_home):
+        # Add NCCL include paths
+        nccl_home = os.getenv('NCCL_HOME', None)
+        if nccl_home and os.path.exists(nccl_home):
             # Add build/include for nccl.h
-            nccl_gin_build_include = f'{nccl_gin_home}/build/include'
-            if os.path.exists(nccl_gin_build_include):
-                include_dirs.append(nccl_gin_build_include)
-                print(f'Added NCCL GIN build include: {nccl_gin_build_include}')
+            nccl_build_include = f'{nccl_home}/build/include'
+            if os.path.exists(nccl_build_include):
+                include_dirs.append(nccl_build_include)
+                print(f'Added NCCL build include: {nccl_build_include}')
 
             # Add src/include for gin.h and device headers
-            nccl_gin_src_include = f'{nccl_gin_home}/src/include'
-            if os.path.exists(nccl_gin_src_include):
-                include_dirs.append(nccl_gin_src_include)
-                print(f'Added NCCL GIN src include: {nccl_gin_src_include}')
+            nccl_src_include = f'{nccl_home}/src/include'
+            if os.path.exists(nccl_src_include):
+                include_dirs.append(nccl_src_include)
+                print(f'Added NCCL src include: {nccl_src_include}')
 
             # Add NCCL GIN library path
             nccl_gin_lib = f'{nccl_gin_home}/build/lib'
@@ -90,10 +90,10 @@ if __name__ == '__main__':
             extra_link_args.extend([f'-L{nccl_gin_lib}', '-lnccl'])
             print('Added NCCL GIN library linking: -lnccl (dynamic)')
 
-            if not os.path.exists(nccl_gin_build_include) and not os.path.exists(nccl_gin_src_include):
-                print(f'Warning: NCCL GIN include directories not found in {nccl_gin_home}')
+            if not os.path.exists(nccl_build_include) and not os.path.exists(nccl_src_include):
+                print(f'Warning: NCCL include directories not found in {nccl_home}')
         else:
-            print('Warning: NCCL_GIN_HOME not set or invalid when ENABLE_NCCL_GIN=1')
+            print('Warning: NCCL_HOME not set or invalid when ENABLE_NCCL=1')
 
     # NVSHMEM flags
     if disable_nvshmem:

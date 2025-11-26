@@ -6,7 +6,7 @@
 #include "launch.cuh"
 #include "utils.cuh"
 
-#ifdef ENABLE_NCCL_GIN
+#ifdef ENABLE_NCCL
 #include <nccl.h>
 
 #include "nccl_gin_backend.h"
@@ -55,8 +55,8 @@ nvshmem_team_config_t cpu_rdma_team_config;
 std::vector<uint8_t> get_unique_id(int qps_per_rank, int num_ranks) {
     std::vector<uint8_t> result;
 
-#ifdef ENABLE_NCCL_GIN
-    // For NCCL GIN: Generate enough IDs for both LL and HT modes
+#ifdef ENABLE_NCCL
+    // For NCCL: Generate enough IDs for both LL and HT modes
     // At this stage, we don't know which mode will be used, so generate for worst case (HT mode)
     // - Low Latency mode: will use only first qps_per_rank IDs
     // - High Throughput mode: will use all NUM_MAX_NVL_PEERS * qps_per_rank IDs
@@ -87,10 +87,10 @@ std::vector<uint8_t> get_unique_id(int qps_per_rank, int num_ranks) {
 
 int init(const std::vector<uint8_t>& root_unique_id_val, int rank, int num_ranks, bool low_latency_mode, int qps_per_rank) {
     // printf("runtime::init() called\n"); fflush(stdout);
-#ifdef ENABLE_NCCL_GIN
+#ifdef ENABLE_NCCL
     // printf("NCCL: init()\n"); fflush(stdout);
 
-    // For NCCL GIN: Verify we received the correct number of unique IDs
+    // For NCCL: Verify we received the correct number of unique IDs
     // We always receive NUM_MAX_NVL_PEERS * qps_per_rank IDs (generated for HT mode worst case)
     // LL mode uses only the first qps_per_rank IDs, HT mode uses all of them
     size_t expected_size = NUM_MAX_NVL_PEERS * qps_per_rank * sizeof(ncclUniqueId);
@@ -139,7 +139,7 @@ int init(const std::vector<uint8_t>& root_unique_id_val, int rank, int num_ranks
 }
 
 void* alloc(size_t size, size_t alignment) {
-#ifdef ENABLE_NCCL_GIN
+#ifdef ENABLE_NCCL
     // printf("NCCL: alloc()\n");
     internode::CommunicationBackend* backend = internode::get_backend();
     if (backend == nullptr) {
@@ -152,7 +152,7 @@ void* alloc(size_t size, size_t alignment) {
 }
 
 void free(void* ptr) {
-#ifdef ENABLE_NCCL_GIN
+#ifdef ENABLE_NCCL
     // printf("NCCL: free()\n");
     internode::CommunicationBackend* backend = internode::get_backend();
     if (backend == nullptr) {
@@ -165,7 +165,7 @@ void free(void* ptr) {
 }
 
 void barrier() {
-#ifdef ENABLE_NCCL_GIN
+#ifdef ENABLE_NCCL
     // printf("NCCL: barrier()\n");
     internode::CommunicationBackend* backend = internode::get_backend();
     backend->barrier();
@@ -175,7 +175,7 @@ void barrier() {
 }
 
 void finalize() {
-#ifdef ENABLE_NCCL_GIN
+#ifdef ENABLE_NCCL
     // printf("NCCL: finalize()\n");
     internode::CommunicationBackend* backend = internode::get_backend();
     if (backend) {

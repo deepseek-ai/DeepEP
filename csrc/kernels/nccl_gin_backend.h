@@ -16,8 +16,9 @@
 
 #define DEEP_EP_GIN_MAX_CONTEXTS 32
 #define NCCL_GIN_NUM_CONTEXTS_PER_COMM 4
+#define NCCL_MAX_NUM_CHANNELS 32  // Max number of local experts per GPU
 
-#ifdef ENABLE_NCCL_GIN
+#ifdef ENABLE_NCCL
 
 namespace deep_ep {
 namespace internode {
@@ -44,20 +45,19 @@ public:
     int get_num_ranks() const override;
     BackendType get_backend_type() const override;
 
-    // NCCL GIN-specific methods
+    // NCCL-specific methods
     bool is_p2p_disabled() const;
 
-    // NCCL GIN-specific method for unique ID generation
+    // NCCL-specific method for unique ID generation
     void get_unique_id(void* unique_id) override;
 
-    // NCCL GIN specific methods
+    // NCCL specific methods
     unsigned get_signals_base(int buffer_idx) const;
     int get_num_gin_comms() const;
 
     // Device arrays for kernels
     ncclWindow_t* get_device_nccl_windows();
     void* get_gin_base_ptr();
-    int get_max_num_channels() const;
     ncclDevComm* get_device_communicators() const;
 
 private:
@@ -85,9 +85,6 @@ private:
     // Device arrays for windows
     ncclWindow_t* d_nccl_dev_wins_ = nullptr;
 
-    // The assumption is that DeepSeek (256 experts) runs on at least 8 GPUs, hence 32 channels
-    const int max_num_channels_ = 32;  // Max number of local experts per GPU
-
     // GIN barriers -- assume 32 rdma ranks
     ncclDevComm_t* dcomms_ = nullptr;    // Host array
     ncclDevComm_t* d_dcomms_ = nullptr;  // Device array
@@ -100,4 +97,4 @@ private:
 }  // namespace internode
 }  // namespace deep_ep
 
-#endif  // ENABLE_NCCL_GIN
+#endif  // ENABLE_NCCL

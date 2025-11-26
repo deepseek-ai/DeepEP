@@ -20,7 +20,7 @@
 #define FINISHED_SUM_TAG 1024
 #define NUM_WAIT_NANOSECONDS 500
 
-// Internode buffer index for NCCL GIN signal allocation
+// Internode buffer index for NCCL signal allocation
 #define INTERNODE_BUFFER_IDX 2
 
 #ifndef ENABLE_FAST_DEBUG

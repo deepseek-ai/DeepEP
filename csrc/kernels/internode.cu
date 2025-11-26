@@ -11,7 +11,7 @@
 #include "launch.cuh"
 #include "utils.cuh"
 
-#ifdef ENABLE_NCCL_GIN
+#ifdef ENABLE_NCCL
 #include "nccl_device/gin/gin_device_api.h"
 #include "nccl_gin_backend.h"
 #endif
@@ -97,13 +97,13 @@ __forceinline__ __device__ int translate_dst_rdma_rank(const int dst_rdma_rank, 
 
 template <bool kLowLatencyMode>
 __forceinline__ __device__ void sync_with_same_gpu_idx(const nvshmem_team_t& rdma_team,
-#ifdef ENABLE_NCCL_GIN
+#ifdef ENABLE_NCCL
                                                        ncclDevComm* dcomms) {
 #else
                                                        void* dcomms) {
 #endif
     // Barrier before cleaning (in case of unfinished chunked EP)
-#ifdef ENABLE_NCCL_GIN
+#ifdef ENABLE_NCCL
     auto dcomm = dcomms[0];
     ncclGin net(dcomm, 0);
 
@@ -152,7 +152,7 @@ __global__ void notify_dispatch(const int* num_tokens_per_rank,
                                 int** barrier_signal_ptrs,
                                 int rank,
                                 const nvshmem_team_t rdma_team,
-#ifdef ENABLE_NCCL_GIN
+#ifdef ENABLE_NCCL
                                 int num_gin_comms,
                                 void* gin_base_ptr,
                                 ncclDevComm* dcomms,
@@ -180,7 +180,7 @@ __global__ void notify_dispatch(const int* num_tokens_per_rank,
 
         // waiting for all previous inflight wrs to complete,
         // in case of rewriting cleared rdma_buffer
-#ifdef ENABLE_NCCL_GIN
+#ifdef ENABLE_NCCL
         // Flush all contexts
         EP_DEVICE_ASSERT(num_gin_comms <= num_threads);
         if (thread_id < num_gin_comms) {
@@ -211,7 +211,7 @@ __global__ void notify_dispatch(const int* num_tokens_per_rank,
         for (int i = thread_id; i < rdma_num_int_clean; i += num_threads)
             rdma_buffer_ptr_int[rdma_clean_offset + i] = 0;
 
-#ifdef ENABLE_NCCL_GIN
+#ifdef ENABLE_NCCL
         // Clean signals here
         // For each channel we have kNumRDMARanks head and tail signals
         int num_signals = kNumRDMARanks * num_channels * 2;
@@ -254,7 +254,7 @@ __global__ void notify_dispatch(const int* num_tokens_per_rank,
         // TODO: overlap EP barrier and NVL cleaning
         for (int i = warp_id; i < kNumRDMARanks; i += num_warps) {
             if (i != rdma_rank) {
-#ifdef ENABLE_NCCL_GIN
+#ifdef ENABLE_NCCL
                 // GIN put is not warp-collective, so only one thread should execute it
                 if (lane_id == 0) {
                     // Distribute work across GIN contexts
@@ -303,7 +303,7 @@ __global__ void notify_dispatch(const int* num_tokens_per_rank,
         __syncthreads();
 
         // Wait previous operations to be finished
-#ifdef ENABLE_NCCL_GIN
+#ifdef ENABLE_NCCL
         // Flush all contexts
         EP_DEVICE_ASSERT(num_gin_comms <= num_threads);
         if (thread_id < num_gin_comms) {
@@ -496,7 +496,7 @@ void notify_dispatch(const int* num_tokens_per_rank,
                      int64_t num_rdma_bytes,
                      int64_t num_nvl_bytes,
                      bool low_latency_mode) {
-#ifdef ENABLE_NCCL_GIN
+#ifdef ENABLE_NCCL
     auto* backend = dynamic_cast<deep_ep::internode::NCCLGINBackend*>(deep_ep::internode::get_backend());
     EP_HOST_ASSERT(backend != nullptr);
     auto gin_base_ptr = backend->get_gin_base_ptr();
@@ -629,7 +629,7 @@ __global__ void __launch_bounds__(((kNumDispatchRDMASenderWarps + 1 + NUM_MAX_NV
              int num_max_nvl_chunked_recv_tokens,
              int rank,
              int num_ranks,
-#ifdef ENABLE_NCCL_GIN
+#ifdef ENABLE_NCCL
              int num_gin_comms,
              void* gin_base_ptr,
              ncclDevComm* dcomms,
@@ -652,8 +652,8 @@ __global__ void __launch_bounds__(((kNumDispatchRDMASenderWarps + 1 + NUM_MAX_NV
     const bool is_forwarder = sm_id % 2 == 0;
     const auto rdma_rank = rank / NUM_MAX_NVL_PEERS, nvl_rank = rank % NUM_MAX_NVL_PEERS;
 
-#ifndef ENABLE_NCCL_GIN
-    // NCCL GIN does not require QP assertions, only IBGDA does
+#ifndef ENABLE_NCCL
+    // NCCL does not require QP assertions, only IBGDA does
     EP_DEVICE_ASSERT(ibgda_get_state()->num_rc_per_pe == num_channels or ibgda_get_state()->num_rc_per_pe >= num_sms);
 #endif
     const auto role_meta = [=]() -> std::pair<WarpRole, int> {
@@ -688,7 +688,7 @@ __global__ void __launch_bounds__(((kNumDispatchRDMASenderWarps + 1 + NUM_MAX_NV
     auto rdma_channel_meta = SymBuffer<int>(rdma_buffer_ptr, NUM_MAX_NVL_PEERS * 2 + 2, kNumRDMARanks, channel_id, num_channels);
     auto rdma_channel_head = SymBuffer<uint64_t, false>(rdma_buffer_ptr, 1, kNumRDMARanks, channel_id, num_channels);
     auto rdma_channel_tail = SymBuffer<uint64_t, false>(rdma_buffer_ptr, 1, kNumRDMARanks, channel_id, num_channels);
-#ifdef ENABLE_NCCL_GIN
+#ifdef ENABLE_NCCL
     // Using signals for RDMA head and tail instead with gin_signals
     auto gin_signals_head = signals_base + kNumRDMARanks * channel_id;  // move the signals to the corresponding channel
     auto gin_signals_tail = signals_base + kNumRDMARanks * num_channels +
@@ -791,7 +791,7 @@ __global__ void __launch_bounds__(((kNumDispatchRDMASenderWarps + 1 + NUM_MAX_NV
 
             // Issue RDMA for non-local ranks
             if (dst_rdma_rank != rdma_rank) {
-#ifdef ENABLE_NCCL_GIN
+#ifdef ENABLE_NCCL
                 // kRDMASender: These are channel-specific routing metadata
                 if (lane_id == 0) {
                     int dst_rank = translate_dst_rdma_rank<kLowLatencyMode>(dst_rdma_rank, nvl_rank);
@@ -848,7 +848,7 @@ __global__ void __launch_bounds__(((kNumDispatchRDMASenderWarps + 1 + NUM_MAX_NV
             // Wait the remote buffer to be released
             auto start_time = clock64();
             while (is_token_in_rank_uint64 != 0 and rdma_tail_idx - cached_rdma_channel_head >= num_max_rdma_chunked_recv_tokens) {
-#ifdef ENABLE_NCCL_GIN
+#ifdef ENABLE_NCCL
                 // kRDMASender: Check available space with head pointers to avoid overflow
                 auto signal_id = gin_signals_head + lane_id;
                 uint64_t signal_value = net_head.readSignal(signal_id);
@@ -1028,7 +1028,7 @@ __global__ void __launch_bounds__(((kNumDispatchRDMASenderWarps + 1 + NUM_MAX_NV
                         reinterpret_cast<uint64_t>(rdma_channel_data.recv_buffer(rdma_rank) + dst_slot_idx * num_bytes_per_token);
                     const auto src_ptr =
                         reinterpret_cast<uint64_t>(rdma_channel_data.send_buffer(dst_rdma_rank) + dst_slot_idx * num_bytes_per_token);
-#ifdef ENABLE_NCCL_GIN
+#ifdef ENABLE_NCCL
                     // kRDMASenderCoordinator: Send tokens to remote RDMA ranks
                     if (lane_id == 0) {  // Only execute on lane 0 to match nvshmemi_ibgda_put_nbi_warp behavior
 
@@ -1070,7 +1070,7 @@ __global__ void __launch_bounds__(((kNumDispatchRDMASenderWarps + 1 + NUM_MAX_NV
                 if (lane_id == dst_rdma_rank) {
                     last_issued_tail += num_tokens_to_issue;
                     num_tokens_to_send -= num_tokens_to_issue;
-#ifdef ENABLE_NCCL_GIN
+#ifdef ENABLE_NCCL
                     // kRDMASenderCoordinator:Update tails
                     auto dst_rank = translate_dst_rdma_rank<kLowLatencyMode>(dst_rdma_rank, nvl_rank);
                     auto signal_id = gin_signals_tail + rdma_rank;
@@ -1186,7 +1186,7 @@ __global__ void __launch_bounds__(((kNumDispatchRDMASenderWarps + 1 + NUM_MAX_NV
                 src_rdma_rank = (src_rdma_rank + 1) % kNumRDMARanks;
                 if (__shfl_sync(0xffffffff, num_tokens_to_recv_from_rdma, src_rdma_rank) > 0) {
                     if (lane_id == src_rdma_rank and cached_rdma_channel_head == cached_rdma_channel_tail) {
-#ifdef ENABLE_NCCL_GIN
+#ifdef ENABLE_NCCL
                         // kRDMAAndNVLForwarder: Read local tail for availability
                         auto signal_id = gin_signals_tail + src_rdma_rank;
                         uint64_t signal_value = net.readSignal(signal_id);
@@ -1304,7 +1304,7 @@ __global__ void __launch_bounds__(((kNumDispatchRDMASenderWarps + 1 + NUM_MAX_NV
             // Update remote head
             if (min_head != std::numeric_limits<int>::max() and min_head >= last_head + num_max_rdma_chunked_send_tokens and
                 lane_id < kNumRDMARanks) {
-#ifdef ENABLE_NCCL_GIN
+#ifdef ENABLE_NCCL
                 // kForwarderCoordinator: Update remote head
                 auto dst_rank = translate_dst_rdma_rank<kLowLatencyMode>(lane_id, nvl_rank);
                 auto signal_id = gin_signals_head + rdma_rank;
@@ -1528,7 +1528,7 @@ void dispatch(void* recv_x,
     // Make sure never OOB
     EP_HOST_ASSERT(static_cast<int64_t>(num_scales) * scale_hidden_stride < std::numeric_limits<int>::max());
 
-#ifdef ENABLE_NCCL_GIN
+#ifdef ENABLE_NCCL
     auto* backend = dynamic_cast<deep_ep::internode::NCCLGINBackend*>(deep_ep::internode::get_backend());
     EP_HOST_ASSERT(backend != nullptr);
     auto gin_base_ptr = backend->get_gin_base_ptr();
@@ -1541,8 +1541,7 @@ void dispatch(void* recv_x,
     EP_HOST_ASSERT(num_gin_comms >= 1);
     EP_HOST_ASSERT(rdma_buffer_ptr == gin_base_ptr);
     EP_HOST_ASSERT(reinterpret_cast<uintptr_t>(rdma_buffer_ptr) >= reinterpret_cast<uintptr_t>(gin_base_ptr));
-    // Check if number of channels exceeds the maximum allowed by NCCL GIN backend
-    EP_HOST_ASSERT(num_channels <= backend->get_max_num_channels());
+    EP_HOST_ASSERT(num_channels <= NCCL_MAX_NUM_CHANNELS);
     EP_HOST_ASSERT(nccl_windows != nullptr);
 #else
     void* gin_base_ptr = nullptr;
@@ -1680,7 +1679,7 @@ __global__ void cached_notify(const int rdma_clean_offset,
                               int num_ranks,
                               bool is_cached_dispatch,
                               const nvshmem_team_t rdma_team,
-#ifdef ENABLE_NCCL_GIN
+#ifdef ENABLE_NCCL
                               int num_gin_comms,
                               void* gin_base_ptr,
                               ncclDevComm* dcomms,
@@ -1704,7 +1703,7 @@ __global__ void cached_notify(const int rdma_clean_offset,
 
     // Using two SMs, which clean the RDMA/NVL buffer respectively
     if (sm_id == 0) {
-#ifdef ENABLE_NCCL_GIN
+#ifdef ENABLE_NCCL
         // Flush all contexts
         EP_DEVICE_ASSERT(num_gin_comms <= num_threads);
         if (thread_id < num_gin_comms) {
@@ -1734,7 +1733,7 @@ __global__ void cached_notify(const int rdma_clean_offset,
         for (int i = thread_id; i < rdma_num_int_clean; i += num_threads)
             rdma_buffer_ptr_int[rdma_clean_offset + i] = 0;
 
-#ifdef ENABLE_NCCL_GIN
+#ifdef ENABLE_NCCL
         // Clean signals here
         // For each channel we have num_rdma_ranks head and tail signals
         int num_signals = num_rdma_ranks * num_channels * 2;
@@ -1916,7 +1915,7 @@ void cached_notify(int hidden_int4,
     EP_HOST_ASSERT(num_nvl_bytes < std::numeric_limits<int>::max());
     EP_HOST_ASSERT(num_channels * 2 > 3);
 
-#ifdef ENABLE_NCCL_GIN
+#ifdef ENABLE_NCCL
     auto* backend = dynamic_cast<deep_ep::internode::NCCLGINBackend*>(deep_ep::internode::get_backend());
     EP_HOST_ASSERT(backend != nullptr);
     auto gin_base_ptr = backend->get_gin_base_ptr();
@@ -2164,7 +2163,7 @@ __global__ void __launch_bounds__((kNumForwarders + 1) * 32, 1) combine(int4* co
                                                                         int num_max_nvl_chunked_recv_tokens,
                                                                         int rank,
                                                                         int num_ranks,
-#ifdef ENABLE_NCCL_GIN
+#ifdef ENABLE_NCCL
                                                                         int num_gin_comms,
                                                                         void* gin_base_ptr,
                                                                         ncclDevComm* dcomms,
@@ -2191,7 +2190,7 @@ __global__ void __launch_bounds__((kNumForwarders + 1) * 32, 1) combine(int4* co
     const auto hidden_bytes = hidden_int4 * sizeof(int4);
     const auto num_bytes_per_token = get_num_bytes_per_token(hidden_int4, 0, 0, num_topk);
 
-#ifdef ENABLE_NCCL_GIN
+#ifdef ENABLE_NCCL
     // Use a diff GIN context and window for each channel/SM
     auto comm_id = channel_id % num_gin_comms;
     auto nccl_window = nccl_windows[comm_id];
@@ -2379,7 +2378,7 @@ __global__ void __launch_bounds__((kNumForwarders + 1) * 32, 1) combine(int4* co
             rdma_buffer_ptr, num_max_rdma_chunked_recv_tokens * num_bytes_per_token, kNumRDMARanks, channel_id, num_channels);
         auto rdma_channel_head = SymBuffer<uint64_t, false>(rdma_buffer_ptr, 1, kNumRDMARanks, channel_id, num_channels);
         auto rdma_channel_tail = SymBuffer<uint64_t, false>(rdma_buffer_ptr, 1, kNumRDMARanks, channel_id, num_channels);
-#ifdef ENABLE_NCCL_GIN
+#ifdef ENABLE_NCCL
         // Using signals for RDMA head and tail instead with gin_signals
         auto gin_signals_head = signals_base + kNumRDMARanks * channel_id;  // move the signals to the corresponding channel
         auto gin_signals_tail = signals_base + kNumRDMARanks * num_channels +
@@ -2471,7 +2470,7 @@ __global__ void __launch_bounds__((kNumForwarders + 1) * 32, 1) combine(int4* co
                 while (sub_warp_id == 0 and lane_id == 0) {
                     // Inequality: `num_max_rdma_chunked_recv_tokens - (tail - head) >= num_chunked_tokens`
                     // Here, `token_start_idx` is the actual tail
-#ifdef ENABLE_NCCL_GIN
+#ifdef ENABLE_NCCL
                     // kNVLAndRDMAForwarder: Check if RDMA receive buffer has space before sending data
                     auto signal_id = gin_signals_head + dst_rdma_rank;
                     uint64_t signal_value = net_head.readSignal(signal_id);
@@ -2484,7 +2483,7 @@ __global__ void __launch_bounds__((kNumForwarders + 1) * 32, 1) combine(int4* co
 
                     // Timeout check
                     if (clock64() - start_time > NUM_TIMEOUT_CYCLES) {
-#ifdef ENABLE_NCCL_GIN
+#ifdef ENABLE_NCCL
                         // kNVLAndRDMAForwarder: debugging
                         auto signal_id = gin_signals_head + dst_rdma_rank;
                         uint64_t signal_value = net_head.readSignal(signal_id);
@@ -2596,7 +2595,7 @@ __global__ void __launch_bounds__((kNumForwarders + 1) * 32, 1) combine(int4* co
                             reinterpret_cast<uint64_t>(rdma_channel_data.recv_buffer(rdma_rank) + rdma_slot_idx * num_bytes_per_token);
                         const auto src_ptr =
                             reinterpret_cast<uint64_t>(rdma_channel_data.send_buffer(dst_rdma_rank) + rdma_slot_idx * num_bytes_per_token);
-#ifdef ENABLE_NCCL_GIN
+#ifdef ENABLE_NCCL
                         // kNVLAndRDMAForwarder: Transfer combined token data to remote RDMA rank
                         if (lane_id == 0) {  // Only execute on lane 0 to match nvshmemi_ibgda_put_nbi_warp behavior
 
@@ -2636,7 +2635,7 @@ __global__ void __launch_bounds__((kNumForwarders + 1) * 32, 1) combine(int4* co
                     // Write new RDMA tail
                     __syncwarp();
                     if (elect_one_sync()) {
-#ifdef ENABLE_NCCL_GIN
+#ifdef ENABLE_NCCL
                         auto dst_rank = translate_dst_rdma_rank<kLowLatencyMode>(dst_rdma_rank, nvl_rank);
                         auto signal_id = gin_signals_tail + rdma_rank;
                         net.signal(world,                                                       // team
@@ -2689,7 +2688,7 @@ __global__ void __launch_bounds__((kNumForwarders + 1) * 32, 1) combine(int4* co
                 // Wait lanes to be ready
                 auto start_time = clock64();
                 while (cached_channel_tail_idx <= expected_head) {
-#ifdef ENABLE_NCCL_GIN
+#ifdef ENABLE_NCCL
                     // kRDMAReceiver: Check if data is available from remote RDMA rank (check tail pointer)
                     auto signal_id = gin_signals_tail + lane_id;
                     uint64_t signal_value = net.readSignal(signal_id);
@@ -2774,7 +2773,7 @@ __global__ void __launch_bounds__((kNumForwarders + 1) * 32, 1) combine(int4* co
                             min_head = min(min_head, rdma_receiver_rdma_head[i][dst_rdma_rank]);
                     if (min_head != std::numeric_limits<int>::max() and min_head >= last_rdma_head + num_max_rdma_chunked_send_tokens and
                         lane_id < kNumRDMARanks) {
-#ifdef ENABLE_NCCL_GIN
+#ifdef ENABLE_NCCL
                         // Coordinator: Notify remote rank that buffer space has been freed (update head pointer)
                         auto dst_rank = translate_dst_rdma_rank<kLowLatencyMode>(dst_rdma_rank, nvl_rank);
                         auto signal_id = gin_signals_head + rdma_rank;
@@ -2851,7 +2850,7 @@ void combine(cudaDataType_t type,
     constexpr int smem_size =
         std::max(kNumTMABytesPerSenderWarp * NUM_MAX_NVL_PEERS, kNumTMABytesPerForwarderWarp * kNumCombineForwarderWarps);
 
-#ifdef ENABLE_NCCL_GIN
+#ifdef ENABLE_NCCL
     auto* backend = dynamic_cast<deep_ep::internode::NCCLGINBackend*>(deep_ep::internode::get_backend());
     EP_HOST_ASSERT(backend != nullptr);
     auto gin_base_ptr = backend->get_gin_base_ptr();
@@ -2863,8 +2862,7 @@ void combine(cudaDataType_t type,
     EP_HOST_ASSERT(num_gin_comms >= 1);
     EP_HOST_ASSERT(rdma_buffer_ptr == gin_base_ptr);
     EP_HOST_ASSERT(reinterpret_cast<uintptr_t>(rdma_buffer_ptr) >= reinterpret_cast<uintptr_t>(gin_base_ptr));
-    // Check if number of channels exceeds the maximum allowed by NCCL GIN backend
-    EP_HOST_ASSERT(num_channels <= backend->get_max_num_channels());
+    EP_HOST_ASSERT(num_channels <= NCCL_MAX_NUM_CHANNELS);
     EP_HOST_ASSERT(dcomms != nullptr);
     EP_HOST_ASSERT(nccl_windows != nullptr);
 #else

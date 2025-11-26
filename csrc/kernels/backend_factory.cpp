@@ -6,7 +6,7 @@
 #include <stdexcept>
 
 #include "communication_backend.h"
-#ifdef ENABLE_NCCL_GIN
+#ifdef ENABLE_NCCL
 #include "nccl_gin_backend.h"
 #endif
 
@@ -23,8 +23,8 @@ std::unique_ptr<CommunicationBackend> CommunicationBackend::create(BackendType t
 
 // Backend selection utilities
 BackendType parse_backend_type(const std::string& backend_str) {
-    if (backend_str == "nccl_gin") {
-        return BackendType::NCCL_GIN;
+    if (backend_str == "nccl" || backend_str == "nccl_gin") {
+        return BackendType::NCCL;
     } else if (backend_str == "auto") {
         return BackendType::AUTO;
     } else {
@@ -39,17 +39,17 @@ BackendType detect_backend_type() {
         try {
             return parse_backend_type(env_backend);
         } catch (const std::exception& e) {
-            std::cerr << "Warning: Invalid DEEP_EP_BACKEND value: " << env_backend << ". Falling back to NCCL_GIN." << std::endl;
+            std::cerr << "Warning: Invalid DEEP_EP_BACKEND value: " << env_backend << ". Falling back to NCCL." << std::endl;
         }
     }
 
-    return BackendType::NCCL_GIN;
+    return BackendType::NCCL;
 }
 
 std::string backend_type_to_string(BackendType type) {
     switch (type) {
-        case BackendType::NCCL_GIN:
-            return "nccl_gin";
+        case BackendType::NCCL:
+            return "nccl";
         case BackendType::AUTO:
             return "auto";
         default:
@@ -92,17 +92,17 @@ void finalize_backend() {
 
 std::unique_ptr<CommunicationBackend> create_backend(BackendType type) {
     switch (type) {
-        case BackendType::NCCL_GIN:
-#ifdef ENABLE_NCCL_GIN
+        case BackendType::NCCL:
+#ifdef ENABLE_NCCL
             return std::make_unique<NCCLGINBackend>();
 #else
-            throw std::runtime_error("NCCL GIN backend not compiled in. Set ENABLE_NCCL_GIN=1 to enable.");
+            throw std::runtime_error("NCCL backend not compiled in. Set ENABLE_NCCL=1 to enable.");
 #endif
         case BackendType::AUTO:
-#ifdef ENABLE_NCCL_GIN
+#ifdef ENABLE_NCCL
             return std::make_unique<NCCLGINBackend>();
 #else
-            throw std::runtime_error("No backend available. Set ENABLE_NCCL_GIN=1 to enable NCCL GIN backend.");
+            throw std::runtime_error("No backend available. Set ENABLE_NCCL=1 to enable NCCL backend.");
 #endif
         default:
             throw std::runtime_error("Unknown backend type");
