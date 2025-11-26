@@ -6,7 +6,7 @@ For system requirements and dependencies, please refer to the main [README.md](R
 
 This project requires NCCL with GIN (GPU-Initiated Networking) support. The minimum supported version is:
 
-- **NCCL 2.28.3-1** or later
+- **NCCL 2.28.3-1** or later [FIXME: this needs to change to 2.29.1 + with our latest changes]
 - Minimum commit: [f1308997d0420148b1be1c24d63f19d902ae589b](https://github.com/NVIDIA/nccl/commit/f1308997d0420148b1be1c24d63f19d902ae589b)
 - Repository: [https://github.com/NVIDIA/nccl](https://github.com/NVIDIA/nccl)
 

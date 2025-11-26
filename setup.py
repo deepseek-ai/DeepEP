@@ -75,20 +75,20 @@ if __name__ == '__main__':
                 include_dirs.append(nccl_src_include)
                 print(f'Added NCCL src include: {nccl_src_include}')
 
-            # Add NCCL GIN library path
-            nccl_gin_lib = f'{nccl_gin_home}/build/lib'
-            if os.path.exists(nccl_gin_lib):
-                library_dirs.append(nccl_gin_lib)
-                print(f'Added NCCL GIN library directory: {nccl_gin_lib}')
-                # Add rpath to ensure NCCL GIN is used at runtime
-                extra_link_args.extend([f'-Wl,-rpath,{nccl_gin_lib}'])
-                print(f'Added NCCL GIN rpath: {nccl_gin_lib}')
+            # Add NCCL library path
+            nccl_lib = f'{nccl_home}/build/lib'
+            if os.path.exists(nccl_lib):
+                library_dirs.append(nccl_lib)
+                print(f'Added NCCL library directory: {nccl_lib}')
+                # Add rpath to ensure NCCL is used at runtime
+                extra_link_args.extend([f'-Wl,-rpath,{nccl_lib}'])
+                print(f'Added NCCL rpath: {nccl_lib}')
 
             sources.extend(['csrc/kernels/nccl_gin_backend.cu'])  # FIXME: this should add internode.cu and internode_ll.cu
 
             # Add NCCL linking - dynamic only for external applications
-            extra_link_args.extend([f'-L{nccl_gin_lib}', '-lnccl'])
-            print('Added NCCL GIN library linking: -lnccl (dynamic)')
+            extra_link_args.extend([f'-L{nccl_lib}', '-lnccl'])
+            print('Added NCCL library linking: -lnccl (dynamic)')
 
             if not os.path.exists(nccl_build_include) and not os.path.exists(nccl_src_include):
                 print(f'Warning: NCCL include directories not found in {nccl_home}')
