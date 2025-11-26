@@ -97,7 +97,7 @@ std::string NVCCCompiler::build(std::string code, std::string signature, int loc
     }else {
         compile_command = nvcc_path + " " + intra_node_flags + " " + source_path + " -o " + output_path;
     }
-
+    
     // Run the compile command
     auto ret = std::system(compile_command.c_str());
     if (ret != 0) {

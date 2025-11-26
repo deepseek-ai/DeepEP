@@ -160,17 +160,14 @@ class HybridEPBuffer:
         config.hidden_dim = (
             hidden_dim if hidden_dim is not None else self.config.hidden_dim
         )
-        config.max_num_of_tokens_per_rank = (
-            max_num_of_tokens_per_rank
-            if max_num_of_tokens_per_rank is not None
-            else self.config.max_num_of_tokens_per_rank
-        )
-        if self.num_of_nodes > 1:
-            assert max_num_of_tokens_per_rank >= 512, "The sequence length should be at least 512 in the multi-node case."
-            assert self.config.max_num_of_tokens_per_rank == max_num_of_tokens_per_rank, "Dynamic sequence length is not supported in the multi-node case."
-        config.max_num_of_tokens_per_rank = max(
-            config.max_num_of_tokens_per_rank, self.config.max_num_of_tokens_per_rank
-        )
+        if max_num_of_tokens_per_rank is None:
+            max_num_of_tokens_per_rank = self.config.max_num_of_tokens_per_rank
+        else:
+            config.max_num_of_tokens_per_rank = max(
+                config.max_num_of_tokens_per_rank, self.config.max_num_of_tokens_per_rank
+            )
+            self.config.max_num_of_tokens_per_rank = max_num_of_tokens_per_rank
+        
         config.num_of_experts_per_rank = (
             num_local_experts
             if num_local_experts is not None
