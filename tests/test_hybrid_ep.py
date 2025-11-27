@@ -21,7 +21,6 @@ PAD_MULTIPLE = int(os.environ.get("PAD_MULTIPLE", 32))
 NUM_OF_EXPERTS = NUM_LOCAL_EXPERTS * NUM_OF_RANKS_PER_NODE * NUM_OF_NODES
 ITERATIONS = int(os.environ.get("ITERATIONS", 100))
 SEED = int(os.environ.get("SEED", 42))
-NUM_OF_RANKS_PER_NVLINK_DOMAIN = int(os.environ.get("NUM_OF_RANKS_PER_NVLINK_DOMAIN", 4))
 USE_MNNVL = os.environ.get("USE_MNNVL", "0").strip().lower() in {"1", "true", "t", "yes", "y", "on"}
 torch.manual_seed(SEED)
 torch.cuda.manual_seed(SEED)
@@ -363,7 +362,7 @@ def test_main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
             hidden_dim=HIDDEN_DIM,
             max_num_of_tokens_per_rank=MAX_NUM_OF_TOKENS_PER_RANK,
             num_local_experts=NUM_LOCAL_EXPERTS,
-            num_of_ranks_per_nvlink_domain=NUM_OF_RANKS_PER_NVLINK_DOMAIN,
+            num_of_ranks_per_nvlink_domain=NUM_OF_RANKS_PER_NODE,
             use_mnnvl=USE_MNNVL,
             use_fp8=use_fp8
         )
