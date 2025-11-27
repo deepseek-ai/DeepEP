@@ -196,13 +196,6 @@ pip install .
 
 ### Quick Start
 
-> **⚠️ Important Note for RDMA Inter-node Configuration**  
-> Currently, the RDMA inter-node kernel implementation requires manual specification of nic names for each GPU. You need to provide the mapping between GPUs and their corresponding IB device names via the `--ib-dev-name-list` parameter. See `tests/test_hybrid_ep.py` for detailed usage examples.
->  In addition, when using the RDMA part, after setting num-tokens-per-rank during initialization, all subsequent communications must use the same value. Currently, dynamic sequence length is not supported.
->
-> **Automatic topology detection will be supported soon.**
-> **Dynamic sequence length will be supported soon.**
-
 Refer to `tests/test_hybrid_ep.py` for comprehensive usage examples including:
 - Multi-node configuration
 - Intra-node testing scenarios
@@ -264,7 +257,6 @@ Here are important parameter settings in `csrc/hybrid_ep/config.cuh`. You can mo
 - Comprehensive performance improvements
 
 ### 🚧 Upcoming Features
-- **Automatic Topology Detection**: Automatic detection of GPU-NIC mapping for RDMA inter-node communication, eliminating the need for manual `--ib-dev-name-list` configuration
 - **Low Latency Mode**: Enhanced performance for latency-critical workloads
 - Performance optimization
 

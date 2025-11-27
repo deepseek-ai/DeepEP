@@ -418,7 +418,7 @@ class HybridEPBuffer:
         # # Cache for template config
         # 7. template_config: HybridEpConfigInstance
         handle: tuple = None,
-        # If enable this, the produced num_dispatched_tokens will be put on the CPU pinned memory, and the tokens_per_expert will be put on the CPU, which may reduce the times of the sync
+        # If enable this, the produced num_dispatched_tokens/tokens_per_expert can be used directly in the host, which could cause sync 
         use_host_meta: bool = True,
     ):
         """
