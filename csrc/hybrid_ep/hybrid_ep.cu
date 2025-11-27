@@ -400,7 +400,9 @@ bool HybridEPBuffer::update_buffer(HybridEpConfigInstance config) {
   }
 
   if(need_reallocate) {
+  #ifdef HYBRID_EP_BUILD_MULTINODE_ENABLE
     rdma_coordinator.update_config(buffer_config);
+  #endif
     release_buffer();
     allocate_buffer();
   }
