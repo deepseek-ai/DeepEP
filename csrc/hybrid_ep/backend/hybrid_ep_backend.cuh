@@ -653,13 +653,16 @@ inline __device__ void N2N_warp_group_device_function(const int node_rank,
       __syncwarp();
     }
   }
+
   if (INTER_NODE_GROUP::thread_rank() < NUM_OF_NODES - 1) {
     struct doca_gpu_dev_verbs_qp *qp = d_qps_gpu[block_offset + INTER_NODE_GROUP::thread_rank()];
-    int status = doca_gpu_dev_verbs_poll_cq<DOCA_GPUNETIO_VERBS_RESOURCE_SHARING_MODE_CTA,
-                                                 DOCA_GPUNETIO_VERBS_QP_SQ>(
-                                                 doca_gpu_dev_verbs_qp_get_cq_sq(qp),
-                                                 smem_inter_node_num_of_write_per_node_ptr[INTER_NODE_GROUP::thread_rank()]);
-    assert(status >= 0);
+    uint32_t wc_num_to_poll = smem_inter_node_num_of_write_per_node_ptr[INTER_NODE_GROUP::thread_rank()];
+    if (wc_num_to_poll > 0) {
+      int status = doca_gpu_dev_verbs_poll_cq<DOCA_GPUNETIO_VERBS_RESOURCE_SHARING_MODE_CTA,
+                                              DOCA_GPUNETIO_VERBS_QP_SQ>(
+                                              doca_gpu_dev_verbs_qp_get_cq_sq(qp), wc_num_to_poll);
+      assert(status >= 0);
+    }
   }
 }
 #endif
@@ -1746,11 +1749,13 @@ inline __device__ void inter_node_N2N_warp_group_device_function(const int node_
   }
   if (INTER_NODE_RDMA_GROUP::thread_rank() < NUM_OF_NODES - 1) {
     struct doca_gpu_dev_verbs_qp *qp = d_qps_gpu[block_offset + INTER_NODE_RDMA_GROUP::thread_rank()];
-    int status = doca_gpu_dev_verbs_poll_cq<DOCA_GPUNETIO_VERBS_RESOURCE_SHARING_MODE_CTA,
-                                                 DOCA_GPUNETIO_VERBS_QP_SQ>(
-                                                 doca_gpu_dev_verbs_qp_get_cq_sq(qp),
-                                                 smem_inter_node_num_of_write_per_node_ptr[INTER_NODE_RDMA_GROUP::thread_rank()]);
-    assert(status >= 0);
+    uint32_t wc_num_to_poll = smem_inter_node_num_of_write_per_node_ptr[INTER_NODE_RDMA_GROUP::thread_rank()];
+    if (wc_num_to_poll > 0) {
+      int status = doca_gpu_dev_verbs_poll_cq<DOCA_GPUNETIO_VERBS_RESOURCE_SHARING_MODE_CTA,
+                                              DOCA_GPUNETIO_VERBS_QP_SQ>(
+                                              doca_gpu_dev_verbs_qp_get_cq_sq(qp), wc_num_to_poll);
+      assert(status >= 0);
+    }
   }
   token_consumer_parity ^= 1;
 }

@@ -9,7 +9,7 @@ import deep_ep
 
 from utils import TorchRef, bench, bench_kineto, init_dist, count_rdma_send_from_routing_map
 
-HIDDEN_DIM = int(os.environ.get("HIDDEN_DIM", 7168 - 256))
+HIDDEN_DIM = int(os.environ.get("HIDDEN_DIM", 7168))
 MAX_NUM_OF_TOKENS_PER_RANK = int(os.environ.get("MAX_NUM_OF_TOKENS_PER_RANK", 4096))
 # NUM_TOKENS_PER_RANK should equal or less than MAX_NUM_OF_TOKENS_PER_RANK
 NUM_TOKENS_PER_RANK = int(os.environ.get("NUM_TOKENS_PER_RANK", 4096))
