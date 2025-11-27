@@ -9,7 +9,7 @@
     } while (0)
 #endif
 
-#define NUM_GPUS_PER_NODE_LOW_LATENCY 4
+#define NUM_GPUS_PER_NODE_LOW_LATENCY 8
 
 #define NUM_MAX_NVL_PEERS 8
 #define NUM_MAX_RDMA_PEERS 20
