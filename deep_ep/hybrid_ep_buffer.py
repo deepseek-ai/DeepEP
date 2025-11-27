@@ -172,9 +172,9 @@ class HybridEPBuffer:
             max_num_of_tokens_per_rank = self.config.max_num_of_tokens_per_rank
         else:
             config.max_num_of_tokens_per_rank = max(
-                config.max_num_of_tokens_per_rank, self.config.max_num_of_tokens_per_rank
+                max_num_of_tokens_per_rank, self.config.max_num_of_tokens_per_rank
             )
-            self.config.max_num_of_tokens_per_rank = max_num_of_tokens_per_rank
+            self.config.max_num_of_tokens_per_rank = config.max_num_of_tokens_per_rank
         
         config.num_of_experts_per_rank = (
             num_local_experts
