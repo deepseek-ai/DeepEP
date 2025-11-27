@@ -19,9 +19,11 @@ void set_p2p_disabled_flag(bool disabled);
 }  // namespace deep_ep
 #endif
 
-#ifndef DISABLE_NVSHMEM
+#ifndef DISABLE_NVSHMEM_AND_NCCL
+#ifdef ENABLE_NVSHMEM
 #include "ibgda_device.cuh"
 #include "nvshmem.h"
+#endif
 #endif
 
 namespace deep_ep {
@@ -47,9 +49,11 @@ void barrier(int** barrier_signal_ptrs, int rank, int num_ranks, cudaStream_t st
 
 namespace internode {
 
-#ifndef DISABLE_NVSHMEM
+#ifndef DISABLE_NVSHMEM_AND_NCCL
+#ifdef ENABLE_NVSHMEM
 nvshmem_team_t cpu_rdma_team = NVSHMEM_TEAM_INVALID;
 nvshmem_team_config_t cpu_rdma_team_config;
+#endif
 #endif
 
 std::vector<uint8_t> get_unique_id(int qps_per_rank, int num_ranks) {
@@ -75,7 +79,7 @@ std::vector<uint8_t> get_unique_id(int qps_per_rank, int num_ranks) {
     }
 
     return result;
-#else
+#elif defined(ENABLE_NVSHMEM)
     // NVSHMEM: always return exactly 1 unique ID (qps_per_rank is ignored)
     nvshmemx_uniqueid_t unique_id;
     nvshmemx_get_uniqueid(&unique_id);
@@ -110,7 +114,7 @@ int init(const std::vector<uint8_t>& root_unique_id_val, int rank, int num_ranks
 
     backend->barrier();
     return backend->get_rank();
-#else
+#elif defined(ENABLE_NVSHMEM)
     // printf("NVSHMEM: init()\n"); fflush(stdout);
     nvshmemx_uniqueid_t root_unique_id;
     nvshmemx_init_attr_t attr;
@@ -146,7 +150,7 @@ void* alloc(size_t size, size_t alignment) {
         throw std::runtime_error("Backend not initialized");
     }
     return backend->alloc(size, alignment);
-#else
+#elif defined(ENABLE_NVSHMEM)
     return nvshmem_align(alignment, size);
 #endif
 }
@@ -159,7 +163,7 @@ void free(void* ptr) {
         throw std::runtime_error("Backend not initialized");
     }
     backend->free(ptr);
-#else
+#elif defined(ENABLE_NVSHMEM)
     nvshmem_free(ptr);
 #endif
 }
@@ -169,7 +173,7 @@ void barrier() {
     // printf("NCCL: barrier()\n");
     internode::CommunicationBackend* backend = internode::get_backend();
     backend->barrier();
-#else
+#elif defined(ENABLE_NVSHMEM)
     nvshmem_barrier_all();
 #endif
 }
@@ -182,7 +186,7 @@ void finalize() {
         backend->finalize();
     }
     internode::finalize_backend();
-#else
+#elif defined(ENABLE_NVSHMEM)
     if (cpu_rdma_team != NVSHMEM_TEAM_INVALID) {
         nvshmem_team_destroy(cpu_rdma_team);
         cpu_rdma_team = NVSHMEM_TEAM_INVALID;

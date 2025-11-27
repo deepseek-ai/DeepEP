@@ -63,7 +63,7 @@ struct Config {
         size_t num_bytes = 0;
         num_bytes += num_channels * num_nvl_ranks * (2 * num_rdma_ranks + 3) * sizeof(int);
         num_bytes += num_channels * num_nvl_ranks * num_max_nvl_chunked_recv_tokens * hidden_bytes;
-#ifndef DISABLE_NVSHMEM
+#ifndef DISABLE_NVSHMEM_AND_NCCL
         num_bytes += num_channels * num_nvl_ranks * num_max_nvl_chunked_recv_tokens * internode::get_source_meta_bytes();
 #endif
         num_bytes += num_channels * num_nvl_ranks * num_max_nvl_chunked_recv_tokens * kNumMaxTopK * sizeof(topk_idx_t);
@@ -74,7 +74,7 @@ struct Config {
     }
 
     size_t get_rdma_buffer_size_hint(int64_t hidden_bytes, int num_ranks) const {
-#ifndef DISABLE_NVSHMEM
+#ifndef DISABLE_NVSHMEM_AND_NCCL
         // Legacy mode
         if (num_ranks <= NUM_MAX_NVL_PEERS)
             return 0;

@@ -41,13 +41,9 @@ export HPCX_DIR="/root/hpcx/hpcx-v2.21.2-gcc-inbox-ubuntu24.04-cuda12-x86_64"
 source $HPCX_DIR/hpcx-mt-init.sh
 hpcx_load
 
-export NCCL_HOME=/path/to/nccl
-
 export CUDA_HOME=/usr/local/cuda-12.8
-export NVSHMEM_DIR=/path/to/nvshmem
 export CUDA_VISIBLE_DEVICES=0,1,2,3
-export PATH=$CUDA_HOME/bin:$PATH
-export LD_LIBRARY_PATH=$NCCL_HOME/build/lib:$CUDA_HOME/lib64:$LD_LIBRARY_PATH
+export PATH=$CUDA_HOME/bin:$PATH #FIXME: needed?
 ```
 
 ## Step 2: Use Low Latency (LL) Kernels
@@ -57,6 +53,9 @@ LL (Low Latency) kernels are optimized for latency-sensitive inference decoding 
 
 ### Enable NCCL compilation
 ```bash
+export NCCL_HOME=/path/to/nccl
+export LD_LIBRARY_PATH=$NCCL_HOME/build/lib:$CUDA_HOME/lib64:$LD_LIBRARY_PATH
+export LD_PRELOAD=$NCCL_HOME/build/lib/libnccl.so.2
 export ENABLE_NCCL=1; python3 setup.py build_ext --inplace; pip install --no-build-isolation .
 ```
 
@@ -67,6 +66,7 @@ DEEP_EP_BACKEND=nccl_gin NCCL_GIN_TYPE=3 NCCL_NET_PLUGIN=none TORCH_DISTRIBUTED_
 
 ### Enable NVSHMEM compilation
 ```bash
+export NVSHMEM_DIR=/path/to/nvshmem
 unset ENABLE_NCCL; python3 setup.py build_ext --inplace; pip install --no-build-isolation .
 ```
 

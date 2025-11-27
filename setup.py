@@ -17,31 +17,36 @@ def get_nvshmem_host_lib_name(base_dir):
 
 
 if __name__ == '__main__':
-    disable_nvshmem = False
+    disable_nvshmem_and_nccl = False
+
+    # detect NVSHMEM 
     nvshmem_dir = os.getenv('NVSHMEM_DIR', None)
     nvshmem_host_lib = 'libnvshmem_host.so'
-    if nvshmem_dir is None:
+
+    nccl_home = os.getenv('NCCL_HOME', None)
+
+    if nvshmem_dir is None and nccl_home is None:
         try:
             nvshmem_dir = importlib.util.find_spec("nvidia.nvshmem").submodule_search_locations[0]
             nvshmem_host_lib = get_nvshmem_host_lib_name(nvshmem_dir)
             import nvidia.nvshmem as nvshmem  # noqa: F401
         except (ModuleNotFoundError, AttributeError, IndexError):
             print(
-                'Warning: `NVSHMEM_DIR` is not specified, and the NVSHMEM module is not installed. All internode and low-latency features are disabled\n'
+                'Warning: `NVSHMEM_DIR` and `NCCL_HOME` are not specified, and the NVSHMEM module is not installed. All internode and low-latency features are disabled\n'
             )
-            disable_nvshmem = True
+            disable_nvshmem_and_nccl = True
     else:
-        disable_nvshmem = False
+        disable_nvshmem_and_nccl = False
 
-    if not disable_nvshmem:
-        assert os.path.exists(nvshmem_dir), f'The specified NVSHMEM directory does not exist: {nvshmem_dir}'
+    if not disable_nvshmem_and_nccl:
+        if nvshmem_dir is not None:
+            assert os.path.exists(nvshmem_dir), f'The specified NVSHMEM directory does not exist: {nvshmem_dir}'
+        if nccl_home is not None:
+            assert os.path.exists(nccl_home), f'The specified NCCL directory does not exist: {nccl_home}'
 
     cxx_flags = ['-O3', '-Wno-deprecated-declarations', '-Wno-unused-variable', '-Wno-sign-compare', '-Wno-reorder', '-Wno-attributes']
-    #nvcc_flags = ['-O3', '-Xcompiler', '-O3', '-DDEEPEP_DEBUG']
     nvcc_flags = ['-O3', '-Xcompiler', '-O3']
-    # Allow half and bfloat16 operators for NVSHMEM and internode.cu compatibility
-    # PyTorch automatically defines these NO_* flags but we need the operators enabled
-    nvcc_flags.extend([
+    nvcc_flags.extend([ # Allow half and bfloat16 operators for NVSHMEM and internode.cu compatibility PyTorch automatically defines these NO_* flags but we need the operators enabled
         '-U__CUDA_NO_HALF_OPERATORS__', '-U__CUDA_NO_HALF_CONVERSIONS__', '-U__CUDA_NO_BFLOAT16_CONVERSIONS__',
         '-U__CUDA_NO_HALF2_OPERATORS__'
     ])
@@ -55,51 +60,42 @@ if __name__ == '__main__':
     extra_link_args = ['-lcuda']
 
     # NCCL Enable
-    if os.getenv('ENABLE_NCCL', '0') == '1':
+    if os.getenv('ENABLE_NCCL', '0') == '1' and nccl_home is not None:
+    #if nccl_home is not None and nvshmem_dir is None:
         cxx_flags.append('-DENABLE_NCCL')
         nvcc_flags.append('-DENABLE_NCCL')
-        print('NCCL backend enabled via ENABLE_NCCL=1')
+        print('NCCL communication backend enabled')
 
-        # Add NCCL include paths
-        nccl_home = os.getenv('NCCL_HOME', None)
-        if nccl_home and os.path.exists(nccl_home):
-            # Add build/include for nccl.h
-            nccl_build_include = f'{nccl_home}/build/include'
-            if os.path.exists(nccl_build_include):
-                include_dirs.append(nccl_build_include)
-                print(f'Added NCCL build include: {nccl_build_include}')
+        # Add build/include for nccl.h
+        include_dirs.append(f'{nccl_home}/build/include')
+        #print(f'Added NCCL build include: {nccl_build_include}')
+        include_dirs.append(f'{nccl_home}/src/include')
+        #print(f'Added NCCL src include: {nccl_src_include}')
 
-            # Add src/include for gin.h and device headers
-            nccl_src_include = f'{nccl_home}/src/include'
-            if os.path.exists(nccl_src_include):
-                include_dirs.append(nccl_src_include)
-                print(f'Added NCCL src include: {nccl_src_include}')
+        # Add NCCL library path
+        library_dirs.append(f'{nccl_home}/build/lib')
+        #print(f'Added NCCL library directory: {nccl_lib}')
+        extra_link_args.extend([f'-Wl,-rpath,{nccl_home}/build/lib'])
+        #print(f'Added NCCL rpath: {nccl_lib}')
 
-            # Add NCCL library path
-            nccl_lib = f'{nccl_home}/build/lib'
-            if os.path.exists(nccl_lib):
-                library_dirs.append(nccl_lib)
-                print(f'Added NCCL library directory: {nccl_lib}')
-                # Add rpath to ensure NCCL is used at runtime
-                extra_link_args.extend([f'-Wl,-rpath,{nccl_lib}'])
-                print(f'Added NCCL rpath: {nccl_lib}')
-
-            sources.extend(['csrc/kernels/nccl_gin_backend.cu'])  # FIXME: this should add internode.cu and internode_ll.cu
-
-            # Add NCCL linking - dynamic only for external applications
-            extra_link_args.extend([f'-L{nccl_lib}', '-lnccl'])
-            print('Added NCCL library linking: -lnccl (dynamic)')
-
-            if not os.path.exists(nccl_build_include) and not os.path.exists(nccl_src_include):
-                print(f'Warning: NCCL include directories not found in {nccl_home}')
-        else:
-            print('Warning: NCCL_HOME not set or invalid when ENABLE_NCCL=1')
+        sources.extend(['csrc/kernels/internode.cu', 'csrc/kernels/internode_ll.cu', 'csrc/kernels/nccl_gin_backend.cu'])  
+        
+        # Device link flags for RDC (relocatable device code)
+        nvcc_dlink.extend(['-dlink'])
+        
+        # Add NCCL linking - dynamic only for external applications
+        extra_link_args.extend([f'-L{nccl_home}/build/lib', '-lnccl'])
+        #print('Added NCCL library linking: -lnccl (dynamic)')
 
     # NVSHMEM flags
-    if disable_nvshmem:
-        cxx_flags.append('-DDISABLE_NVSHMEM')
-        nvcc_flags.append('-DDISABLE_NVSHMEM')
-    else:
+    if disable_nvshmem_and_nccl:
+        cxx_flags.append('-DDISABLE_NVSHMEM_AND_NCCL')
+        nvcc_flags.append('-DDISABLE_NVSHMEM_AND_NCCL')
+
+    if os.getenv('ENABLE_NCCL', '0') == '0' and nvshmem_dir is not None:
+        cxx_flags.append('-DENABLE_NVSHMEM')
+        nvcc_flags.append('-DENABLE_NVSHMEM')
+        print('NVSHMEM communication backend enabled')
         sources.extend(['csrc/kernels/internode.cu', 'csrc/kernels/internode_ll.cu'])
         include_dirs.extend([f'{nvshmem_dir}/include'])
         library_dirs.extend([f'{nvshmem_dir}/lib'])
@@ -117,7 +113,7 @@ if __name__ == '__main__':
         nvcc_flags.append('-DDISABLE_SM90_FEATURES')
 
         # Disable internode and low-latency kernels
-        assert disable_nvshmem
+        assert disable_nvshmem_and_nccl
     else:
         # Prefer H800 series
         os.environ['TORCH_CUDA_ARCH_LIST'] = os.getenv('TORCH_CUDA_ARCH_LIST', '9.0')

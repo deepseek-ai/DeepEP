@@ -1,7 +1,13 @@
+#include <cooperative_groups.h>
+
 #include "configs.cuh"
 #include "exception.cuh"
-#include "ibgda_device.cuh"
 #include "launch.cuh"
+#include "utils.cuh"
+
+#ifdef ENABLE_NVSHMEM
+#include "ibgda_device.cuh"
+#endif
 
 #ifdef ENABLE_NCCL
 #include "nccl_device/gin/gin_device_api.h"
@@ -13,6 +19,9 @@
 //   ctx_id = expert_id % NCCL_GIN_NUM_CONTEXTS_PER_COMM
 // This gives sequential assignment: experts 0-3 → (comm0, ctx0-3), experts 4-7 → (comm1, ctx0-3), etc.
 #endif
+
+using namespace cooperative_groups;
+namespace cg = cooperative_groups;
 
 namespace deep_ep {
 
@@ -74,6 +83,7 @@ __device__ __forceinline__ uint64_t nccl_get_p2p_ptr(const uint64_t& dst_ptr,
 }
 #endif
 
+#ifdef ENABLE_NVSHMEM
 template <int kNumThreads>
 __forceinline__ __device__ void barrier(int thread_id, int rank, int num_ranks, int* mask_buffer_ptr, int* sync_buffer_ptr) {
     EP_DEVICE_ASSERT(kNumThreads >= num_ranks);
@@ -123,6 +133,7 @@ __forceinline__ __device__ void barrier(int thread_id, int rank, int num_ranks, 
     }
     __syncthreads();
 }
+#endif
 
 #ifdef ENABLE_NCCL
 // NCCL barrier with per-rank timeout tracking
@@ -234,7 +245,7 @@ __launch_bounds__(kNumThreads, 1) __global__ void clean_low_latency_buffer(int* 
 #ifdef ENABLE_NCCL
                                                                            ncclDevComm* dcomms,
                                                                            unsigned signals_base) {
-#else
+#elif defined(ENABLE_NVSHMEM)
                                                                            void* dcomms,
                                                                            unsigned signals_base) {
 #endif
@@ -246,7 +257,7 @@ __launch_bounds__(kNumThreads, 1) __global__ void clean_low_latency_buffer(int* 
     ncclGin net(dcomm, 0);
     nccl_gin_barrier<kNumThreads>(thread_id, rank, dcomm, net, mask_buffer_ptr, signals_base);
 
-#else
+#elif defined(ENABLE_NVSHMEM)
     if (sync_buffer_ptr == nullptr)
         nvshmemx_barrier_all_block();
     else
@@ -263,7 +274,7 @@ __launch_bounds__(kNumThreads, 1) __global__ void clean_low_latency_buffer(int* 
         // Barrier after cleaning (make sure the low-latency mode works fine)
 #ifdef ENABLE_NCCL
     nccl_gin_barrier<kNumThreads>(thread_id, rank, dcomm, net, mask_buffer_ptr, signals_base);
-#else
+#elif defined(ENABLE_NVSHMEM)
     if (sync_buffer_ptr == nullptr)
         nvshmemx_barrier_all_block();
     else
@@ -289,7 +300,7 @@ void clean_low_latency_buffer(int* clean_0,
     auto signals_base = backend->get_signals_base(INTERNODE_BUFFER_IDX); // reuse HT signals for this -- we will clear them in the notify phase
 
     EP_HOST_ASSERT(dcomms != nullptr);
-#else
+#elif defined(ENABLE_NVSHMEM)
     void* dcomms = nullptr;
     unsigned signals_base = 0;
 #endif
@@ -348,7 +359,7 @@ __global__ __launch_bounds__(1024, 1) void dispatch(void* packed_recv_x,
                                                     const ncclWindow_t* nccl_windows,
                                                     unsigned signals_base,
                                                     unsigned signals_base_next) {
-#else
+#elif defined(ENABLE_NVSHMEM)
                                                     int num_gin_comms,
                                                     void* gin_base_ptr,
                                                     void* dcomms,
@@ -498,7 +509,7 @@ __global__ __launch_bounds__(1024, 1) void dispatch(void* packed_recv_x,
                         UNROLLED_WARP_COPY(8, lane_id, num_int4_per_msg, dst_int4_ptr, src_int4_ptr, ld_nc_global, st_na_global);
                     }
                 }
-#else
+#elif defined(ENABLE_NVSHMEM)
                 const auto dst_p2p_ptr = nvshmemi_get_p2p_ptr(dst_ptr, rank, dst_rank);
                 if (not is_rank_masked<true>(mask_buffer_ptr, dst_rank)) {
                     if (dst_p2p_ptr == 0) {
@@ -557,7 +568,7 @@ __global__ __launch_bounds__(1024, 1) void dispatch(void* packed_recv_x,
                     }
                 }
             }
-#else
+#elif defined(ENABLE_NVSHMEM)
             // do nothing for NVSHMEM
 #endif
 
@@ -632,7 +643,7 @@ __global__ __launch_bounds__(1024, 1) void dispatch(void* packed_recv_x,
                 st_release_sys_global(reinterpret_cast<int*>(dst_p2p_ptr), -num_tokens_sent - 1);
             }
         }
-#else
+#elif defined(ENABLE_NVSHMEM)
         auto dst_p2p_ptr = nvshmemi_get_p2p_ptr(dst_ptr, rank, dst_rank);
         if (not is_rank_masked(mask_buffer_ptr, dst_rank)) {
             if (dst_p2p_ptr == 0) {
@@ -712,7 +723,7 @@ LOW_LATENCY_DISPATCH_RECV:
                     )
                         ;
                 }
-#else
+#elif defined(ENABLE_NVSHMEM)
                 while ((num_recv_tokens = ld_acquire_sys_global(rdma_recv_count + local_expert_idx * num_ranks + src_rank)) ==
                            0                                                               // data not arrived
                        && (wait_recv_cost = clock64() - start_time) <= NUM_TIMEOUT_CYCLES  // not timeout
@@ -856,7 +867,7 @@ void dispatch(void* packed_recv_x,
     EP_HOST_ASSERT(dcomms != nullptr);
     EP_HOST_ASSERT(num_gin_comms >= 1);
     EP_HOST_ASSERT(nccl_windows != nullptr);
-#else
+#elif defined(ENABLE_NVSHMEM)
     void* gin_base_ptr = nullptr;
     int num_gin_comms = 1;
     void* dcomms = nullptr;
@@ -1112,7 +1123,7 @@ __global__ __launch_bounds__(1024, 1) void combine(void* combined_x,
                                                    const ncclWindow_t* nccl_windows,
                                                    unsigned signals_base,
                                                    unsigned signals_base_next) {
-#else
+#elif defined(ENABLE_NVSHMEM)
                                                    int num_gin_comms,
                                                    void* dcomms,
                                                    void* nccl_windows,
@@ -1187,7 +1198,7 @@ __global__ __launch_bounds__(1024, 1) void combine(void* combined_x,
                 }
             }
         }
-#else
+#elif defined(ENABLE_NVSHMEM)
             // do nothing for NVSHMEM
 #endif
 
@@ -1261,7 +1272,7 @@ __global__ __launch_bounds__(1024, 1) void combine(void* combined_x,
                     rdma_recv_x_offset + (global_expert_idx * num_max_dispatch_tokens_per_rank + src_idx) * num_bytes_per_slot;
                 const auto dst_p2p_ptr =
                     nccl_get_p2p_ptr(dst_ptr, expected_dst_offset, rank, dst_rank, local_expert_idx, nccl_windows, num_gin_comms);
-#else
+#elif defined(ENABLE_NVSHMEM)
                 const auto dst_p2p_ptr = nvshmemi_get_p2p_ptr(dst_ptr, rank, dst_rank);
 #endif
 
@@ -1364,7 +1375,7 @@ __global__ __launch_bounds__(1024, 1) void combine(void* combined_x,
                                 ncclCoopThread());
                     }
                 }
-#else
+#elif defined(ENABLE_NVSHMEM)
                 // Issue RDMA
                 // NOTES: for zero-copy mode, we assume the data is already in the send buffer
                 if (dst_p2p_ptr == 0) {
@@ -1386,7 +1397,7 @@ __global__ __launch_bounds__(1024, 1) void combine(void* combined_x,
 
             auto dst_p2p_ptr = nccl_get_p2p_ptr(
                 dst_ptr, dst_offset, rank, dst_rank, (responsible_expert_idx % num_local_experts), nccl_windows, num_gin_comms);
-#else
+#elif defined(ENABLE_NVSHMEM)
             auto dst_p2p_ptr = nvshmemi_get_p2p_ptr(dst_ptr, rank, dst_rank);
 #endif
 
@@ -1415,7 +1426,7 @@ __global__ __launch_bounds__(1024, 1) void combine(void* combined_x,
                             ncclGin_SignalAdd{signal_id, 1},
                             ncclGin_None{},  // no counter
                             ncclCoopThread());
-#else
+#elif defined(ENABLE_NVSHMEM)
                     nvshmemi_ibgda_amo_nonfetch_add(reinterpret_cast<int*>(dst_ptr), 1, dst_rank, local_expert_idx);
 #endif
 
@@ -1473,7 +1484,7 @@ LOW_LATENCY_COMBINE_RECV:
                         ;
                 }
             }
-#else
+#elif defined(ENABLE_NVSHMEM)
             if (not is_rank_masked(mask_buffer_ptr, src_rank)) {
                 while (ld_acquire_sys_global(rdma_recv_flag + responsible_expert_idx) == 0  // recv not ready
                        && (wait_recv_cost = clock64() - start_time) <= NUM_TIMEOUT_CYCLES   // not timeout
@@ -1737,7 +1748,7 @@ void combine(void* combined_x,
 
     EP_HOST_ASSERT(dcomms != nullptr);
     EP_HOST_ASSERT(nccl_windows != nullptr);
-#else
+#elif defined(ENABLE_NVSHMEM)
     void* dcomms = nullptr;
     void* nccl_windows = nullptr;
     unsigned signals_base = 0;

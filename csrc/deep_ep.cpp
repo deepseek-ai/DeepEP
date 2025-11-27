@@ -167,7 +167,7 @@ Buffer::Buffer(int rank,
     CUDA_CHECK(cudaGetDevice(&device_id));
     rdma_rank = rank / NUM_MAX_NVL_PEERS, nvl_rank = rank % NUM_MAX_NVL_PEERS;
     num_rdma_ranks = std::max(1, num_ranks / NUM_MAX_NVL_PEERS), num_nvl_ranks = std::min(num_ranks, NUM_MAX_NVL_PEERS);
-#ifdef DISABLE_NVSHMEM
+#ifdef DISABLE_NVSHMEM_AND_NCCL
     EP_HOST_ASSERT(num_rdma_ranks == 1 and not low_latency_mode and "NVSHMEM is disabled during compilation");
 #endif
 
@@ -258,7 +258,7 @@ pybind11::bytearray Buffer::get_local_ipc_handle() const {
 }
 
 pybind11::bytearray Buffer::get_local_nvshmem_unique_id() const {
-#ifndef DISABLE_NVSHMEM
+#ifndef DISABLE_NVSHMEM_AND_NCCL
     EP_HOST_ASSERT(rdma_rank == 0 and "Only RDMA rank 0 can get unique ID(s)");
 
     // Pass qps_per_rank to determine how many NCCL communicators are needed
@@ -308,7 +308,7 @@ void Buffer::destroy() {
     }
 
     // Free NVSHMEM
-#ifndef DISABLE_NVSHMEM
+#ifndef DISABLE_NVSHMEM_AND_NCCL
     if (is_available() and num_rdma_bytes > 0) {
         CUDA_CHECK(cudaDeviceSynchronize());
         internode::barrier();
@@ -366,7 +366,7 @@ void Buffer::sync(const std::vector<int>& device_ids,
     }
 
     // Sync NVSHMEM handles and allocate memory
-#ifndef DISABLE_NVSHMEM
+#ifndef DISABLE_NVSHMEM_AND_NCCL
     if (num_rdma_bytes > 0) {
         // Initialize NVSHMEM
         EP_HOST_ASSERT(root_unique_id_opt.has_value());
@@ -980,7 +980,7 @@ Buffer::internode_dispatch(const torch::Tensor& x,
                            std::optional<EventHandle>& previous_event,
                            bool async,
                            bool allocate_on_comm_stream) {
-#ifndef DISABLE_NVSHMEM
+#ifndef DISABLE_NVSHMEM_AND_NCCL
     // In dispatch, CPU will busy-wait until GPU receive tensor size metadata from other ranks, which can be quite long.
     // If users of DeepEP need to execute other Python code on other threads, such as KV transfer, their code will get stuck due to GIL
     // unless we release GIL here.
@@ -1358,7 +1358,7 @@ std::tuple<torch::Tensor, std::optional<torch::Tensor>, std::optional<EventHandl
     std::optional<EventHandle>& previous_event,
     bool async,
     bool allocate_on_comm_stream) {
-#ifndef DISABLE_NVSHMEM
+#ifndef DISABLE_NVSHMEM_AND_NCCL
     const int num_channels = config.num_sms / 2;
     EP_HOST_ASSERT(config.num_sms % 2 == 0);
 
@@ -1531,7 +1531,7 @@ std::tuple<torch::Tensor, std::optional<torch::Tensor>, std::optional<EventHandl
 }
 
 void Buffer::clean_low_latency_buffer(int num_max_dispatch_tokens_per_rank, int hidden, int num_experts) {
-#ifndef DISABLE_NVSHMEM
+#ifndef DISABLE_NVSHMEM_AND_NCCL
     EP_HOST_ASSERT(low_latency_mode);
 
     auto layout = LowLatencyLayout(rdma_buffer_ptr, num_max_dispatch_tokens_per_rank, hidden, num_ranks, num_experts);
@@ -1577,7 +1577,7 @@ Buffer::low_latency_dispatch(const torch::Tensor& x,
                              bool use_ue8m0,
                              bool async,
                              bool return_recv_hook) {
-#ifndef DISABLE_NVSHMEM
+#ifndef DISABLE_NVSHMEM_AND_NCCL
     EP_HOST_ASSERT(low_latency_mode);
 
     // Tensor checks
@@ -1724,7 +1724,7 @@ std::tuple<torch::Tensor, std::optional<EventHandle>, std::optional<std::functio
     bool async,
     bool return_recv_hook,
     const std::optional<torch::Tensor>& out) {
-#ifndef DISABLE_NVSHMEM
+#ifndef DISABLE_NVSHMEM_AND_NCCL
     EP_HOST_ASSERT(low_latency_mode);
 
     // Tensor checks
@@ -1839,7 +1839,7 @@ std::tuple<torch::Tensor, std::optional<EventHandle>, std::optional<std::functio
 }
 
 torch::Tensor Buffer::get_next_low_latency_combine_buffer(int num_max_dispatch_tokens_per_rank, int hidden, int num_experts) const {
-#ifndef DISABLE_NVSHMEM
+#ifndef DISABLE_NVSHMEM_AND_NCCL
     LowLatencyLayout layout(rdma_buffer_ptr, num_max_dispatch_tokens_per_rank, hidden, num_ranks, num_experts);
 
     auto buffer = layout.buffers[low_latency_buffer_idx];
