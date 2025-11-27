@@ -92,13 +92,10 @@ std::tuple<torch::Tensor, torch::Tensor> Executor::dispatch_preprocess(HybridEpC
             args.row_id_map = row_id_map;
 
             // If we want to put the tokens_per_expert/num_dispatched_tokens_tensor can be used in the host, we need to synchronize the stream.
-            if (args.use_host_meta) {
+            if (!args.non_blocking) {
                 cudaStreamSynchronize(args.stream);
                 if (args.num_permuted_tokens < 0) {
                     args.num_permuted_tokens = tokens_per_expert.sum().item<int64_t>();
-                }
-                if (args.num_dispatched_tokens < 0) {
-                    args.num_dispatched_tokens = args.num_dispatched_tokens_tensor.value().item<int64_t>();
                 }
             }
         }
@@ -184,7 +181,6 @@ Executor::dispatch_postprocess(HybridEpConfigInstance config, DispatchBuffers& d
         permute_args.hidden_size = config.hidden_dim;
         permute_args.scales_per_token = config.hidden_dim / 128;
         permute_args.num_dispatched_token_tensor = args.num_dispatched_tokens_tensor.value();
-        permute_args.num_dispatched_tokens = args.num_dispatched_tokens;
         permute_args.num_permuted_token = args.num_permuted_tokens;
         permute_args.num_ranks_per_node = config.num_of_ranks_per_node;
         permute_args.num_of_local_experts = config.num_of_experts_per_rank;
@@ -274,7 +270,6 @@ void Executor::combine_preprocess(HybridEpConfigInstance config, CombineBuffers&
         unpermute_args.row_id_map = args.row_id_map.value();
         unpermute_args.num_of_local_experts = config.num_of_experts_per_rank;
         unpermute_args.num_dispatched_tokens_tensor = num_dispatched_tokens_tensor;
-        unpermute_args.num_dispatched_tokens = num_dispatched_tokens;
         unpermute_args.pad_multiple = args.pad_multiple;
         unpermute_args.hidden_size = config.hidden_dim;
         unpermute_args.local_rank = local_rank;

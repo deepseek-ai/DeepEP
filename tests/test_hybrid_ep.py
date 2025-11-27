@@ -21,6 +21,8 @@ PAD_MULTIPLE = int(os.environ.get("PAD_MULTIPLE", 32))
 NUM_OF_EXPERTS = NUM_LOCAL_EXPERTS * NUM_OF_RANKS_PER_NODE * NUM_OF_NODES
 ITERATIONS = int(os.environ.get("ITERATIONS", 100))
 SEED = int(os.environ.get("SEED", 42))
+NUM_OF_RANKS_PER_NVLINK_DOMAIN = int(os.environ.get("NUM_OF_RANKS_PER_NVLINK_DOMAIN", 4))
+USE_MNNVL = os.environ.get("USE_MNNVL", "0").strip().lower() in {"1", "true", "t", "yes", "y", "on"}
 torch.manual_seed(SEED)
 torch.cuda.manual_seed(SEED)
 torch.cuda.manual_seed_all(SEED)
@@ -288,10 +290,9 @@ def test_hybrid_ep_benchmark(buffer: deep_ep.HybridEPBuffer, group: dist.Process
         buffer.dispatch_with_permute(hidden=hidden, scaling_factor=scaling_factor, routing_map=routing_map, probs=probs, pad_multiple=PAD_MULTIPLE)
     )
     num_permuted_tokens = tokens_per_expert.sum().item()
-    num_dispatched_tokens = handle_with_permute[3].item()
     dispatched_hidden_bf16_with_permute = dispatched_hidden_with_permute.to(torch.bfloat16)
 
-    dispatch_with_permute_args = {'hidden': hidden, 'scaling_factor': scaling_factor, 'routing_map': routing_map, 'probs': probs, 'pad_multiple': PAD_MULTIPLE, 'handle': handle_with_permute, 'num_permuted_tokens': num_permuted_tokens, 'num_dispatched_tokens': num_dispatched_tokens}
+    dispatch_with_permute_args = {'hidden': hidden, 'scaling_factor': scaling_factor, 'routing_map': routing_map, 'probs': probs, 'pad_multiple': PAD_MULTIPLE, 'handle': handle_with_permute, 'num_permuted_tokens': num_permuted_tokens}
     t = bench(lambda: buffer.dispatch_with_permute(**dispatch_with_permute_args))[0]
     nvl_recv_bytes = (dispatch_bf16_nvl_recv_bytes * fp8_factor) if hidden.dtype == torch.uint8 else dispatch_bf16_nvl_recv_bytes
     print_in_order(f'[rank {rank}] HybridEP dispatch+permute torch API ({"FP8" if hidden.dtype == torch.uint8 else "BF16"}): '
@@ -362,6 +363,8 @@ def test_main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
             hidden_dim=HIDDEN_DIM,
             max_num_of_tokens_per_rank=MAX_NUM_OF_TOKENS_PER_RANK,
             num_local_experts=NUM_LOCAL_EXPERTS,
+            num_of_ranks_per_nvlink_domain=NUM_OF_RANKS_PER_NVLINK_DOMAIN,
+            use_mnnvl=USE_MNNVL,
             use_fp8=use_fp8
         )
         

@@ -537,11 +537,10 @@ HybridEPBuffer::dispatch_with_permute(HybridEpConfigInstance config,
           c10::optional<torch::Tensor> num_dispatched_tokens_tensor,
           c10::optional<torch::Tensor> local_expert_routing_map,
           c10::optional<torch::Tensor> row_id_map,
-          c10::optional<int64_t> num_dispatched_tokens,
           c10::optional<int64_t> num_permuted_tokens,
           int64_t num_of_tokens_per_rank,
           c10::optional<int64_t> pad_multiple,
-          bool use_host_meta,
+          bool non_blocking,
           bool with_probs)
 {
  // Check the input tensors
@@ -569,13 +568,11 @@ HybridEPBuffer::dispatch_with_permute(HybridEpConfigInstance config,
  args.attn_to_rdma_map = attn_to_rdma_map;
  args.local_expert_routing_map = local_expert_routing_map;
  args.num_dispatched_tokens_tensor = num_dispatched_tokens_tensor;
- args.num_dispatched_tokens = (num_dispatched_tokens.has_value()) ? 
-                                num_dispatched_tokens.value() : -1;
  args.max_num_dispatched_tokens = this->max_num_of_tokens;
  args.row_id_map = row_id_map;
  args.num_permuted_tokens = (num_permuted_tokens.has_value()) ? num_permuted_tokens.value() : -1;
  args.pad_multiple = (pad_multiple.has_value()) ? pad_multiple.value() : 0;
- args.use_host_meta = use_host_meta;
+ args.non_blocking = non_blocking;
  args.num_of_tokens_per_rank = num_of_tokens_per_rank;
  args.enable_permute = true;
  args.stream = at::cuda::getCurrentCUDAStream();
@@ -602,7 +599,6 @@ HybridEPBuffer::combine_with_unpermute(HybridEpConfigInstance config,
         torch::Tensor sparse_to_dense_map, torch::Tensor rdma_to_attn_map,
         torch::Tensor attn_to_rdma_map, c10::optional<torch::Tensor> num_dispatched_tokens_tensor,
         c10::optional<torch::Tensor> row_id_map,
-        c10::optional<int64_t> num_dispatched_tokens,
         int64_t num_of_tokens_per_rank,
         c10::optional<int64_t> pad_multiple,
         bool with_probs)
@@ -638,8 +634,6 @@ HybridEPBuffer::combine_with_unpermute(HybridEpConfigInstance config,
   args.rdma_to_attn_map = rdma_to_attn_map;
   args.attn_to_rdma_map = attn_to_rdma_map;
   args.num_dispatched_tokens_tensor = num_dispatched_tokens_tensor;
-  args.num_dispatched_tokens = (num_dispatched_tokens.has_value()) ? 
-                                num_dispatched_tokens.value() : -1;
   args.row_id_map = row_id_map;
   args.pad_multiple = (pad_multiple.has_value()) ? pad_multiple.value() : 0;
   args.num_of_tokens_per_rank = num_of_tokens_per_rank;

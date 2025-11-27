@@ -35,7 +35,7 @@ public:
         // Misc
         int pad_multiple;  // Used in the padding case of permute
         bool enable_permute = false;
-        bool use_host_meta = false;  // If enable this, the produced num_dispatched_tokens will be put
+        bool non_blocking = false;  // If enable this, the produced num_dispatched_tokens will be put
                                         // on the CPU pinned memory, and the tokens_per_expert will be put
                                         // on the CPU, which may reduce the times of the sync
         int64_t num_of_tokens_per_rank;  // Dynamic sequence length

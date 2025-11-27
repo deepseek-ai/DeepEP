@@ -379,9 +379,7 @@
    // Construct the output tensors
    auto permuted_tokens =
        torch::empty({args.num_permuted_token, args.hidden_size}, args.token_options.device(torch::kCUDA));
- 
-   int padded_num_dispatched_tokens = args.num_dispatched_tokens + args.pad_multiple;
- 
+  
    torch::Tensor permuted_scaling_factor, permuted_probs;
    if (args.use_fp8) {
      permuted_scaling_factor =
@@ -393,16 +391,10 @@
          {args.num_permuted_token}, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
    }
  
-   // If the size of the allocated dispatched tokens is 0, return the empty
-   // tensors
-   if (padded_num_dispatched_tokens == 0) {
-     return std::make_tuple(permuted_tokens, permuted_scaling_factor, permuted_probs);
-   }
- 
    // Launch the kernel
    constexpr int block_size = 512;
    constexpr int tokens_per_block = block_size / 128;
-   int grid_size = std::min(args.num_of_blocks_permute_api, (padded_num_dispatched_tokens + tokens_per_block - 1) / tokens_per_block);
+   int grid_size = args.num_of_blocks_permute_api;
    int shared_mem_size = args.num_of_local_experts * tokens_per_block * sizeof(int);
    permute_kernel<<<grid_size, block_size, shared_mem_size, args.stream>>>(
        reinterpret_cast<DType*>(tokens_ptr),
@@ -524,13 +516,8 @@
  
    constexpr int block_size = 512;
    constexpr int tokens_per_block = block_size / 128;
-   int grid_size = std::min(args.num_of_blocks_permute_api, (args.num_dispatched_tokens + tokens_per_block - 1) / tokens_per_block);
+   int grid_size = args.num_of_blocks_permute_api;
    int shared_mem_size = args.num_of_local_experts * tokens_per_block * sizeof(int);
- 
-   // If the size of the dispatched tokens is 0, return
-   if (args.num_dispatched_tokens == 0) {
-     return;
-   }
  
    unpermute_kernel<<<grid_size, block_size, shared_mem_size, args.stream>>>(
        reinterpret_cast<__nv_bfloat16*>(args.permuted_tokens.data_ptr()),

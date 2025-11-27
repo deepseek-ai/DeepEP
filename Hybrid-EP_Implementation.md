@@ -202,6 +202,8 @@ Refer to `tests/test_hybrid_ep.py` for comprehensive usage examples including:
 - Inter-node testing scenarios
 - Performance benchmarking setups
 
+**Users must manually set num_of_ranks_per_nvlink_domain, either by passing it to HybridEPBuffer.__init__ or via an environment variable. In multi-node NVLink setups, you must also set USE_MNNVL=1.**
+
 ### Important Configuration Note
 Here are important parameter settings in `csrc/hybrid_ep/config.cuh`. You can modify these parameters via `HybridEPBuffer.init_config()` or by setting proper environment variables (see `deep_ep/hybrid_ep_buffer.py`) to achieve better performance/usability:
 

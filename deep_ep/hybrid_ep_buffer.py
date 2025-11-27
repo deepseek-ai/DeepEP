@@ -45,6 +45,8 @@ class HybridEPBuffer:
         num_sms_combine_api: int = None,
         num_sms_preprocessing_api: int = None,
         num_sms_permute_api: int = None,
+        # Rank-based setting
+        num_of_ranks_per_nvlink_domain: int = None,
         use_mnnvl: bool = None
     ):
         self.group = group
@@ -54,32 +56,26 @@ class HybridEPBuffer:
             self.group_size > 1
         ), f"The hybrid-ep kernel should be used with at least 2 ranks, but got {self.group_size}."
 
-        # Compute the number of the involved ranks in the nvlink domain.
-        global_ranks = torch.distributed.get_process_group_ranks(self.group)
-        rank_stride = global_ranks[1] - global_ranks[0]
         # Number of ranks in the first nvlink domain.
         if use_mnnvl is None:
             use_mnnvl = os.getenv("USE_MNNVL", "0").strip().lower() in {"1", "true", "t", "yes", "y", "on"}
-        if int(os.getenv("NVLINK_DOMAIN_SIZE", "8")) > 8: # For compatibility 
+        if num_of_ranks_per_nvlink_domain is None:
+            num_of_ranks_per_nvlink_domain = int(os.getenv("NUM_OF_RANKS_PER_NVLINK_DOMAIN", "8"))
+        if num_of_ranks_per_nvlink_domain > 8: 
             use_mnnvl = True
-        self.nvlink_domain_size = 72 if use_mnnvl else 8
+        
         assert (
-            rank_stride <= self.nvlink_domain_size
-        ), "The rank stride should be less than or equal to the nvlink domain size."
-        num_of_ranks_per_node = min(self.nvlink_domain_size // rank_stride, self.group_size)
-
-        assert (
-            self.group_size % num_of_ranks_per_node == 0
+            self.group_size % num_of_ranks_per_nvlink_domain == 0
         ), "The number of ranks should be divisible by the number of ranks per node."
         self.rank = self.group.rank()
-        self.num_of_ranks_per_node = num_of_ranks_per_node
+        self.num_of_ranks_per_nvlink_domain = num_of_ranks_per_nvlink_domain
 
         # Local rank: the active rank in the nvlink domain.
-        self.local_rank = self.rank % self.num_of_ranks_per_node
+        self.local_rank = self.rank % self.num_of_ranks_per_nvlink_domain
         # Node rank: the active rank between the nvlink domains.
-        self.node_rank = self.rank // self.num_of_ranks_per_node
+        self.node_rank = self.rank // self.num_of_ranks_per_nvlink_domain
         # The number of nodes.
-        self.num_of_nodes = self.group_size // self.num_of_ranks_per_node
+        self.num_of_nodes = self.group_size // self.num_of_ranks_per_nvlink_domain
         self.use_fp8 = use_fp8
 
         props = torch.cuda.get_device_properties(torch.cuda.current_device())
@@ -109,7 +105,7 @@ class HybridEPBuffer:
         self.config.hidden_dim = hidden_dim
         self.config.max_num_of_tokens_per_rank = max(max_num_of_tokens_per_rank, 512)
         self.config.num_of_experts_per_rank = num_local_experts
-        self.config.num_of_ranks_per_node = self.num_of_ranks_per_node
+        self.config.num_of_ranks_per_node = self.num_of_ranks_per_nvlink_domain
         self.config.num_of_nodes = self.num_of_nodes
         self.config.num_of_blocks_dispatch_api = self.num_sms_dispatch_api
         self.config.num_of_blocks_combine_api = self.num_sms_combine_api
@@ -181,7 +177,7 @@ class HybridEPBuffer:
             if num_local_experts is not None
             else self.config.num_of_experts_per_rank
         )
-        config.num_of_ranks_per_node = self.num_of_ranks_per_node
+        config.num_of_ranks_per_node = self.num_of_ranks_per_nvlink_domain
         config.num_of_nodes = self.num_of_nodes
 
         # Metadata-preprocessing API Config
@@ -401,7 +397,6 @@ class HybridEPBuffer:
         probs: torch.Tensor = None,
         scaling_factor: torch.Tensor = None,
         # Used in the sync-free permute
-        num_dispatched_tokens: int = None,
         num_permuted_tokens: int = None,
         # If we use permute kernel, the output tensor will be permuted. the result can be directly used in the gemm.
         pad_multiple: int = None,
@@ -418,8 +413,13 @@ class HybridEPBuffer:
         # # Cache for template config
         # 7. template_config: HybridEpConfigInstance
         handle: tuple = None,
-        # If enable this, the produced num_dispatched_tokens/tokens_per_expert can be used directly in the host, which could cause sync 
-        use_host_meta: bool = True,
+        # There are 2 tensors are put on the CPU pinned memory
+        # 1. num_dispatched_tokens in handle
+        # 2. tokens_per_expert
+        # If non_blocking is True, no stream synchronization will be used, so we can not promise the data in pinned 
+        # memory is ready for using in CPU. The CPU value of num_permuted_tokens required for this mode
+        # Otherwise, the stream synchronization will be used to wait for the data in pinned memory.
+        non_blocking: bool = False,
     ):
         """
         Dispatch the data to the experts with permute.
@@ -438,6 +438,8 @@ class HybridEPBuffer:
                     routing_map, probs = indices_to_map(
                         topk_idx, topk_weights, num_of_tokens_per_rank, num_of_experts
                     )
+            if non_blocking:
+                assert num_permuted_tokens >= 0, "The num_permuted_tokens is required for non-blocking mode."
 
             # If the handle is not provided, we need to generate the handle in the first invocation of the dispatch kernel.
             if handle is None:
@@ -504,11 +506,10 @@ class HybridEPBuffer:
                 num_dispatched_tokens_tensor=num_dispatched_tokens_tensor,
                 local_expert_routing_map=local_expert_routing_map,
                 row_id_map=row_id_map,
-                num_dispatched_tokens=num_dispatched_tokens,
                 num_permuted_tokens=num_permuted_tokens,
                 num_of_tokens_per_rank=num_of_tokens_per_rank,
                 pad_multiple=pad_multiple,
-                use_host_meta=use_host_meta,
+                non_blocking=non_blocking,
                 with_probs=probs is not None,
             )
 
@@ -522,6 +523,7 @@ class HybridEPBuffer:
                 num_of_tokens_per_rank,
                 config,
             )
+        
         return (
             dispatched_token,
             dispatched_probs,
@@ -536,7 +538,6 @@ class HybridEPBuffer:
         # Input tensors
         hidden: torch.Tensor,
         probs: torch.Tensor = None,
-        num_dispatched_tokens: int = None,
         handle: tuple = None,
         pad_multiple: int = None,
     ):
@@ -568,7 +569,6 @@ class HybridEPBuffer:
                 attn_to_rdma_map=attn_to_rdma_map,
                 num_dispatched_tokens_tensor=num_dispatched_tokens_tensor,
                 row_id_map=row_id_map,
-                num_dispatched_tokens=num_dispatched_tokens,
                 num_of_tokens_per_rank=num_of_tokens_per_rank,
                 pad_multiple=pad_multiple,
                 with_probs=probs is not None,
