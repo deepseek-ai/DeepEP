@@ -192,6 +192,8 @@ export RDMA_CORE_HOME=/path/to/rdma-core  # Path to your RDMA core installation
 export TORCH_ARCH_LIST="9.0;10.0"  # Adjust based on your GPU architecture
 pip install .
 ```
+ 
+> RDMA Core requirement: install `rdma-core` v60.0 ([reference](https://github.com/linux-rdma/rdma-core/tree/v60.0)) and keep track of the latest upstream release whenever possible ([linux-rdma/rdma-core](https://github.com/linux-rdma/rdma-core.git)).
 
 
 ### Quick Start
