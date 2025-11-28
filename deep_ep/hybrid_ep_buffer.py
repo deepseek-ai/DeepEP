@@ -44,7 +44,6 @@ class HybridEPBuffer:
         num_sms_dispatch_api: int = None,
         num_sms_combine_api: int = None,
         num_sms_preprocessing_api: int = None,
-        num_sms_permute_api: int = None,
         # Rank-based setting
         num_of_hybrid_ep_ranks_per_nvlink_domain: int = None,
         use_mnnvl: bool = None
@@ -82,8 +81,7 @@ class HybridEPBuffer:
         sm_count = props.multi_processor_count
         if num_sms_preprocessing_api is None:
             num_sms_preprocessing_api = 108
-        if num_sms_permute_api is None:
-            num_sms_permute_api = sm_count * 8
+        num_blocks_permute_api = sm_count * 16
         # Inter-node case should use less SMs for the dispatch and combine APIs.
         if num_sms_dispatch_api is None:
             num_sms_dispatch_api = 32 if self.num_of_nodes == 1 else 8
@@ -98,7 +96,7 @@ class HybridEPBuffer:
         self.num_sms_preprocessing_api = num_sms_preprocessing_api
         self.num_sms_dispatch_api = num_sms_dispatch_api
         self.num_sms_combine_api = num_sms_combine_api
-        self.num_sms_permute_api = num_sms_permute_api
+        self.num_blocks_permute_api = num_blocks_permute_api
         
         # Initialize the BufferConfig for the hybrid-ep buffer allocation.
         self.config = hybrid_ep_cpp.BufferConfig()
@@ -111,7 +109,7 @@ class HybridEPBuffer:
         self.config.num_of_blocks_combine_api = self.num_sms_combine_api
         # The SMs of preprocessing, chunk size of dispatch and combine will affact the size of intermediate buffers.
         self.config.num_of_blocks_preprocessing_api = self.num_sms_preprocessing_api
-        self.config.num_of_blocks_permute_api = self.num_sms_permute_api
+        self.config.num_of_blocks_permute_api = self.num_blocks_permute_api
         # The fp8/bf16/fp16 data is communicated in the uint8/uint16 format.
         self.config.token_data_type = (
             hybrid_ep_cpp.UINT8 if self.use_fp8 else hybrid_ep_cpp.UINT16
@@ -185,7 +183,7 @@ class HybridEPBuffer:
         config.num_of_threads_per_block_preprocessing_api = int(
             os.getenv("NUM_OF_THREADS_PER_BLOCK_PREPROCESSING_API", "512")
         )
-        config.num_of_blocks_permute_api = self.num_sms_permute_api
+        config.num_of_blocks_permute_api = self.num_blocks_permute_api
 
         # Dispatch API Config
         if use_fp8 is None:
