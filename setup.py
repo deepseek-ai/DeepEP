@@ -10,6 +10,17 @@ from pathlib import Path
 from torch.utils.cpp_extension import BuildExtension, CUDAExtension
 
 
+def collect_package_files(package: str, relative_dir: str):
+    base_path = Path(package) / relative_dir
+    if not base_path.exists():
+        return []
+    return [
+        str(path.relative_to(package))
+        for path in base_path.rglob('*')
+        if path.is_file()
+    ]
+
+
 # Wheel specific: the wheels only include the soname of the host library `libnvshmem_host.so.X`
 def get_nvshmem_host_lib_name(base_dir):
     path = Path(base_dir).joinpath('lib')
@@ -275,7 +286,7 @@ if __name__ == '__main__':
             'build_ext': BuildExtension
         },
         package_data={
-            'deep_ep': ['backend/*'],
+            'deep_ep': collect_package_files('deep_ep', 'backend'),
         },
         include_package_data=True
     )

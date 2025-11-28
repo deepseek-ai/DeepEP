@@ -195,6 +195,29 @@ pip install .
  
 > RDMA Core requirement: install `rdma-core` v60.0 ([reference](https://github.com/linux-rdma/rdma-core/tree/v60.0)), and the latest release is also recommended ([linux-rdma/rdma-core](https://github.com/linux-rdma/rdma-core.git)).
 
+Example:
+```bash
+git clone https://github.com/linux-rdma/rdma-core.git
+cd rdma-core
+git checkout tags/v60.0
+sh build.sh
+export RDMA_CORE_HOME=/path/to/rdma-core/build
+```
+
+Hybrid EP’s RDMA topology probing relies on `libnvidia-ml.so.1`. During Dockerfile builds, compile against the NVML stubs (for example, those shipped in `libnvidia-ml-dev`), then at runtime launch the container with `--gpus all` or a Kubernetes device plugin so that the NVIDIA container runtime injects the host’s real NVML library and prevents driver/library mismatches.
+
+Example:
+```bash
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends libnvidia-ml-dev
+RUN git clone -b hybrid_ep https://github.com/deepseek-ai/DeepEP.git
+ENV HYBRID_EP_MULTINODE=1
+RUN cd DeepEP && \
+    TORCH_CUDA_ARCH_LIST="9.0 10.0" MAX_JOBS=8 pip install --no-build-isolation . && \
+    apt-get purge -y libnvidia-ml-dev && \
+    apt-get autoremove -y && \
+    rm -rf /var/lib/apt/lists/*
+```
 
 ### Quick Start
 
