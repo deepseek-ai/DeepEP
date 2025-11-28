@@ -327,9 +327,9 @@
  
    int checkBDFFormat(char* bdf) {
      if (bdf[4] != ':' || bdf[7] != ':' || bdf[10] != '.') return 0;
-     if (isHex(bdf[0]) == 0 || isHex(bdf[1] == 0) || isHex(bdf[2] == 0) || isHex(bdf[3] == 0) ||
-         isHex(bdf[5] == 0) || isHex(bdf[6] == 0) || isHex(bdf[8] == 0) || isHex(bdf[9] == 0) ||
-         isHex(bdf[11] == 0)) return 0;
+     if (isHex(bdf[0]) == 0 || isHex(bdf[1]) == 0 || isHex(bdf[2]) == 0 || isHex(bdf[3]) == 0 ||
+         isHex(bdf[5]) == 0 || isHex(bdf[6]) == 0 || isHex(bdf[8]) == 0 || isHex(bdf[9]) == 0 ||
+         isHex(bdf[11]) == 0) return 0;
      return 1;
    }
  
