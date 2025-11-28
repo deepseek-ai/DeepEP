@@ -332,6 +332,11 @@ This code repository is released under [the MIT License](LICENSE), except for co
   - This PR is authored by **Tencent Network Platform Department**
 - [Eager](https://github.com/deepseek-ai/DeepEP/pull/437)
   - Using a low-latency protocol removes the extra RTT latency introduced by RDMA atomic OPs
+- [Hybrid-EP](https://github.com/deepseek-ai/DeepEP/tree/hybrid-ep)
+  - A new backend implementation using TMA instructions for minimal SM usage and larger NVLink domain support
+  - Fine-grained communication-computation overlap for single-batch scenarios
+  - PCIe kernel support for non-NVLink environments
+  - NVFP4 data type support
 
 ## Community Forks
 
