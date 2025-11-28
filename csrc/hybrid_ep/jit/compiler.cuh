@@ -37,9 +37,11 @@ public:
     * @param signature The signature of the code, which is used to name the .so
     * file
     * @param local_rank The local rank of the current process
+    * @param node_rank The node rank of the current process
+    * @param num_of_nodes The number of nodes in the communication 
     * @return std::string The path of the compiled .so file
     */
-    std::string build(std::string code, std::string signature, int local_rank, int node_rank);
+    std::string build(std::string code, std::string signature, int local_rank, int node_rank, int num_of_nodes);
 
     /**
     * @brief Get the compiled function pointer from the compiled .so file
@@ -52,13 +54,12 @@ public:
 
 
 private:
-    std::string base_path;  // The path of the installed package
-    std::string flags;      // The flags required by nvcc compiler, which contains the
-    // base flags(-O3, -arch...), include files, library files
-    std::string nvcc_path;  // The path of the nvcc compiler
-    std::string include;
-    std::string library;
-    std::string objs = "";
+    std::string base_path;            // The path of the installed package
+    std::string jit_dir;              // The path of the jit library
+    std::string intra_node_flags;     // The flags required by nvcc compiler in the intra-node case
+    std::string inter_node_flags;     // The flags required by nvcc compiler in the inter-node case
+    std::string nvcc_path;            // The path of the nvcc compiler
+    std::string objs;                 // The objects to be compiled, only used in the inter-node case
 };
 
 class KernelCache{
@@ -96,6 +97,7 @@ public:
 private:
     NVCCCompiler nvcc_compiler;
     std::unordered_map<std::string, std::any> kernel_cache;
+    std::string jit_dir;    // The path of the jit directory
     std::string base_path;  // The path of the installed package
     int local_rank;   // Used to generate the unique signature for each rank
     int node_rank;    // Used to generate the unique signature for each node

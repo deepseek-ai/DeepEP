@@ -290,3 +290,52 @@ inline void print_ptr_info(void* p) {
     fprintf(stderr, "alloc_base=%p, alloc_size=%zu bytes\n", reinterpret_cast<void*>(base), size);
   }
 }
+
+/* Error type */
+typedef enum {
+  ncclSuccess = 0,
+  ncclUnhandledCudaError = 1,
+  ncclSystemError = 2,
+  ncclInternalError = 3,
+  ncclInvalidArgument = 4,
+  ncclInvalidUsage = 5,
+  ncclRemoteError = 6,
+  ncclInProgress = 7,
+  ncclNumResults = 8
+} ncclResult_t;
+
+#define NCCL_CHECK(call)                                                     \
+  do {                                                                       \
+    ncclResult_t RES = call;                                                 \
+    if (RES != ncclSuccess && RES != ncclInProgress) {                       \
+      /* Print the back trace*/                                              \
+      fprintf(stderr, "%s:%d -> %d\n", __FILE__, __LINE__, RES);             \
+      return RES;                                                            \
+    }                                                                        \
+  } while (0)
+
+template <typename T>
+ncclResult_t ncclCallocDebug(T** ptr, size_t nelem, const char* filefunc, int line) {
+  void* p = malloc(nelem * sizeof(T));
+  if (p == NULL) {
+    // WARN("Failed to malloc %ld bytes", nelem*sizeof(T));
+    return ncclSystemError;
+  }
+  // INFO(NCCL_ALLOC, "%s:%d malloc Size %ld pointer %p", filefunc, line,
+  // nelem*sizeof(T), p);
+  memset(p, 0, nelem * sizeof(T));
+  *ptr = (T*)p;
+  return ncclSuccess;
+}
+#define ncclCalloc(...) ncclCallocDebug(__VA_ARGS__, __FILE__, __LINE__)
+
+#define CALL_CHECK(call)                                                       \
+  do {                                                                         \
+    int result = call;                                                         \
+    if (result != 0) {                                                         \
+      fprintf(stderr, "file=%s, line=%d, call='%s', returned=%d.\n",           \
+              __FILE__, __LINE__, #call, result);                              \
+      abort();                                                                 \
+    }                                                                          \
+  } while(0)
+
