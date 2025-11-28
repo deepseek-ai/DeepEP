@@ -46,7 +46,7 @@ class HybridEPBuffer:
         num_sms_preprocessing_api: int = None,
         num_sms_permute_api: int = None,
         # Rank-based setting
-        num_of_ranks_per_nvlink_domain: int = None,
+        num_of_hybrid_ep_ranks_per_nvlink_domain: int = None,
         use_mnnvl: bool = None
     ):
         self.group = group
@@ -59,23 +59,23 @@ class HybridEPBuffer:
         # Number of ranks in the first nvlink domain.
         if use_mnnvl is None:
             use_mnnvl = os.getenv("USE_MNNVL", "0").strip().lower() in {"1", "true", "t", "yes", "y", "on"}
-        if num_of_ranks_per_nvlink_domain is None:
-            num_of_ranks_per_nvlink_domain = int(os.getenv("NUM_OF_RANKS_PER_NVLINK_DOMAIN", "8"))
-        if num_of_ranks_per_nvlink_domain > 8: 
+        if num_of_hybrid_ep_ranks_per_nvlink_domain is None:
+            num_of_hybrid_ep_ranks_per_nvlink_domain = int(os.getenv("NUM_OF_HYBRID_EP_RANKS_PER_NVLINK_DOMAIN", "8"))
+        if num_of_hybrid_ep_ranks_per_nvlink_domain > 8: 
             use_mnnvl = True
         
         assert (
-            self.group_size % num_of_ranks_per_nvlink_domain == 0
+            self.group_size % num_of_hybrid_ep_ranks_per_nvlink_domain == 0
         ), "The number of ranks should be divisible by the number of ranks per node."
         self.rank = self.group.rank()
-        self.num_of_ranks_per_nvlink_domain = num_of_ranks_per_nvlink_domain
+        self.num_of_hybrid_ep_ranks_per_nvlink_domain = num_of_hybrid_ep_ranks_per_nvlink_domain
 
         # Local rank: the active rank in the nvlink domain.
-        self.local_rank = self.rank % self.num_of_ranks_per_nvlink_domain
+        self.local_rank = self.rank % self.num_of_hybrid_ep_ranks_per_nvlink_domain
         # Node rank: the active rank between the nvlink domains.
-        self.node_rank = self.rank // self.num_of_ranks_per_nvlink_domain
+        self.node_rank = self.rank // self.num_of_hybrid_ep_ranks_per_nvlink_domain
         # The number of nodes.
-        self.num_of_nodes = self.group_size // self.num_of_ranks_per_nvlink_domain
+        self.num_of_nodes = self.group_size // self.num_of_hybrid_ep_ranks_per_nvlink_domain
         self.use_fp8 = use_fp8
 
         props = torch.cuda.get_device_properties(torch.cuda.current_device())
@@ -105,7 +105,7 @@ class HybridEPBuffer:
         self.config.hidden_dim = hidden_dim
         self.config.max_num_of_tokens_per_rank = max(max_num_of_tokens_per_rank, 512)
         self.config.num_of_experts_per_rank = num_local_experts
-        self.config.num_of_ranks_per_node = self.num_of_ranks_per_nvlink_domain
+        self.config.num_of_ranks_per_node = self.num_of_hybrid_ep_ranks_per_nvlink_domain
         self.config.num_of_nodes = self.num_of_nodes
         self.config.num_of_blocks_dispatch_api = self.num_sms_dispatch_api
         self.config.num_of_blocks_combine_api = self.num_sms_combine_api
@@ -177,7 +177,7 @@ class HybridEPBuffer:
             if num_local_experts is not None
             else self.config.num_of_experts_per_rank
         )
-        config.num_of_ranks_per_node = self.num_of_ranks_per_nvlink_domain
+        config.num_of_ranks_per_node = self.num_of_hybrid_ep_ranks_per_nvlink_domain
         config.num_of_nodes = self.num_of_nodes
 
         # Metadata-preprocessing API Config

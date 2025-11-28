@@ -362,7 +362,7 @@ def test_main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
             hidden_dim=HIDDEN_DIM,
             max_num_of_tokens_per_rank=MAX_NUM_OF_TOKENS_PER_RANK,
             num_local_experts=NUM_LOCAL_EXPERTS,
-            num_of_ranks_per_nvlink_domain=NUM_OF_RANKS_PER_NODE,
+            num_of_hybrid_ep_ranks_per_nvlink_domain=NUM_OF_RANKS_PER_NODE,
             use_mnnvl=USE_MNNVL,
             use_fp8=use_fp8
         )
