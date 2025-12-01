@@ -292,11 +292,13 @@ public:
 
     torch::Tensor get_next_low_latency_combine_buffer(int num_max_dispatch_tokens_per_rank, int hidden, int num_experts) const;
 
+#ifndef DISABLE_NVSHMEM_AND_NCCL
     void low_latency_update_mask_buffer(int rank_to_mask, bool mask);
 
     void low_latency_query_mask_buffer(const torch::Tensor& mask_status);
 
     void low_latency_clean_mask_buffer();
+#endif
 };
 
 }  // namespace deep_ep

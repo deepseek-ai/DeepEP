@@ -29,8 +29,8 @@ export LD_LIBRARY_PATH=$CUDA_HOME/lib64:$LD_LIBRARY_PATH
 
 # Compile NCCL with GIN support
 export NCCL_NET_HOME=none
-export NCCL_HOME=/path/to/nccl
-cd $NCCL_HOME
+export NCCL_DIR=/path/to/nccl
+cd $NCCL_DIR
 make clean && make MPI_HOME=$HPCX_MPI_DIR NVCC_GENCODE="-gencode=arch=compute_90,code=sm_90" src.build -j32 # adjust NVCC_GENCODE accordingly
 ```
 
@@ -53,9 +53,9 @@ LL (Low Latency) kernels are optimized for latency-sensitive inference decoding 
 
 ### Enable NCCL compilation
 ```bash
-export NCCL_HOME=/path/to/nccl
-export LD_LIBRARY_PATH=$NCCL_HOME/build/lib:$CUDA_HOME/lib64:$LD_LIBRARY_PATH
-export LD_PRELOAD=$NCCL_HOME/build/lib/libnccl.so.2
+export NCCL_DIR=/path/to/nccl
+export LD_LIBRARY_PATH=$NCCL_DIR/build/lib:$CUDA_HOME/lib64:$LD_LIBRARY_PATH
+export LD_PRELOAD=$NCCL_DIR/build/lib/libnccl.so.2
 export ENABLE_NCCL=1; python3 setup.py build_ext --inplace; pip install --no-build-isolation .
 ```
 
@@ -94,7 +94,7 @@ export ENABLE_NCCL=1; python3 setup.py build_ext --inplace; pip install --no-bui
 
 ### Example 1: Run HT kernels with NCCL backend
 ```bash
-LD_LIBRARY_PATH=$MPI_HOME/lib/:$HPCX_UCX_DIR/lib/:$NCCL_HOME/build/lib:$NCCL_HOME/src/gin/transport/gdaki/doca-gpunetio-lite/lib:$LD_LIBRARY_PATH DEEP_EP_BACKEND=nccl_gin NCCL_GIN_TYPE=3 NCCL_ENABLE=1 UCX_IB_DM_COUNT=0 NCCL_SHM_DISABLE=1 NCCL_NET_PLUGIN=none NCCL_DEBUG=0 DOCA_GPUNETIO_LITE_DEBUG=0 python tests/test_internode.py
+LD_LIBRARY_PATH=$MPI_HOME/lib/:$HPCX_UCX_DIR/lib/:$NCCL_DIR/build/lib:$NCCL_DIR/src/gin/transport/gdaki/doca-gpunetio-lite/lib:$LD_LIBRARY_PATH DEEP_EP_BACKEND=nccl_gin NCCL_GIN_TYPE=3 NCCL_ENABLE=1 UCX_IB_DM_COUNT=0 NCCL_SHM_DISABLE=1 NCCL_NET_PLUGIN=none NCCL_DEBUG=0 DOCA_GPUNETIO_LITE_DEBUG=0 python tests/test_internode.py
 ```
 
 ### Enable NVSHMEM compilation
@@ -124,6 +124,6 @@ rm -rf build/ dist/ *.egg-info/ *.so;
 ## Important Notes
 
 - When switching between NCCL and NVSHMEM backends, always rebuild and reinstall
-- Adjust paths according to your system configuration (HPCX_DIR, CUDA_HOME, NCCL_HOME, etc.)
+- Adjust paths according to your system configuration (HPCX_DIR, CUDA_HOME, NCCL_DIR, etc.)
 - The NVCC_GENCODE flag should match your GPU architecture (e.g., `-gencode=arch=compute_90,code=sm_90` for H100)
 - By default, DeepEP uses NCCL as the communication backend for PyTorch Distributed that is used as a launcher for dispatch/combine primitives. However, the NCCL backend in PyTorch Distributed requires NCCL_P2P_DISABLE=1 on EOS, which is only possible for running high throughput kernels. NCCL_P2P_DISABLE=1 must not be set when running low latency kernels with NVLink; for this case, the Gloo communication backend for PyTorch Distributed can be used. [FIXME: This needs investigation. There is no reason for NCCL_P2P_DISABLE=1 to be set for running PyTorch Distributed with NCCL backend.]

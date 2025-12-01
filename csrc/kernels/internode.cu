@@ -105,8 +105,7 @@ __forceinline__ __device__ void sync_with_same_gpu_idx(
 #ifdef ENABLE_NCCL
                                                        ncclDevComm* dcomms) {
 #elif defined(ENABLE_NVSHMEM)
-                                                       const nvshmem_team_t& rdma_team,
-                                                       void* dcomms) {
+                                                       const nvshmem_team_t& rdma_team) {
 #endif
     // Barrier before cleaning (in case of unfinished chunked EP)
 #ifdef ENABLE_NCCL
@@ -156,21 +155,17 @@ __global__ void notify_dispatch(const int* num_tokens_per_rank,
                                 void* rdma_buffer_ptr,
                                 void** buffer_ptrs,
                                 int** barrier_signal_ptrs,
-                                int rank,
+                                int rank
 #ifdef ENABLE_NCCL
-                                int num_gin_comms,
+                                ,int num_gin_comms,
                                 void* gin_base_ptr,
                                 ncclDevComm* dcomms,
                                 const ncclWindow_t* nccl_windows,
-                                unsigned signals_base) {
+                                unsigned signals_base
 #elif defined(ENABLE_NVSHMEM)
-                                const nvshmem_team_t rdma_team,
-                                int num_gin_comms,
-                                void* gin_base_ptr,
-                                void* dcomms,
-                                void* nccl_windows,
-                                unsigned signals_base) {
+                                ,const nvshmem_team_t rdma_team
 #endif
+                                ) {
     auto sm_id = static_cast<int>(blockIdx.x);
     auto thread_id = static_cast<int>(threadIdx.x), warp_id = thread_id / 32, lane_id = get_lane_id();
     auto num_threads = static_cast<int>(blockDim.x), num_warps = num_threads / 32;
@@ -208,7 +203,7 @@ __global__ void notify_dispatch(const int* num_tokens_per_rank,
 #ifdef ENABLE_NCCL
                 dcomms);
 #elif defined(ENABLE_NVSHMEM)
-                rdma_team, dcomms);
+                rdma_team);
 #endif
         barrier_block<NUM_MAX_NVL_PEERS, true>(barrier_signal_ptrs, nvl_rank);
 
@@ -334,7 +329,7 @@ __global__ void notify_dispatch(const int* num_tokens_per_rank,
 #ifdef ENABLE_NCCL
                 dcomms);
 #elif defined(ENABLE_NVSHMEM)
-                rdma_team, dcomms);
+                rdma_team);
 #endif
         __syncthreads();
 
@@ -430,7 +425,7 @@ __global__ void notify_dispatch(const int* num_tokens_per_rank,
 #ifdef ENABLE_NCCL
                 dcomms);
 #elif defined(ENABLE_NVSHMEM)
-                rdma_team, dcomms);
+                rdma_team);
 #endif
         barrier_block<NUM_MAX_NVL_PEERS>(barrier_signal_ptrs, nvl_rank);
     } else {
@@ -531,12 +526,6 @@ void notify_dispatch(const int* num_tokens_per_rank,
     EP_HOST_ASSERT(rdma_buffer_ptr == gin_base_ptr);
     EP_HOST_ASSERT(reinterpret_cast<uintptr_t>(rdma_buffer_ptr) >= reinterpret_cast<uintptr_t>(gin_base_ptr));
     EP_HOST_ASSERT(nccl_windows != nullptr);
-#elif defined(ENABLE_NVSHMEM)
-    void* gin_base_ptr = nullptr;
-    void* dcomms = nullptr;
-    int num_gin_comms = 1;
-    void* nccl_windows = nullptr;
-    unsigned signals_base = 0;
 #endif
 
 #ifdef ENABLE_NCCL
@@ -608,12 +597,7 @@ void notify_dispatch(const int* num_tokens_per_rank,
                       buffer_ptrs,                                                                                                     \
                       barrier_signal_ptrs,                                                                                             \
                       rank,                                                                                                            \
-                      cpu_rdma_team,                                                                                                   \
-                      num_gin_comms,                                                                                                   \
-                      gin_base_ptr,                                                                                                    \
-                      dcomms,                                                                                                          \
-                      nccl_windows,                                                                                                    \
-                      signals_base);                                                                                                   \
+                      cpu_rdma_team);                                                                                                  \
     }                                                                                                                                  \
     break
 #endif
@@ -689,20 +673,15 @@ __global__ void __launch_bounds__(((kNumDispatchRDMASenderWarps + 1 + NUM_MAX_NV
              int num_max_nvl_chunked_send_tokens,
              int num_max_nvl_chunked_recv_tokens,
              int rank,
-             int num_ranks,
+             int num_ranks
 #ifdef ENABLE_NCCL
-             int num_gin_comms,
+             ,int num_gin_comms,
              void* gin_base_ptr,
              ncclDevComm* dcomms,
              const ncclWindow_t* nccl_windows,
-             unsigned signals_base) {
-#elif defined(ENABLE_NVSHMEM)
-             int num_gin_comms,
-             void* gin_base_ptr,
-             void* dcomms,
-             void* nccl_windows,
-             unsigned signals_base) {
+             unsigned signals_base
 #endif
+             ) {
     enum class WarpRole { kRDMASender, kRDMASenderCoordinator, kRDMAAndNVLForwarder, kForwarderCoordinator, kNVLReceivers };
 
     const auto num_sms = static_cast<int>(gridDim.x);
@@ -1604,14 +1583,9 @@ void dispatch(void* recv_x,
     EP_HOST_ASSERT(reinterpret_cast<uintptr_t>(rdma_buffer_ptr) >= reinterpret_cast<uintptr_t>(gin_base_ptr));
     EP_HOST_ASSERT(num_channels <= NCCL_MAX_NUM_CHANNELS);
     EP_HOST_ASSERT(nccl_windows != nullptr);
-#elif defined(ENABLE_NVSHMEM)
-    void* gin_base_ptr = nullptr;
-    void* dcomms = nullptr;
-    int num_gin_comms = 1;
-    void* nccl_windows = nullptr;
-    unsigned signals_base = 0;
 #endif
 
+#ifdef ENABLE_NCCL
 #define DISPATCH_LAUNCH_CASE(num_rdma_ranks)                                                                                   \
     {                                                                                                                          \
         auto dispatch_func = low_latency_mode                                                                                  \
@@ -1662,7 +1636,55 @@ void dispatch(void* recv_x,
                       signals_base);                                                                                           \
     }                                                                                                                          \
     break
+#elif defined(ENABLE_NVSHMEM)
+#define DISPATCH_LAUNCH_CASE(num_rdma_ranks)                                                                                   \
+    {                                                                                                                          \
+        auto dispatch_func = low_latency_mode                                                                                  \
+            ? (is_cached_dispatch ? dispatch<true, num_rdma_ranks, true, kNumTMABytesPerWarp, kNumDispatchRDMASenderWarps>     \
+                                  : dispatch<true, num_rdma_ranks, false, kNumTMABytesPerWarp, kNumDispatchRDMASenderWarps>)   \
+            : (is_cached_dispatch ? dispatch<false, num_rdma_ranks, true, kNumTMABytesPerWarp, kNumDispatchRDMASenderWarps>    \
+                                  : dispatch<false, num_rdma_ranks, false, kNumTMABytesPerWarp, kNumDispatchRDMASenderWarps>); \
+        SET_SHARED_MEMORY_FOR_TMA(dispatch_func);                                                                              \
+        LAUNCH_KERNEL(&cfg,                                                                                                    \
+                      dispatch_func,                                                                                           \
+                      reinterpret_cast<int4*>(recv_x),                                                                         \
+                      recv_x_scales,                                                                                           \
+                      recv_topk_idx,                                                                                           \
+                      recv_topk_weights,                                                                                       \
+                      reinterpret_cast<SourceMeta*>(recv_src_meta),                                                            \
+                      reinterpret_cast<const int4*>(x),                                                                        \
+                      x_scales,                                                                                                \
+                      topk_idx,                                                                                                \
+                      topk_weights,                                                                                            \
+                      send_rdma_head,                                                                                          \
+                      send_nvl_head,                                                                                           \
+                      recv_rdma_channel_prefix_matrix,                                                                         \
+                      recv_gbl_channel_prefix_matrix,                                                                          \
+                      rdma_channel_prefix_matrix,                                                                              \
+                      recv_rdma_rank_prefix_sum,                                                                               \
+                      gbl_channel_prefix_matrix,                                                                               \
+                      recv_gbl_rank_prefix_sum,                                                                                \
+                      is_token_in_rank,                                                                                        \
+                      num_tokens,                                                                                              \
+                      hidden_int4,                                                                                             \
+                      num_scales,                                                                                              \
+                      num_topk,                                                                                                \
+                      num_experts,                                                                                             \
+                      scale_token_stride,                                                                                      \
+                      scale_hidden_stride,                                                                                     \
+                      rdma_buffer_ptr,                                                                                         \
+                      num_max_rdma_chunked_send_tokens,                                                                        \
+                      num_max_rdma_chunked_recv_tokens,                                                                        \
+                      buffer_ptrs,                                                                                             \
+                      num_max_nvl_chunked_send_tokens,                                                                         \
+                      num_max_nvl_chunked_recv_tokens,                                                                         \
+                      rank,                                                                                                    \
+                      num_ranks);                                                                                              \
+    }                                                                                                                          \
+    break
+#endif
 #undef DISPATCH_LAUNCH_CASE
+#ifdef ENABLE_NCCL
 #define DISPATCH_LAUNCH_CASE(num_rdma_ranks)                                                                                   \
     {                                                                                                                          \
         auto dispatch_func = low_latency_mode                                                                                  \
@@ -1714,6 +1736,54 @@ void dispatch(void* recv_x,
                       signals_base);                                                                                           \
     }                                                                                                                          \
     break
+#elif defined(ENABLE_NVSHMEM)
+#define DISPATCH_LAUNCH_CASE(num_rdma_ranks)                                                                                   \
+    {                                                                                                                          \
+        auto dispatch_func = low_latency_mode                                                                                  \
+            ? (is_cached_dispatch ? dispatch<true, num_rdma_ranks, true, kNumTMABytesPerWarp, kNumDispatchRDMASenderWarps>     \
+                                  : dispatch<true, num_rdma_ranks, false, kNumTMABytesPerWarp, kNumDispatchRDMASenderWarps>)   \
+            : (is_cached_dispatch ? dispatch<false, num_rdma_ranks, true, kNumTMABytesPerWarp, kNumDispatchRDMASenderWarps>    \
+                                  : dispatch<false, num_rdma_ranks, false, kNumTMABytesPerWarp, kNumDispatchRDMASenderWarps>); \
+        SET_SHARED_MEMORY_FOR_TMA(dispatch_func);                                                                              \
+        LAUNCH_KERNEL(&cfg,                                                                                                    \
+                      dispatch_func,                                                                                           \
+                      reinterpret_cast<int4*>(recv_x),                                                                         \
+                      recv_x_scales,                                                                                           \
+                      recv_topk_idx,                                                                                           \
+                      recv_topk_weights,                                                                                       \
+                      reinterpret_cast<SourceMeta*>(recv_src_meta),                                                            \
+                      reinterpret_cast<const int4*>(x),                                                                        \
+                      x_scales,                                                                                                \
+                      topk_idx,                                                                                                \
+                      topk_weights,                                                                                            \
+                      send_rdma_head,                                                                                          \
+                      send_nvl_head,                                                                                           \
+                      recv_rdma_channel_prefix_matrix,                                                                         \
+                      recv_gbl_channel_prefix_matrix,                                                                          \
+                      rdma_channel_prefix_matrix,                                                                              \
+                      recv_rdma_rank_prefix_sum,                                                                               \
+                      gbl_channel_prefix_matrix,                                                                               \
+                      recv_gbl_rank_prefix_sum,                                                                                \
+                      is_token_in_rank,                                                                                        \
+                      num_tokens,                                                                                              \
+                      num_worst_tokens,                                                                                        \
+                      hidden_int4,                                                                                             \
+                      num_scales,                                                                                              \
+                      num_topk,                                                                                                \
+                      num_experts,                                                                                             \
+                      scale_token_stride,                                                                                      \
+                      scale_hidden_stride,                                                                                     \
+                      rdma_buffer_ptr,                                                                                         \
+                      num_max_rdma_chunked_send_tokens,                                                                        \
+                      num_max_rdma_chunked_recv_tokens,                                                                        \
+                      buffer_ptrs,                                                                                             \
+                      num_max_nvl_chunked_send_tokens,                                                                         \
+                      num_max_nvl_chunked_recv_tokens,                                                                         \
+                      rank,                                                                                                    \
+                      num_ranks);                                                                                              \
+    }                                                                                                                          \
+    break
+#endif
 
     EP_HOST_ASSERT((topk_idx == nullptr) == (topk_weights == nullptr));
     EP_HOST_ASSERT((recv_topk_idx == nullptr) == (recv_topk_weights == nullptr));
@@ -1739,19 +1809,16 @@ __global__ void cached_notify(const int rdma_clean_offset,
                               int** barrier_signal_ptrs,
                               int rank,
                               int num_ranks,
-                              bool is_cached_dispatch,
+                              bool is_cached_dispatch
 #ifdef ENABLE_NCCL
-                              int num_gin_comms,
+                              ,int num_gin_comms,
                               void* gin_base_ptr,
                               ncclDevComm* dcomms,
-                              unsigned signals_base) {
+                              unsigned signals_base
 #elif defined(ENABLE_NVSHMEM)
-                              const nvshmem_team_t rdma_team,
-                              int num_gin_comms,
-                              void* gin_base_ptr,
-                              void* dcomms,
-                              unsigned signals_base) {
+                              ,const nvshmem_team_t rdma_team
 #endif
+                              ) {
     auto sm_id = static_cast<int>(blockIdx.x);
     auto thread_id = static_cast<int>(threadIdx.x);
     auto num_threads = static_cast<int>(blockDim.x);
@@ -1791,7 +1858,7 @@ __global__ void cached_notify(const int rdma_clean_offset,
 #ifdef ENABLE_NCCL
                 dcomms);
 #elif defined(ENABLE_NVSHMEM)
-                rdma_team, dcomms);
+                rdma_team);
 #endif
         //  Barrier for NVL
         barrier_block<NUM_MAX_NVL_PEERS, true>(barrier_signal_ptrs, nvl_rank);
@@ -1842,7 +1909,7 @@ __global__ void cached_notify(const int rdma_clean_offset,
 #ifdef ENABLE_NCCL
                 dcomms);
 #elif defined(ENABLE_NVSHMEM)
-                rdma_team, dcomms);
+                rdma_team);
 #endif
 
         barrier_block<NUM_MAX_NVL_PEERS>(barrier_signal_ptrs, nvl_rank);
@@ -2001,11 +2068,6 @@ void cached_notify(int hidden_int4,
     EP_HOST_ASSERT(num_gin_comms >= 1);
     EP_HOST_ASSERT(rdma_buffer_ptr == gin_base_ptr);
     EP_HOST_ASSERT(reinterpret_cast<uintptr_t>(rdma_buffer_ptr) >= reinterpret_cast<uintptr_t>(gin_base_ptr));
-#elif defined(ENABLE_NVSHMEM)
-    void* gin_base_ptr = nullptr;
-    void* dcomms = nullptr;
-    int num_gin_comms = 1;
-    unsigned signals_base = 0;
 #endif
 
     // Launch kernel
@@ -2054,11 +2116,7 @@ void cached_notify(int hidden_int4,
                   rank,
                   num_ranks,
                   is_cached_dispatch,
-                  cpu_rdma_team,
-                  num_gin_comms,
-                  gin_base_ptr,
-                  dcomms,
-                  signals_base);
+                  cpu_rdma_team);
 #endif
 }
 
@@ -2261,20 +2319,15 @@ __global__ void __launch_bounds__((kNumForwarders + 1) * 32, 1) combine(int4* co
                                                                         int num_max_nvl_chunked_send_tokens,
                                                                         int num_max_nvl_chunked_recv_tokens,
                                                                         int rank,
-                                                                        int num_ranks,
+                                                                        int num_ranks
 #ifdef ENABLE_NCCL
-                                                                        int num_gin_comms,
+                                                                        ,int num_gin_comms,
                                                                         void* gin_base_ptr,
                                                                         ncclDevComm* dcomms,
                                                                         const ncclWindow_t* nccl_windows,
-                                                                        unsigned signals_base) {
-#elif defined(ENABLE_NVSHMEM)
-                                                                        int num_gin_comms,
-                                                                        void* gin_base_ptr,
-                                                                        void* dcomms,
-                                                                        void* nccl_windows,
-                                                                        unsigned signals_base) {
+                                                                        unsigned signals_base
 #endif
+                                                                        ) {
     enum class WarpRole { kNVLSender, kNVLAndRDMAForwarder, kRDMAReceiver, kCoordinator };
 
     const auto sm_id = static_cast<int>(blockIdx.x);
@@ -2964,14 +3017,9 @@ void combine(cudaDataType_t type,
     EP_HOST_ASSERT(num_channels <= NCCL_MAX_NUM_CHANNELS);
     EP_HOST_ASSERT(dcomms != nullptr);
     EP_HOST_ASSERT(nccl_windows != nullptr);
-#elif defined(ENABLE_NVSHMEM)
-    void* gin_base_ptr = nullptr;
-    int num_gin_comms = 1;
-    void* dcomms = nullptr;
-    void* nccl_windows = nullptr;
-    unsigned signals_base = 0;
 #endif
 
+#ifdef ENABLE_NCCL
 #define COMBINE_LAUNCH_CASE(num_rdma_ranks)                                           \
     {                                                                                 \
         auto combine_func = low_latency_mode ? combine<true,                          \
@@ -3021,6 +3069,52 @@ void combine(cudaDataType_t type,
                       signals_base);                                                  \
     }                                                                                 \
     break
+#elif defined(ENABLE_NVSHMEM)
+#define COMBINE_LAUNCH_CASE(num_rdma_ranks)                                           \
+    {                                                                                 \
+        auto combine_func = low_latency_mode ? combine<true,                          \
+                                                       num_rdma_ranks,                \
+                                                       nv_bfloat16,                   \
+                                                       kNumCombineForwarderWarps,     \
+                                                       kNumTMABytesPerSenderWarp,     \
+                                                       kNumTMABytesPerForwarderWarp>  \
+                                             : combine<false,                         \
+                                                       num_rdma_ranks,                \
+                                                       nv_bfloat16,                   \
+                                                       kNumCombineForwarderWarps,     \
+                                                       kNumTMABytesPerSenderWarp,     \
+                                                       kNumTMABytesPerForwarderWarp>; \
+        SET_SHARED_MEMORY_FOR_TMA(combine_func);                                      \
+        LAUNCH_KERNEL(&cfg,                                                           \
+                      combine_func,                                                   \
+                      reinterpret_cast<int4*>(combined_x),                            \
+                      combined_topk_weights,                                          \
+                      is_combined_token_in_rank,                                      \
+                      reinterpret_cast<const int4*>(x),                               \
+                      topk_weights,                                                   \
+                      reinterpret_cast<const int4*>(bias_0),                          \
+                      reinterpret_cast<const int4*>(bias_1),                          \
+                      combined_rdma_head,                                             \
+                      combined_nvl_head,                                              \
+                      reinterpret_cast<const SourceMeta*>(src_meta),                  \
+                      rdma_channel_prefix_matrix,                                     \
+                      rdma_rank_prefix_sum,                                           \
+                      gbl_channel_prefix_matrix,                                      \
+                      num_tokens,                                                     \
+                      num_combined_tokens,                                            \
+                      hidden,                                                         \
+                      num_topk,                                                       \
+                      rdma_buffer_ptr,                                                \
+                      num_max_rdma_chunked_send_tokens,                               \
+                      num_max_rdma_chunked_recv_tokens,                               \
+                      buffer_ptrs,                                                    \
+                      num_max_nvl_chunked_send_tokens,                                \
+                      num_max_nvl_chunked_recv_tokens,                                \
+                      rank,                                                           \
+                      num_ranks);                                                     \
+    }                                                                                 \
+    break
+#endif
 
     int num_rdma_ranks = num_ranks / NUM_MAX_NVL_PEERS;
     auto num_warps_per_forwarder = std::max(kNumCombineForwarderWarps / num_rdma_ranks, 1);

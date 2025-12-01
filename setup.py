@@ -23,16 +23,16 @@ if __name__ == '__main__':
     nvshmem_dir = os.getenv('NVSHMEM_DIR', None)
     nvshmem_host_lib = 'libnvshmem_host.so'
 
-    nccl_home = os.getenv('NCCL_HOME', None)
+    nccl_dir = os.getenv('NCCL_DIR', None)
 
-    if nvshmem_dir is None and nccl_home is None:
+    if nvshmem_dir is None and nccl_dir is None:
         try:
             nvshmem_dir = importlib.util.find_spec("nvidia.nvshmem").submodule_search_locations[0]
             nvshmem_host_lib = get_nvshmem_host_lib_name(nvshmem_dir)
             import nvidia.nvshmem as nvshmem  # noqa: F401
         except (ModuleNotFoundError, AttributeError, IndexError):
             print(
-                'Warning: `NVSHMEM_DIR` and `NCCL_HOME` are not specified, and the NVSHMEM module is not installed. All internode and low-latency features are disabled\n'
+                'Warning: `NVSHMEM_DIR` and `NCCL_DIR` are not specified, and the NVSHMEM module is not installed. All internode and low-latency features are disabled\n'
             )
             disable_nvshmem_and_nccl = True
     else:
@@ -41,8 +41,8 @@ if __name__ == '__main__':
     if not disable_nvshmem_and_nccl:
         if nvshmem_dir is not None:
             assert os.path.exists(nvshmem_dir), f'The specified NVSHMEM directory does not exist: {nvshmem_dir}'
-        if nccl_home is not None:
-            assert os.path.exists(nccl_home), f'The specified NCCL directory does not exist: {nccl_home}'
+        if nccl_dir is not None:
+            assert os.path.exists(nccl_dir), f'The specified NCCL directory does not exist: {nccl_dir}'
 
     cxx_flags = ['-O3', '-Wno-deprecated-declarations', '-Wno-unused-variable', '-Wno-sign-compare', '-Wno-reorder', '-Wno-attributes']
     nvcc_flags = ['-O3', '-Xcompiler', '-O3']
@@ -60,22 +60,22 @@ if __name__ == '__main__':
     extra_link_args = ['-lcuda']
 
     # NCCL Enable
-    if os.getenv('ENABLE_NCCL', '0') == '1' and nccl_home is not None:
-    #if nccl_home is not None and nvshmem_dir is None:
+    if os.getenv('ENABLE_NCCL', '0') == '1' and nccl_dir is not None:
+    #if nccl_dir is not None and nvshmem_dir is None:
         cxx_flags.append('-DENABLE_NCCL')
         nvcc_flags.append('-DENABLE_NCCL')
         print('NCCL communication backend enabled')
 
         # Add build/include for nccl.h
-        include_dirs.append(f'{nccl_home}/build/include')
+        include_dirs.append(f'{nccl_dir}/build/include')
         #print(f'Added NCCL build include: {nccl_build_include}')
-        include_dirs.append(f'{nccl_home}/src/include')
+        include_dirs.append(f'{nccl_dir}/src/include')
         #print(f'Added NCCL src include: {nccl_src_include}')
 
         # Add NCCL library path
-        library_dirs.append(f'{nccl_home}/build/lib')
+        library_dirs.append(f'{nccl_dir}/build/lib')
         #print(f'Added NCCL library directory: {nccl_lib}')
-        extra_link_args.extend([f'-Wl,-rpath,{nccl_home}/build/lib'])
+        extra_link_args.extend([f'-Wl,-rpath,{nccl_dir}/build/lib'])
         #print(f'Added NCCL rpath: {nccl_lib}')
 
         sources.extend(['csrc/kernels/internode.cu', 'csrc/kernels/internode_ll.cu', 'csrc/kernels/nccl_gin_backend.cu'])  
@@ -84,7 +84,7 @@ if __name__ == '__main__':
         nvcc_dlink.extend(['-dlink'])
         
         # Add NCCL linking - dynamic only for external applications
-        extra_link_args.extend([f'-L{nccl_home}/build/lib', '-lnccl'])
+        extra_link_args.extend([f'-L{nccl_dir}/build/lib', '-lnccl'])
         #print('Added NCCL library linking: -lnccl (dynamic)')
 
     # NVSHMEM flags
@@ -119,7 +119,11 @@ if __name__ == '__main__':
         os.environ['TORCH_CUDA_ARCH_LIST'] = os.getenv('TORCH_CUDA_ARCH_LIST', '9.0')
 
         # CUDA 12 flags
-        nvcc_flags.extend(['-rdc=true', '--ptxas-options=--register-usage-level=10'])
+        # Only enable RDC when we have internode code (NCCL or NVSHMEM)
+        if not disable_nvshmem_and_nccl:
+            nvcc_flags.append('-rdc=true')
+        nvcc_flags.append('--ptxas-options=--register-usage-level=10')
+
 
     # Disable LD/ST tricks, as some CUDA version does not support `.L1::no_allocate`
     if os.environ['TORCH_CUDA_ARCH_LIST'].strip() != '9.0':

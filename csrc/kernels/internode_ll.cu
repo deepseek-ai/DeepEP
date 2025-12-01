@@ -241,14 +241,12 @@ __launch_bounds__(kNumThreads, 1) __global__ void clean_low_latency_buffer(int* 
                                                                            int rank,
                                                                            int num_ranks,
                                                                            int* mask_buffer_ptr,
-                                                                           int* sync_buffer_ptr,
+                                                                           int* sync_buffer_ptr
 #ifdef ENABLE_NCCL
-                                                                           ncclDevComm* dcomms,
-                                                                           unsigned signals_base) {
-#elif defined(ENABLE_NVSHMEM)
-                                                                           void* dcomms,
-                                                                           unsigned signals_base) {
+                                                                           ,ncclDevComm* dcomms,
+                                                                           unsigned signals_base
 #endif
+                                                                           ) {
     auto thread_id = static_cast<int>(threadIdx.x);
 
     // Barrier before cleaning (in case of unfinished chunked EP)
@@ -300,13 +298,11 @@ void clean_low_latency_buffer(int* clean_0,
     auto signals_base = backend->get_signals_base(INTERNODE_BUFFER_IDX); // reuse HT signals for this -- we will clear them in the notify phase
 
     EP_HOST_ASSERT(dcomms != nullptr);
-#elif defined(ENABLE_NVSHMEM)
-    void* dcomms = nullptr;
-    unsigned signals_base = 0;
 #endif
 
     SETUP_LAUNCH_CONFIG(1, kNumThreads, stream);
 
+#ifdef ENABLE_NCCL
     LAUNCH_KERNEL(&cfg,
                   clean_low_latency_buffer<kNumThreads>,
                   clean_0,
@@ -319,6 +315,18 @@ void clean_low_latency_buffer(int* clean_0,
                   sync_buffer_ptr,
                   dcomms,
                   signals_base);
+#elif defined(ENABLE_NVSHMEM)
+    LAUNCH_KERNEL(&cfg,
+                  clean_low_latency_buffer<kNumThreads>,
+                  clean_0,
+                  num_clean_int_0,
+                  clean_1,
+                  num_clean_int_1,
+                  rank,
+                  num_ranks,
+                  mask_buffer_ptr,
+                  sync_buffer_ptr);
+#endif
 }
 
 template <bool kUseFP8, bool kUseUE8M0, int kHidden>
@@ -351,22 +359,16 @@ __global__ __launch_bounds__(1024, 1) void dispatch(void* packed_recv_x,
                                                     int num_warp_groups,
                                                     int num_warps_per_group,
                                                     bool round_scale,
-                                                    int phases,
+                                                    int phases
 #ifdef ENABLE_NCCL
-                                                    int num_gin_comms,
+                                                    ,int num_gin_comms,
                                                     void* gin_base_ptr,
                                                     ncclDevComm* dcomms,
                                                     const ncclWindow_t* nccl_windows,
                                                     unsigned signals_base,
-                                                    unsigned signals_base_next) {
-#elif defined(ENABLE_NVSHMEM)
-                                                    int num_gin_comms,
-                                                    void* gin_base_ptr,
-                                                    void* dcomms,
-                                                    void* nccl_windows,
-                                                    unsigned signals_base,
-                                                    unsigned signals_base_next) {
+                                                    unsigned signals_base_next
 #endif
+                                                    ) {
     const auto sm_id = static_cast<int>(blockIdx.x);
     const auto thread_id = static_cast<int>(threadIdx.x);
     const auto warp_id = thread_id / 32, lane_id = get_lane_id();
@@ -544,10 +546,10 @@ __global__ __launch_bounds__(1024, 1) void dispatch(void* packed_recv_x,
 
             // Clear signals for next dispatch
             // Optimization: skip signal resets on single-node runs where P2P is guaranteed
+#ifdef ENABLE_NCCL
             const int signals_per_buffer = num_experts;
             const int total_resets = signals_per_buffer * num_gin_comms;
 
-#ifdef ENABLE_NCCL
             #pragma unroll
             for (int idx = lane_id; idx < total_resets; idx += 32) {
                 const int signal_idx = idx / num_gin_comms;
@@ -867,15 +869,9 @@ void dispatch(void* packed_recv_x,
     EP_HOST_ASSERT(dcomms != nullptr);
     EP_HOST_ASSERT(num_gin_comms >= 1);
     EP_HOST_ASSERT(nccl_windows != nullptr);
-#elif defined(ENABLE_NVSHMEM)
-    void* gin_base_ptr = nullptr;
-    int num_gin_comms = 1;
-    void* dcomms = nullptr;
-    void* nccl_windows = nullptr;
-    unsigned signals_base = 0;
-    unsigned signals_base_next = 0;
 #endif
 
+#ifdef ENABLE_NCCL
 #define DISPATCH_LAUNCH_CASE(hidden)                         \
     {                                                        \
         auto dispatch_func = dispatch<false, false, hidden>; \
@@ -923,6 +919,49 @@ void dispatch(void* packed_recv_x,
                       signals_base_next);                    \
     }                                                        \
     break
+#elif defined(ENABLE_NVSHMEM)
+#define DISPATCH_LAUNCH_CASE(hidden)                         \
+    {                                                        \
+        auto dispatch_func = dispatch<false, false, hidden>; \
+        if (use_fp8 and not use_ue8m0)                       \
+            dispatch_func = dispatch<true, false, hidden>;   \
+        if (use_fp8 and use_ue8m0)                           \
+            dispatch_func = dispatch<true, true, hidden>;    \
+        LAUNCH_KERNEL(&cfg,                                  \
+                      dispatch_func,                         \
+                      packed_recv_x,                         \
+                      packed_recv_x_scales,                  \
+                      packed_recv_src_info,                  \
+                      packed_recv_layout_range,              \
+                      packed_recv_count,                     \
+                      mask_buffer_ptr,                       \
+                      cumulative_local_expert_recv_stats,    \
+                      dispatch_wait_recv_cost_stats,         \
+                      rdma_recv_x,                           \
+                      rdma_recv_count,                       \
+                      rdma_x,                                \
+                      rdma_recv_x_offset,                    \
+                      rdma_recv_count_offset,                \
+                      rdma_x_offset,                         \
+                      x,                                     \
+                      topk_idx,                              \
+                      atomic_counter_per_expert,             \
+                      atomic_finish_counter_per_expert,      \
+                      next_clean,                            \
+                      num_next_clean_int,                    \
+                      num_tokens,                            \
+                      num_max_dispatch_tokens_per_rank,      \
+                      num_topk,                              \
+                      num_experts,                           \
+                      rank,                                  \
+                      num_ranks,                             \
+                      num_warp_groups,                       \
+                      num_warps_per_group,                   \
+                      round_scale,                           \
+                      phases);                               \
+    }                                                        \
+    break
+#endif
 
     SETUP_LAUNCH_CONFIG(num_sms, num_warps * 32, stream);
     SWITCH_HIDDEN(DISPATCH_LAUNCH_CASE);
@@ -1116,20 +1155,15 @@ __global__ __launch_bounds__(1024, 1) void combine(void* combined_x,
                                                    int num_warp_groups,
                                                    int num_warps_per_group,
                                                    int phases,
-                                                   bool zero_copy,
+                                                   bool zero_copy
 #ifdef ENABLE_NCCL
-                                                   int num_gin_comms,
+                                                   ,int num_gin_comms,
                                                    ncclDevComm* dcomms,
                                                    const ncclWindow_t* nccl_windows,
                                                    unsigned signals_base,
-                                                   unsigned signals_base_next) {
-#elif defined(ENABLE_NVSHMEM)
-                                                   int num_gin_comms,
-                                                   void* dcomms,
-                                                   void* nccl_windows,
-                                                   unsigned signals_base,
-                                                   unsigned signals_base_next) {
+                                                   unsigned signals_base_next
 #endif
+                                                   ) {
     const auto sm_id = __shfl_sync(0xffffffff, static_cast<int>(blockIdx.x), 0);
     const auto num_sms = __shfl_sync(0xffffffff, static_cast<int>(gridDim.x), 0);
     const auto thread_id = static_cast<int>(threadIdx.x);
@@ -1748,14 +1782,9 @@ void combine(void* combined_x,
 
     EP_HOST_ASSERT(dcomms != nullptr);
     EP_HOST_ASSERT(nccl_windows != nullptr);
-#elif defined(ENABLE_NVSHMEM)
-    void* dcomms = nullptr;
-    void* nccl_windows = nullptr;
-    unsigned signals_base = 0;
-    unsigned signals_base_next = 0;
-    int num_gin_comms = 1;
 #endif
 
+#ifdef ENABLE_NCCL
 #define COMBINE_LAUNCH_CASE(hidden)                                                                                                \
     {                                                                                                                              \
         auto combine_func =                                                                                                        \
@@ -1798,6 +1827,45 @@ void combine(void* combined_x,
                       signals_base_next);                                                                                          \
     }                                                                                                                              \
     break
+#elif defined(ENABLE_NVSHMEM)
+#define COMBINE_LAUNCH_CASE(hidden)                                                                                                \
+    {                                                                                                                              \
+        auto combine_func =                                                                                                        \
+            use_logfmt ? combine<true, hidden, kNumMaxTopk, kNumMaxUnrolls> : combine<false, hidden, kNumMaxTopk, kNumMaxUnrolls>; \
+        SET_SHARED_MEMORY_FOR_TMA(combine_func);                                                                                   \
+        LAUNCH_KERNEL(&cfg,                                                                                                        \
+                      combine_func,                                                                                                \
+                      combined_x,                                                                                                  \
+                      rdma_recv_x,                                                                                                 \
+                      rdma_recv_flag,                                                                                              \
+                      rdma_send_x,                                                                                                 \
+                      rdma_recv_x_offset,                                                                                          \
+                      rdma_recv_flag_offset,                                                                                       \
+                      rdma_send_x_offset,                                                                                          \
+                      x,                                                                                                           \
+                      topk_idx,                                                                                                    \
+                      topk_weights,                                                                                                \
+                      src_info,                                                                                                    \
+                      layout_range,                                                                                                \
+                      mask_buffer_ptr,                                                                                             \
+                      combine_wait_recv_cost_stats,                                                                                \
+                      next_clean,                                                                                                  \
+                      num_next_clean_int,                                                                                          \
+                      atomic_clean_flag,                                                                                           \
+                      num_combined_tokens,                                                                                         \
+                      hidden,                                                                                                      \
+                      num_topk,                                                                                                    \
+                      num_max_dispatch_tokens_per_rank,                                                                            \
+                      num_experts,                                                                                                 \
+                      rank,                                                                                                        \
+                      num_ranks,                                                                                                   \
+                      num_warp_groups,                                                                                             \
+                      num_warps_per_group,                                                                                         \
+                      phases,                                                                                                      \
+                      zero_copy);                                                                                                  \
+    }                                                                                                                              \
+    break
+#endif
 
     SETUP_LAUNCH_CONFIG(num_sms, num_warps * 32, stream);
     SWITCH_HIDDEN(COMBINE_LAUNCH_CASE);
