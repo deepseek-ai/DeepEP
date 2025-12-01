@@ -18,7 +18,12 @@ namespace internode {
 
 std::vector<uint8_t> get_unique_id(int qps_per_rank, int num_ranks);
 
-int init(const std::vector<uint8_t>& root_unique_id_val, int rank, int num_ranks, bool low_latency_mode, int qps_per_rank);
+int init(const std::vector<uint8_t>& root_unique_id_val,
+         int rank,
+         int num_ranks,
+         int num_rdma_ranks,
+         bool low_latency_mode,
+         int qps_per_rank);
 
 void* alloc(size_t size, size_t alignment);
 

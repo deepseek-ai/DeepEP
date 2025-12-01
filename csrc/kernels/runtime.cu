@@ -11,12 +11,12 @@
 
 #include "nccl_gin_backend.h"
 
-// Forward declaration for internal initialization function
 namespace deep_ep {
 namespace internode_ll {
 void set_p2p_disabled_flag(bool disabled);
-}
+}  // namespace internode_ll
 }  // namespace deep_ep
+
 #endif
 
 #ifndef DISABLE_NVSHMEM_AND_NCCL
@@ -89,11 +89,15 @@ std::vector<uint8_t> get_unique_id(int qps_per_rank, int num_ranks) {
 #endif
 }
 
-int init(const std::vector<uint8_t>& root_unique_id_val, int rank, int num_ranks, bool low_latency_mode, int qps_per_rank) {
-    // printf("runtime::init() called\n"); fflush(stdout);
-#ifdef ENABLE_NCCL
-    // printf("NCCL: init()\n"); fflush(stdout);
+int init(const std::vector<uint8_t>& root_unique_id_val, int init_rank, int init_num_ranks, int init_num_rdma_ranks, bool low_latency_mode, int qps_per_rank) {
+    // For NCCL: always use rank and num_ranks (the backend handles comm splitting)
+    // For NVSHMEM: use rdma_rank and num_rdma_ranks in HT mode, rank and num_ranks in LL mode
+    int rank, num_ranks;
 
+#ifdef ENABLE_NCCL
+
+    rank = init_rank;
+    num_ranks = init_num_ranks;
     // For NCCL: Verify we received the correct number of unique IDs
     // We always receive NUM_MAX_NVL_PEERS * qps_per_rank IDs (generated for HT mode worst case)
     // LL mode uses only the first qps_per_rank IDs, HT mode uses all of them
@@ -114,8 +118,15 @@ int init(const std::vector<uint8_t>& root_unique_id_val, int rank, int num_ranks
 
     backend->barrier();
     return backend->get_rank();
+
 #elif defined(ENABLE_NVSHMEM)
-    // printf("NVSHMEM: init()\n"); fflush(stdout);
+
+    rank = low_latency_mode ? init_rank : init_rdma_rank;
+    num_ranks = low_latency_mode ? init_num_ranks : init_num_rdma_ranks;
+
+    if (rank == 0)
+        printf("[NVSHMEM Backend] Rank %d connecting to %d ranks\n", rank, num_ranks);
+
     nvshmemx_uniqueid_t root_unique_id;
     nvshmemx_init_attr_t attr;
     std::memcpy(&root_unique_id, root_unique_id_val.data(), sizeof(nvshmemx_uniqueid_t));
@@ -144,7 +155,6 @@ int init(const std::vector<uint8_t>& root_unique_id_val, int rank, int num_ranks
 
 void* alloc(size_t size, size_t alignment) {
 #ifdef ENABLE_NCCL
-    // printf("NCCL: alloc()\n");
     internode::CommunicationBackend* backend = internode::get_backend();
     if (backend == nullptr) {
         throw std::runtime_error("Backend not initialized");
@@ -157,7 +167,6 @@ void* alloc(size_t size, size_t alignment) {
 
 void free(void* ptr) {
 #ifdef ENABLE_NCCL
-    // printf("NCCL: free()\n");
     internode::CommunicationBackend* backend = internode::get_backend();
     if (backend == nullptr) {
         throw std::runtime_error("Backend not initialized");
@@ -170,7 +179,6 @@ void free(void* ptr) {
 
 void barrier() {
 #ifdef ENABLE_NCCL
-    // printf("NCCL: barrier()\n");
     internode::CommunicationBackend* backend = internode::get_backend();
     backend->barrier();
 #elif defined(ENABLE_NVSHMEM)
@@ -180,7 +188,6 @@ void barrier() {
 
 void finalize() {
 #ifdef ENABLE_NCCL
-    // printf("NCCL: finalize()\n");
     internode::CommunicationBackend* backend = internode::get_backend();
     if (backend) {
         backend->finalize();
@@ -196,5 +203,4 @@ void finalize() {
 }
 
 }  // namespace internode
-
 }  // namespace deep_ep
