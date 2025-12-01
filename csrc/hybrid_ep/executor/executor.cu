@@ -95,7 +95,12 @@ std::tuple<torch::Tensor, torch::Tensor> Executor::dispatch_preprocess(HybridEpC
             if (!args.non_blocking) {
                 cudaStreamSynchronize(args.stream);
                 if (args.num_permuted_tokens < 0) {
-                    args.num_permuted_tokens = tokens_per_expert.sum().item<int64_t>();
+                    const int32_t* tokens_per_expert_ptr = tokens_per_expert.data_ptr<int32_t>();
+                    int64_t num_permuted_tokens = 0;
+                    for (int i = 0; i < config.num_of_experts_per_rank; ++i) {
+                        num_permuted_tokens += static_cast<int64_t>(tokens_per_expert_ptr[i]);
+                    }
+                    args.num_permuted_tokens = num_permuted_tokens;
                 }
             }
         }

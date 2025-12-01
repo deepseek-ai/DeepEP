@@ -269,7 +269,7 @@
  
 
  template <const int block_size = 512, typename DType, typename ProbType, typename ScalarType>
- __launch_bounds__(block_size, 1) __global__ void permute_kernel(DType* tokens,
+ __global__ void permute_kernel(DType* tokens,
                                 DType* permuted_tokens,
                                 ScalarType* scaling_factor,
                                 ScalarType* permuted_scaling_factor,
@@ -418,7 +418,7 @@
  }
  
  template <const int block_size = 512, typename DType, typename ProbType>
- __launch_bounds__(block_size, 1) __global__ void unpermute_kernel(DType* permuted_tokens,
+ __global__ void unpermute_kernel(DType* permuted_tokens,
                                   DType* tokens,
                                   ProbType* permuted_probs,
                                   ProbType* probs,
