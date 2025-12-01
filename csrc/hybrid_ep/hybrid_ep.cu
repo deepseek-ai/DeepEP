@@ -19,6 +19,8 @@ HybridEPBuffer::HybridEPBuffer(
 #ifdef HYBRID_EP_BUILD_MULTINODE_ENABLE
       rdma_coordinator.init(process_group, node_rank, local_rank, buffer_config);
 #else
+      fprintf(stderr, "Inter-node communication is not supported. Please rebuild with HYBRID_EP_MULTINODE flag.\n");
+      fflush(stderr);
       assert(false); // inter-node communication is not supported.
 #endif
     }
