@@ -133,7 +133,7 @@ class HybridEPBuffer:
             os.path.dirname(os.path.abspath(__file__)), 
             load_cached_kernels = False, 
             use_shared_buffer = True,
-            enable_fabric = use_mnnvl, # If use_mnnvl is True, the fabric memory handle will be used.
+            use_mnnvl = use_mnnvl, # If use_mnnvl is True, the fabric memory handle will be used.
         )
 
     def empty_jit_cache(self):

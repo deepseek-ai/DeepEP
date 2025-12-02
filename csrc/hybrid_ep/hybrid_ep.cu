@@ -11,13 +11,13 @@ HybridEPBuffer::HybridEPBuffer(
   std::string base_path,
   bool load_cached_kernels,
   bool use_shared_buffer,
-  bool enable_fabric
+  bool use_mnnvl
 ) : process_group(process_group), buffer_config(config), local_rank(local_rank), node_rank(node_rank), group_size(group_size), use_shared_buffer(use_shared_buffer),
     executor(local_rank, node_rank, base_path, load_cached_kernels) {
-    remote_allocator.init(enable_fabric);
+    remote_allocator.init(/*enable_fabric=*/use_mnnvl);
     if(group_size > buffer_config.num_of_ranks_per_node) {
 #ifdef HYBRID_EP_BUILD_MULTINODE_ENABLE
-      rdma_coordinator.init(process_group, node_rank, local_rank, buffer_config);
+      rdma_coordinator.init(process_group, node_rank, local_rank, use_mnnvl, buffer_config);
 #else
       fprintf(stderr, "Inter-node communication is not supported. Please rebuild with HYBRID_EP_MULTINODE flag.\n");
       fflush(stderr);

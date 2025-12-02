@@ -264,6 +264,7 @@ void RDMACoordinator::init(
       pybind11::object process_group,
       int node_rank,
       int local_rank, 
+      bool use_mnnvl,
       BufferConfig config
   ) {
   this->process_group = process_group;
@@ -273,12 +274,19 @@ void RDMACoordinator::init(
   assert(buffer_config.num_of_nodes > 1);
   
   std::vector<int> gpu_idx_vec;
-  for (int i = 0; i < buffer_config.num_of_ranks_per_node; ++i) {
+  // The node in config means the nvlink domain
+  // The local device index is the index of the device in the real device list within the physical node. 
+  int num_of_local_devices = buffer_config.num_of_ranks_per_node;
+  if (use_mnnvl) {
+    num_of_local_devices = std::min(num_of_local_devices, 4);
+  }
+  int local_device_idx = local_rank % num_of_local_devices;
+  for (int i = 0; i < num_of_local_devices; ++i) {
     gpu_idx_vec.push_back(i);
   }
   // Get name of ibv device.
   const char *net_name;
-  hybrid_ep::get_nic(gpu_idx_vec, local_rank, &net_name);
+  hybrid_ep::get_nic(gpu_idx_vec, local_device_idx, &net_name);
   // Find ib device and get ibv_context.
   struct ibv_device *ib_dev = ctx_find_dev(net_name);
 
@@ -293,7 +301,7 @@ void RDMACoordinator::init(
   // Alloc protect domain.
   ib_pd = ibv_alloc_pd(ib_context);
   gpu_handler = (struct doca_gpu *)calloc(1, sizeof(struct doca_gpu));
-  get_gpu_handler(gpu_handler, ib_context, local_rank);
+  get_gpu_handler(gpu_handler, ib_context, local_device_idx);
   mr_access_flag = IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_WRITE | IBV_ACCESS_REMOTE_READ |
                       IBV_ACCESS_REMOTE_ATOMIC | IBV_ACCESS_RELAXED_ORDERING;
   

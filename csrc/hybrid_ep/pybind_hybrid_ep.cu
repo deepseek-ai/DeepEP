@@ -125,7 +125,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
             py::arg("base_path"),
             py::arg("load_cached_kernels") = false,
             py::arg("use_shared_buffer") = true,
-            py::arg("enable_fabric") = false)
+            py::arg("use_mnnvl") = false)
         .def("update_buffer", &HybridEPBuffer::update_buffer, py::arg("config"))
         .def("metadata_preprocessing", &HybridEPBuffer::metadata_preprocessing,
              py::kw_only(), py::arg("config"), py::arg("routing_map"), py::arg("num_of_tokens_per_rank"))
