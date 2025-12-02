@@ -169,6 +169,8 @@ __forceinline__ __device__ void nccl_gin_barrier(int thread_id, int rank, ncclDe
     // Step 1: Update local signal counter and read back the value
     __shared__ uint64_t local_signal_value;
     if (thread_id == 0) {
+        uint64_t current_generation = net.readSignal(my_signal_idx);
+
         // Increment my own signal to indicate I've arrived at the barrier
         net.signal(
             world,
@@ -178,8 +180,10 @@ __forceinline__ __device__ void nccl_gin_barrier(int thread_id, int rank, ncclDe
             ncclGin_None(),
             cuda::thread_scope_system
         );
-        // Read current signal value for tracking
-        local_signal_value = net.readSignal(my_signal_idx);
+
+        // Calculate expected value for this barrier (current + 1)
+        // All ranks will wait for others to reach this generation
+        local_signal_value = current_generation + 1;
     }
     __syncthreads();
     
