@@ -1309,8 +1309,9 @@ inline __device__ void intra_node_red_warp_group_device_function(const int node_
 
   // Processing token using BF16x2 intruction, HIDDEN_DIM must be multiple of 2.
   static_assert(HIDDEN_DIM % 2 == 0, "HIDDEN_DIM must be multiple of 2.");
-  static_assert((HIDDEN_DIM / 2) % INTRA_NODE_RED_GROUP::size() == 0, "HIDDEN_DIM / 2 must be multiple of INTRA_NODE_RED_GROUP::size(), we may relax this if it is the problem.");
-  constexpr int NUM_OF_ELEMENT_PER_THREAD = (HIDDEN_DIM / 2) / INTRA_NODE_RED_GROUP::size();
+  constexpr int NUM_OF_BF16X2_ELEMENTS_PER_TOKEN = HIDDEN_DIM / 2;
+  //static_assert((HIDDEN_DIM / 2) % INTRA_NODE_RED_GROUP::size() == 0, "HIDDEN_DIM / 2 must be multiple of INTRA_NODE_RED_GROUP::size(), we may relax this if it is the problem.");
+  constexpr int NUM_OF_ELEMENT_PER_THREAD = ((NUM_OF_BF16X2_ELEMENTS_PER_TOKEN - 1) / INTRA_NODE_RED_GROUP::size()) + 1;
   // Processing prob using fp32.
   constexpr int NUM_OF_PROB_VEC_ELEMENT_PER_THREAD = ((NUM_OF_EXPERTS_PER_RANK * NUM_OF_RANKS_PER_NODE - 1) / INTRA_NODE_RED_GROUP::size()) + 1;
   //static_assert(INTRA_NODE_RED_GROUP::size() >= NUM_OF_EXPERTS_PER_RANK * NUM_OF_RANKS_PER_NODE, "The size of intra-node reduction warp group must not be smaller than prob size.");
@@ -1444,10 +1445,12 @@ inline __device__ void intra_node_red_warp_group_device_function(const int node_
             #pragma unroll
             for(int n = 0; n < NUM_OF_ELEMENT_PER_THREAD; n++){
               int element_id = (n * INTRA_NODE_RED_GROUP::size()) + INTRA_NODE_RED_GROUP::thread_rank();
-              __nv_bfloat162 src_data = load_token_base_ptr[element_id];
-              float2 src_data_fp32 = __bfloat1622float2(src_data);
-              acc_token_fp32[n].x += src_data_fp32.x;
-              acc_token_fp32[n].y += src_data_fp32.y;      
+              if(element_id < NUM_OF_BF16X2_ELEMENTS_PER_TOKEN){
+                __nv_bfloat162 src_data = load_token_base_ptr[element_id];
+                float2 src_data_fp32 = __bfloat1622float2(src_data);
+                acc_token_fp32[n].x += src_data_fp32.x;
+                acc_token_fp32[n].y += src_data_fp32.y;
+              }     
             }
 
             if constexpr(BACKWARD_COMBINE){
@@ -1502,8 +1505,10 @@ inline __device__ void intra_node_red_warp_group_device_function(const int node_
           #pragma unroll
           for(int n = 0; n < NUM_OF_ELEMENT_PER_THREAD; n++){
             int element_id = (n * INTRA_NODE_RED_GROUP::size()) + INTRA_NODE_RED_GROUP::thread_rank();
-            // Convert accumulated token back to BF16 and store the result back to shared memory token entry.
-            store_token_base_ptr[element_id] = __float22bfloat162_rn(acc_token_fp32[n]);
+            if(element_id < NUM_OF_BF16X2_ELEMENTS_PER_TOKEN){
+              // Convert accumulated token back to BF16 and store the result back to shared memory token entry.
+              store_token_base_ptr[element_id] = __float22bfloat162_rn(acc_token_fp32[n]);
+            }
           }
 
           // Store the prob(optional).
@@ -2081,8 +2086,9 @@ inline __device__ void inter_node_red_warp_group_device_function(const int node_
 
   // Processing token using BF16x2 intruction, HIDDEN_DIM must be multiple of 2.
   static_assert(HIDDEN_DIM % 2 == 0, "HIDDEN_DIM must be multiple of 2.");
-  static_assert((HIDDEN_DIM / 2) % NUM_OF_THREADS_PER_PIPELINE == 0, "HIDDEN_DIM / 2 must be multiple of NUM_OF_THREADS_PER_PIPELINE, we may relax this if it is the problem.");
-  constexpr int NUM_OF_ELEMENT_PER_THREAD = (HIDDEN_DIM / 2) / NUM_OF_THREADS_PER_PIPELINE;
+  constexpr int NUM_OF_BF16X2_ELEMENTS_PER_TOKEN = HIDDEN_DIM / 2;
+  //static_assert((HIDDEN_DIM / 2) % NUM_OF_THREADS_PER_PIPELINE == 0, "HIDDEN_DIM / 2 must be multiple of NUM_OF_THREADS_PER_PIPELINE, we may relax this if it is the problem.");
+  constexpr int NUM_OF_ELEMENT_PER_THREAD = ((NUM_OF_BF16X2_ELEMENTS_PER_TOKEN - 1) / NUM_OF_THREADS_PER_PIPELINE) + 1;
   // Processing prob using fp32.
   constexpr int NUM_OF_PROB_VEC_ELEMENT_PER_THREAD = ((NUM_OF_EXPERTS_PER_RANK * NUM_OF_RANKS_PER_NODE - 1) / NUM_OF_THREADS_PER_PIPELINE) + 1;
   //static_assert(INTER_NODE_RED_GROUP::size() >= NUM_OF_EXPERTS_PER_RANK * NUM_OF_RANKS_PER_NODE, "The size of inter-node reduction warp group must not be smaller than prob size.");
@@ -2199,10 +2205,12 @@ inline __device__ void inter_node_red_warp_group_device_function(const int node_
             #pragma unroll
             for(int n = 0; n < NUM_OF_ELEMENT_PER_THREAD; n++){
               int element_id = (n * NUM_OF_THREADS_PER_PIPELINE) + thread_rank_within_pipeline;
-              __nv_bfloat162 src_data = load_token_base_ptr[element_id];
-              float2 src_data_fp32 = __bfloat1622float2(src_data);
-              acc_token_fp32[n].x += src_data_fp32.x;
-              acc_token_fp32[n].y += src_data_fp32.y;      
+              if(element_id < NUM_OF_BF16X2_ELEMENTS_PER_TOKEN){
+                __nv_bfloat162 src_data = load_token_base_ptr[element_id];
+                float2 src_data_fp32 = __bfloat1622float2(src_data);
+                acc_token_fp32[n].x += src_data_fp32.x;
+                acc_token_fp32[n].y += src_data_fp32.y;
+              }     
             }
 
             if constexpr(BACKWARD_COMBINE){
@@ -2267,10 +2275,12 @@ inline __device__ void inter_node_red_warp_group_device_function(const int node_
             #pragma unroll
             for(int m = 0; m < NUM_OF_ELEMENT_PER_THREAD; m++){
               int element_id = (m * NUM_OF_THREADS_PER_PIPELINE) + thread_rank_within_pipeline;
-              __nv_bfloat162 src_data = load_token_base_ptr[element_id];
-              float2 src_data_fp32 = __bfloat1622float2(src_data);
-              acc_token_fp32[m].x += src_data_fp32.x;
-              acc_token_fp32[m].y += src_data_fp32.y;      
+              if(element_id < NUM_OF_BF16X2_ELEMENTS_PER_TOKEN){
+                __nv_bfloat162 src_data = load_token_base_ptr[element_id];
+                float2 src_data_fp32 = __bfloat1622float2(src_data);
+                acc_token_fp32[m].x += src_data_fp32.x;
+                acc_token_fp32[m].y += src_data_fp32.y;
+              }  
             }
 
             if constexpr(BACKWARD_COMBINE){
@@ -2325,8 +2335,10 @@ inline __device__ void inter_node_red_warp_group_device_function(const int node_
         #pragma unroll
         for(int n = 0; n < NUM_OF_ELEMENT_PER_THREAD; n++){
           int element_id = (n * NUM_OF_THREADS_PER_PIPELINE) + thread_rank_within_pipeline;
-          // Convert accumulated token back to BF16 and store the result back to shared memory token entry.
-          store_token_base_ptr[element_id] = __float22bfloat162_rn(acc_token_fp32[n]);
+          if(element_id < NUM_OF_BF16X2_ELEMENTS_PER_TOKEN){
+            // Convert accumulated token back to BF16 and store the result back to shared memory token entry.
+            store_token_base_ptr[element_id] = __float22bfloat162_rn(acc_token_fp32[n]);
+          }
         }
 
         // Store the prob(optional).
@@ -2473,7 +2485,13 @@ __global__ void dispatch_kernel(const __grid_constant__ dispatch_kernel_param_t<
   // Currently, we use TMA to copy prob data, which need at least 16B size and alignment(which requires expert per node to be multiple of 4).
   // We need to add padding or not using TMA for prob, if we want to support other scenario.
   static_assert((NUM_OF_EXPERTS_PER_RANK * NUM_OF_RANKS_PER_NODE * sizeof(float)) % 16 == 0, "Currently, expert per node must be multiple of 4(So the prob for each token is multiple of 16B) to make TMA work.");
-
+  static_assert((HIDDEN_DIM * sizeof(TOKEN_DATA_TYPE)) % 16 == 0, "Currently, the size of token must be multiple of 16B to make TMA work.");
+  if constexpr(std::is_same<TOKEN_DATA_TYPE, uint8_t>::value){
+    // If FP8 token is used, HIDDEN_DIM must be multiple of 128 for scaling factor usage.
+    static_assert(HIDDEN_DIM % 128 == 0, "HIDDEN_DIM must be multiple of 128 for scaling factor");
+    // If FP8 token is used, HIDDEN_DIM must be multiple of 512 to make scaling factor multiple of 16B to make TMA work.
+    static_assert(((HIDDEN_DIM / 128) * sizeof(float)) % 16 == 0, "Currently, scaling factor per token must be multiple of 16B.");
+  }
 
   // Shared memory used over 48KB, should use dynamic shared memory.
   extern __shared__ uint8_t smem_bytes[];
@@ -2579,6 +2597,7 @@ __global__ void combine_kernel(const __grid_constant__ combine_kernel_param_t pa
   // Currently, we use TMA to copy prob data, which need at least 16B size and alignment(which requires expert per node to be multiple of 4).
   // We need to add padding or not using TMA for prob, if we want to support other scenario.
   static_assert((NUM_OF_EXPERTS_PER_RANK * NUM_OF_RANKS_PER_NODE * sizeof(float)) % 16 == 0, "Currently, expert per node must be multiple of 4(So the prob for each token is multiple of 16B) to make TMA work.");
+  static_assert((HIDDEN_DIM * sizeof(uint16_t)) % 16 == 0, "Currently, the size of token must be multiple of 16B to make TMA work.");
   static_assert(MAX_NUM_OF_TOKENS_PER_RANK % NUM_OF_TOKENS_PER_CHUNK == 0, "MAX_NUM_OF_TOKENS_PER_RANK must be multiple of NUM_OF_TOKENS_PER_CHUNK.");
   constexpr int MAX_NUM_OF_CHUNKS_PER_RANK = MAX_NUM_OF_TOKENS_PER_RANK / NUM_OF_TOKENS_PER_CHUNK;
 
@@ -2586,6 +2605,7 @@ __global__ void combine_kernel(const __grid_constant__ combine_kernel_param_t pa
   extern __shared__ uint8_t smem_bytes[];
   using cur_smem_t = combine_kernel_dynamic_shared_memory_buffer_t
   <NUM_OF_STAGES_G2S, NUM_OF_STAGES_S2G, HIDDEN_DIM, MAX_NUM_OF_TOKENS_PER_RANK, NUM_OF_TOKENS_PER_CHUNK, NUM_OF_EXPERTS_PER_RANK, NUM_OF_RANKS_PER_NODE, NUM_OF_NODES, BACKWARD_COMBINE>;
+  
   cur_smem_t* smem_buffer_ptr = reinterpret_cast<cur_smem_t*>(smem_bytes);
 
   // Let first thread of each CUDA block initialize the mbarrier.
