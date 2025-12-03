@@ -1,11 +1,11 @@
-#include <cooperative_groups.h>
-
-#include <cuda/atomic>
 #include <functional>
 #include <optional>
 
 #include "buffer.cuh"
 #include "configs.cuh"
+
+#include <cooperative_groups.h>
+#include <cuda/atomic>
 #include "exception.cuh"
 #include "launch.cuh"
 #include "utils.cuh"

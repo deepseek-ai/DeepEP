@@ -1,6 +1,6 @@
-#include <cooperative_groups.h>
-
 #include "configs.cuh"
+
+#include <cooperative_groups.h>
 #include "exception.cuh"
 #include "launch.cuh"
 #include "utils.cuh"
