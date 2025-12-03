@@ -21,6 +21,7 @@ PAD_MULTIPLE = int(os.environ.get("PAD_MULTIPLE", 32))
 NUM_OF_EXPERTS = NUM_LOCAL_EXPERTS * NUM_OF_RANKS_PER_NODE * NUM_OF_NODES
 ITERATIONS = int(os.environ.get("ITERATIONS", 100))
 SEED = int(os.environ.get("SEED", 42))
+USE_MNNVL = os.environ.get("USE_MNNVL", "0").strip().lower() in {"1", "true", "t", "yes", "y", "on"}
 torch.manual_seed(SEED)
 torch.cuda.manual_seed(SEED)
 torch.cuda.manual_seed_all(SEED)
@@ -253,7 +254,16 @@ def test_hybrid_ep_benchmark(buffer: deep_ep.HybridEPBuffer, group: dist.Process
         dispatch_bf16_rdma_send_bytes = num_rdma_send * HIDDEN_DIM * 2
         combine_bf16_rdma_recv_bytes = dispatch_bf16_rdma_send_bytes
 
-    dispatch_args = {'hidden': hidden, 'scaling_factor': scaling_factor, 'topk_idx': topk_idx, 'topk_weights': topk_weights, 'num_of_experts': NUM_OF_EXPERTS}
+    '''
+    Benchmark of the dispatch and combine torch API without permute
+    '''
+
+    dispatched_hidden, dispatched_probs, _, handle= (
+        buffer.dispatch(hidden=hidden, scaling_factor=scaling_factor, topk_idx=topk_idx, topk_weights=topk_weights, num_of_experts=NUM_OF_EXPERTS)
+    )
+    dispatched_hidden_bf16 = dispatched_hidden.to(torch.bfloat16)
+
+    dispatch_args = {'hidden': hidden, 'scaling_factor': scaling_factor, 'topk_idx': topk_idx, 'topk_weights': topk_weights, 'num_of_experts': NUM_OF_EXPERTS, 'handle': handle}
     t = bench(lambda: buffer.dispatch(**dispatch_args))[0]
     nvl_recv_bytes = (dispatch_bf16_nvl_recv_bytes * fp8_factor) if hidden.dtype == torch.uint8 else dispatch_bf16_nvl_recv_bytes
     if NUM_OF_NODES > 1:
@@ -264,10 +274,6 @@ def test_hybrid_ep_benchmark(buffer: deep_ep.HybridEPBuffer, group: dist.Process
         print_in_order(f'[rank {rank}] HybridEP dispatch torch API ({"FP8" if hidden.dtype == torch.uint8 else "BF16"}): '
                 f'{rdma_send_bytes / 1e9 / t:.2f} GB/s (IB), t: {t * 1e6:.2f} us, rdma_send_bytes: {rdma_send_bytes / 1e6:.2f} MB')
 
-    dispatched_hidden, dispatched_probs, _, handle= (
-        buffer.dispatch(hidden=hidden, scaling_factor=scaling_factor, topk_idx=topk_idx, topk_weights=topk_weights, num_of_experts=NUM_OF_EXPERTS)
-    )
-    dispatched_hidden_bf16 = dispatched_hidden.to(torch.bfloat16)
     combine_args = {'hidden': dispatched_hidden_bf16, 'probs': dispatched_probs, 'handle': handle}
     t = bench(lambda: buffer.combine(**combine_args))[0]
     print_in_order(f'[rank {rank}] HybridEP combine torch API: '
@@ -279,7 +285,13 @@ def test_hybrid_ep_benchmark(buffer: deep_ep.HybridEPBuffer, group: dist.Process
     '''
     Benchmark of the dispatch and combine with permute extension
     '''
-    dispatch_with_permute_args = {'hidden': hidden, 'scaling_factor': scaling_factor, 'routing_map': routing_map, 'probs': probs, 'pad_multiple': PAD_MULTIPLE}
+    dispatched_hidden_with_permute, dispatched_probs_with_permute, _, tokens_per_expert, handle_with_permute= (
+        buffer.dispatch_with_permute(hidden=hidden, scaling_factor=scaling_factor, routing_map=routing_map, probs=probs, pad_multiple=PAD_MULTIPLE)
+    )
+    num_permuted_tokens = tokens_per_expert.sum().item()
+    dispatched_hidden_bf16_with_permute = dispatched_hidden_with_permute.to(torch.bfloat16)
+
+    dispatch_with_permute_args = {'hidden': hidden, 'scaling_factor': scaling_factor, 'routing_map': routing_map, 'probs': probs, 'pad_multiple': PAD_MULTIPLE, 'handle': handle_with_permute, 'num_permuted_tokens': num_permuted_tokens}
     t = bench(lambda: buffer.dispatch_with_permute(**dispatch_with_permute_args))[0]
     nvl_recv_bytes = (dispatch_bf16_nvl_recv_bytes * fp8_factor) if hidden.dtype == torch.uint8 else dispatch_bf16_nvl_recv_bytes
     print_in_order(f'[rank {rank}] HybridEP dispatch+permute torch API ({"FP8" if hidden.dtype == torch.uint8 else "BF16"}): '
@@ -288,11 +300,7 @@ def test_hybrid_ep_benchmark(buffer: deep_ep.HybridEPBuffer, group: dist.Process
         print_in_order(f'[rank {rank}] HybridEP dispatch+permute torch API ({"FP8" if hidden.dtype == torch.uint8 else "BF16"}): '
                 f'{rdma_send_bytes / 1e9 / t:.2f} GB/s (IB), t: {t * 1e6:.2f} us, rdma_send_bytes: {rdma_send_bytes / 1e6:.2f} MB')
 
-    dispatched_hidden, dispatched_probs, _, _, handle= (
-        buffer.dispatch_with_permute(hidden=hidden, scaling_factor=scaling_factor, routing_map=routing_map, probs=probs, pad_multiple=PAD_MULTIPLE)
-    )
-    dispatched_hidden_bf16 = dispatched_hidden.to(torch.bfloat16)
-    combine_with_unpermute_args = {'hidden': dispatched_hidden_bf16, 'probs': dispatched_probs, 'handle': handle, 'pad_multiple': PAD_MULTIPLE}
+    combine_with_unpermute_args = {'hidden': dispatched_hidden_bf16_with_permute, 'probs': dispatched_probs_with_permute, 'handle': handle_with_permute, 'pad_multiple': PAD_MULTIPLE}
     t = bench(lambda: buffer.combine_with_unpermute(**combine_with_unpermute_args))[0]
     print_in_order(f'[rank {rank}] HybridEP combine+unpermute torch API: '
             f'{combine_bf16_nvl_send_bytes / 1e9 / t:.2f} GB/s (NVL), t: {t * 1e6:.2f} us, combine_send_bytes: {combine_bf16_nvl_send_bytes / 1e6:.2f} MB')
@@ -325,27 +333,38 @@ def test_hybrid_ep_benchmark(buffer: deep_ep.HybridEPBuffer, group: dist.Process
         with torch.cuda.nvtx.range(f"hybrid-ep dispatch ({"FP8" if hidden.dtype == torch.uint8 else "BF16"})"):
             if rank == 0:
                 print(f"profile hybrid-ep dispatch ({"FP8" if hidden.dtype == torch.uint8 else "BF16"})", flush=True)
-            dispatch_args = {'tensor': hidden, 'scaling_factor': scaling_factor, 'topk_idx': topk_idx, 'topk_weights': topk_weights, 'num_of_experts': NUM_OF_EXPERTS}
+            dispatch_args = {'hidden': hidden, 'scaling_factor': scaling_factor, 'topk_idx': topk_idx, 'topk_weights': topk_weights, 'num_of_experts': NUM_OF_EXPERTS}
             bench(lambda: buffer.dispatch(**dispatch_args))
         with torch.cuda.nvtx.range("hybrid-ep combine"):
             if rank == 0:
                 print(f"profile hybrid-ep combine", flush=True)
-            combine_args = {'tensor': dispatched_hidden_bf16, 'probs': dispatched_probs, 'handle': handle}
+            combine_args = {'hidden': dispatched_hidden_bf16, 'probs': dispatched_probs, 'handle': handle}
             bench(lambda: buffer.combine(**combine_args))
+        with torch.cuda.nvtx.range(f"hybrid-ep dispatch+permute ({"FP8" if hidden.dtype == torch.uint8 else "BF16"})"):
+            if rank == 0:
+                print(f"profile hybrid-ep dispatch+permute ({"FP8" if hidden.dtype == torch.uint8 else "BF16"})", flush=True)
+            dispatch_with_permute_args = {'hidden': hidden, 'scaling_factor': scaling_factor, 'routing_map': routing_map, 'probs': probs, 'pad_multiple': PAD_MULTIPLE}
+            bench(lambda: buffer.dispatch_with_permute(**dispatch_with_permute_args))
+        with torch.cuda.nvtx.range("hybrid-ep combine+unpermute"):
+            if rank == 0:
+                print(f"profile hybrid-ep combine+unpermute", flush=True)
+            combine_with_unpermute_args = {'hidden': dispatched_hidden_bf16_with_permute, 'probs': dispatched_probs_with_permute, 'handle': handle_with_permute, 'pad_multiple': PAD_MULTIPLE}
+            bench(lambda: buffer.combine_with_unpermute(**combine_with_unpermute_args))
         time.sleep(1)
         torch.cuda.profiler.stop()
 
 
 def test_main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
     _, _, group = init_dist(local_rank, num_local_ranks)
-    for use_fp8 in [True, False]:
+    for use_fp8 in [False, True]:
         buffer = deep_ep.HybridEPBuffer(
             group=group,
             hidden_dim=HIDDEN_DIM,
             max_num_of_tokens_per_rank=MAX_NUM_OF_TOKENS_PER_RANK,
             num_local_experts=NUM_LOCAL_EXPERTS,
-            use_fp8=use_fp8,
-            ib_dev_name_list=args.ib_dev_name_list,
+            num_of_hybrid_ep_ranks_per_nvlink_domain=NUM_OF_RANKS_PER_NODE,
+            use_mnnvl=USE_MNNVL,
+            use_fp8=use_fp8
         )
         
         ref = TorchRef(
@@ -365,7 +384,5 @@ if __name__ == "__main__":
                        help='Number of processes to spawn (default: 4)')
     parser.add_argument('--nsys-profile', action='store_true', default=False,
                        help='benchmark with nsys profile or not (default: False)')
-    parser.add_argument('--ib-dev-name-list', nargs='+', type=str, default=[],
-                       help='IB device name list (default: [])')
     args = parser.parse_args()
     torch.multiprocessing.spawn(test_main, args=(args.num_processes, args), nprocs=args.num_processes)

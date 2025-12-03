@@ -30,8 +30,9 @@ Executor::metadata_preprocess_core(
   auto attn_to_rdma_map =
       torch::empty({num_of_tokens_per_rank, config.num_of_nodes - 1},
                    torch::dtype(torch::kBool).device(torch::kCUDA));
+  // Put on the pinned memory
   auto num_of_tokens_for_experts =
-      torch::empty({1}, torch::dtype(torch::kInt32).device(torch::kCUDA));
+      torch::empty({1}, torch::dtype(torch::kInt32).pinned_memory(true));
   auto local_expert_routing_map = torch::empty(
       {num_of_tokens_per_rank * config.num_of_ranks_per_node * config.num_of_nodes, config.num_of_experts_per_rank},
       torch::dtype(torch::kBool).device(torch::kCUDA));
@@ -48,7 +49,7 @@ Executor::metadata_preprocess_core(
   return std::make_tuple(sparse_to_dense_map, rdma_to_attn_map, attn_to_rdma_map, num_of_tokens_for_experts, local_expert_routing_map);
 }
 
-void Executor::dispatch_preprocess(HybridEpConfigInstance config, DispatchBuffers& dispatch_buffers, DispatchArgs& args) {
+std::tuple<torch::Tensor, torch::Tensor> Executor::dispatch_preprocess(HybridEpConfigInstance config, DispatchBuffers& dispatch_buffers, DispatchArgs& args) {
     nvtxRangePushA("dispatch_preprocess in hybrid-ep");
     if(config.num_of_nodes > 1) {
 #ifdef HYBRID_EP_BUILD_MULTINODE_ENABLE
@@ -69,7 +70,44 @@ void Executor::dispatch_preprocess(HybridEpConfigInstance config, DispatchBuffer
         dispatch_buffers.attn_input_prob = (config.forward_dispatch_api) ? args.probs.data_ptr() : nullptr;
         dispatch_buffers.attn_input_scaling_factor = (config.token_data_type == APP_TOKEN_DATA_TYPE::UINT8) ? args.scaling_factor.data_ptr() : nullptr;
     }
+
+    torch::Tensor row_id_map;
+    torch::Tensor tokens_per_expert;
+
+    if(args.enable_permute) {
+        if(args.row_id_map.has_value()){
+            assert(args.num_permuted_tokens >= 0);
+            row_id_map = args.row_id_map.value();
+        } else {
+            assert(args.local_expert_routing_map.has_value());
+            std::tie(row_id_map, tokens_per_expert) = permute_processing(
+                args.local_expert_routing_map.value().data_ptr<bool>(), 
+                args.num_dispatched_tokens_tensor.value(),
+                args.max_num_dispatched_tokens, 
+                config.num_of_experts_per_rank, 
+                args.pad_multiple, 
+                config.num_of_blocks_preprocessing_api,
+                args.stream
+            );
+            args.row_id_map = row_id_map;
+
+            // If we want to put the tokens_per_expert/num_dispatched_tokens_tensor can be used in the host, we need to synchronize the stream.
+            if (!args.non_blocking) {
+                cudaStreamSynchronize(args.stream);
+                if (args.num_permuted_tokens < 0) {
+                    const int32_t* tokens_per_expert_ptr = tokens_per_expert.data_ptr<int32_t>();
+                    int64_t num_permuted_tokens = 0;
+                    for (int i = 0; i < config.num_of_experts_per_rank; ++i) {
+                        num_permuted_tokens += static_cast<int64_t>(tokens_per_expert_ptr[i]);
+                    }
+                    args.num_permuted_tokens = num_permuted_tokens;
+                }
+            }
+        }
+    }
     nvtxRangePop();  // End of dispatch_preprocess nvtx range
+
+    return std::make_tuple(row_id_map, tokens_per_expert);
 }
 
 template void Executor::dispatch_core<uint8_t>(HybridEpConfigInstance config, DispatchBuffers& dispatch_buffers, DispatchArgs& args);
@@ -114,8 +152,8 @@ void Executor::dispatch_core(HybridEpConfigInstance config, DispatchBuffers& dis
     param.expected_rdma_flag_value = dispatch_buffers.expected_rdma_flag_value;
     param.expected_intra_node_flag_value = dispatch_buffers.expected_intra_node_flag_value;
 #ifdef HYBRID_EP_BUILD_MULTINODE_ENABLE
-    param.d_qps_gpu = dispatch_buffers.d_qps_gpu;
-    param.mr_info = dispatch_buffers.mr_info;
+    param.d_qps_gpu = reinterpret_cast<void **>(dispatch_buffers.d_qps_gpu);
+    param.mr_info = reinterpret_cast<void*>(dispatch_buffers.mr_info);
 #endif
     
     // Launch kernel
@@ -123,7 +161,7 @@ void Executor::dispatch_core(HybridEpConfigInstance config, DispatchBuffers& dis
     nvtxRangePop();  // End of dispatch_core nvtx range
 }
 
-std::tuple<torch::Tensor, c10::optional<torch::Tensor>, c10::optional<torch::Tensor>, torch::Tensor, torch::Tensor>
+std::tuple<torch::Tensor, c10::optional<torch::Tensor>, c10::optional<torch::Tensor> >
 Executor::dispatch_postprocess(HybridEpConfigInstance config, DispatchBuffers& dispatch_buffers, DispatchArgs& args) {
     nvtxRangePushA("dispatch_postprocess in hybrid-ep");
 
@@ -132,91 +170,63 @@ Executor::dispatch_postprocess(HybridEpConfigInstance config, DispatchBuffers& d
     torch::Tensor dispatched_tokens;
     c10::optional<torch::Tensor> dispatched_probs;
     c10::optional<torch::Tensor> dispatched_scaling_factor;
-    // Possible ouput from the permute part
-    torch::Tensor row_id_map, tokens_per_expert;
-
-    if(args.num_dispatched_tokens == 0 ) {
-        // Fast return empty tensors if there are no tokens to dispatch
-        dispatched_tokens = torch::empty({0, config.hidden_dim}, torch::dtype(args.hidden.dtype()).device(torch::kCUDA));
-        if(config.forward_dispatch_api) {
-            dispatched_probs = torch::empty({0}, torch::dtype(torch::kFloat32).device(torch::kCUDA));
-        }
-        if(config.token_data_type == APP_TOKEN_DATA_TYPE::UINT8) {
-            dispatched_scaling_factor = torch::empty({0, config.hidden_dim / 128}, torch::dtype(torch::kFloat32).device(torch::kCUDA));
-        }
-        row_id_map = torch::empty({0, config.num_of_experts_per_rank}, torch::dtype(torch::kInt32).device(torch::kCUDA));
-        tokens_per_expert = torch::zeros({config.num_of_experts_per_rank}, torch::dtype(torch::kInt32).device(torch::kCUDA));
-        return std::make_tuple(dispatched_tokens, dispatched_probs, dispatched_scaling_factor, row_id_map, tokens_per_expert);
-    }
 
     if(args.enable_permute) {
         // Use permute kernel to avoid standalone D2D memory copy
         assert(args.num_dispatched_tokens_tensor.has_value());
-
-        int num_dispatched_tokens = args.num_dispatched_tokens;
-        int num_permuted_tokens = args.num_permuted_tokens;
-        torch::Tensor num_dispatched_tokens_tensor = args.num_dispatched_tokens_tensor.value();
-
-        if (args.row_id_map.has_value()) {
-          // The row_id_map is valid, which means that the cached model is used.
-          // Then we will use the values in args directly.
-          assert(args.num_permuted_tokens >= 0);
-          row_id_map = args.row_id_map.value();
-        } else {
-          // Otherwise, we will compute the row_id_map/tokens_per_expert by preprocessing kernel.
-          assert(args.local_expert_routing_map.has_value());
+        assert(args.row_id_map.has_value());
+        assert(args.num_permuted_tokens >= 0);
     
-          std::tie(row_id_map, tokens_per_expert) = permute_processing(
-              args.local_expert_routing_map.value().data_ptr<bool>(), num_dispatched_tokens_tensor,
-              num_dispatched_tokens, config.num_of_experts_per_rank, args.pad_multiple, args.stream);
-    
-          // If use pre-allocated sync-free mode, we use the value in args directly.
-          // otherwise, we will compute the num_permuted_tokens by summing the tokens_per_expert.
-          if (num_permuted_tokens < 0) {
-            if (args.use_host_meta) {
-                auto host_opts = tokens_per_expert.options().device(torch::kCPU).pinned_memory(true);
-                torch::Tensor tokens_per_expert_pinned = torch::empty(tokens_per_expert.sizes(), host_opts);
-                tokens_per_expert_pinned.copy_(tokens_per_expert, /*non_blocking=*/false);
-                tokens_per_expert = tokens_per_expert_pinned;
-            }
-            num_permuted_tokens = tokens_per_expert.sum().item<int64_t>();
-          }
+        // Prepare the arguments for the permute kernel
+        PermuteArgs permute_args;
+        permute_args.tokens_ptr = reinterpret_cast<void*>(dispatch_buffers.expert_output_token);
+        permute_args.probs_ptr = reinterpret_cast<float*>(dispatch_buffers.expert_output_prob);
+        permute_args.scaling_factor_ptr = reinterpret_cast<float*>(dispatch_buffers.expert_output_scaling_factor);
+        permute_args.row_id_map = args.row_id_map.value();
+        permute_args.hidden_size = config.hidden_dim;
+        permute_args.scales_per_token = config.hidden_dim / 128;
+        permute_args.num_dispatched_token_tensor = args.num_dispatched_tokens_tensor.value();
+        permute_args.num_permuted_token = args.num_permuted_tokens;
+        permute_args.num_ranks_per_node = config.num_of_ranks_per_node;
+        permute_args.num_of_local_experts = config.num_of_experts_per_rank;
+        permute_args.pad_multiple = args.pad_multiple;
+        permute_args.local_rank = local_rank;
+        permute_args.use_fp8 = config.token_data_type == APP_TOKEN_DATA_TYPE::UINT8;
+        permute_args.with_probs = config.forward_dispatch_api;
+        permute_args.token_options = args.hidden.options();
+        permute_args.stream = args.stream;
+        permute_args.num_of_blocks_permute_api = config.num_of_blocks_permute_api;
+        
+        if(config.token_data_type == APP_TOKEN_DATA_TYPE::UINT16) {
+            std::tie(dispatched_tokens, dispatched_scaling_factor, dispatched_probs) = 
+                permute_launcher<uint16_t, float, float>(permute_args);
+        } else if (config.token_data_type == APP_TOKEN_DATA_TYPE::UINT8) {
+            std::tie(dispatched_tokens, dispatched_scaling_factor, dispatched_probs) = 
+                permute_launcher<uint8_t, float, float>(permute_args);
+        }else {
+            throw std::runtime_error("Unsupported token data type: " + type_to_string(config.token_data_type));
         }
-    
-        if (config.token_data_type == APP_TOKEN_DATA_TYPE::UINT16) {
-          std::tie(dispatched_tokens, dispatched_scaling_factor, dispatched_probs) = permute_launcher(
-              reinterpret_cast<uint16_t*>(dispatch_buffers.expert_output_token),
-              reinterpret_cast<float*>(dispatch_buffers.expert_output_prob),
-              reinterpret_cast<float*>(dispatch_buffers.expert_output_scaling_factor), row_id_map,
-              config.hidden_dim, config.hidden_dim / 128, local_rank, config.num_of_ranks_per_node,
-              config.num_of_experts_per_rank, num_dispatched_tokens_tensor, num_dispatched_tokens,
-              num_permuted_tokens, args.pad_multiple,
-              false,  // use_fp8
-              config.forward_dispatch_api, args.hidden.options(), args.stream);
-    
-        } else {
-          std::tie(dispatched_tokens, dispatched_scaling_factor, dispatched_probs) = permute_launcher(
-              reinterpret_cast<uint8_t*>(dispatch_buffers.expert_output_token),
-              reinterpret_cast<float*>(dispatch_buffers.expert_output_prob),
-              reinterpret_cast<float*>(dispatch_buffers.expert_output_scaling_factor), row_id_map,
-              config.hidden_dim, config.hidden_dim / 128, local_rank, config.num_of_ranks_per_node,
-              config.num_of_experts_per_rank, num_dispatched_tokens_tensor, num_dispatched_tokens,
-              num_permuted_tokens, args.pad_multiple,
-              true,  // use_fp8
-              config.forward_dispatch_api, args.hidden.options(), args.stream);
-        }    
     }else {
         // D2D copy the result to the pytorch tensor
+        int num_dispatched_tokens = 0;
+        if (args.num_dispatched_tokens >= 0) {
+          num_dispatched_tokens = args.num_dispatched_tokens;
+        } else {
+          num_dispatched_tokens = args.num_dispatched_tokens_tensor.value().item<int>();
+        }
         size_t sizeof_token_data_type = get_token_data_type_size(dispatch_buffers.data_type);
-        dispatched_tokens = torch::empty({args.num_dispatched_tokens, config.hidden_dim}, torch::dtype(args.hidden.dtype()).device(torch::kCUDA));
-        auto res_sz = args.num_dispatched_tokens * config.hidden_dim * sizeof_token_data_type;
+        dispatched_tokens = torch::empty(
+            {num_dispatched_tokens, config.hidden_dim}, 
+            torch::dtype(args.hidden.dtype()).device(torch::kCUDA)
+        );
+        auto res_sz = num_dispatched_tokens * config.hidden_dim * sizeof_token_data_type;
         CUDA_CHECK(cudaMemcpyAsync(dispatched_tokens.data_ptr(), dispatch_buffers.expert_output_token, res_sz, cudaMemcpyDeviceToDevice, args.stream));
 
         if(config.forward_dispatch_api) {
-            dispatched_probs = torch::empty({args.num_dispatched_tokens,
+            dispatched_probs = torch::empty({num_dispatched_tokens,
                 config.num_of_experts_per_rank * config.num_of_ranks_per_node},
                             torch::dtype(torch::kFloat32).device(torch::kCUDA));
-            auto probs_sz = args.num_dispatched_tokens * config.num_of_experts_per_rank * config.num_of_ranks_per_node * sizeof(float);
+            auto probs_sz = num_dispatched_tokens * config.num_of_experts_per_rank * config.num_of_ranks_per_node * sizeof(float);
             CUDA_CHECK(cudaMemcpyAsync(dispatched_probs.value().data_ptr<float>(),
                                         dispatch_buffers.expert_output_prob,
                                         probs_sz, cudaMemcpyDeviceToDevice, args.stream));
@@ -224,10 +234,10 @@ Executor::dispatch_postprocess(HybridEpConfigInstance config, DispatchBuffers& d
 
         if(config.token_data_type == APP_TOKEN_DATA_TYPE::UINT8) {
             dispatched_scaling_factor = torch::empty({
-                    args.num_dispatched_tokens, 
+                    num_dispatched_tokens, 
                     config.hidden_dim / 128}, 
                     torch::dtype(torch::kFloat32).device(torch::kCUDA));
-            auto scaling_factor_sz = args.num_dispatched_tokens * config.hidden_dim / 128 * sizeof(float);
+            auto scaling_factor_sz = num_dispatched_tokens * config.hidden_dim / 128 * sizeof(float);
             CUDA_CHECK(cudaMemcpyAsync(dispatched_scaling_factor.value().data_ptr<float>(),
                                         dispatch_buffers.expert_output_scaling_factor,
                                         scaling_factor_sz, cudaMemcpyDeviceToDevice, args.stream));
@@ -235,7 +245,7 @@ Executor::dispatch_postprocess(HybridEpConfigInstance config, DispatchBuffers& d
     }
 
     nvtxRangePop();  // End of dispatch_postprocess nvtx range
-    return std::make_tuple(dispatched_tokens, dispatched_probs, dispatched_scaling_factor, row_id_map, tokens_per_expert);
+    return std::make_tuple(dispatched_tokens, dispatched_probs, dispatched_scaling_factor);
 }
 
 void Executor::combine_preprocess(HybridEpConfigInstance config, CombineBuffers& combine_buffers, CombineArgs& args) {
@@ -252,15 +262,28 @@ void Executor::combine_preprocess(HybridEpConfigInstance config, CombineBuffers&
         // If args.num_dispatched_tokens >= 0, which means that the sync-free model is used.
         // Otherwise, we will use the values in args.num_dispatched_tokens_tensor.
         if (num_dispatched_tokens < 0) {
+          // Synchronize the stream to get the real num_dispatched_tokens from the pinned memory.
+          cudaStreamSynchronize(args.stream);
           num_dispatched_tokens = num_dispatched_tokens_tensor.item<int>();
         }
     
-        unpermute_launcher(
-            args.hidden, args.probs, reinterpret_cast<uint16_t*>(combine_buffers.expert_input_token),
-            reinterpret_cast<float*>(combine_buffers.expert_input_prob), args.row_id_map.value(),
-            config.num_of_experts_per_rank, num_dispatched_tokens_tensor, num_dispatched_tokens,
-            args.pad_multiple, config.hidden_dim, local_rank, config.num_of_ranks_per_node, 
-            config.backward_combine_api, args.stream);
+        UnpermuteArgs unpermute_args;
+        unpermute_args.permuted_tokens = args.hidden;
+        unpermute_args.permuted_probs = args.probs;
+        unpermute_args.tokens_ptr = reinterpret_cast<uint16_t*>(combine_buffers.expert_input_token);
+        unpermute_args.probs_ptr = reinterpret_cast<float*>(combine_buffers.expert_input_prob);
+        unpermute_args.row_id_map = args.row_id_map.value();
+        unpermute_args.num_of_local_experts = config.num_of_experts_per_rank;
+        unpermute_args.num_dispatched_tokens_tensor = num_dispatched_tokens_tensor;
+        unpermute_args.pad_multiple = args.pad_multiple;
+        unpermute_args.hidden_size = config.hidden_dim;
+        unpermute_args.local_rank = local_rank;
+        unpermute_args.num_ranks_per_node = config.num_of_ranks_per_node;
+        unpermute_args.with_probs = config.backward_combine_api;
+        unpermute_args.stream = args.stream;
+        unpermute_args.num_of_blocks_permute_api = config.num_of_blocks_permute_api;
+        
+        unpermute_launcher<uint16_t, float>(unpermute_args);
     
     }else{
         // Copy the input tensor to the input buffer
@@ -319,8 +342,8 @@ void Executor::combine_core(HybridEpConfigInstance config, CombineBuffers& combi
     param.expected_intra_node_flag_value =
         combine_buffers.expected_intra_node_flag_value;
 #ifdef HYBRID_EP_BUILD_MULTINODE_ENABLE
-    param.d_qps_gpu = combine_buffers.d_qps_gpu;
-    param.mr_info = combine_buffers.mr_info;
+    param.d_qps_gpu = reinterpret_cast<void **>(combine_buffers.d_qps_gpu);
+    param.mr_info = reinterpret_cast<void*>(combine_buffers.mr_info);
 #endif
 
     // Launch kernel
@@ -334,3 +357,4 @@ void Executor::combine_postprocess(HybridEpConfigInstance config, CombineBuffers
     // No postprocess is needed for the combine kernel now.
     nvtxRangePop();  // End of combine_postprocess nvtx range
 }
+

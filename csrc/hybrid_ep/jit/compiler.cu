@@ -11,19 +11,31 @@ inline std::string get_env(std::string name) {
     return std::string(env);
 }
 
+std::string get_jit_dir() {
+    std::string home_dir = get_env("HOME");
+    if (home_dir.empty()) {
+        home_dir = "/tmp";  // Fallback to /tmp if HOME is not set
+    }
+    return home_dir + "/.deepep/hybrid_ep/jit";
+}
+
 NVCCCompiler::NVCCCompiler(std::string base_path): base_path(base_path) {
+    jit_dir = get_jit_dir();
+
     nvcc_path = get_env("CUDA_HOME") + "/bin/nvcc";
 
     // Init the flags to compiler
     std::string sm_arch_flags = convert_to_nvcc_arch_flags(SM_ARCH);
-    flags = "-std=c++17 " + sm_arch_flags +
+    std::string flags = "-std=c++17 " + sm_arch_flags +
             " -O3 --expt-relaxed-constexpr "
             " -Xcompiler -fPIC -shared ";
     // Add the include path of the hybrid-ep library
-    include = " -I" + base_path + "/backend" 
+    std::string include = " -I" + base_path + "/backend" 
             + " -I" + get_env("CUDA_HOME") + "/include ";
     // Add the library path of the hybrid-ep library
-    library = "-L" + get_env("CUDA_HOME") + "/lib64 -lcudart ";
+    std::string library = "-L" + get_env("CUDA_HOME") + "/lib64 -lcudart ";
+
+    intra_node_flags = flags + " " + include + " " + library;
 
 #ifdef HYBRID_EP_BUILD_MULTINODE_ENABLE
     // Add the dependency of the inter-node jit
@@ -51,13 +63,12 @@ NVCCCompiler::NVCCCompiler(std::string base_path): base_path(base_path) {
         + doca_obj_path + "/doca_gpunetio_log.o ";
 #endif
 
-    flags = flags + " " + include + " " + library;
+    inter_node_flags = flags + " " + include + " " + library;
 }
   
 
-std::string NVCCCompiler::build(std::string code, std::string signature, int local_rank, int node_rank) {
+std::string NVCCCompiler::build(std::string code, std::string signature, int local_rank, int node_rank, int num_of_nodes) {
     // Create the source directory
-    std::string jit_dir = base_path + "/build/jit";
     std::filesystem::create_directories(jit_dir);
 
     // Get a unique signature for each run
@@ -75,14 +86,19 @@ std::string NVCCCompiler::build(std::string code, std::string signature, int loc
     out.write(code.data(), code.size());
     out.close();
 
-    // Compile the code
     std::string output_path =
         jit_dir + "/" + extended_signature + ".so";
     // Remove the output .so file if it exists
     remove(output_path.c_str());
-    std::string compile_command = 
-        nvcc_path + " " + flags + " " + source_path + " " + objs + " -o " + output_path;
-
+    // Choose the flags based on the number of nodes
+    std::string compile_command;
+    if(num_of_nodes > 1) {
+        compile_command = nvcc_path + " " + inter_node_flags + " " + source_path + " " + objs + " -o " + output_path;
+    }else {
+        compile_command = nvcc_path + " " + intra_node_flags + " " + source_path + " -o " + output_path;
+    }
+    
+    // Run the compile command
     auto ret = std::system(compile_command.c_str());
     if (ret != 0) {
         throw std::runtime_error("Failed to compile the code, compile command: " + compile_command);
@@ -113,7 +129,7 @@ std::any NVCCCompiler::get_instance(std::string library_path, std::string kernel
     }
 
     // Unique the compiled lib from different rank
-    std::string unique_library_path = base_path + "/build/jit/" + kernel_key + ".so";
+    std::string unique_library_path = jit_dir + "/" + kernel_key + ".so";
     std::string unique_command = "mv " + library_path + " " + unique_library_path;
     if(library_path != unique_library_path) {
         auto ret = std::system(unique_command.c_str());
@@ -160,7 +176,7 @@ std::string NVCCCompiler::get_dispatch_code(HybridEpConfigInstance config) {
          std::to_string(config.hidden_dim) + ", " + std::to_string(config.max_num_of_tokens_per_rank) + ", " +
          std::to_string(config.num_of_ranks_per_node) + ", " + std::to_string(config.num_of_nodes) + ", " +
          std::to_string(config.num_of_experts_per_rank) + ">::dispatch<" + token_type + ", " +
-         std::to_string(config.num_of_stages_dispatch_api) + ", " + std::to_string(config.num_of_tokens_per_chunk_dispatch_api) + ", " +
+         std::to_string(config.num_of_stages_dispatch_api) + ", " + std::to_string(config.num_of_in_flight_s2g_dispatch_api) + ", " + std::to_string(config.num_of_tokens_per_chunk_dispatch_api) + ", " +
          std::to_string(config.num_of_blocks_dispatch_api) + ", " + (config.forward_dispatch_api ? "true" : "false") + ", " +
          (config.device_side_sync_dispatch_api ? "true" : "false") + R"(>;
             return func_ptr;
@@ -193,12 +209,12 @@ std::string NVCCCompiler::get_combine_code(HybridEpConfigInstance config) {
 }
 
 KernelCache::KernelCache(int node_rank, int local_rank, std::string base_path, bool load_cached_kernels): 
-node_rank(node_rank), local_rank(local_rank), base_path(base_path), nvcc_compiler(base_path) {
+node_rank(node_rank), local_rank(local_rank), nvcc_compiler(base_path) {
     // Load all cached kernels from the cache directory
-    std::string cache_dir = base_path + "/build/jit";
-    std::filesystem::create_directories(cache_dir);
+    jit_dir = get_jit_dir();
+    std::filesystem::create_directories(jit_dir);
     if(load_cached_kernels) {
-        for (const auto& entry : std::filesystem::directory_iterator(cache_dir)) {
+        for (const auto& entry : std::filesystem::directory_iterator(jit_dir)) {
             if (entry.path().extension() == ".so") {
                 std::string kernel_key = entry.path().stem().string();
                 kernel_cache[kernel_key] = nvcc_compiler.get_instance(entry.path().string(), kernel_key);
@@ -235,7 +251,7 @@ void KernelCache::run_proprecess_kernel(
     auto it = kernel_cache.find(preprocess_kernel_key);
     if (it == kernel_cache.end()) {
         auto preprocessing_code = nvcc_compiler.get_metadata_preprocessing_code(config);
-        auto preprocessing_path = nvcc_compiler.build(preprocessing_code, preprocess_kernel_key, local_rank, node_rank);
+        auto preprocessing_path = nvcc_compiler.build(preprocessing_code, preprocess_kernel_key, local_rank, node_rank, config.num_of_nodes);
         kernel_cache[preprocess_kernel_key] = nvcc_compiler.get_instance(preprocessing_path, preprocess_kernel_key);
     }
     auto preprocessing_instance = kernel_cache[preprocess_kernel_key];
@@ -278,6 +294,7 @@ void KernelCache::run_dispatch_kernel(
         config.num_of_nodes,
         type_to_string(config.token_data_type),
         config.num_of_stages_dispatch_api,
+        config.num_of_in_flight_s2g_dispatch_api,
         config.num_of_tokens_per_chunk_dispatch_api,
         config.num_of_blocks_dispatch_api,
         config.forward_dispatch_api,
@@ -288,7 +305,7 @@ void KernelCache::run_dispatch_kernel(
     if (it == kernel_cache.end()) {
         // JIT Compile the kernel
         auto dispatch_code = nvcc_compiler.get_dispatch_code(config);
-        auto dispatch_path = nvcc_compiler.build(dispatch_code, dispatch_kernel_key, local_rank, node_rank);
+        auto dispatch_path = nvcc_compiler.build(dispatch_code, dispatch_kernel_key, local_rank, node_rank, config.num_of_nodes);
         kernel_cache[dispatch_kernel_key] = nvcc_compiler.get_instance(dispatch_path, dispatch_kernel_key);
     }
     auto dispatch_instance = kernel_cache[dispatch_kernel_key];
@@ -328,7 +345,7 @@ void KernelCache::run_combine_kernel(
     if (it == kernel_cache.end()) {
         // JIT Compile the kernel
         auto combine_code = nvcc_compiler.get_combine_code(config);
-        auto combine_path = nvcc_compiler.build(combine_code, combine_kernel_key, local_rank, node_rank);
+        auto combine_path = nvcc_compiler.build(combine_code, combine_kernel_key, local_rank, node_rank, config.num_of_nodes);
         kernel_cache[combine_kernel_key] = nvcc_compiler.get_instance(combine_path, combine_kernel_key);
     }
     auto combine_instance = kernel_cache[combine_kernel_key];

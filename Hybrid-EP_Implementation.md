@@ -192,22 +192,50 @@ export RDMA_CORE_HOME=/path/to/rdma-core  # Path to your RDMA core installation
 export TORCH_ARCH_LIST="9.0;10.0"  # Adjust based on your GPU architecture
 pip install .
 ```
+ 
+> RDMA Core requirement: install `rdma-core` v60.0 ([reference](https://github.com/linux-rdma/rdma-core/tree/v60.0)), and the latest release is also recommended ([linux-rdma/rdma-core](https://github.com/linux-rdma/rdma-core.git)).
 
+Example:
+```bash
+git clone https://github.com/linux-rdma/rdma-core.git
+cd rdma-core
+git checkout tags/v60.0
+sh build.sh
+export RDMA_CORE_HOME=/path/to/rdma-core/build
+```
+
+Hybrid EP’s RDMA topology probing relies on `libnvidia-ml.so.1`. During Dockerfile builds, compile against the NVML stubs (for example, those shipped in `libnvidia-ml-dev`), then at runtime launch the container with `--gpus all` or a Kubernetes device plugin so that the NVIDIA container runtime injects the host’s real NVML library and prevents driver/library mismatches.
+
+Example:
+```bash
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends libnvidia-ml-dev
+RUN git clone -b hybrid_ep https://github.com/deepseek-ai/DeepEP.git
+ENV HYBRID_EP_MULTINODE=1
+RUN cd DeepEP && \
+    TORCH_CUDA_ARCH_LIST="9.0 10.0" MAX_JOBS=8 pip install --no-build-isolation . && \
+    apt-get purge -y libnvidia-ml-dev && \
+    apt-get autoremove -y && \
+    rm -rf /var/lib/apt/lists/*
+```
 
 ### Quick Start
-
-> **⚠️ Important Note for RDMA Inter-node Configuration**  
-> Currently, the RDMA inter-node kernel implementation requires manual specification of nic names for each GPU. You need to provide the mapping between GPUs and their corresponding IB device names via the `--ib-dev-name-list` parameter. See `tests/test_hybrid_ep.py` for detailed usage examples.
->  In addition, when using the RDMA part, after setting num-tokens-per-rank during initialization, all subsequent communications must use the same value. Currently, dynamic sequence length is not supported.
->
-> **Automatic topology detection will be supported soon.**
-> **Dynamic sequence length will be supported soon.**
 
 Refer to `tests/test_hybrid_ep.py` for comprehensive usage examples including:
 - Multi-node configuration
 - Intra-node testing scenarios
 - Inter-node testing scenarios
 - Performance benchmarking setups
+
+**Explicitly configure `num_of_hybrid_ep_ranks_per_nvlink_domain` (default 8, representing the number of Hybrid-EP ranks that participate in the same Hybrid-EP communication within a single NVLink domain, this value is critical for MNNVL case) and `USE_MNNVL` (default disabled/False) either via uppercase environment variables or by passing arguments to `HybridEPBuffer.__init__`. In multi-node NVLink deployments you must enable `USE_MNNVL=1`.**
+
+Example configuration on EP64, MNNVL:
+- Environment variables:
+  ```
+  export NUM_OF_HYBRID_EP_RANKS_PER_NVLINK_DOMAIN=64
+  export USE_MNNVL=1
+  ```
+- Python init: `HybridEPBuffer(..., num_of_hybrid_ep_ranks_per_nvlink_domain=64, use_mnnvl=True)`
 
 ### Important Configuration Note
 Here are important parameter settings in `csrc/hybrid_ep/config.cuh`. You can modify these parameters via `HybridEPBuffer.init_config()` or by setting proper environment variables (see `deep_ep/hybrid_ep_buffer.py`) to achieve better performance/usability:
@@ -264,7 +292,6 @@ Here are important parameter settings in `csrc/hybrid_ep/config.cuh`. You can mo
 - Comprehensive performance improvements
 
 ### 🚧 Upcoming Features
-- **Automatic Topology Detection**: Automatic detection of GPU-NIC mapping for RDMA inter-node communication, eliminating the need for manual `--ib-dev-name-list` configuration
 - **Low Latency Mode**: Enhanced performance for latency-critical workloads
 - Performance optimization
 

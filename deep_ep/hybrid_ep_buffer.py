@@ -44,8 +44,9 @@ class HybridEPBuffer:
         num_sms_dispatch_api: int = None,
         num_sms_combine_api: int = None,
         num_sms_preprocessing_api: int = None,
-        use_mnnvl: bool = None,
-        ib_dev_name_list: list[str] = [],
+        # Rank-based setting
+        num_of_hybrid_ep_ranks_per_nvlink_domain: int = None,
+        use_mnnvl: bool = None
     ):
         self.group = group
         self.rank = self.group.rank()
@@ -54,63 +55,61 @@ class HybridEPBuffer:
             self.group_size > 1
         ), f"The hybrid-ep kernel should be used with at least 2 ranks, but got {self.group_size}."
 
-        # Compute the number of the involved ranks in the nvlink domain.
-        global_ranks = torch.distributed.get_process_group_ranks(self.group)
-        rank_stride = global_ranks[1] - global_ranks[0]
         # Number of ranks in the first nvlink domain.
         if use_mnnvl is None:
             use_mnnvl = os.getenv("USE_MNNVL", "0").strip().lower() in {"1", "true", "t", "yes", "y", "on"}
-        if int(os.getenv("NVLINK_DOMAIN_SIZE", "8")) > 8: # For compatibility 
+        if num_of_hybrid_ep_ranks_per_nvlink_domain is None:
+            num_of_hybrid_ep_ranks_per_nvlink_domain = int(os.getenv("NUM_OF_HYBRID_EP_RANKS_PER_NVLINK_DOMAIN", "8"))
+        if num_of_hybrid_ep_ranks_per_nvlink_domain > 8: 
             use_mnnvl = True
-        self.nvlink_domain_size = 72 if use_mnnvl else 8
+        
         assert (
-            rank_stride <= self.nvlink_domain_size
-        ), "The rank stride should be less than or equal to the nvlink domain size."
-        num_of_ranks_per_node = min(self.nvlink_domain_size // rank_stride, self.group_size)
-
-        assert (
-            self.group_size % num_of_ranks_per_node == 0
+            self.group_size % num_of_hybrid_ep_ranks_per_nvlink_domain == 0
         ), "The number of ranks should be divisible by the number of ranks per node."
         self.rank = self.group.rank()
-        self.num_of_ranks_per_node = num_of_ranks_per_node
+        self.num_of_hybrid_ep_ranks_per_nvlink_domain = num_of_hybrid_ep_ranks_per_nvlink_domain
 
         # Local rank: the active rank in the nvlink domain.
-        self.local_rank = self.rank % self.num_of_ranks_per_node
+        self.local_rank = self.rank % self.num_of_hybrid_ep_ranks_per_nvlink_domain
         # Node rank: the active rank between the nvlink domains.
-        self.node_rank = self.rank // self.num_of_ranks_per_node
+        self.node_rank = self.rank // self.num_of_hybrid_ep_ranks_per_nvlink_domain
         # The number of nodes.
-        self.num_of_nodes = self.group_size // self.num_of_ranks_per_node
+        self.num_of_nodes = self.group_size // self.num_of_hybrid_ep_ranks_per_nvlink_domain
         self.use_fp8 = use_fp8
 
         props = torch.cuda.get_device_properties(torch.cuda.current_device())
         sm_count = props.multi_processor_count
         if num_sms_preprocessing_api is None:
-            num_sms_preprocessing_api = 128
+            num_sms_preprocessing_api = 108
+        num_blocks_permute_api = sm_count * 16
         # Inter-node case should use less SMs for the dispatch and combine APIs.
         if num_sms_dispatch_api is None:
-            num_sms_dispatch_api = 32 if self.num_of_nodes == 1 else 16
+            num_sms_dispatch_api = 32 if self.num_of_nodes == 1 else 8
         if num_sms_combine_api is None:
-            num_sms_combine_api = 32 if self.num_of_nodes == 1 else 16
+            num_sms_combine_api = 32 if self.num_of_nodes == 1 else 8
         assert (
             sm_count >= num_sms_preprocessing_api
             and sm_count >= num_sms_dispatch_api
             and sm_count >= num_sms_combine_api
         ), "check the sms occupancy setting"
+        # Used SMs for preprocessing of dispatch and permute.
         self.num_sms_preprocessing_api = num_sms_preprocessing_api
         self.num_sms_dispatch_api = num_sms_dispatch_api
         self.num_sms_combine_api = num_sms_combine_api
-
+        self.num_blocks_permute_api = num_blocks_permute_api
+        
         # Initialize the BufferConfig for the hybrid-ep buffer allocation.
         self.config = hybrid_ep_cpp.BufferConfig()
         self.config.hidden_dim = hidden_dim
-        self.config.max_num_of_tokens_per_rank = max_num_of_tokens_per_rank
+        self.config.max_num_of_tokens_per_rank = max(max_num_of_tokens_per_rank, 512)
         self.config.num_of_experts_per_rank = num_local_experts
-        self.config.num_of_ranks_per_node = self.num_of_ranks_per_node
+        self.config.num_of_ranks_per_node = self.num_of_hybrid_ep_ranks_per_nvlink_domain
         self.config.num_of_nodes = self.num_of_nodes
         self.config.num_of_blocks_dispatch_api = self.num_sms_dispatch_api
         self.config.num_of_blocks_combine_api = self.num_sms_combine_api
         # The SMs of preprocessing, chunk size of dispatch and combine will affact the size of intermediate buffers.
         self.config.num_of_blocks_preprocessing_api = self.num_sms_preprocessing_api
+        self.config.num_of_blocks_permute_api = self.num_blocks_permute_api
         # The fp8/bf16/fp16 data is communicated in the uint8/uint16 format.
         self.config.token_data_type = (
             hybrid_ep_cpp.UINT8 if self.use_fp8 else hybrid_ep_cpp.UINT16
@@ -122,6 +121,8 @@ class HybridEPBuffer:
             os.getenv("NUM_OF_TOKENS_PER_CHUNK_COMBINE_API", "128")
         )
 
+        assert self.config.is_valid(), "The buffer config is not valid."
+
         # Create C++ buffer - this will allocate all buffers during construction
         self.runtime = hybrid_ep_cpp.HybridEPBuffer(
             self.group, 
@@ -130,10 +131,9 @@ class HybridEPBuffer:
             self.node_rank, 
             self.group_size, 
             os.path.dirname(os.path.abspath(__file__)), 
-            ib_dev_name_list, 
             load_cached_kernels = False, 
             use_shared_buffer = True,
-            enable_fabric = use_mnnvl, # If use_mnnvl is True, the fabric memory handle will be used.
+            use_mnnvl = use_mnnvl, # If use_mnnvl is True, the fabric memory handle will be used.
         )
 
     def empty_jit_cache(self):
@@ -162,22 +162,20 @@ class HybridEPBuffer:
         config.hidden_dim = (
             hidden_dim if hidden_dim is not None else self.config.hidden_dim
         )
-        config.max_num_of_tokens_per_rank = (
-            max_num_of_tokens_per_rank
-            if max_num_of_tokens_per_rank is not None
-            else self.config.max_num_of_tokens_per_rank
-        )
-        if self.num_of_nodes > 1:
-            assert self.config.max_num_of_tokens_per_rank == max_num_of_tokens_per_rank, "Dynamic sequence length is not supported in the multi-node case."
-        config.max_num_of_tokens_per_rank = max(
-            config.max_num_of_tokens_per_rank, self.config.max_num_of_tokens_per_rank
-        )
+        if max_num_of_tokens_per_rank is None:
+            max_num_of_tokens_per_rank = self.config.max_num_of_tokens_per_rank
+        else:
+            config.max_num_of_tokens_per_rank = max(
+                max_num_of_tokens_per_rank, self.config.max_num_of_tokens_per_rank
+            )
+            self.config.max_num_of_tokens_per_rank = config.max_num_of_tokens_per_rank
+        
         config.num_of_experts_per_rank = (
             num_local_experts
             if num_local_experts is not None
             else self.config.num_of_experts_per_rank
         )
-        config.num_of_ranks_per_node = self.num_of_ranks_per_node
+        config.num_of_ranks_per_node = self.num_of_hybrid_ep_ranks_per_nvlink_domain
         config.num_of_nodes = self.num_of_nodes
 
         # Metadata-preprocessing API Config
@@ -185,6 +183,7 @@ class HybridEPBuffer:
         config.num_of_threads_per_block_preprocessing_api = int(
             os.getenv("NUM_OF_THREADS_PER_BLOCK_PREPROCESSING_API", "512")
         )
+        config.num_of_blocks_permute_api = self.num_blocks_permute_api
 
         # Dispatch API Config
         if use_fp8 is None:
@@ -197,6 +196,9 @@ class HybridEPBuffer:
         # Dispatch stages config:
         config.num_of_stages_dispatch_api = int(
             os.getenv("NUM_OF_STAGES_DISPATCH_API", "10")
+        )
+        config.num_of_in_flight_s2g_dispatch_api = int(
+            os.getenv("NUM_OF_IN_FLIGHT_S2G_DISPATCH_API", "8")
         )
         config.num_of_tokens_per_chunk_dispatch_api = int(
             os.getenv("NUM_OF_TOKENS_PER_CHUNK_DISPATCH_API", "128")
@@ -227,8 +229,10 @@ class HybridEPBuffer:
             os.getenv("NUM_OF_ADDITIONAL_IN_FLIGHT_S2G_COMBINE_API", "2")
         )
 
+        assert config.is_valid(), "The config is not valid."
+
         # Use the runtime kernel config to update the buffer.
-        reallocated = self.runtime.update_buffer(config)
+        self.runtime.update_buffer(config)
         return config
 
     def dispatch(
@@ -321,6 +325,8 @@ class HybridEPBuffer:
             ) = handle
 
         if num_dispatched_tokens is None:
+            # Synchronize the stream to make sure the data in the pinned_memory_buffer: num_dispatched_tokens_tensor is ready.
+            torch.cuda.current_stream().synchronize()
             num_dispatched_tokens = num_dispatched_tokens_tensor.item()
 
         dispatched_token, dispatched_probs, dispatched_scaling_factor = (
@@ -389,7 +395,6 @@ class HybridEPBuffer:
         probs: torch.Tensor = None,
         scaling_factor: torch.Tensor = None,
         # Used in the sync-free permute
-        num_dispatched_tokens: int = None,
         num_permuted_tokens: int = None,
         # If we use permute kernel, the output tensor will be permuted. the result can be directly used in the gemm.
         pad_multiple: int = None,
@@ -406,8 +411,13 @@ class HybridEPBuffer:
         # # Cache for template config
         # 7. template_config: HybridEpConfigInstance
         handle: tuple = None,
-        # If enable this, the produced num_dispatched_tokens will be put on the CPU pinned memory, and the tokens_per_expert will be put on the CPU, which may reduce the times of the sync
-        use_host_meta: bool = True,
+        # There are 2 tensors are put on the CPU pinned memory
+        # 1. num_dispatched_tokens in handle
+        # 2. tokens_per_expert
+        # If non_blocking is True, no stream synchronization will be used, so we can not promise the data in pinned 
+        # memory is ready for using in CPU. The CPU value of num_permuted_tokens required for this mode
+        # Otherwise, the stream synchronization will be used to wait for the data in pinned memory.
+        non_blocking: bool = False,
     ):
         """
         Dispatch the data to the experts with permute.
@@ -426,6 +436,8 @@ class HybridEPBuffer:
                     routing_map, probs = indices_to_map(
                         topk_idx, topk_weights, num_of_tokens_per_rank, num_of_experts
                     )
+            if non_blocking:
+                assert num_permuted_tokens >= 0, "The num_permuted_tokens is required for non-blocking mode."
 
             # If the handle is not provided, we need to generate the handle in the first invocation of the dispatch kernel.
             if handle is None:
@@ -462,15 +474,6 @@ class HybridEPBuffer:
                     routing_map=global_routing_map,
                     num_of_tokens_per_rank=num_of_tokens_per_rank,
                 )
-                if use_host_meta:
-                    # Put the num_dispatched_tokens_tensor on the CPU pinned memory, because this tensor also will be used in the GPU kernel
-                    num_dispatched_tokens_tensor_pinned = torch.empty(
-                        num_dispatched_tokens_tensor.shape,
-                        device="cpu",
-                        dtype=num_dispatched_tokens_tensor.dtype,
-                        pin_memory=True,
-                    )
-                    num_dispatched_tokens_tensor_pinned.copy_(num_dispatched_tokens_tensor, False)
             else:
                 (
                     sparse_to_dense_map,
@@ -501,11 +504,10 @@ class HybridEPBuffer:
                 num_dispatched_tokens_tensor=num_dispatched_tokens_tensor,
                 local_expert_routing_map=local_expert_routing_map,
                 row_id_map=row_id_map,
-                num_dispatched_tokens=num_dispatched_tokens,
                 num_permuted_tokens=num_permuted_tokens,
                 num_of_tokens_per_rank=num_of_tokens_per_rank,
                 pad_multiple=pad_multiple,
-                use_host_meta=use_host_meta,
+                non_blocking=non_blocking,
                 with_probs=probs is not None,
             )
 
@@ -519,6 +521,7 @@ class HybridEPBuffer:
                 num_of_tokens_per_rank,
                 config,
             )
+        
         return (
             dispatched_token,
             dispatched_probs,
@@ -533,7 +536,6 @@ class HybridEPBuffer:
         # Input tensors
         hidden: torch.Tensor,
         probs: torch.Tensor = None,
-        num_dispatched_tokens: int = None,
         handle: tuple = None,
         pad_multiple: int = None,
     ):
@@ -565,7 +567,6 @@ class HybridEPBuffer:
                 attn_to_rdma_map=attn_to_rdma_map,
                 num_dispatched_tokens_tensor=num_dispatched_tokens_tensor,
                 row_id_map=row_id_map,
-                num_dispatched_tokens=num_dispatched_tokens,
                 num_of_tokens_per_rank=num_of_tokens_per_rank,
                 pad_multiple=pad_multiple,
                 with_probs=probs is not None,

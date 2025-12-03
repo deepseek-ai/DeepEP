@@ -26,15 +26,16 @@ public:
         torch::Tensor attn_to_rdma_map;
         c10::optional<torch::Tensor> num_dispatched_tokens_tensor;  // Used in the permute
         c10::optional<torch::Tensor> local_expert_routing_map;      // Used in the permute
-        // Used in the sync-free permute
+
         int64_t num_dispatched_tokens = -1;
-        // Cached permute
+        // Used in the permute case, use up-bound to avoid synchronization to get the real num_dispatched_tokens from the pinned memory
+        int64_t max_num_dispatched_tokens = -1;
         c10::optional<torch::Tensor> row_id_map;
         int64_t num_permuted_tokens = -1;
         // Misc
         int pad_multiple;  // Used in the padding case of permute
         bool enable_permute = false;
-        bool use_host_meta = false;  // If enable this, the produced num_dispatched_tokens will be put
+        bool non_blocking = false;  // If enable this, the produced num_dispatched_tokens will be put
                                         // on the CPU pinned memory, and the tokens_per_expert will be put
                                         // on the CPU, which may reduce the times of the sync
         int64_t num_of_tokens_per_rank;  // Dynamic sequence length
@@ -72,12 +73,13 @@ public:
         int num_of_tokens_per_rank
     );
 
-    void dispatch_preprocess(
-        HybridEpConfigInstance config, DispatchBuffers& dispatch_buffers, DispatchArgs& args); // Now is empty op, will be filled with D2D in the inter-node case
+    std::tuple<torch::Tensor, torch::Tensor> 
+    dispatch_preprocess(
+        HybridEpConfigInstance config, DispatchBuffers& dispatch_buffers, DispatchArgs& args);
     template<typename DType> 
     void dispatch_core(
         HybridEpConfigInstance config, DispatchBuffers& dispatch_buffers, DispatchArgs& args);
-    std::tuple<torch::Tensor, c10::optional<torch::Tensor>, c10::optional<torch::Tensor>, torch::Tensor, torch::Tensor> 
+    std::tuple<torch::Tensor, c10::optional<torch::Tensor>, c10::optional<torch::Tensor> > 
     dispatch_postprocess(
         HybridEpConfigInstance config, DispatchBuffers& dispatch_buffers, DispatchArgs& args); 
 
@@ -86,7 +88,7 @@ public:
     void combine_core(
         HybridEpConfigInstance config, CombineBuffers& combine_buffers, CombineArgs& args);
     void combine_postprocess(
-        HybridEpConfigInstance config, CombineBuffers& combine_buffers, CombineArgs& args); // Now is empty op, will be filled with D2D in the inter-node case
+        HybridEpConfigInstance config, CombineBuffers& combine_buffers, CombineArgs& args); 
 
 private:
     KernelCache kernel_cache;
@@ -94,3 +96,4 @@ private:
     int local_rank;
     int node_rank;
 };
+

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT 
 // SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 
+#include <cuda_runtime.h>
 #include <pybind11/functional.h>
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
@@ -13,7 +14,7 @@ namespace py = pybind11;
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.doc() = "HybridEP, efficiently enable the expert-parallel communication in "
               "the Hopper+ architectures";
-  
+      
     pybind11::enum_<APP_TOKEN_DATA_TYPE>(m, "APP_TOKEN_DATA_TYPE")
         .value("UINT16", APP_TOKEN_DATA_TYPE::UINT16)
         .value("UINT8", APP_TOKEN_DATA_TYPE::UINT8)
@@ -33,8 +34,10 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         .def_readwrite("num_of_blocks_preprocessing_api", &BufferConfig::num_of_blocks_preprocessing_api)
         .def_readwrite("num_of_blocks_dispatch_api", &BufferConfig::num_of_blocks_dispatch_api)
         .def_readwrite("num_of_blocks_combine_api", &BufferConfig::num_of_blocks_combine_api)
+        .def_readwrite("num_of_blocks_permute_api", &BufferConfig::num_of_blocks_permute_api)
         .def_readwrite("num_of_tokens_per_chunk_dispatch_api", &BufferConfig::num_of_tokens_per_chunk_dispatch_api)
         .def_readwrite("num_of_tokens_per_chunk_combine_api", &BufferConfig::num_of_tokens_per_chunk_combine_api)
+        .def("is_valid", &BufferConfig::is_valid)
         .def("__repr__", [](const BufferConfig &config) {
           return "<BufferConfig hidden_dim=" +
                  std::to_string(config.hidden_dim) + " max_num_of_tokens_per_rank=" +
@@ -46,6 +49,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
                  " num_of_blocks_preprocessing_api=" + std::to_string(config.num_of_blocks_preprocessing_api) + 
                  " num_of_blocks_dispatch_api=" + std::to_string(config.num_of_blocks_dispatch_api) + 
                  " num_of_blocks_combine_api=" + std::to_string(config.num_of_blocks_combine_api) + 
+                 " num_of_blocks_permute_api=" + std::to_string(config.num_of_blocks_permute_api) + 
                  " num_of_tokens_per_chunk_dispatch_api=" + std::to_string(config.num_of_tokens_per_chunk_dispatch_api) + 
                  " num_of_tokens_per_chunk_combine_api=" + std::to_string(config.num_of_tokens_per_chunk_combine_api) + 
                  ">";
@@ -68,10 +72,14 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
             &HybridEpConfigInstance::num_of_threads_per_block_preprocessing_api)
         .def_readwrite("num_of_blocks_preprocessing_api",
                        &HybridEpConfigInstance::num_of_blocks_preprocessing_api)
+        .def_readwrite("num_of_blocks_permute_api",
+                       &HybridEpConfigInstance::num_of_blocks_permute_api)
         // Dispatch API Config
         .def_readwrite("token_data_type", &HybridEpConfigInstance::token_data_type)
         .def_readwrite("num_of_stages_dispatch_api",
                        &HybridEpConfigInstance::num_of_stages_dispatch_api)
+        .def_readwrite("num_of_in_flight_s2g_dispatch_api",
+                       &HybridEpConfigInstance::num_of_in_flight_s2g_dispatch_api)
         .def_readwrite("num_of_tokens_per_chunk_dispatch_api",
                        &HybridEpConfigInstance::num_of_tokens_per_chunk_dispatch_api)
         .def_readwrite("num_of_blocks_dispatch_api",
@@ -98,6 +106,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
                        &HybridEpConfigInstance::backward_combine_api)
         .def_readwrite("device_side_sync_combine_api",
                        &HybridEpConfigInstance::device_side_sync_combine_api)
+        .def("is_valid", &HybridEpConfigInstance::is_valid)
         .def("__repr__", [](const HybridEpConfigInstance &config) {
           return "<HybridEpConfigInstance hidden_dim=" +
                  std::to_string(config.hidden_dim) + " max_num_of_tokens_per_rank=" +
@@ -107,17 +116,16 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         });
   
     pybind11::class_<HybridEPBuffer>(m, "HybridEPBuffer")
-        .def(py::init<py::object, BufferConfig, int, int, int, std::string, std::vector<std::string>, bool, bool, bool>(),
+        .def(py::init<py::object, BufferConfig, int, int, int, std::string, bool, bool, bool>(),
             py::arg("process_group"),
             py::arg("config"),
             py::arg("local_rank"),
             py::arg("node_rank"),
             py::arg("group_size"),
             py::arg("base_path"),
-            py::arg("ib_dev_name_list") = std::vector<std::string>{},
             py::arg("load_cached_kernels") = false,
             py::arg("use_shared_buffer") = true,
-            py::arg("enable_fabric") = false)
+            py::arg("use_mnnvl") = false)
         .def("update_buffer", &HybridEPBuffer::update_buffer, py::arg("config"))
         .def("metadata_preprocessing", &HybridEPBuffer::metadata_preprocessing,
              py::kw_only(), py::arg("config"), py::arg("routing_map"), py::arg("num_of_tokens_per_rank"))
@@ -141,16 +149,16 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
              py::arg("scaling_factor") = c10::nullopt,
              py::arg("sparse_to_dense_map"), py::arg("rdma_to_attn_map"),
              py::arg("attn_to_rdma_map"), py::arg("num_dispatched_tokens_tensor"),
-             py::arg("local_expert_routing_map"), py::arg("row_id_map"), py::arg("num_dispatched_tokens") = std::nullopt,
+             py::arg("local_expert_routing_map"), py::arg("row_id_map"),
              py::arg("num_permuted_tokens") = std::nullopt,
-             py::arg("num_of_tokens_per_rank"), py::arg("pad_multiple") = std::nullopt, py::arg("use_host_meta") = false,
+             py::arg("num_of_tokens_per_rank"), py::arg("pad_multiple") = std::nullopt, py::arg("non_blocking") = false,
              py::arg("with_probs") = false)
         .def("combine_with_unpermute", &HybridEPBuffer::combine_with_unpermute, py::kw_only(), 
              py::arg("config"), py::arg("hidden"),
              py::arg("probs") = c10::nullopt,
              py::arg("sparse_to_dense_map"), py::arg("rdma_to_attn_map"),
              py::arg("attn_to_rdma_map"), py::arg("num_dispatched_tokens_tensor"),
-             py::arg("row_id_map"), py::arg("num_dispatched_tokens") = std::nullopt,
+             py::arg("row_id_map"),
              py::arg("num_of_tokens_per_rank"), py::arg("pad_multiple") = std::nullopt,
              py::arg("with_probs") = false);    
     

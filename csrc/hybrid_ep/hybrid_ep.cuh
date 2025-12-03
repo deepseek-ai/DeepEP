@@ -19,7 +19,7 @@
 
 class HybridEPBuffer {
 public:
-  HybridEPBuffer(pybind11::object process_group, BufferConfig config, int local_rank, int node_rank, int group_size, std::string base_path, std::vector<std::string> ib_dev_name_list, bool load_cached_kernels, bool use_shared_buffer, bool enable_fabric);
+  HybridEPBuffer(pybind11::object process_group, BufferConfig config, int local_rank, int node_rank, int group_size, std::string base_path, bool load_cached_kernels, bool use_shared_buffer, bool use_mnnvl);
   ~HybridEPBuffer();
   bool update_buffer(HybridEpConfigInstance config); // True means the buffer is reallocated.
 
@@ -56,11 +56,10 @@ public:
             c10::optional<torch::Tensor> num_dispatched_tokens_tensor,
             c10::optional<torch::Tensor> local_expert_routing_map,
             c10::optional<torch::Tensor> row_id_map,
-            c10::optional<int64_t> num_dispatched_tokens,
             c10::optional<int64_t> num_permuted_tokens,
             int64_t num_of_tokens_per_rank,
             c10::optional<int64_t> pad_multiple,
-            bool use_host_meta,
+            bool non_blocking,
             bool with_probs);
 
   std::tuple<torch::Tensor, torch::Tensor>
@@ -70,7 +69,6 @@ public:
           torch::Tensor sparse_to_dense_map, torch::Tensor rdma_to_attn_map,
           torch::Tensor attn_to_rdma_map, c10::optional<torch::Tensor> num_dispatched_tokens_tensor,
           c10::optional<torch::Tensor> row_id_map,
-          c10::optional<int64_t> num_dispatched_tokens,
           int64_t num_of_tokens_per_rank,
           c10::optional<int64_t> pad_multiple,
           bool with_probs);       

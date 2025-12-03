@@ -9,17 +9,18 @@ HybridEPBuffer::HybridEPBuffer(
   int node_rank, 
   int group_size, 
   std::string base_path,
-  std::vector<std::string> ib_dev_name_list,
   bool load_cached_kernels,
   bool use_shared_buffer,
-  bool enable_fabric
+  bool use_mnnvl
 ) : process_group(process_group), buffer_config(config), local_rank(local_rank), node_rank(node_rank), group_size(group_size), use_shared_buffer(use_shared_buffer),
     executor(local_rank, node_rank, base_path, load_cached_kernels) {
-    remote_allocator.init(enable_fabric);
+    remote_allocator.init(/*enable_fabric=*/use_mnnvl);
     if(group_size > buffer_config.num_of_ranks_per_node) {
 #ifdef HYBRID_EP_BUILD_MULTINODE_ENABLE
-      rdma_coordinator.init(process_group, node_rank, local_rank, buffer_config, ib_dev_name_list);
+      rdma_coordinator.init(process_group, node_rank, local_rank, use_mnnvl, buffer_config);
 #else
+      fprintf(stderr, "Inter-node communication is not supported. Please rebuild with HYBRID_EP_MULTINODE flag.\n");
+      fflush(stderr);
       assert(false); // inter-node communication is not supported.
 #endif
     }
@@ -378,6 +379,7 @@ bool HybridEPBuffer::update_buffer(HybridEpConfigInstance config) {
   // If new config requires bigger buffer, we will release the old buffer and allocate a new one.
   bool need_reallocate = false;
   
+  need_reallocate |= grow_to(buffer_config.max_num_of_tokens_per_rank, config.max_num_of_tokens_per_rank);
   need_reallocate |= grow_to(buffer_config.hidden_dim,             config.hidden_dim);
   need_reallocate |= grow_to(buffer_config.num_of_experts_per_rank,config.num_of_experts_per_rank);
   need_reallocate |= grow_to(buffer_config.num_of_ranks_per_node,  config.num_of_ranks_per_node);
@@ -395,11 +397,14 @@ bool HybridEPBuffer::update_buffer(HybridEpConfigInstance config) {
   }
 
   if(buffer_config.num_of_nodes > 1 && need_reallocate) {
-    fprintf(stderr, "Reallocate buffer for multi-node case is very slow, please check the buffer configuration to pre-allocate the buffer.");
-    assert(!need_reallocate);
+    TORCH_WARN("Reallocating HybridEP buffers in multi-node mode is very slow; "
+               "adjust buffer_config to pre-allocate sufficient capacity.");
   }
 
   if(need_reallocate) {
+  #ifdef HYBRID_EP_BUILD_MULTINODE_ENABLE
+    rdma_coordinator.update_config(buffer_config);
+  #endif
     release_buffer();
     allocate_buffer();
   }
@@ -452,8 +457,7 @@ HybridEPBuffer::dispatch(HybridEpConfigInstance config,
   args.attn_to_rdma_map = attn_to_rdma_map;
   args.num_dispatched_tokens_tensor = num_dispatched_tokens_tensor;
   args.num_dispatched_tokens = (num_dispatched_tokens.has_value()) ? 
-                                num_dispatched_tokens.value() : 
-                                num_dispatched_tokens_tensor.value().item<int64_t>();
+                                num_dispatched_tokens.value() : -1;
   args.num_of_tokens_per_rank = num_of_tokens_per_rank;
   args.enable_permute = false;
   args.stream = at::cuda::getCurrentCUDAStream();
@@ -468,7 +472,7 @@ HybridEPBuffer::dispatch(HybridEpConfigInstance config,
   }else {
     throw std::runtime_error("Invalid token data type:" +  std::to_string(static_cast<int>(config.token_data_type)));
   }
-  auto [dispatched_tokens, dispatched_probs, dispatched_scaling_factor, row_id_map, tokens_per_expert] = executor.dispatch_postprocess(config, dispatch_buffers, args);
+  auto [dispatched_tokens, dispatched_probs, dispatched_scaling_factor] = executor.dispatch_postprocess(config, dispatch_buffers, args);
 
   return std::make_tuple(dispatched_tokens, dispatched_probs, dispatched_scaling_factor);
 }
@@ -535,11 +539,10 @@ HybridEPBuffer::dispatch_with_permute(HybridEpConfigInstance config,
           c10::optional<torch::Tensor> num_dispatched_tokens_tensor,
           c10::optional<torch::Tensor> local_expert_routing_map,
           c10::optional<torch::Tensor> row_id_map,
-          c10::optional<int64_t> num_dispatched_tokens,
           c10::optional<int64_t> num_permuted_tokens,
           int64_t num_of_tokens_per_rank,
           c10::optional<int64_t> pad_multiple,
-          bool use_host_meta,
+          bool non_blocking,
           bool with_probs)
 {
  // Check the input tensors
@@ -567,20 +570,18 @@ HybridEPBuffer::dispatch_with_permute(HybridEpConfigInstance config,
  args.attn_to_rdma_map = attn_to_rdma_map;
  args.local_expert_routing_map = local_expert_routing_map;
  args.num_dispatched_tokens_tensor = num_dispatched_tokens_tensor;
- args.num_dispatched_tokens = (num_dispatched_tokens.has_value()) ? 
-                                num_dispatched_tokens.value() : 
-                                num_dispatched_tokens_tensor.value().item<int64_t>();
+ args.max_num_dispatched_tokens = this->max_num_of_tokens;
  args.row_id_map = row_id_map;
  args.num_permuted_tokens = (num_permuted_tokens.has_value()) ? num_permuted_tokens.value() : -1;
  args.pad_multiple = (pad_multiple.has_value()) ? pad_multiple.value() : 0;
- args.use_host_meta = use_host_meta;
+ args.non_blocking = non_blocking;
  args.num_of_tokens_per_rank = num_of_tokens_per_rank;
  args.enable_permute = true;
  args.stream = at::cuda::getCurrentCUDAStream();
  
  // Run the full dispatch operation
  config.forward_dispatch_api = with_probs;
- executor.dispatch_preprocess(config, dispatch_buffers, args);
+ auto [result_row_id_map, result_tokens_per_expert] = executor.dispatch_preprocess(config, dispatch_buffers, args);
  if(config.token_data_type == APP_TOKEN_DATA_TYPE::UINT8) {
    executor.dispatch_core<uint8_t>(config, dispatch_buffers, args);
  } else if (config.token_data_type == APP_TOKEN_DATA_TYPE::UINT16) {
@@ -589,7 +590,9 @@ HybridEPBuffer::dispatch_with_permute(HybridEpConfigInstance config,
    throw std::runtime_error("Invalid token data type:" +  std::to_string(static_cast<int>(config.token_data_type)));
  }
 
- return executor.dispatch_postprocess(config, dispatch_buffers, args);
+ auto [dispatched_tokens, dispatched_probs, dispatched_scaling_factor] = executor.dispatch_postprocess(config, dispatch_buffers, args);
+
+ return std::make_tuple(dispatched_tokens, dispatched_probs, dispatched_scaling_factor, result_row_id_map, result_tokens_per_expert);
 }
 
 std::tuple<torch::Tensor, torch::Tensor>
@@ -598,7 +601,6 @@ HybridEPBuffer::combine_with_unpermute(HybridEpConfigInstance config,
         torch::Tensor sparse_to_dense_map, torch::Tensor rdma_to_attn_map,
         torch::Tensor attn_to_rdma_map, c10::optional<torch::Tensor> num_dispatched_tokens_tensor,
         c10::optional<torch::Tensor> row_id_map,
-        c10::optional<int64_t> num_dispatched_tokens,
         int64_t num_of_tokens_per_rank,
         c10::optional<int64_t> pad_multiple,
         bool with_probs)
@@ -634,9 +636,6 @@ HybridEPBuffer::combine_with_unpermute(HybridEpConfigInstance config,
   args.rdma_to_attn_map = rdma_to_attn_map;
   args.attn_to_rdma_map = attn_to_rdma_map;
   args.num_dispatched_tokens_tensor = num_dispatched_tokens_tensor;
-  args.num_dispatched_tokens = (num_dispatched_tokens.has_value()) ? 
-                                num_dispatched_tokens.value() : 
-                                num_dispatched_tokens_tensor.value().item<int64_t>();
   args.row_id_map = row_id_map;
   args.pad_multiple = (pad_multiple.has_value()) ? pad_multiple.value() : 0;
   args.num_of_tokens_per_rank = num_of_tokens_per_rank;

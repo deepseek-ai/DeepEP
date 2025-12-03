@@ -20,6 +20,7 @@ struct BufferConfig {
   int num_of_blocks_preprocessing_api;
   int num_of_blocks_dispatch_api;
   int num_of_blocks_combine_api;
+  int num_of_blocks_permute_api;
   int num_of_tokens_per_chunk_dispatch_api;
   int num_of_tokens_per_chunk_combine_api;
 
@@ -28,7 +29,11 @@ struct BufferConfig {
    */
    bool is_valid(){
     bool valid = true;
-    valid &= (hidden_dim % 512 == 0);
+    if (token_data_type == APP_TOKEN_DATA_TYPE::UINT8) {
+      valid &= (hidden_dim % 512 == 0); // Make TMA work in scaling factor.
+    } else {
+      valid &= (hidden_dim % 16 == 0); // Make TMA work.
+    }
     valid &= ((num_of_experts_per_rank * num_of_ranks_per_node) % 4 == 0);
     valid &= (num_of_ranks_per_node % 2 == 0);
     return valid;
@@ -51,12 +56,14 @@ struct HybridEpConfigInstance {
    */
   int num_of_threads_per_block_preprocessing_api;
   int num_of_blocks_preprocessing_api;
+  int num_of_blocks_permute_api;
 
   /*
    *  Dispatch API Config
    */
   APP_TOKEN_DATA_TYPE token_data_type;
   int num_of_stages_dispatch_api;
+  int num_of_in_flight_s2g_dispatch_api;
   int num_of_tokens_per_chunk_dispatch_api;
   int num_of_blocks_dispatch_api;
   bool forward_dispatch_api;
@@ -79,7 +86,11 @@ struct HybridEpConfigInstance {
    */
   bool is_valid(){
     bool valid = true;
-    valid &= (hidden_dim % 512 == 0);
+    if (token_data_type == APP_TOKEN_DATA_TYPE::UINT8) {
+      valid &= (hidden_dim % 512 == 0); // Make TMA work in scaling factor.
+    } else {
+      valid &= (hidden_dim % 16 == 0); // Make TMA work.
+    }
     valid &= ((num_of_experts_per_rank * num_of_ranks_per_node) % 4 == 0);
     valid &= (num_of_ranks_per_node % 2 == 0);
     return valid;
