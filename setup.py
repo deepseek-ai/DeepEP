@@ -1,5 +1,4 @@
 import os
-import sys
 import subprocess
 import setuptools
 import importlib
@@ -19,7 +18,7 @@ def get_nvshmem_host_lib_name(base_dir):
 if __name__ == '__main__':
     disable_nvshmem_and_nccl = False
 
-    # detect NVSHMEM 
+    # detect NVSHMEM
     nvshmem_dir = os.getenv('NVSHMEM_DIR', None)
     nvshmem_host_lib = 'libnvshmem_host.so'
 
@@ -61,7 +60,7 @@ if __name__ == '__main__':
         cxx_flags.append('-DDISABLE_NVSHMEM_AND_NCCL')
         nvcc_flags.append('-DDISABLE_NVSHMEM_AND_NCCL')
 
-    # Use NCCL 
+    # Use NCCL
     if os.getenv('ENABLE_NCCL', '0') == '1' and nccl_dir is not None:
         print('NCCL communication backend enabled')
         cxx_flags.append('-DENABLE_NCCL')
@@ -104,7 +103,6 @@ if __name__ == '__main__':
         if not disable_nvshmem_and_nccl:
             nvcc_flags.append('-rdc=true')
         nvcc_flags.append('--ptxas-options=--register-usage-level=10')
-
 
     # Disable LD/ST tricks, as some CUDA version does not support `.L1::no_allocate`
     if os.environ['TORCH_CUDA_ARCH_LIST'].strip() != '9.0':

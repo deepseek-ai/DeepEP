@@ -1,7 +1,6 @@
-#include "configs.cuh"
-
 #include <cooperative_groups.h>
 
+#include "configs.cuh"
 #include "exception.cuh"
 #include "launch.cuh"
 #include "utils.cuh"
@@ -139,72 +138,58 @@ __forceinline__ __device__ void barrier(int thread_id, int rank, int num_ranks, 
 #ifdef ENABLE_NCCL
 // NCCL barrier with per-rank timeout tracking
 template <int kNumThreads>
-__forceinline__ __device__ void nccl_gin_barrier(int thread_id, int rank, ncclDevComm& dcomm, ncclGin& net, 
-                                                  int* mask_buffer_ptr, int barrier_index = 0) {
+__forceinline__ __device__ void nccl_gin_barrier(
+    int thread_id, int rank, ncclDevComm& dcomm, ncclGin& net, int* mask_buffer_ptr, int barrier_index = 0) {
     EP_DEVICE_ASSERT(kNumThreads >= dcomm.nRanks);
-    
+
     // If no masking, use simple global barrier (fast path)
     if (mask_buffer_ptr == nullptr) {
         ncclBarrierSession<ncclCoopCta> barrier(ncclCoopCta(), ncclTeamTagWorld(), net, barrier_index);
         barrier.sync(ncclCoopCta(), cuda::memory_order_relaxed, ncclGinFenceLevel::Relaxed);
         return;
     }
-    
+
     // Per-rank barrier with timeout tracking using signal array
     // Each rank gets its own signal: signals_base + barrier_index * num_ranks + rank
-    
+
     // Early exit if this rank is masked (no need to participate in barrier)
     if (is_rank_masked(mask_buffer_ptr, rank)) {
         return;
     }
-    
+
     int num_ranks = dcomm.nRanks;
     ncclTeam world = ncclTeamWorld(dcomm);
     unsigned int my_signal_idx = barrier_index * num_ranks + rank;
-    
+
     // Step 0: Flush all pending operations (equivalent to NVSHMEM's quiet)
     // This ensures all prior operations complete before starting the barrier
     net.flush(ncclCoopCta());
-    
+
     // Step 1: Update local signal counter and read back the value
     __shared__ uint64_t local_signal_value;
     if (thread_id == 0) {
         uint64_t current_generation = net.readSignal(my_signal_idx);
 
         // Increment my own signal to indicate I've arrived at the barrier
-        net.signal(
-            world,
-            rank,
-            ncclGin_SignalInc{my_signal_idx},
-            ncclCoopThread(),
-            ncclGin_None(),
-            cuda::thread_scope_system
-        );
+        net.signal(world, rank, ncclGin_SignalInc{my_signal_idx}, ncclCoopThread(), ncclGin_None(), cuda::thread_scope_system);
 
         // Calculate expected value for this barrier (current + 1)
         // All ranks will wait for others to reach this generation
         local_signal_value = current_generation + 1;
     }
     __syncthreads();
-    
+
     // Step 2a: Signal all other non-masked ranks (send phase)
     // Each thread handles one destination rank (one-to-one mapping guaranteed by kNumThreads >= nRanks)
     if (thread_id < num_ranks && thread_id != rank) {
         const auto dst_rank = thread_id;
         if (not is_rank_masked(mask_buffer_ptr, dst_rank)) {
             // Signal the destination rank (send our signal to them)
-            net.signal(
-                world,
-                dst_rank,
-                ncclGin_SignalInc{my_signal_idx},
-                ncclCoopThread(),
-                ncclGin_None(),
-                cuda::thread_scope_system
-            );
+            net.signal(world, dst_rank, ncclGin_SignalInc{my_signal_idx}, ncclCoopThread(), ncclGin_None(), cuda::thread_scope_system);
         }
     }
     __syncthreads();
-    
+
     // Step 2b: Wait for signals from all other non-masked ranks (wait phase)
     // Each thread handles one destination rank (one-to-one mapping guaranteed by kNumThreads >= nRanks)
     if (thread_id < num_ranks && thread_id != rank) {
@@ -215,24 +200,23 @@ __forceinline__ __device__ void nccl_gin_barrier(int thread_id, int rank, ncclDe
             uint64_t wait_recv_cost = 0;
             unsigned int src_signal_idx = barrier_index * num_ranks + dst_rank;
             uint64_t expected_signal = local_signal_value;  // We expect dst_rank to reach same counter value
-            
+
             // Poll with timeout
             uint64_t cur_value;
             do {
                 cur_value = net.readSignal(src_signal_idx);
                 wait_recv_cost = clock64() - start_time;
             } while (cur_value < expected_signal && wait_recv_cost <= NUM_TIMEOUT_CYCLES);
-            
+
             // Mask rank if timeout
             if (wait_recv_cost > NUM_TIMEOUT_CYCLES) {
-                printf("Warning: DeepEP timeout for NCCL barrier, rank %d, dst_rank %d, barrier_idx %d\n", 
-                       rank, dst_rank, barrier_index);
+                printf("Warning: DeepEP timeout for NCCL barrier, rank %d, dst_rank %d, barrier_idx %d\n", rank, dst_rank, barrier_index);
                 atomicExch(mask_buffer_ptr + dst_rank, 1);
             }
         }
     }
     __syncthreads();
-    
+
     // Step 3: Ensure all memory operations are visible (flush any pending ops)
     net.flush(ncclCoopCta());
 }
@@ -248,10 +232,11 @@ __launch_bounds__(kNumThreads, 1) __global__ void clean_low_latency_buffer(int* 
                                                                            int* mask_buffer_ptr,
                                                                            int* sync_buffer_ptr
 #ifdef ENABLE_NCCL
-                                                                           ,ncclDevComm* dcomms,
+                                                                           ,
+                                                                           ncclDevComm* dcomms,
                                                                            unsigned signals_base
 #endif
-                                                                           ) {
+) {
     auto thread_id = static_cast<int>(threadIdx.x);
 
     // Barrier before cleaning (in case of unfinished chunked EP)
@@ -300,7 +285,8 @@ void clean_low_latency_buffer(int* clean_0,
     auto* backend = dynamic_cast<deep_ep::internode::NCCLGINBackend*>(deep_ep::internode::get_backend());
     EP_HOST_ASSERT(backend != nullptr);
     auto dcomms = backend->get_device_communicators();
-    auto signals_base = backend->get_signals_base(INTERNODE_BUFFER_IDX); // reuse HT signals for this -- we will clear them in the notify phase
+    auto signals_base =
+        backend->get_signals_base(INTERNODE_BUFFER_IDX);  // reuse HT signals for this -- we will clear them in the notify phase
 
     EP_HOST_ASSERT(dcomms != nullptr);
 #endif
@@ -366,14 +352,15 @@ __global__ __launch_bounds__(1024, 1) void dispatch(void* packed_recv_x,
                                                     bool round_scale,
                                                     int phases
 #ifdef ENABLE_NCCL
-                                                    ,int num_gin_comms,
+                                                    ,
+                                                    int num_gin_comms,
                                                     void* gin_base_ptr,
                                                     ncclDevComm* dcomms,
                                                     const ncclWindow_t* nccl_windows,
                                                     unsigned signals_base,
                                                     unsigned signals_base_next
 #endif
-                                                    ) {
+) {
     const auto sm_id = static_cast<int>(blockIdx.x);
     const auto thread_id = static_cast<int>(threadIdx.x);
     const auto warp_id = thread_id / 32, lane_id = get_lane_id();
@@ -549,8 +536,8 @@ __global__ __launch_bounds__(1024, 1) void dispatch(void* packed_recv_x,
             for (int i = lane_id; i < num_next_clean_int; i += 32)
                 next_clean[i] = 0;
 
-            // Clear signals for next dispatch
-            // Optimization: skip signal resets on single-node runs where P2P is guaranteed
+                // Clear signals for next dispatch
+                // Optimization: skip signal resets on single-node runs where P2P is guaranteed
 #ifdef ENABLE_NCCL
             const int signals_per_buffer = num_experts;
             const int total_resets = signals_per_buffer * num_gin_comms;
@@ -576,7 +563,7 @@ __global__ __launch_bounds__(1024, 1) void dispatch(void* packed_recv_x,
                 }
             }
 #elif defined(ENABLE_NVSHMEM)
-            // do nothing for NVSHMEM
+                // do nothing for NVSHMEM
 #endif
 
             // Notify before executing `int_p`
@@ -1162,13 +1149,14 @@ __global__ __launch_bounds__(1024, 1) void combine(void* combined_x,
                                                    int phases,
                                                    bool zero_copy
 #ifdef ENABLE_NCCL
-                                                   ,int num_gin_comms,
+                                                   ,
+                                                   int num_gin_comms,
                                                    ncclDevComm* dcomms,
                                                    const ncclWindow_t* nccl_windows,
                                                    unsigned signals_base,
                                                    unsigned signals_base_next
 #endif
-                                                   ) {
+) {
     const auto sm_id = __shfl_sync(0xffffffff, static_cast<int>(blockIdx.x), 0);
     const auto num_sms = __shfl_sync(0xffffffff, static_cast<int>(gridDim.x), 0);
     const auto thread_id = static_cast<int>(threadIdx.x);

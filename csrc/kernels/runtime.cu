@@ -89,7 +89,13 @@ std::vector<uint8_t> get_unique_id(int qps_per_rank, int num_ranks) {
 #endif
 }
 
-int init(const std::vector<uint8_t>& root_unique_id_val, int init_rank, int init_num_ranks, int init_num_rdma_ranks, bool low_latency_mode, int qps_per_rank) {
+int init(const std::vector<uint8_t>& root_unique_id_val,
+         int init_rank,
+         int init_rdma_rank,
+         int init_num_ranks,
+         int init_num_rdma_ranks,
+         bool low_latency_mode,
+         int qps_per_rank) {
     // For NCCL: always use rank and num_ranks (the backend handles comm splitting)
     // For NVSHMEM: use rdma_rank and num_rdma_ranks in HT mode, rank and num_ranks in LL mode
     int rank, num_ranks;

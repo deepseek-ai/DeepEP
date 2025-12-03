@@ -18,14 +18,14 @@
 
 // NCCL error checking macro - pattern from official NCCL examples
 // See: nccl/examples/common/include/nccl_utils.h
-#define NCCLCHECK(cmd) do {                                      \
-  ncclResult_t res = cmd;                                        \
-  if (res != ncclSuccess) {                                      \
-    fprintf(stderr, "DeepEP NCCL error %s:%d '%s'\n",            \
-        __FILE__,__LINE__,ncclGetErrorString(res));              \
-    throw std::runtime_error("NCCL operation failed");           \
-  }                                                              \
-} while(0)
+#define NCCLCHECK(cmd)                                                                                      \
+    do {                                                                                                    \
+        ncclResult_t res = cmd;                                                                             \
+        if (res != ncclSuccess) {                                                                           \
+            fprintf(stderr, "DeepEP NCCL error %s:%d '%s'\n", __FILE__, __LINE__, ncclGetErrorString(res)); \
+            throw std::runtime_error("NCCL operation failed");                                              \
+        }                                                                                                   \
+    } while (0)
 
 // Use NCCL's NCCLCHECK for functions that can return errors
 
@@ -347,8 +347,7 @@ void* NCCLGINBackend::alloc(size_t size, size_t alignment) {
 
         cudaError_t e2 = cudaMemcpy(d_nccl_dev_wins_, wins_nccl.data(), wins_nccl.size() * sizeof(ncclWindow_t), cudaMemcpyHostToDevice);
         if (e2 != cudaSuccess) {
-            printf(
-                "[NCCL Backend - Memory Alloc] Rank %d: NCCL window copy FAILED: %s (error %d)\n", rank_, cudaGetErrorString(e2), e2);
+            printf("[NCCL Backend - Memory Alloc] Rank %d: NCCL window copy FAILED: %s (error %d)\n", rank_, cudaGetErrorString(e2), e2);
             fflush(stdout);
             for (int c = 0; c < num_comms_; ++c) {
                 ncclCommWindowDeregister(nccl_comms_[c], dev_wins_multi_nccl_[c][0]);
@@ -381,8 +380,7 @@ void NCCLGINBackend::free(void* ptr) {
         for (int c = 0; c < num_comms_; ++c) {
             ncclResult_t r = ncclCommWindowDeregister(nccl_comms_[c], dev_wins_multi_nccl_[c][0]);
             if (r != ncclSuccess) {
-                fprintf(
-                    stderr, "[NCCL Backend] Warning: Failed to deregister NCCL comm windows (comm %d): %s\n", c, ncclGetErrorString(r));
+                fprintf(stderr, "[NCCL Backend] Warning: Failed to deregister NCCL comm windows (comm %d): %s\n", c, ncclGetErrorString(r));
             }
         }
         dev_wins_multi_nccl_.clear();

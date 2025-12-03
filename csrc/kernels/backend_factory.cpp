@@ -53,7 +53,7 @@ std::string backend_type_to_string(BackendType type) {
         case BackendType::AUTO:
             return "auto";
         default:
-            return "unknown";
+            return "nccl";
     }
 }
 

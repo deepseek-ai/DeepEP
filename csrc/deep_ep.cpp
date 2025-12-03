@@ -374,7 +374,6 @@ void Buffer::sync(const std::vector<int>& device_ids,
         auto root_unique_id_str = root_unique_id_opt->cast<std::string>();
         std::memcpy(root_unique_id.data(), root_unique_id_str.c_str(), root_unique_id_opt->size());
 
-
         /*
         int init_rank, init_num_ranks;
         const char* backend_env = std::getenv("DEEP_EP_BACKEND");
@@ -390,7 +389,7 @@ void Buffer::sync(const std::vector<int>& device_ids,
             init_num_ranks = low_latency_mode ? num_ranks : num_rdma_ranks;
         } */
 
-        int result_rank = internode::init(root_unique_id, rank, num_ranks, num_rdma_ranks, low_latency_mode, qps_per_rank);
+        int result_rank = internode::init(root_unique_id, rank, rdma_rank, num_ranks, num_rdma_ranks, low_latency_mode, qps_per_rank);
         EP_HOST_ASSERT(result_rank == rank);
         internode::barrier();
 

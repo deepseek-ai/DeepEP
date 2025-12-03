@@ -1,11 +1,11 @@
+#include <cooperative_groups.h>
+
+#include <cuda/atomic>
 #include <functional>
 #include <optional>
 
 #include "buffer.cuh"
 #include "configs.cuh"
-
-#include <cooperative_groups.h>
-#include <cuda/atomic>
 #include "exception.cuh"
 #include "launch.cuh"
 #include "utils.cuh"
@@ -103,9 +103,9 @@ __forceinline__ __device__ int translate_dst_rdma_rank(const int dst_rdma_rank, 
 template <bool kLowLatencyMode>
 __forceinline__ __device__ void sync_with_same_gpu_idx(
 #ifdef ENABLE_NCCL
-                                                       ncclDevComm* dcomms) {
+    ncclDevComm* dcomms) {
 #elif defined(ENABLE_NVSHMEM)
-                                                       const nvshmem_team_t& rdma_team) {
+    const nvshmem_team_t& rdma_team) {
 #endif
     // Barrier before cleaning (in case of unfinished chunked EP)
 #ifdef ENABLE_NCCL
@@ -157,15 +157,17 @@ __global__ void notify_dispatch(const int* num_tokens_per_rank,
                                 int** barrier_signal_ptrs,
                                 int rank
 #ifdef ENABLE_NCCL
-                                ,int num_gin_comms,
+                                ,
+                                int num_gin_comms,
                                 void* gin_base_ptr,
                                 ncclDevComm* dcomms,
                                 const ncclWindow_t* nccl_windows,
                                 unsigned signals_base
 #elif defined(ENABLE_NVSHMEM)
-                                ,const nvshmem_team_t rdma_team
+                                ,
+                                const nvshmem_team_t rdma_team
 #endif
-                                ) {
+) {
     auto sm_id = static_cast<int>(blockIdx.x);
     auto thread_id = static_cast<int>(threadIdx.x), warp_id = thread_id / 32, lane_id = get_lane_id();
     auto num_threads = static_cast<int>(blockDim.x), num_warps = num_threads / 32;
@@ -675,13 +677,14 @@ __global__ void __launch_bounds__(((kNumDispatchRDMASenderWarps + 1 + NUM_MAX_NV
              int rank,
              int num_ranks
 #ifdef ENABLE_NCCL
-             ,int num_gin_comms,
+             ,
+             int num_gin_comms,
              void* gin_base_ptr,
              ncclDevComm* dcomms,
              const ncclWindow_t* nccl_windows,
              unsigned signals_base
 #endif
-             ) {
+    ) {
     enum class WarpRole { kRDMASender, kRDMASenderCoordinator, kRDMAAndNVLForwarder, kForwarderCoordinator, kNVLReceivers };
 
     const auto num_sms = static_cast<int>(gridDim.x);
@@ -1811,14 +1814,16 @@ __global__ void cached_notify(const int rdma_clean_offset,
                               int num_ranks,
                               bool is_cached_dispatch
 #ifdef ENABLE_NCCL
-                              ,int num_gin_comms,
+                              ,
+                              int num_gin_comms,
                               void* gin_base_ptr,
                               ncclDevComm* dcomms,
                               unsigned signals_base
 #elif defined(ENABLE_NVSHMEM)
-                              ,const nvshmem_team_t rdma_team
+                              ,
+                              const nvshmem_team_t rdma_team
 #endif
-                              ) {
+) {
     auto sm_id = static_cast<int>(blockIdx.x);
     auto thread_id = static_cast<int>(threadIdx.x);
     auto num_threads = static_cast<int>(blockDim.x);
@@ -2321,13 +2326,14 @@ __global__ void __launch_bounds__((kNumForwarders + 1) * 32, 1) combine(int4* co
                                                                         int rank,
                                                                         int num_ranks
 #ifdef ENABLE_NCCL
-                                                                        ,int num_gin_comms,
+                                                                        ,
+                                                                        int num_gin_comms,
                                                                         void* gin_base_ptr,
                                                                         ncclDevComm* dcomms,
                                                                         const ncclWindow_t* nccl_windows,
                                                                         unsigned signals_base
 #endif
-                                                                        ) {
+) {
     enum class WarpRole { kNVLSender, kNVLAndRDMAForwarder, kRDMAReceiver, kCoordinator };
 
     const auto sm_id = static_cast<int>(blockIdx.x);
