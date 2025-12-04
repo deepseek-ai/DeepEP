@@ -536,36 +536,6 @@ __global__ __launch_bounds__(1024, 1) void dispatch(void* packed_recv_x,
             for (int i = lane_id; i < num_next_clean_int; i += 32)
                 next_clean[i] = 0;
 
-                // Clear signals for next dispatch
-                // Optimization: skip signal resets on single-node runs where P2P is guaranteed
-#ifdef ENABLE_NCCL
-            const int signals_per_buffer = num_experts;
-            const int total_resets = signals_per_buffer * num_gin_comms;
-
-            #pragma unroll
-            for (int idx = lane_id; idx < total_resets; idx += 32) {
-                const int signal_idx = idx / num_gin_comms;
-                const int comm_id = idx % num_gin_comms;
-
-                // Skip signal resets on single-node runs (P2P guaranteed, no signals needed)
-                bool skip = false;
-                if (!d_p2p_disabled && num_ranks <= NUM_GPUS_PER_NODE_LOW_LATENCY) {
-                    skip = true;
-                }
-
-                if (!skip) {
-                    // Reset signal for all contexts in this communicator
-                    #pragma unroll
-                    for (int ctx_id = 0; ctx_id < NCCL_GIN_NUM_CONTEXTS_PER_COMM; ++ctx_id) {
-                        ncclGin net(dcomms[comm_id], ctx_id);
-                        net.resetSignal(signals_base_next + signal_idx);
-                    }
-                }
-            }
-#elif defined(ENABLE_NVSHMEM)
-                // do nothing for NVSHMEM
-#endif
-
             // Notify before executing `int_p`
             __syncwarp();
             #pragma unroll
@@ -708,7 +678,7 @@ LOW_LATENCY_DISPATCH_RECV:
                     } while (cur_value < 1                                                       // data not arrived
                              && (wait_recv_cost = clock64() - start_time) <= NUM_TIMEOUT_CYCLES  // not timeout
                     );
-
+                    net.resetSignal(signals_base + local_expert_idx * num_ranks + src_rank);
                     num_recv_tokens = -(int)cur_value;
                 } else {
                     while ((num_recv_tokens = ld_acquire_sys_global((rdma_recv_count + local_expert_idx * num_ranks + src_rank))) ==
@@ -1199,36 +1169,6 @@ __global__ __launch_bounds__(1024, 1) void combine(void* combined_x,
         for (int i = lane_id; i < num_next_clean_int; i += 32)
             next_clean[i] = 0;
 
-#ifdef ENABLE_NCCL
-        // Clear signals for next combine
-        // Optimization: skip signal resets on single-node runs where P2P is guaranteed
-        const int signals_per_buffer = num_experts;
-        const int total_resets = signals_per_buffer * num_gin_comms;
-
-        #pragma unroll
-        for (int idx = lane_id; idx < total_resets; idx += 32) {
-            const int signal_idx = idx / num_gin_comms;
-            const int comm_id = idx % num_gin_comms;
-
-            // Skip signal resets on single-node runs (P2P guaranteed, no signals needed)
-            bool skip = false;
-            if (!d_p2p_disabled && num_ranks <= NUM_GPUS_PER_NODE_LOW_LATENCY) {
-                skip = true;
-            }
-
-            if (!skip) {
-                // Reset signal for all contexts in this communicator
-                #pragma unroll
-                for (int ctx_id = 0; ctx_id < NCCL_GIN_NUM_CONTEXTS_PER_COMM; ++ctx_id) {
-                    ncclGin net(dcomms[comm_id], ctx_id);
-                    net.resetSignal(signals_base_next + signal_idx);
-                }
-            }
-        }
-#elif defined(ENABLE_NVSHMEM)
-            // do nothing for NVSHMEM
-#endif
-
         // Notify before executing `int_p`
         __syncwarp();
         if (lane_id == 0)
@@ -1503,6 +1443,7 @@ LOW_LATENCY_COMBINE_RECV:
                     } while (cur_value < 1                                                       // signal not arrived
                              && (wait_recv_cost = clock64() - start_time) <= NUM_TIMEOUT_CYCLES  // not timeout
                     );
+                    net.resetSignal(signals_base + responsible_expert_idx);
 
                 } else {
                     while (ld_acquire_sys_global(rdma_recv_flag + responsible_expert_idx) == 0  // recv not ready
