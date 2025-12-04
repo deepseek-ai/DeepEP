@@ -1584,7 +1584,7 @@ void dispatch(void* recv_x,
     EP_HOST_ASSERT(num_gin_comms >= 1);
     EP_HOST_ASSERT(rdma_buffer_ptr == gin_base_ptr);
     EP_HOST_ASSERT(reinterpret_cast<uintptr_t>(rdma_buffer_ptr) >= reinterpret_cast<uintptr_t>(gin_base_ptr));
-    EP_HOST_ASSERT(num_channels <= NCCL_MAX_NUM_CHANNELS);
+    EP_HOST_ASSERT(num_channels <= DEEP_EP_NCCL_MAX_NUM_CHANNELS);
     EP_HOST_ASSERT(nccl_windows != nullptr);
 #endif
 
@@ -3020,7 +3020,7 @@ void combine(cudaDataType_t type,
     EP_HOST_ASSERT(num_gin_comms >= 1);
     EP_HOST_ASSERT(rdma_buffer_ptr == gin_base_ptr);
     EP_HOST_ASSERT(reinterpret_cast<uintptr_t>(rdma_buffer_ptr) >= reinterpret_cast<uintptr_t>(gin_base_ptr));
-    EP_HOST_ASSERT(num_channels <= NCCL_MAX_NUM_CHANNELS);
+    EP_HOST_ASSERT(num_channels <= DEEP_EP_NCCL_MAX_NUM_CHANNELS);
     EP_HOST_ASSERT(dcomms != nullptr);
     EP_HOST_ASSERT(nccl_windows != nullptr);
 #endif

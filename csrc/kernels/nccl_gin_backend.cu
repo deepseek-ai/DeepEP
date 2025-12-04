@@ -82,7 +82,7 @@ int NCCLGINBackend::init(const std::vector<uint8_t>& root_unique_id_val, int ran
         }
 
         // Total comms (add 1 if there's a remainder)
-        num_comms_ = (qps_per_rank / NCCL_GIN_NUM_CONTEXTS_PER_COMM) + ((qps_per_rank % NCCL_GIN_NUM_CONTEXTS_PER_COMM) > 0 ? 1 : 0);
+        num_comms_ = (qps_per_rank / DEEP_EP_NCCL_GIN_CTXS_PER_COMM) + ((qps_per_rank % DEEP_EP_NCCL_GIN_CTXS_PER_COMM) > 0 ? 1 : 0);
 
         // Verify we received the right number of unique IDs
         // We always receive NUM_MAX_NVL_PEERS * qps_per_rank IDs from runtime.cu
@@ -143,7 +143,7 @@ int NCCLGINBackend::init(const std::vector<uint8_t>& root_unique_id_val, int ran
             printf("[NCCL Backend] Rank %d successfully initialized %d communicator(s)\n", comm_rank, num_comms_);
 
         // Verify we have communicators initialized
-        // Note: We assume NCCL GIN provides NCCL_GIN_NUM_CONTEXTS_PER_COMM (4) contexts per communicator
+        // Note: We assume NCCL GIN provides DEEP_EP_NCCL_GIN_CTXS_PER_COMM (4) contexts per communicator
         // This is a build-time configuration in NCCL GIN
         EP_HOST_ASSERT(num_comms_ > 0);
 
@@ -162,8 +162,8 @@ int NCCLGINBackend::init(const std::vector<uint8_t>& root_unique_id_val, int ran
         // The assumption is that kDecoupled is false when initializing SymBuffers in internode.cu
         // IMPORTANT: Use global num_ranks, not comm_nranks, because kernels use global topology
         const auto num_rdma_ranks = std::max(num_ranks / NUM_MAX_NVL_PEERS, 1);
-        int rdma_channel_head_signals = num_rdma_ranks * NCCL_MAX_NUM_CHANNELS;
-        int rdma_channel_tail_signals = num_rdma_ranks * NCCL_MAX_NUM_CHANNELS;
+        int rdma_channel_head_signals = num_rdma_ranks * DEEP_EP_NCCL_MAX_NUM_CHANNELS;
+        int rdma_channel_tail_signals = num_rdma_ranks * DEEP_EP_NCCL_MAX_NUM_CHANNELS;
         // Adding signals for high throughput and low latency kernels
         num_total_signals_ = rdma_channel_head_signals + rdma_channel_tail_signals + num_dispatch_signals_;
 

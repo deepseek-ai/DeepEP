@@ -66,7 +66,7 @@ __device__ __forceinline__ uint64_t nccl_get_p2p_ptr(const uint64_t& dst_ptr,
         return 0;  // Different nodes, must use RDMA
 
     auto const p2p_ptr =
-        reinterpret_cast<uint64_t>(ncclGetPeerPointer(nccl_windows[expert_idx / NCCL_GIN_NUM_CONTEXTS_PER_COMM], offset, dst_rank));
+        reinterpret_cast<uint64_t>(ncclGetPeerPointer(nccl_windows[expert_idx / DEEP_EP_NCCL_GIN_CTXS_PER_COMM], offset, dst_rank));
 
     return p2p_ptr ? p2p_ptr : 0;
 }
@@ -468,8 +468,8 @@ __global__ __launch_bounds__(1024, 1) void dispatch(void* packed_recv_x,
                     if (dst_p2p_ptr == 0) {
                         if (lane_id == 0) {
                             size_t expected_src_offset = rdma_x_offset + token_idx * num_bytes_per_msg;
-                            auto comm_id = dst_expert_local_idx / NCCL_GIN_NUM_CONTEXTS_PER_COMM;
-                            auto ctx_id = dst_expert_local_idx % NCCL_GIN_NUM_CONTEXTS_PER_COMM;
+                            auto comm_id = dst_expert_local_idx / DEEP_EP_NCCL_GIN_CTXS_PER_COMM;
+                            auto ctx_id = dst_expert_local_idx % DEEP_EP_NCCL_GIN_CTXS_PER_COMM;
                             ncclGin net(dcomms[comm_id], ctx_id);
                             ncclTeam world = ncclTeamWorld(dcomms[comm_id]);
                             auto nccl_window = nccl_windows[comm_id];
@@ -581,8 +581,8 @@ __global__ __launch_bounds__(1024, 1) void dispatch(void* packed_recv_x,
             if (dst_p2p_ptr == 0) {  // if (rank != dst_rank) {
                 // Each thread writes its value to its slot in shared memory
 
-                auto comm_id = dst_expert_local_idx / NCCL_GIN_NUM_CONTEXTS_PER_COMM;
-                auto ctx_id = dst_expert_local_idx % NCCL_GIN_NUM_CONTEXTS_PER_COMM;
+                auto comm_id = dst_expert_local_idx / DEEP_EP_NCCL_GIN_CTXS_PER_COMM;
+                auto ctx_id = dst_expert_local_idx % DEEP_EP_NCCL_GIN_CTXS_PER_COMM;
                 auto signal_id = signals_base + dst_expert_local_idx * num_ranks + rank;
                 ncclGin net(dcomms[comm_id], ctx_id);
                 ncclTeam world = ncclTeamWorld(dcomms[comm_id]);
@@ -663,8 +663,8 @@ LOW_LATENCY_DISPATCH_RECV:
                 auto src_p2p_ptr = nccl_get_p2p_ptr(0x01, src_offset, rank, src_rank, local_expert_idx, nccl_windows);
                 // if (rank != src_rank) {
                 if (src_p2p_ptr == 0) {
-                    auto comm_id = local_expert_idx / NCCL_GIN_NUM_CONTEXTS_PER_COMM;
-                    auto ctx_id = local_expert_idx % NCCL_GIN_NUM_CONTEXTS_PER_COMM;
+                    auto comm_id = local_expert_idx / DEEP_EP_NCCL_GIN_CTXS_PER_COMM;
+                    auto ctx_id = local_expert_idx % DEEP_EP_NCCL_GIN_CTXS_PER_COMM;
                     ncclGin net(dcomms[comm_id], ctx_id);
                     uint64_t cur_value;
                     do {
@@ -1322,8 +1322,8 @@ __global__ __launch_bounds__(1024, 1) void combine(void* combined_x,
                         //    EP_DEVICE_ASSERT(buf_offset == expected_buf_offset);
                         //}
 
-                        auto comm_id = local_expert_idx / NCCL_GIN_NUM_CONTEXTS_PER_COMM;
-                        auto ctx_id = local_expert_idx % NCCL_GIN_NUM_CONTEXTS_PER_COMM;
+                        auto comm_id = local_expert_idx / DEEP_EP_NCCL_GIN_CTXS_PER_COMM;
+                        auto ctx_id = local_expert_idx % DEEP_EP_NCCL_GIN_CTXS_PER_COMM;
                         //EP_DEVICE_ASSERT(comm_id >= 0 && comm_id < num_gin_comms);
 
                         ncclGin net(dcomms[comm_id], ctx_id);
@@ -1374,8 +1374,8 @@ __global__ __launch_bounds__(1024, 1) void combine(void* combined_x,
                     auto signal_id = signals_base + global_expert_idx;
 
                     auto local_expert_idx_flag = responsible_expert_idx % num_local_experts;
-                    auto comm_id = local_expert_idx_flag / NCCL_GIN_NUM_CONTEXTS_PER_COMM;
-                    auto ctx_id = local_expert_idx_flag % NCCL_GIN_NUM_CONTEXTS_PER_COMM;
+                    auto comm_id = local_expert_idx_flag / DEEP_EP_NCCL_GIN_CTXS_PER_COMM;
+                    auto ctx_id = local_expert_idx_flag % DEEP_EP_NCCL_GIN_CTXS_PER_COMM;
                     //EP_DEVICE_ASSERT(comm_id >= 0 && comm_id < num_gin_comms);
 
                     ncclGin net(dcomms[comm_id], ctx_id);
@@ -1433,8 +1433,8 @@ LOW_LATENCY_COMBINE_RECV:
                 if (src_p2p_ptr == 0) {
                     uint64_t cur_value;
                     auto local_expert_idx_wait = responsible_expert_idx % num_local_experts;
-                    auto comm_id_wait = local_expert_idx_wait / NCCL_GIN_NUM_CONTEXTS_PER_COMM;
-                    auto ctx_id_wait = local_expert_idx_wait % NCCL_GIN_NUM_CONTEXTS_PER_COMM;
+                    auto comm_id_wait = local_expert_idx_wait / DEEP_EP_NCCL_GIN_CTXS_PER_COMM;
+                    auto ctx_id_wait = local_expert_idx_wait % DEEP_EP_NCCL_GIN_CTXS_PER_COMM;
                     //EP_DEVICE_ASSERT(comm_id_wait >= 0 && comm_id_wait < num_gin_comms);
                     ncclGin net(dcomms[comm_id_wait], ctx_id_wait);
                     do {

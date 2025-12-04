@@ -15,8 +15,8 @@
 #include "communication_backend.h"
 
 #define DEEP_EP_GIN_MAX_CONTEXTS 32
-#define NCCL_GIN_NUM_CONTEXTS_PER_COMM 4
-#define NCCL_MAX_NUM_CHANNELS 32  // Max number of local experts per GPU
+#define DEEP_EP_NCCL_GIN_CTXS_PER_COMM 4
+#define DEEP_EP_NCCL_MAX_NUM_CHANNELS 32  // Max number of local experts per GPU
 
 #ifdef ENABLE_NCCL
 
