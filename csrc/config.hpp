@@ -195,19 +195,6 @@ struct LowLatencyLayout {
                           signaling_buffer_bytes_aligned * i,
                           advance(rdma_buffer, signaling_buffer_bytes_aligned * 2 + send_buffer_bytes * i),
                           num_bytes_per_combine_msg};
-            /*
-            if (rdma_buffer != nullptr) {
-                printf("LL Buffer [%d]: base_ptr=%p\n", i, rdma_buffer);
-                printf("  dispatch_send: ptr=%p, offset=%zu\n",
-                       buffers[i].dispatch_rdma_send_buffer,
-                       buffers[i].dispatch_rdma_send_buffer_offset);
-                printf("  dispatch_recv_data: ptr=%p, offset=%zu\n",
-                       buffers[i].dispatch_rdma_recv_data_buffer,
-                       buffers[i].dispatch_rdma_recv_data_buffer_offset);
-                printf("  dispatch_recv_count: ptr=%p, offset=%zu\n",
-                       buffers[i].dispatch_rdma_recv_count_buffer,
-                       buffers[i].dispatch_rdma_recv_count_buffer_offset);
-            }*/
         }
     }
 };
