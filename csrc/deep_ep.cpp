@@ -9,6 +9,7 @@
 #include <chrono>
 #include <cstdlib>
 #include <memory>
+#include <stdexcept>
 
 #include "kernels/api.cuh"
 #include "kernels/configs.cuh"
