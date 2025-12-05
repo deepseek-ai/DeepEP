@@ -332,6 +332,16 @@ This code repository is released under [the MIT License](LICENSE), except for co
   - This PR is authored by **Tencent Network Platform Department**
 - [Eager](https://github.com/deepseek-ai/DeepEP/pull/437)
   - Using a low-latency protocol removes the extra RTT latency introduced by RDMA atomic OPs
+- [Hybrid-EP](https://github.com/deepseek-ai/DeepEP/tree/hybrid-ep)
+  - A new backend implementation using TMA instructions for minimal SM usage and larger NVLink domain support
+  - Fine-grained communication-computation overlap for single-batch scenarios
+  - PCIe kernel support for non-NVLink environments
+  - NVFP4 data type support
+- [AntGroup-Opt](https://github.com/deepseek-ai/DeepEP/tree/antgroup-opt)
+  - This optimization series is authored by **AntGroup Network Platform Department**
+  - [Normal-SMFree](https://github.com/deepseek-ai/DeepEP/pull/347) Eliminating SM from RDMA path by decoupling comm-kernel execution from NIC token transfer, freeing SMs for compute
+  - [LL-SBO](https://github.com/deepseek-ai/DeepEP/pull/483) Overlapping Down GEMM computation with Combine Send communication via signaling mechanism to reduce end-to-end latency
+  - [LL-Layered](https://github.com/deepseek-ai/DeepEP/pull/500) Optimizing cross-node LL operator communication using rail-optimized forwarding and data merging to reduce latency
 
 ## Community Forks
 
