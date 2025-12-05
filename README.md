@@ -337,6 +337,11 @@ This code repository is released under [the MIT License](LICENSE), except for co
   - Fine-grained communication-computation overlap for single-batch scenarios
   - PCIe kernel support for non-NVLink environments
   - NVFP4 data type support
+- [AntGroup-Opt](https://github.com/deepseek-ai/DeepEP/tree/antgroup-opt)
+  - This optimization series is authored by **AntGroup Network Platform Department**
+  - [Normal-SMFree](https://github.com/deepseek-ai/DeepEP/pull/347) Eliminating SM from RDMA path by decoupling comm-kernel execution from NIC token transfer, freeing SMs for compute
+  - [LL-SBO](https://github.com/deepseek-ai/DeepEP/pull/483) Overlapping Down GEMM computation with Combine Send communication via signaling mechanism to reduce end-to-end latency
+  - [LL-Layered](https://github.com/deepseek-ai/DeepEP/pull/500) Optimizing cross-node LL operator communication using rail-optimized forwarding and data merging to reduce latency
 
 ## Community Forks
 
