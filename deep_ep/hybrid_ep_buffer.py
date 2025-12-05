@@ -4,7 +4,7 @@ import torch
 import os
 import shutil
 import hybrid_ep_cpp
-
+import warnings
 
 def indices_to_map(
     topk_idx: torch.Tensor,
@@ -418,10 +418,19 @@ class HybridEPBuffer:
         # memory is ready for using in CPU. The CPU value of num_permuted_tokens required for this mode
         # Otherwise, the stream synchronization will be used to wait for the data in pinned memory.
         non_blocking: bool = False,
+        # Deprecated parameters
+        num_dispatched_tokens: int = None,
+        use_host_meta: bool = None,
     ):
         """
         Dispatch the data to the experts with permute.
         """
+        if num_dispatched_tokens is not None:
+            warnings.warn("The num_dispatched_tokens is deprecated, it will be removed in the future.")
+        if use_host_meta is not None:
+            warnings.warn("The use_host_meta is deprecated, it will be removed in the future.")
+            non_blocking = not use_host_meta
+
         with torch.cuda.nvtx.range("hybrid-ep dispatch with permute phase"):
             num_of_tokens_per_rank, hidden_dim = hidden.shape
             if routing_map is not None:
@@ -538,11 +547,16 @@ class HybridEPBuffer:
         probs: torch.Tensor = None,
         handle: tuple = None,
         pad_multiple: int = None,
+        # Deprecated parameters
+        num_dispatched_tokens: int = None,
     ):
         """
         Combine the data from the experts with unpermute.
         Do not require the routing_map, but the handle is necessary.
         """
+        if num_dispatched_tokens is not None:
+            warnings.warn("The num_dispatched_tokens is deprecated, it will be removed in the future.")
+
         with torch.cuda.nvtx.range("hybrid-ep combine with unpermute phase"):
             assert self.config is not None, "Please initialize the config first."
             assert handle is not None, "The handle is necessary in the combine pass."
