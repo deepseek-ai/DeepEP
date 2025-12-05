@@ -60,12 +60,12 @@ private:
     bool low_latency_mode = false;
 
     // NVLink Buffer
-    int64_t num_nvl_bytes;
+    uint64_t num_nvl_bytes;
     void* buffer_ptrs[NUM_MAX_NVL_PEERS] = {nullptr};
     void** buffer_ptrs_gpu = nullptr;
 
     // NVSHMEM Buffer
-    int64_t num_rdma_bytes;
+    uint64_t num_rdma_bytes;
     void* rdma_buffer_ptr = nullptr;
 
     // Shrink mode buffer
@@ -116,8 +116,8 @@ private:
 public:
     Buffer(int rank,
            int num_ranks,
-           int64_t num_nvl_bytes,
-           int64_t num_rdma_bytes,
+           uint64_t num_nvl_bytes,
+           uint64_t num_rdma_bytes,
            bool low_latency_mode,
            bool explicitly_destroy,
            bool enable_shrink,
@@ -157,7 +157,7 @@ public:
         int num_experts,
         std::optional<EventHandle>& previous_event,
         bool async,
-        bool allocate_on_comm_stream);
+        bool allocate_on_comm_stream, bool return_recv_hook);
 
     std::tuple<torch::Tensor,
                std::optional<torch::Tensor>,
@@ -215,7 +215,7 @@ public:
                std::optional<torch::Tensor>,
                std::optional<torch::Tensor>,
                std::optional<torch::Tensor>,
-               std::optional<EventHandle>>
+               int, std::optional<EventHandle>, std::optional<std::function<void()>>>
     internode_dispatch(const torch::Tensor& x,
                        const std::optional<torch::Tensor>& x_scales,
                        const std::optional<torch::Tensor>& topk_idx,
@@ -235,9 +235,12 @@ public:
                        const Config& config,
                        std::optional<EventHandle>& previous_event,
                        bool async,
-                       bool allocate_on_comm_stream);
+                       bool allocate_on_comm_stream,
+                       bool decoupled_mode,
+                       bool return_recv_hook,
+                       int num_max_dispatch_tokens_per_rank);
 
-    std::tuple<torch::Tensor, std::optional<torch::Tensor>, std::optional<EventHandle>> internode_combine(
+    std::tuple<torch::Tensor, std::optional<torch::Tensor>, std::optional<EventHandle>, std::optional<std::function<void()>>> internode_combine(
         const torch::Tensor& x,
         const std::optional<torch::Tensor>& topk_weights,
         const std::optional<torch::Tensor>& bias_0,
@@ -252,7 +255,10 @@ public:
         const Config& config,
         std::optional<EventHandle>& previous_event,
         bool async,
-        bool allocate_on_comm_stream);
+        bool allocate_on_comm_stream,
+        bool decoupled_mode,
+        bool return_recv_hook,
+        int num_max_dispatch_tokens_per_rank);
 
     void clean_low_latency_buffer(int num_max_dispatch_tokens_per_rank, int hidden, int num_experts);
 
