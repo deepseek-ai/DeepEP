@@ -47,26 +47,32 @@ __device__ __forceinline__ uint64_t nccl_get_p2p_ptr(const uint64_t& dst_ptr,
                                                      const int& rank,
                                                      const int& dst_rank,
                                                      const int& expert_idx,
-                                                     const ncclWindow_t* nccl_windows) {
+                                                     const ncclWindow_t* nccl_windows,
+                                                     ncclDevComm* dcomms) {
     // Local rank, no need for peer mapping
     if (rank == dst_rank)
         return dst_ptr;
-    // else
-    //     return 0;
 
     // If P2P is globally disabled, always use RDMA path
     if (d_p2p_disabled)
         return 0;
 
-    // P2P/NVLink only works between ranks on the same node
-    // Calculate if ranks are on the same node based on actual GPUs per node for low-latency mode
-    int rank_node = rank / NUM_GPUS_PER_NODE_LOW_LATENCY;
-    int dst_rank_node = dst_rank / NUM_GPUS_PER_NODE_LOW_LATENCY;
-    if (rank_node != dst_rank_node)
-        return 0;  // Different nodes, must use RDMA
+    // P2P/NVLink only works between ranks on the same node (LSA team)
+    // Use NCCL team APIs to check if dst_rank is in the same LSA team
+    auto comm_id = expert_idx / DEEP_EP_NCCL_GIN_CTXS_PER_COMM;
+    ncclTeam lsa = ncclTeamLsa(dcomms[comm_id]);
+    ncclTeam world = ncclTeamWorld(dcomms[comm_id]);
+    if (!ncclTeamRankIsMember(lsa, world, dst_rank))
+        return 0;  // Different nodes (not in same LSA team), must use RDMA
+
+    // Old implementation using compile-time constant (faster but assumes fixed 8 GPUs/node):
+    // int rank_node = rank / NUM_GPUS_PER_NODE_LOW_LATENCY;
+    // int dst_rank_node = dst_rank / NUM_GPUS_PER_NODE_LOW_LATENCY;
+    // if (rank_node != dst_rank_node)
+    //     return 0;  // Different nodes, must use RDMA
 
     auto const p2p_ptr =
-        reinterpret_cast<uint64_t>(ncclGetPeerPointer(nccl_windows[expert_idx / DEEP_EP_NCCL_GIN_CTXS_PER_COMM], offset, dst_rank));
+        reinterpret_cast<uint64_t>(ncclGetPeerPointer(nccl_windows[comm_id], offset, dst_rank));
 
     return p2p_ptr ? p2p_ptr : 0;
 }
@@ -462,7 +468,7 @@ __global__ __launch_bounds__(1024, 1) void dispatch(void* packed_recv_x,
                     dst_expert_local_idx * num_ranks * num_max_dispatch_tokens_per_rank * num_bytes_per_msg +
                     rank * num_max_dispatch_tokens_per_rank * num_bytes_per_msg + slot_idx * num_bytes_per_msg;
                 const auto dst_p2p_ptr =
-                    nccl_get_p2p_ptr(dst_ptr, expected_dst_offset, rank, dst_rank, dst_expert_local_idx, nccl_windows);
+                    nccl_get_p2p_ptr(dst_ptr, expected_dst_offset, rank, dst_rank, dst_expert_local_idx, nccl_windows, dcomms);
 
                 if (not is_rank_masked<true>(mask_buffer_ptr, dst_rank)) {
                     if (dst_p2p_ptr == 0) {
@@ -575,7 +581,7 @@ __global__ __launch_bounds__(1024, 1) void dispatch(void* packed_recv_x,
 
 #ifdef ENABLE_NCCL
         size_t dst_offset = rdma_recv_count_offset + (dst_expert_local_idx * num_ranks + rank) * sizeof(int);
-        const auto dst_p2p_ptr = nccl_get_p2p_ptr(dst_ptr, dst_offset, rank, dst_rank, dst_expert_local_idx, nccl_windows);
+        const auto dst_p2p_ptr = nccl_get_p2p_ptr(dst_ptr, dst_offset, rank, dst_rank, dst_expert_local_idx, nccl_windows, dcomms);
 
         if (not is_rank_masked(mask_buffer_ptr, dst_rank)) {
             if (dst_p2p_ptr == 0) {  // if (rank != dst_rank) {
@@ -660,7 +666,7 @@ LOW_LATENCY_DISPATCH_RECV:
 #ifdef ENABLE_NCCL
                 // int sig_idx_wait2 = local_expert_idx * num_ranks + src_rank;
                 size_t src_offset = rdma_recv_count_offset + (local_expert_idx * num_ranks + src_rank) * sizeof(int);
-                auto src_p2p_ptr = nccl_get_p2p_ptr(0x01, src_offset, rank, src_rank, local_expert_idx, nccl_windows);
+                auto src_p2p_ptr = nccl_get_p2p_ptr(0x01, src_offset, rank, src_rank, local_expert_idx, nccl_windows, dcomms);
                 // if (rank != src_rank) {
                 if (src_p2p_ptr == 0) {
                     auto comm_id = local_expert_idx / DEEP_EP_NCCL_GIN_CTXS_PER_COMM;
@@ -1237,7 +1243,7 @@ __global__ __launch_bounds__(1024, 1) void combine(void* combined_x,
                 const auto expected_dst_offset =
                     rdma_recv_x_offset + (global_expert_idx * num_max_dispatch_tokens_per_rank + src_idx) * num_bytes_per_slot;
                 const auto dst_p2p_ptr =
-                    nccl_get_p2p_ptr(dst_ptr, expected_dst_offset, rank, dst_rank, local_expert_idx, nccl_windows);
+                    nccl_get_p2p_ptr(dst_ptr, expected_dst_offset, rank, dst_rank, local_expert_idx, nccl_windows, dcomms);
 #elif defined(ENABLE_NVSHMEM)
                 const auto dst_p2p_ptr = nvshmemi_get_p2p_ptr(dst_ptr, rank, dst_rank);
 #endif
@@ -1362,7 +1368,7 @@ __global__ __launch_bounds__(1024, 1) void combine(void* combined_x,
             size_t dst_offset = rdma_recv_flag_offset + global_expert_idx * sizeof(int);
 
             auto dst_p2p_ptr = nccl_get_p2p_ptr(
-                dst_ptr, dst_offset, rank, dst_rank, (responsible_expert_idx % num_local_experts), nccl_windows);
+                dst_ptr, dst_offset, rank, dst_rank, (responsible_expert_idx % num_local_experts), nccl_windows, dcomms);
 #elif defined(ENABLE_NVSHMEM)
             auto dst_p2p_ptr = nvshmemi_get_p2p_ptr(dst_ptr, rank, dst_rank);
 #endif
@@ -1428,7 +1434,7 @@ LOW_LATENCY_COMBINE_RECV:
 #ifdef ENABLE_NCCL
             size_t src_offset = rdma_recv_flag_offset + responsible_expert_idx * sizeof(int);
             auto src_p2p_ptr = nccl_get_p2p_ptr(
-                0x01, src_offset, rank, src_rank, (responsible_expert_idx % num_local_experts), nccl_windows);
+                0x01, src_offset, rank, src_rank, (responsible_expert_idx % num_local_experts), nccl_windows, dcomms);
             if (not is_rank_masked(mask_buffer_ptr, src_rank)) {
                 if (src_p2p_ptr == 0) {
                     uint64_t cur_value;
