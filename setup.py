@@ -31,6 +31,8 @@ if __name__ == '__main__':
             disable_nvshmem = True
     else:
         disable_nvshmem = False
+        # Get the actual versioned library name when NVSHMEM_DIR is provided
+        nvshmem_host_lib = get_nvshmem_host_lib_name(nvshmem_dir)
 
     if not disable_nvshmem:
         assert os.path.exists(nvshmem_dir), f'The specified NVSHMEM directory does not exist: {nvshmem_dir}'
