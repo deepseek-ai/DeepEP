@@ -10,7 +10,8 @@ Executor::metadata_preprocess_core(
     HybridEpConfigInstance config, 
     hybrid_ep::tmp_state_t *preprocessing_tmp,
     torch::Tensor global_routing_map,
-    int num_of_tokens_per_rank
+    int num_of_tokens_per_rank,
+    bool non_blocking
 ) {
   nvtxRangePushA("metadata_preprocess_core in hybrid-ep");
   // padding for the routing map
@@ -30,9 +31,14 @@ Executor::metadata_preprocess_core(
   auto attn_to_rdma_map =
       torch::empty({num_of_tokens_per_rank, config.num_of_nodes - 1},
                    torch::dtype(torch::kBool).device(torch::kCUDA));
-  // Put on the pinned memory
-  auto num_of_tokens_for_experts =
-      torch::empty({1}, torch::dtype(torch::kInt32).pinned_memory(true));
+  torch::Tensor num_of_tokens_for_experts;
+  if (non_blocking) {
+    num_of_tokens_for_experts =
+        torch::empty({1}, torch::dtype(torch::kInt32).device(torch::kCUDA));
+  } else {
+    num_of_tokens_for_experts =
+        torch::empty({1}, torch::dtype(torch::kInt32).pinned_memory(true));
+  }
   auto local_expert_routing_map = torch::empty(
       {num_of_tokens_per_rank * config.num_of_ranks_per_node * config.num_of_nodes, config.num_of_experts_per_rank},
       torch::dtype(torch::kBool).device(torch::kCUDA));
@@ -49,7 +55,8 @@ Executor::metadata_preprocess_core(
   return std::make_tuple(sparse_to_dense_map, rdma_to_attn_map, attn_to_rdma_map, num_of_tokens_for_experts, local_expert_routing_map);
 }
 
-std::tuple<torch::Tensor, torch::Tensor> Executor::dispatch_preprocess(HybridEpConfigInstance config, DispatchBuffers& dispatch_buffers, DispatchArgs& args) {
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> 
+Executor::dispatch_preprocess(HybridEpConfigInstance config, DispatchBuffers& dispatch_buffers, DispatchArgs& args) {
     nvtxRangePushA("dispatch_preprocess in hybrid-ep");
     if(config.num_of_nodes > 1) {
 #ifdef HYBRID_EP_BUILD_MULTINODE_ENABLE
@@ -73,6 +80,7 @@ std::tuple<torch::Tensor, torch::Tensor> Executor::dispatch_preprocess(HybridEpC
 
     torch::Tensor row_id_map;
     torch::Tensor tokens_per_expert;
+    torch::Tensor overflow_flag;
 
     if(args.enable_permute) {
         if(args.row_id_map.has_value()){
@@ -80,13 +88,15 @@ std::tuple<torch::Tensor, torch::Tensor> Executor::dispatch_preprocess(HybridEpC
             row_id_map = args.row_id_map.value();
         } else {
             assert(args.local_expert_routing_map.has_value());
-            std::tie(row_id_map, tokens_per_expert) = permute_processing(
+            std::tie(row_id_map, tokens_per_expert, overflow_flag) = permute_processing(
                 args.local_expert_routing_map.value().data_ptr<bool>(), 
                 args.num_dispatched_tokens_tensor.value(),
                 args.max_num_dispatched_tokens, 
                 config.num_of_experts_per_rank, 
                 args.pad_multiple, 
                 config.num_of_blocks_preprocessing_api,
+                args.num_permuted_tokens,
+                args.non_blocking,
                 args.stream
             );
             args.row_id_map = row_id_map;
@@ -107,7 +117,7 @@ std::tuple<torch::Tensor, torch::Tensor> Executor::dispatch_preprocess(HybridEpC
     }
     nvtxRangePop();  // End of dispatch_preprocess nvtx range
 
-    return std::make_tuple(row_id_map, tokens_per_expert);
+    return std::make_tuple(row_id_map, tokens_per_expert, overflow_flag);
 }
 
 template void Executor::dispatch_core<uint8_t>(HybridEpConfigInstance config, DispatchBuffers& dispatch_buffers, DispatchArgs& args);

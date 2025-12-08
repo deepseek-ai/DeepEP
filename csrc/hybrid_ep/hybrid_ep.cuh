@@ -28,7 +28,7 @@ public:
 
   std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor,
              torch::Tensor>
-  metadata_preprocessing(HybridEpConfigInstance config, torch::Tensor global_routing_map, int64_t num_of_tokens_per_rank);
+  metadata_preprocessing(HybridEpConfigInstance config, torch::Tensor global_routing_map, int64_t num_of_tokens_per_rank, bool non_blocking);
 
   std::tuple<torch::Tensor, c10::optional<torch::Tensor>, c10::optional<torch::Tensor>>
   dispatch(HybridEpConfigInstance config, 
@@ -46,7 +46,7 @@ public:
           torch::Tensor attn_to_rdma_map, int64_t num_of_tokens_per_rank,
           bool with_probs);
   
-  std::tuple<torch::Tensor, c10::optional<torch::Tensor>, c10::optional<torch::Tensor>, torch::Tensor, torch::Tensor>
+  std::tuple<torch::Tensor, c10::optional<torch::Tensor>, c10::optional<torch::Tensor>, torch::Tensor, torch::Tensor, torch::Tensor>
   dispatch_with_permute(
             HybridEpConfigInstance config, 
             torch::Tensor hidden, c10::optional<torch::Tensor> probs,

@@ -68,17 +68,21 @@ struct UnpermuteArgs {
   * @param max_num_dispatched_tokens[in]
   * @param num_of_local_experts[in]
   * @param pad_multiple[in]
+  * @param non_blocking[in]
   * @param stream[in]
   * @return row_id_map[out] shape: [num_dispatched_tokens, num_of_local_experts],
   * type: int
   */
- std::tuple<torch::Tensor, torch::Tensor> permute_processing(
+ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> 
+ permute_processing(
      bool* routing_map,
      torch::Tensor num_dispatched_token_tensor,
      int max_num_dispatched_tokens,
      int num_of_local_experts,
      int pad_multiple,
      int num_of_blocks,
+     int num_permuted_tokens,
+     bool non_blocking,
      cudaStream_t stream);
  
  /**

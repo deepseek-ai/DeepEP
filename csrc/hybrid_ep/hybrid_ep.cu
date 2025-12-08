@@ -413,13 +413,13 @@ bool HybridEPBuffer::update_buffer(HybridEpConfigInstance config) {
 
 std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor,
            torch::Tensor>
-HybridEPBuffer::metadata_preprocessing(HybridEpConfigInstance config, torch::Tensor global_routing_map, int64_t num_of_tokens_per_rank) {
+HybridEPBuffer::metadata_preprocessing(HybridEpConfigInstance config, torch::Tensor global_routing_map, int64_t num_of_tokens_per_rank, bool non_blocking) {
   // Basic checks
   assert(global_routing_map.device().is_cuda());
   assert(global_routing_map.is_contiguous());
 
   // Run the hybrid-ep metadata preprocessing kernel
-  return executor.metadata_preprocess_core(config, preprocessing_tmp, global_routing_map, num_of_tokens_per_rank);
+  return executor.metadata_preprocess_core(config, preprocessing_tmp, global_routing_map, num_of_tokens_per_rank, non_blocking);
 }
 
 std::tuple<torch::Tensor, c10::optional<torch::Tensor>, c10::optional<torch::Tensor>>
@@ -529,8 +529,7 @@ HybridEPBuffer::combine(HybridEpConfigInstance config,
   return std::make_tuple(combined_tokens, combined_probs);
 }
 
-
-std::tuple<torch::Tensor, c10::optional<torch::Tensor>, c10::optional<torch::Tensor>, torch::Tensor, torch::Tensor>
+std::tuple<torch::Tensor, c10::optional<torch::Tensor>, c10::optional<torch::Tensor>, torch::Tensor, torch::Tensor, torch::Tensor>
 HybridEPBuffer::dispatch_with_permute(HybridEpConfigInstance config, 
           torch::Tensor hidden, c10::optional<torch::Tensor> probs,
           c10::optional<torch::Tensor> scaling_factor,
@@ -581,7 +580,7 @@ HybridEPBuffer::dispatch_with_permute(HybridEpConfigInstance config,
  
  // Run the full dispatch operation
  config.forward_dispatch_api = with_probs;
- auto [result_row_id_map, result_tokens_per_expert] = executor.dispatch_preprocess(config, dispatch_buffers, args);
+ auto [result_row_id_map, result_tokens_per_expert, overflow_flag] = executor.dispatch_preprocess(config, dispatch_buffers, args);
  if(config.token_data_type == APP_TOKEN_DATA_TYPE::UINT8) {
    executor.dispatch_core<uint8_t>(config, dispatch_buffers, args);
  } else if (config.token_data_type == APP_TOKEN_DATA_TYPE::UINT16) {
@@ -592,7 +591,7 @@ HybridEPBuffer::dispatch_with_permute(HybridEpConfigInstance config,
 
  auto [dispatched_tokens, dispatched_probs, dispatched_scaling_factor] = executor.dispatch_postprocess(config, dispatch_buffers, args);
 
- return std::make_tuple(dispatched_tokens, dispatched_probs, dispatched_scaling_factor, result_row_id_map, result_tokens_per_expert);
+ return std::make_tuple(dispatched_tokens, dispatched_probs, dispatched_scaling_factor, overflow_flag, result_row_id_map, result_tokens_per_expert);
 }
 
 std::tuple<torch::Tensor, torch::Tensor>

@@ -414,9 +414,8 @@ class HybridEPBuffer:
         # There are 2 tensors are put on the CPU pinned memory
         # 1. num_dispatched_tokens in handle
         # 2. tokens_per_expert
-        # If non_blocking is True, no stream synchronization will be used, so we can not promise the data in pinned 
-        # memory is ready for using in CPU. The CPU value of num_permuted_tokens required for this mode
-        # Otherwise, the stream synchronization will be used to wait for the data in pinned memory.
+        # If non_blocking is True, no stream synchronization will be used, the all output are on the GPU.
+        # Otherwise, num_dispatched_tokens_tensor and tokens_per_expert are on the CPU pinned memory, the stream synchronization will be used to wait for the data in pinned memory.
         non_blocking: bool = False,
         # Deprecated parameters
         num_dispatched_tokens: int = None,
@@ -482,6 +481,7 @@ class HybridEPBuffer:
                     config=config,
                     routing_map=global_routing_map,
                     num_of_tokens_per_rank=num_of_tokens_per_rank,
+                    non_blocking=non_blocking,
                 )
             else:
                 (
@@ -493,6 +493,7 @@ class HybridEPBuffer:
                     row_id_map,
                     num_of_tokens_per_rank,
                     config,
+                    overflow_flag,
                 ) = handle
 
             # Dispatch phase
@@ -500,6 +501,7 @@ class HybridEPBuffer:
                 dispatched_token,
                 dispatched_probs,
                 dispatched_scaling_factor,
+                overflow_flag,
                 row_id_map,
                 tokens_per_expert,
             ) = self.runtime.dispatch_with_permute(
@@ -529,6 +531,7 @@ class HybridEPBuffer:
                 row_id_map,
                 num_of_tokens_per_rank,
                 config,
+                overflow_flag,
             )
         
         return (
@@ -570,6 +573,7 @@ class HybridEPBuffer:
                 row_id_map,
                 num_of_tokens_per_rank,
                 config,
+                overflow_flag,
             ) = handle
 
             combined_token, combined_probs = self.runtime.combine_with_unpermute(

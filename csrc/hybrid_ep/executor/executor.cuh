@@ -70,10 +70,11 @@ public:
         HybridEpConfigInstance config,
         hybrid_ep::tmp_state_t *preprocessing_tmp,
         torch::Tensor global_routing_map,
-        int num_of_tokens_per_rank
+        int num_of_tokens_per_rank,
+        bool non_blocking
     );
 
-    std::tuple<torch::Tensor, torch::Tensor> 
+    std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> 
     dispatch_preprocess(
         HybridEpConfigInstance config, DispatchBuffers& dispatch_buffers, DispatchArgs& args);
     template<typename DType> 

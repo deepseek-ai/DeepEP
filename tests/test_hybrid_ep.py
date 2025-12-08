@@ -165,7 +165,7 @@ def test_hybrid_ep_correctness(buffer: deep_ep.HybridEPBuffer, ref: TorchRef, us
             scaling_factor=scaling_factor,
             pad_multiple=PAD_MULTIPLE,
         )
-        _, _, _, num_dispatched_tokens_tensor, local_expert_routing_map, _, _, _ = (
+        _, _, _, num_dispatched_tokens_tensor, local_expert_routing_map, _, _, _, _ = (
             handle
         )
         num_dispatched_tokens_tensor = num_dispatched_tokens_tensor.cpu()
