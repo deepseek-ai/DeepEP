@@ -315,13 +315,8 @@ void Buffer::destroy() {
         internode::barrier();
         internode::free(rdma_buffer_ptr);
         if (enable_shrink) {
-#ifdef ENABLE_NCCL
-            CUDA_CHECK(cudaFree(mask_buffer_ptr));
-            CUDA_CHECK(cudaFree(sync_buffer_ptr));
-#else
             internode::free(mask_buffer_ptr);
             internode::free(sync_buffer_ptr);
-#endif
         }
         internode::finalize();
     }
@@ -385,17 +380,15 @@ void Buffer::sync(const std::vector<int>& device_ids,
         // Clean buffer (mainly for low-latency mode)
         CUDA_CHECK(cudaMemset(rdma_buffer_ptr, 0, num_rdma_bytes));
 
+        // Register memory with NCCL communicators (sets up windows for RDMA)
+        internode::register_memory(rdma_buffer_ptr, num_rdma_bytes);
+
         // Allocate and clean shrink buffer
         if (enable_shrink) {
             int num_mask_buffer_bytes = num_ranks * sizeof(int);
             int num_sync_buffer_bytes = num_ranks * sizeof(int);
-#ifdef ENABLE_NCCL
-            CUDA_CHECK(cudaMalloc(&mask_buffer_ptr, num_ranks * sizeof(int)));
-            CUDA_CHECK(cudaMalloc(&sync_buffer_ptr, num_ranks * sizeof(int)));
-#else
             mask_buffer_ptr = reinterpret_cast<int*>(internode::alloc(num_mask_buffer_bytes, NUM_BUFFER_ALIGNMENT_BYTES));
             sync_buffer_ptr = reinterpret_cast<int*>(internode::alloc(num_sync_buffer_bytes, NUM_BUFFER_ALIGNMENT_BYTES));
-#endif
             CUDA_CHECK(cudaMemset(mask_buffer_ptr, 0, num_mask_buffer_bytes));
             CUDA_CHECK(cudaMemset(sync_buffer_ptr, 0, num_sync_buffer_bytes));
         }

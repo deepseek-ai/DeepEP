@@ -39,6 +39,7 @@ public:
 
     // Memory management interface methods
     void* alloc(size_t size, size_t alignment) override;
+    void register_memory(void* ptr, size_t size);  // NCCL-specific: register allocated memory with communicators
     void free(void* ptr) override;
 
     int get_rank() const override;

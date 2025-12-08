@@ -171,6 +171,25 @@ void* alloc(size_t size, size_t alignment) {
 #endif
 }
 
+void register_memory(void* ptr, size_t size) {
+#ifdef ENABLE_NCCL
+    internode::CommunicationBackend* backend = internode::get_backend();
+    if (backend == nullptr) {
+        throw std::runtime_error("Backend not initialized");
+    }
+    // Cast to NCCLGINBackend to access NCCL-specific register_memory
+    auto* nccl_backend = dynamic_cast<internode::NCCLGINBackend*>(backend);
+    if (nccl_backend == nullptr) {
+        throw std::runtime_error("register_memory is only supported with NCCL backend");
+    }
+    nccl_backend->register_memory(ptr, size);
+#elif defined(ENABLE_NVSHMEM)
+    // NVSHMEM: memory allocated with nvshmem_align is already registered
+    (void)ptr;
+    (void)size;
+#endif
+}
+
 void free(void* ptr) {
 #ifdef ENABLE_NCCL
     internode::CommunicationBackend* backend = internode::get_backend();

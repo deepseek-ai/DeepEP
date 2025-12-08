@@ -94,6 +94,13 @@ int NCCLGINBackend::init(const std::vector<uint8_t>& root_unique_id_val, int ran
                        "Number of unique IDs doesn't match NUM_MAX_NVL_PEERS * qps_per_rank");
 
         if (rank == 0) {
+            // Print NCCL version from the actually loaded library
+            int nccl_version;
+            ncclGetVersion(&nccl_version);
+            printf("[NCCL Backend] NCCL version: %d.%d.%d (loaded library)\n",
+                   nccl_version / 10000,
+                   (nccl_version % 10000) / 100,
+                   nccl_version % 100);
             printf("[NCCL Backend] Initializing %d communicator(s) (qps_per_rank=%d) for rank %d/%d\n",
                    num_comms_,
                    qps_per_rank,
@@ -304,9 +311,6 @@ void* NCCLGINBackend::alloc(size_t size, size_t alignment) {
     if (!initialized_) {
         throw std::runtime_error("NCCL backend not initialized");
     }
-    if (mem_handle_.ptr != nullptr) {
-        throw std::runtime_error("NCCL backend only supports a single allocation at a time.");
-    }
 
     void* ptr = nullptr;
     // NCCL memory is already aligned to page size, so alignment parameter is ignored for now.
@@ -317,6 +321,19 @@ void* NCCLGINBackend::alloc(size_t size, size_t alignment) {
     if (rank_ == 0)
         printf("[NCCL Backend - Memory Alloc] Rank %d: Allocated ptr=%p, size=%lu\n", rank_, ptr, size);
 
+    return ptr;
+}
+
+void NCCLGINBackend::register_memory(void* ptr, size_t size) {
+    if (!initialized_) {
+        throw std::runtime_error("NCCL backend not initialized");
+    }
+    if (mem_handle_.ptr != nullptr) {
+        throw std::runtime_error("NCCL backend only supports a single registration at a time.");
+    }
+
+    mem_handle_.ptr = ptr;
+
     // Multi-communicator: register with each communicator and gather ctx0 windows
     dev_wins_multi_nccl_.clear();
     dev_wins_multi_nccl_.resize(num_comms_);
@@ -324,7 +341,7 @@ void* NCCLGINBackend::alloc(size_t size, size_t alignment) {
     wins_nccl.reserve(num_comms_);
 
     for (int c = 0; c < num_comms_; ++c) {
-        // printf("[NCCL Backend - Memory Alloc] Rank %d: Registering comm %d/%d\n", rank_, c, num_comms_);
+        // printf("[NCCL Backend - Memory Register] Rank %d: Registering comm %d/%d\n", rank_, c, num_comms_);
         //  Register with ncclCommWindowRegister
         ncclResult_t r = ncclCommWindowRegister(nccl_comms_[c], ptr, size, dev_wins_multi_nccl_[c].data(), 0);
         if (r != ncclSuccess) {
@@ -332,41 +349,37 @@ void* NCCLGINBackend::alloc(size_t size, size_t alignment) {
             for (int j = 0; j < c; ++j) {
                 ncclCommWindowDeregister(nccl_comms_[j], dev_wins_multi_nccl_[j][0]);
             }
-            ncclMemFree(ptr);
             throw std::runtime_error(std::string("Failed to register NCCL comm windows (multi): ") + ncclGetErrorString(r));
         }
 
         wins_nccl.push_back(dev_wins_multi_nccl_[c][0]);
     }
-    mem_handle_.ptr = ptr;
+
     if (d_nccl_dev_wins_ != nullptr && num_comms_ > 0) {
         if (rank_ == 0) {
-            printf("[NCCL Backend - Memory Alloc] Rank %d: Copying %lu NCCL windows to GPU\n", rank_, wins_nccl.size());
+            printf("[NCCL Backend - Memory Register] Rank %d: Copying %lu NCCL windows to GPU\n", rank_, wins_nccl.size());
             fflush(stdout);
         }
 
         cudaError_t e2 = cudaMemcpy(d_nccl_dev_wins_, wins_nccl.data(), wins_nccl.size() * sizeof(ncclWindow_t), cudaMemcpyHostToDevice);
         if (e2 != cudaSuccess) {
-            printf("[NCCL Backend - Memory Alloc] Rank %d: NCCL window copy FAILED: %s (error %d)\n", rank_, cudaGetErrorString(e2), e2);
+            printf("[NCCL Backend - Memory Register] Rank %d: NCCL window copy FAILED: %s (error %d)\n", rank_, cudaGetErrorString(e2), e2);
             fflush(stdout);
             for (int c = 0; c < num_comms_; ++c) {
                 ncclCommWindowDeregister(nccl_comms_[c], dev_wins_multi_nccl_[c][0]);
             }
-            ncclMemFree(mem_handle_.ptr);
-            mem_handle_ = {};
             throw std::runtime_error(std::string("Failed to copy NCCL windows to GPU: ") + cudaGetErrorString(e2));
         }
 
         if (rank_ == 0) {
-            printf("[NCCL Backend - Memory Alloc] Rank %d: Successfully copied windows to GPU\n", rank_);
+            printf("[NCCL Backend - Memory Register] Rank %d: Successfully copied windows to GPU\n", rank_);
             fflush(stdout);
         }
     }
     if (rank_ == 0) {
-        printf("[NCCL Backend - Memory Alloc] Rank %d: Registered windows and returning ptr=%p, size=%lu\n", rank_, ptr, size);
+        printf("[NCCL Backend - Memory Register] Rank %d: Registered windows for ptr=%p, size=%lu\n", rank_, ptr, size);
         fflush(stdout);
     }
-    return ptr;
 }
 
 void NCCLGINBackend::free(void* ptr) {

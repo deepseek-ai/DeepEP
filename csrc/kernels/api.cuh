@@ -28,6 +28,8 @@ int init(const std::vector<uint8_t>& root_unique_id_val,
 
 void* alloc(size_t size, size_t alignment);
 
+void register_memory(void* ptr, size_t size);
+
 void free(void* ptr);
 
 void barrier();
