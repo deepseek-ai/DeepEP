@@ -266,16 +266,7 @@ void Executor::combine_preprocess(HybridEpConfigInstance config, CombineBuffers&
         // routing map.
         assert(args.row_id_map.has_value());
         assert(args.num_dispatched_tokens_tensor.has_value());
-    
-        auto num_dispatched_tokens = args.num_dispatched_tokens;
         auto num_dispatched_tokens_tensor = args.num_dispatched_tokens_tensor.value();
-        // If args.num_dispatched_tokens >= 0, which means that the sync-free model is used.
-        // Otherwise, we will use the values in args.num_dispatched_tokens_tensor.
-        if (num_dispatched_tokens < 0) {
-          // Synchronize the stream to get the real num_dispatched_tokens from the pinned memory.
-          cudaStreamSynchronize(args.stream);
-          num_dispatched_tokens = num_dispatched_tokens_tensor.item<int>();
-        }
     
         UnpermuteArgs unpermute_args;
         unpermute_args.permuted_tokens = args.hidden;

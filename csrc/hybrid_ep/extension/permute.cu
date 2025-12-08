@@ -185,7 +185,7 @@
            auto new_value = old_value + workspace_1[tile_idx * num_of_local_experts + expert_id] +
                             workspace_2[(tile_idx / block_size) * num_of_local_experts + expert_id] +
                             tokens_per_expert_prefix_sum[expert_id];
-           if (new_value >= num_permuted_tokens) {
+           if (new_value > num_permuted_tokens) {
              *overflow_flag = 1;
              row_id_map[offset] = 0;
            } else {
@@ -218,7 +218,7 @@
      for (int j = 0; j < num_of_local_experts; j++) {
        if (i < num_padded_tokens[j]) {
          auto padded_offset = -(tokens_per_expert_shmem[j] + tokens_per_expert_prefix_sum[j] + i + 1);
-         if ( padded_offset >=  num_permuted_tokens) {
+         if ( -padded_offset > num_permuted_tokens) {
           *overflow_flag = 1;
           row_id_map[offset + j] = 0;
          } else {
