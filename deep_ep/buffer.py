@@ -1,6 +1,7 @@
 import os
 import torch
 import torch.distributed as dist
+import numpy as np
 from typing import Callable, List, Tuple, Optional, Union
 
 # noinspection PyUnresolvedReferences
@@ -702,3 +703,39 @@ class Buffer:
         """
         src_info, layout_range, num_max_dispatch_tokens_per_rank, hidden, num_experts = handle
         return self.runtime.get_next_low_latency_combine_buffer(num_max_dispatch_tokens_per_rank, hidden, num_experts)
+
+    def shuffle_expert_columns(self, topk_idx: torch.Tensor, num_experts: int, num_ranks: int, seed: int = None):
+        """
+        Shuffle destination ranks (columns of communication matrix).
+
+        Example: If colsMap = [2, 0, 3, 1], tokens going to GPU 0 now go to GPU 2, etc.
+
+        Arguments:
+            topk_idx: Token routing indices with shape [num_tokens, num_topk]
+            num_experts: Total number of experts
+            num_ranks: Total number of ranks/GPUs
+            seed: Optional seed for reproducibility. If None, uses non-deterministic shuffle.
+        """        
+        experts_per_rank = num_experts // num_ranks
+        if seed is not None:
+            np.random.seed(seed)
+        colsMap = np.arange(num_ranks)
+        np.random.shuffle(colsMap)
+
+        topk_idx_original = topk_idx.clone()
+        num_tokens, num_topk = topk_idx.shape
+
+        for token_idx in range(num_tokens):
+            for k in range(num_topk):
+                old_expert = topk_idx_original[token_idx, k].item()
+                if old_expert == -1:
+                    continue
+
+                old_rank = old_expert // experts_per_rank
+                local_expert_id = old_expert % experts_per_rank
+
+                # Column permutation: destination rank is permuted
+                new_rank = colsMap[old_rank]
+                new_expert = new_rank * experts_per_rank + local_expert_id
+
+                topk_idx[token_idx, k] = new_expert
