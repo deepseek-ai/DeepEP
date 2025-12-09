@@ -95,7 +95,7 @@ def test_main(args: argparse.Namespace,
     shuffle_fn = None
     if args.shuffle_expert_columns:
         def shuffle_fn():
-            buffer.shuffle_expert_columns(topk_idx, num_experts, num_ranks, seed=1)
+            buffer.shuffle_expert_columns(topk_idx, num_experts, num_ranks, seed=args.shuffle_seed)
 
     t = bench(lambda: buffer.get_dispatch_layout(topk_idx, num_experts), pre_iteration_fn=shuffle_fn)[0]
 
@@ -384,6 +384,7 @@ if __name__ == '__main__':
     parser.add_argument('--num-topk-groups', type=int, default=None, help='Number of top-k groups (default: `min(num_nodes, 4)`)')
     parser.add_argument('--num-topk', type=int, default=8, help='Number of top-k experts (default: 8)')
     parser.add_argument('--shuffle-expert-columns', type=bool, default=False, help='whether to shuffle expert columns')
+    parser.add_argument('--shuffle-seed', type=int, default=1, help='seed for shuffling expert columns')
     parser.add_argument(
         '--pressure-test-mode',
         type=int,
