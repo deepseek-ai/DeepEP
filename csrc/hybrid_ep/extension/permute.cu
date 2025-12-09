@@ -196,8 +196,6 @@
      }
    }
  
-   if (pad_multiple <= 0)
-     return;
    grid.sync();
  
    /**
@@ -206,8 +204,12 @@
    int* num_padded_tokens =
        reinterpret_cast<int*>(tokens_per_expert_shmem + 2 * num_of_local_experts);
    for (int i = threadIdx.x; i < num_of_local_experts; i += block_size) {
-     int padded_value =
-         (tokens_per_expert_shmem[i] + pad_multiple - 1) / pad_multiple * pad_multiple;
+     int padded_value;
+     if (pad_multiple <= 0) {
+        padded_value = tokens_per_expert_shmem[i];
+     }else{
+        padded_value = (tokens_per_expert_shmem[i] + pad_multiple - 1) / pad_multiple * pad_multiple;
+     }
      num_padded_tokens[i] = padded_value - tokens_per_expert_shmem[i];
    }
    __syncthreads();
@@ -218,11 +220,11 @@
      for (int j = 0; j < num_of_local_experts; j++) {
        if (i < num_padded_tokens[j]) {
          auto padded_offset = -(tokens_per_expert_shmem[j] + tokens_per_expert_prefix_sum[j] + i + 1);
-         if ( -padded_offset > num_permuted_tokens) {
+         if ( abs(padded_offset) > num_permuted_tokens) {
           *overflow_flag = 1;
           row_id_map[offset + j] = 0;
          } else {
-           row_id_map[offset + j] = padded_offset;
+          row_id_map[offset + j] = padded_offset;
          }
        } else {
          row_id_map[offset + j] = 0;
@@ -232,7 +234,13 @@
  
    if (blockIdx.x == 0) {
      for (int i = threadIdx.x; i < num_of_local_experts; i += block_size) {
-       tokens_per_expert[i] = tokens_per_expert_shmem[i] + num_padded_tokens[i];
+       auto tokens_for_expert_i = tokens_per_expert_shmem[i] + num_padded_tokens[i];
+       auto overflow_num = tokens_for_expert_i + tokens_per_expert_prefix_sum[i] - num_permuted_tokens;
+       if(overflow_num < 0) {
+        tokens_per_expert[i] = tokens_for_expert_i;
+       }else{
+        tokens_per_expert[i] = max(0, tokens_for_expert_i - overflow_num);
+       }
      }
    }
  }
