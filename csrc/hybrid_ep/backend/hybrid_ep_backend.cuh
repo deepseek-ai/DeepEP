@@ -2408,10 +2408,10 @@ inline __device__ void inter_node_red_warp_group_device_function(const int node_
 __launch_bounds__(1, 1)
 static __global__ void device_sync_kernel(uint32_t* intra_node_remote_flags, const uint32_t* expected_flag_value)
 {
+  // Add system-level fence to confirm correctness in cuda graph.
+  __threadfence_system();
   // Atomically reduce add 1 to the u32 flag on rank #0 in current NVLink domain. 
   // Need a strong system-scope red to make sure all ranks from current NVLink domain can see the side effect.
-  // But no memory fence(i.e. .release) needed since CUDA stream already do that for us.
-  // red.relaxed.sys.global.add.u32          [a], 1; 
   asm volatile("red.relaxed.sys.global.add.u32 [%0], %1;"
                 :
                 : "l"(__cvta_generic_to_global(intra_node_remote_flags)), "n"(1)
