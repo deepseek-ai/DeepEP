@@ -65,11 +65,11 @@ if __name__ == '__main__':
         print('NCCL communication backend enabled')
         cxx_flags.append('-DENABLE_NCCL')
         nvcc_flags.append('-DENABLE_NCCL')
-        include_dirs.append(f'{nccl_dir}/build/include')
-        library_dirs.append(f'{nccl_dir}/build/lib')
+        include_dirs.append(f'{nccl_dir}/include')  # NCCL_DIR points to build/ directory
+        library_dirs.append(f'{nccl_dir}/lib')
         sources.extend(['csrc/kernels/internode.cu', 'csrc/kernels/internode_ll.cu', 'csrc/kernels/nccl_gin_backend.cu'])
         nvcc_dlink.extend(['-dlink'])
-        extra_link_args.extend([f'-Wl,-rpath,{nccl_dir}/build/lib', f'-L{nccl_dir}/build/lib', '-lnccl'])
+        extra_link_args.extend([f'-Wl,-rpath,{nccl_dir}/lib', f'-L{nccl_dir}/lib', '-lnccl'])
 
     # Use NVSHMEM
     if os.getenv('ENABLE_NCCL', '0') == '0' and nvshmem_dir is not None:

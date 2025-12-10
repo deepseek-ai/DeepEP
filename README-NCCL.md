@@ -16,9 +16,10 @@ This guide requires NCCL with the Device API support including, in particular, G
 ```bash
 # Setup CUDA environment
 export CUDA_HOME=/usr/local/cuda-12.8
-export NCCL_DIR=/path/to/nccl
-cd $NCCL_DIR
+export NCCL_SRC=/path/to/nccl
+cd $NCCL_SRC
 make clean && make MPI_HOME=$MPI_DIR NVCC_GENCODE="-gencode=arch=compute_90,code=sm_90" src.build -j32 # adjust NVCC_GENCODE accordingly
+export NCCL_DIR=$NCCL_SRC/build  # NCCL_DIR points to the build directory containing lib/ and include/
 ```
 
 ## Step 2: Use Low Latency (LL) Kernels
@@ -28,10 +29,10 @@ LL (Low Latency) kernels are optimized for latency-sensitive inference decoding 
 
 ### Enable NCCL compilation
 ```bash
-export NCCL_DIR=/path/to/nccl
-export LD_LIBRARY_PATH=$NCCL_DIR/build/lib:$LD_LIBRARY_PATH
-export LD_PRELOAD=$NCCL_DIR/build/lib/libnccl.so.2 # Needed on systems where PyTorch uses RPATH to load its internal NCCL library. 
-                                                   # Dynamic linker priority: LD_PRELOAD > RPATH > LD_LIBRARY_PATH > RUNPATH
+export NCCL_DIR=/path/to/nccl/install/  # Points to build directory containing bin/, include/, and lib/
+export LD_LIBRARY_PATH=$NCCL_DIR/lib:$LD_LIBRARY_PATH
+export LD_PRELOAD=$NCCL_DIR/lib/libnccl.so.2 # Needed on systems where PyTorch uses RPATH to load its internal NCCL library. 
+                                             # Dynamic linker priority: LD_PRELOAD > RPATH > LD_LIBRARY_PATH > RUNPATH
 export ENABLE_NCCL=1; python3 setup.py build_ext --inplace; pip install --no-build-isolation .
 ```
 
