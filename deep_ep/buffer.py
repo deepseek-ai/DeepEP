@@ -134,6 +134,8 @@ class Buffer:
             if not allow_mnnvl:
                 # Disable multi-node NVLink detection
                 os.environ['NVSHMEM_DISABLE_MNNVL'] = '1'
+            else:
+                os.environ['NCCL_MNNVL_ENABLE'] = '1' # default value is 2 (auto-detect)
 
             # Synchronize using the root ID
             if (low_latency_mode and self.rank == 0) or (not low_latency_mode and self.runtime.get_rdma_rank() == 0):
