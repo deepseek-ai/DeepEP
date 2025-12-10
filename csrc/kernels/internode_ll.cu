@@ -327,9 +327,11 @@ __global__ __launch_bounds__(1024, 1) void dispatch(void* packed_recv_x,
                                                     void* rdma_recv_x,
                                                     int* rdma_recv_count,
                                                     void* rdma_x,
+#ifdef ENABLE_NCCL
                                                     size_t rdma_recv_x_offset,
                                                     size_t rdma_recv_count_offset,
                                                     size_t rdma_x_offset,
+#endif
                                                     const void* x,
                                                     const topk_idx_t* topk_idx,
                                                     int* atomic_counter_per_expert,
@@ -777,9 +779,11 @@ void dispatch(void* packed_recv_x,
               void* rdma_recv_x,
               int* rdma_recv_count,
               void* rdma_x,
+#ifdef ENABLE_NCCL
               size_t rdma_recv_x_offset,
               size_t rdma_recv_count_offset,
               size_t rdma_x_offset,
+#endif
               const void* x,
               const topk_idx_t* topk_idx,
               int* next_clean,
@@ -900,9 +904,6 @@ void dispatch(void* packed_recv_x,
                       rdma_recv_x,                           \
                       rdma_recv_count,                       \
                       rdma_x,                                \
-                      rdma_recv_x_offset,                    \
-                      rdma_recv_count_offset,                \
-                      rdma_x_offset,                         \
                       x,                                     \
                       topk_idx,                              \
                       atomic_counter_per_expert,             \
@@ -1092,9 +1093,11 @@ __global__ __launch_bounds__(1024, 1) void combine(void* combined_x,
                                                    void* rdma_recv_x,
                                                    int* rdma_recv_flag,
                                                    void* rdma_send_x,
+#ifdef ENABLE_NCCL
                                                    size_t rdma_recv_x_offset,
                                                    size_t rdma_recv_flag_offset,
                                                    size_t rdma_send_x_offset,
+#endif
                                                    const void* x,
                                                    const topk_idx_t* topk_idx,
                                                    const float* topk_weights,
@@ -1649,9 +1652,11 @@ void combine(void* combined_x,
              void* rdma_recv_x,
              int* rdma_recv_flag,
              void* rdma_send_x,
+#ifdef ENABLE_NCCL
              size_t rdma_recv_x_offset,
              size_t rdma_recv_flag_offset,
              size_t rdma_send_x_offset,
+#endif
              const void* x,
              const topk_idx_t* topk_idx,
              const float* topk_weights,
@@ -1776,9 +1781,6 @@ void combine(void* combined_x,
                       rdma_recv_x,                                                                                                 \
                       rdma_recv_flag,                                                                                              \
                       rdma_send_x,                                                                                                 \
-                      rdma_recv_x_offset,                                                                                          \
-                      rdma_recv_flag_offset,                                                                                       \
-                      rdma_send_x_offset,                                                                                          \
                       x,                                                                                                           \
                       topk_idx,                                                                                                    \
                       topk_weights,                                                                                                \

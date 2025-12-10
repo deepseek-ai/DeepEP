@@ -301,9 +301,11 @@ void dispatch(void* packed_recv_x,
               void* rdma_recv_x,
               int* rdma_recv_count,
               void* rdma_x,
+#ifdef ENABLE_NCCL
               size_t rdma_recv_x_offset,
               size_t rdma_recv_count_offset,
               size_t rdma_x_offset,
+#endif
               const void* x,
               const topk_idx_t* topk_idx,
               int* next_clean,
@@ -328,9 +330,11 @@ void combine(void* combined_x,
              void* rdma_recv_x,
              int* rdma_recv_flag,
              void* rdma_send_x,
+#ifdef ENABLE_NCCL
              size_t rdma_recv_x_offset,
              size_t rdma_recv_flag_offset,
              size_t rdma_send_x_offset,
+#endif
              const void* x,
              const topk_idx_t* topk_idx,
              const float* topk_weights,

@@ -1640,9 +1640,11 @@ Buffer::low_latency_dispatch(const torch::Tensor& x,
             buffer.dispatch_rdma_recv_data_buffer,
             buffer.dispatch_rdma_recv_count_buffer,
             buffer.dispatch_rdma_send_buffer,
+#ifdef ENABLE_NCCL
             buffer.dispatch_rdma_recv_data_buffer_offset,
             buffer.dispatch_rdma_recv_count_buffer_offset,
             buffer.dispatch_rdma_send_buffer_offset,
+#endif
             x.data_ptr(),
             topk_idx.data_ptr<topk_idx_t>(),
             next_clean_meta.first,
@@ -1764,9 +1766,11 @@ std::tuple<torch::Tensor, std::optional<EventHandle>, std::optional<std::functio
                               buffer.combine_rdma_recv_data_buffer,
                               buffer.combine_rdma_recv_flag_buffer,
                               buffer.combine_rdma_send_buffer,
+#ifdef ENABLE_NCCL
                               buffer.combine_rdma_recv_data_buffer_offset,
                               buffer.combine_rdma_recv_flag_buffer_offset,
                               buffer.combine_rdma_send_buffer_offset,
+#endif
                               x.data_ptr(),
                               topk_idx.data_ptr<topk_idx_t>(),
                               topk_weights.data_ptr<float>(),
