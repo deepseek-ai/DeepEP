@@ -51,12 +51,35 @@
 #ifndef DISABLE_SM90_FEATURES
 #include <cuda_fp8.h>
 #else
-// Ampere does not support FP8 features
+// Define minimal FP8 types to avoid compilation errors in CUDA standard library
+typedef uint8_t __nv_fp8_storage_t;
+typedef uint32_t __nv_fp8x2_storage_t;
+
+struct __nv_fp8_e4m3 {
+    __nv_fp8_storage_t __x;
+    __nv_fp8_e4m3() = default;
+    __device__ __nv_fp8_e4m3(__nv_fp8_storage_t x) : __x(x) {}
+};
+
+struct __nv_fp8_e5m2 {
+    __nv_fp8_storage_t __x;
+    __nv_fp8_e5m2() = default;
+    __device__ __nv_fp8_e5m2(__nv_fp8_storage_t x) : __x(x) {}
+};
+
+// Define minimal FP8 constants and functions as stubs
 #define __NV_E4M3 0
 #define __NV_E5M2 1
-typedef int __nv_fp8_interpretation_t;
-typedef int __nv_fp8x4_e4m3;
-typedef uint8_t __nv_fp8_storage_t;
+#define __NV_SATFINITE 0
+
+// Stub FP8 conversion function
+__device__ static inline __nv_fp8x2_storage_t __nv_cvt_float2_to_fp8x2(float2, int, int) {
+    return 0;  // Return dummy value
+}
+
+// Prevent cuda_fp8.h from being included when SM90 features are disabled
+#define CUDA_FP8_H
+#define __CUDA_FP8_H__
 #endif
 
 namespace deep_ep {
