@@ -263,32 +263,28 @@ __global__ void notify_dispatch(const int* num_tokens_per_rank,
         for (int i = warp_id; i < kNumRDMARanks; i += num_warps) {
             if (i != rdma_rank) {
 #ifdef ENABLE_NCCL
-                // GIN put is not warp-collective, so only one thread should execute it
-                if (lane_id == 0) {
-                    // Distribute work across GIN contexts
-                    auto comm_id = i % num_gin_comms;
-                    int dst_rank = translate_dst_rdma_rank<kLowLatencyMode>(i, nvl_rank);
-                    size_t src_offset =
-                        reinterpret_cast<size_t>(rdma_recv_num_tokens_mixed.send_buffer(i)) - reinterpret_cast<size_t>(gin_base_ptr);
-                    size_t dst_offset = reinterpret_cast<size_t>(rdma_recv_num_tokens_mixed.recv_buffer(rdma_rank)) -
-                        reinterpret_cast<size_t>(gin_base_ptr);
-                    size_t bytes = (NUM_MAX_NVL_PEERS + num_rdma_experts + 1) * sizeof(int);
+                // Distribute work across GIN contexts
+                auto comm_id = i % num_gin_comms;
+                int dst_rank = translate_dst_rdma_rank<kLowLatencyMode>(i, nvl_rank);
+                size_t src_offset =
+                    reinterpret_cast<size_t>(rdma_recv_num_tokens_mixed.send_buffer(i)) - reinterpret_cast<size_t>(gin_base_ptr);
+                size_t dst_offset = reinterpret_cast<size_t>(rdma_recv_num_tokens_mixed.recv_buffer(rdma_rank)) -
+                    reinterpret_cast<size_t>(gin_base_ptr);
+                size_t bytes = (NUM_MAX_NVL_PEERS + num_rdma_experts + 1) * sizeof(int);
 
-                    ncclGin net(dcomms[comm_id], 0);
-                    ncclTeam world = ncclTeamWorld(dcomms[comm_id]);
-                    auto nccl_window = nccl_windows[comm_id];
-                    net.put(world,
-                            dst_rank,
-                            nccl_window,
-                            dst_offset,
-                            nccl_window,
-                            src_offset,
-                            bytes,
-                            ncclGin_None{},  // no signal
-                            ncclGin_None{},  // no counter
-                            ncclCoopThread());
-                }
-                __syncwarp();  // Synchronize all warp threads after the operation
+                ncclGin net(dcomms[comm_id], 0);
+                ncclTeam world = ncclTeamWorld(dcomms[comm_id]);
+                auto nccl_window = nccl_windows[comm_id];
+                net.put(world,
+                        dst_rank,
+                        nccl_window,
+                        dst_offset,
+                        nccl_window,
+                        src_offset,
+                        bytes,
+                        ncclGin_None{},  // no signal
+                        ncclGin_None{},  // no counter
+                        ncclCoopWarp());
 #elif defined(ENABLE_NVSHMEM)
                 nvshmemi_ibgda_put_nbi_warp<true>(reinterpret_cast<uint64_t>(rdma_recv_num_tokens_mixed.recv_buffer(rdma_rank)),
                                                   reinterpret_cast<uint64_t>(rdma_recv_num_tokens_mixed.send_buffer(i)),
@@ -836,26 +832,23 @@ __global__ void __launch_bounds__(((kNumDispatchRDMASenderWarps + 1 + NUM_MAX_NV
             if (dst_rdma_rank != rdma_rank) {
 #ifdef ENABLE_NCCL
                 // kRDMASender: These are channel-specific routing metadata
-                if (lane_id == 0) {
-                    int dst_rank = translate_dst_rdma_rank<kLowLatencyMode>(dst_rdma_rank, nvl_rank);
-                    size_t src_offset =
-                        reinterpret_cast<size_t>(rdma_channel_meta.send_buffer(dst_rdma_rank)) - reinterpret_cast<size_t>(gin_base_ptr);
-                    size_t dst_offset =
-                        reinterpret_cast<size_t>(rdma_channel_meta.recv_buffer(rdma_rank)) - reinterpret_cast<size_t>(gin_base_ptr);
-                    size_t bytes = sizeof(int) * (NUM_MAX_NVL_PEERS * 2 + 2);
+                int dst_rank = translate_dst_rdma_rank<kLowLatencyMode>(dst_rdma_rank, nvl_rank);
+                size_t src_offset =
+                    reinterpret_cast<size_t>(rdma_channel_meta.send_buffer(dst_rdma_rank)) - reinterpret_cast<size_t>(gin_base_ptr);
+                size_t dst_offset =
+                    reinterpret_cast<size_t>(rdma_channel_meta.recv_buffer(rdma_rank)) - reinterpret_cast<size_t>(gin_base_ptr);
+                size_t bytes = sizeof(int) * (NUM_MAX_NVL_PEERS * 2 + 2);
 
-                    net.put(world,
-                            dst_rank,
-                            nccl_window,
-                            dst_offset,
-                            nccl_window,
-                            src_offset,
-                            bytes,
-                            ncclGin_None{},  // no signal
-                            ncclGin_None{},  // no counter
-                            ncclCoopThread());
-                }
-                __syncwarp();  // Synchronize all warp threads
+                net.put(world,
+                        dst_rank,
+                        nccl_window,
+                        dst_offset,
+                        nccl_window,
+                        src_offset,
+                        bytes,
+                        ncclGin_None{},  // no signal
+                        ncclGin_None{},  // no counter
+                        ncclCoopWarp());
 #elif defined(ENABLE_NVSHMEM)
                 nvshmemi_ibgda_put_nbi_warp<true>(reinterpret_cast<uint64_t>(rdma_channel_meta.recv_buffer(rdma_rank)),
                                                   reinterpret_cast<uint64_t>(rdma_channel_meta.send_buffer(dst_rdma_rank)),
@@ -1073,27 +1066,23 @@ __global__ void __launch_bounds__(((kNumDispatchRDMASenderWarps + 1 + NUM_MAX_NV
                         reinterpret_cast<uint64_t>(rdma_channel_data.send_buffer(dst_rdma_rank) + dst_slot_idx * num_bytes_per_token);
 #ifdef ENABLE_NCCL
                     // kRDMASenderCoordinator: Send tokens to remote RDMA ranks
-                    if (lane_id == 0) {  // Only execute on lane 0 to match nvshmemi_ibgda_put_nbi_warp behavior
-
-                        int dst_rank = translate_dst_rdma_rank<kLowLatencyMode>(dst_rdma_rank, nvl_rank);
-                        size_t src_offset =
-                            reinterpret_cast<size_t>(rdma_channel_data.send_buffer(dst_rdma_rank) + dst_slot_idx * num_bytes_per_token) -
-                            reinterpret_cast<size_t>(gin_base_ptr);
-                        size_t dst_offset =
-                            reinterpret_cast<size_t>(rdma_channel_data.recv_buffer(rdma_rank) + dst_slot_idx * num_bytes_per_token) -
-                            reinterpret_cast<size_t>(gin_base_ptr);
-                        net.put(world,
-                                dst_rank,
-                                nccl_window,
-                                dst_offset,
-                                nccl_window,
-                                src_offset,
-                                num_bytes_per_msg,
-                                ncclGin_None{},  // no signal
-                                ncclGin_None{},  // no counter
-                                ncclCoopThread());
-                    }
-                    __syncwarp();  // Synchronize all warp threads
+                    int dst_rank = translate_dst_rdma_rank<kLowLatencyMode>(dst_rdma_rank, nvl_rank);
+                    size_t src_offset =
+                        reinterpret_cast<size_t>(rdma_channel_data.send_buffer(dst_rdma_rank) + dst_slot_idx * num_bytes_per_token) -
+                        reinterpret_cast<size_t>(gin_base_ptr);
+                    size_t dst_offset =
+                        reinterpret_cast<size_t>(rdma_channel_data.recv_buffer(rdma_rank) + dst_slot_idx * num_bytes_per_token) -
+                        reinterpret_cast<size_t>(gin_base_ptr);
+                    net.put(world,
+                            dst_rank,
+                            nccl_window,
+                            dst_offset,
+                            nccl_window,
+                            src_offset,
+                            num_bytes_per_msg,
+                            ncclGin_None{},  // no signal
+                            ncclGin_None{},  // no counter
+                            ncclCoopWarp());
 #elif defined(ENABLE_NVSHMEM)
                     nvshmemi_ibgda_put_nbi_warp<true>(dst_ptr,
                                                       src_ptr,
@@ -2755,27 +2744,23 @@ __global__ void __launch_bounds__((kNumForwarders + 1) * 32, 1) combine(int4* co
                             reinterpret_cast<uint64_t>(rdma_channel_data.send_buffer(dst_rdma_rank) + rdma_slot_idx * num_bytes_per_token);
 #ifdef ENABLE_NCCL
                         // kNVLAndRDMAForwarder: Transfer combined token data to remote RDMA rank
-                        if (lane_id == 0) {  // Only execute on lane 0 to match nvshmemi_ibgda_put_nbi_warp behavior
-
-                            int dst_rank = translate_dst_rdma_rank<kLowLatencyMode>(dst_rdma_rank, nvl_rank);
-                            size_t src_offset = reinterpret_cast<size_t>(rdma_channel_data.send_buffer(dst_rdma_rank) +
-                                                                         rdma_slot_idx * num_bytes_per_token) -
-                                reinterpret_cast<size_t>(gin_base_ptr);
-                            size_t dst_offset =
-                                reinterpret_cast<size_t>(rdma_channel_data.recv_buffer(rdma_rank) + rdma_slot_idx * num_bytes_per_token) -
-                                reinterpret_cast<size_t>(gin_base_ptr);
-                            net.put(world,
-                                    dst_rank,
-                                    nccl_window,
-                                    dst_offset,
-                                    nccl_window,
-                                    src_offset,
-                                    num_bytes_per_msg,
-                                    ncclGin_None{},  // no signal
-                                    ncclGin_None{},  // no counter
-                                    ncclCoopThread());
-                        }
-                        __syncwarp();  // Synchronize all warp threads
+                        int dst_rank = translate_dst_rdma_rank<kLowLatencyMode>(dst_rdma_rank, nvl_rank);
+                        size_t src_offset = reinterpret_cast<size_t>(rdma_channel_data.send_buffer(dst_rdma_rank) +
+                                                                     rdma_slot_idx * num_bytes_per_token) -
+                            reinterpret_cast<size_t>(gin_base_ptr);
+                        size_t dst_offset =
+                            reinterpret_cast<size_t>(rdma_channel_data.recv_buffer(rdma_rank) + rdma_slot_idx * num_bytes_per_token) -
+                            reinterpret_cast<size_t>(gin_base_ptr);
+                        net.put(world,
+                                dst_rank,
+                                nccl_window,
+                                dst_offset,
+                                nccl_window,
+                                src_offset,
+                                num_bytes_per_msg,
+                                ncclGin_None{},  // no signal
+                                ncclGin_None{},  // no counter
+                                ncclCoopWarp());
 
 #elif defined(ENABLE_NVSHMEM)
                         nvshmemi_ibgda_put_nbi_warp<true>(dst_ptr,
