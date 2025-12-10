@@ -474,24 +474,22 @@ __global__ __launch_bounds__(1024, 1) void dispatch(void* packed_recv_x,
 
                 if (not is_rank_masked<true>(mask_buffer_ptr, dst_rank)) {
                     if (dst_p2p_ptr == 0) {
-                        if (lane_id == 0) {
-                            size_t expected_src_offset = rdma_x_offset + token_idx * num_bytes_per_msg;
-                            auto comm_id = dst_expert_local_idx / DEEP_EP_NCCL_GIN_CTXS_PER_COMM;
-                            auto ctx_id = dst_expert_local_idx % DEEP_EP_NCCL_GIN_CTXS_PER_COMM;
-                            ncclGin net(dcomms[comm_id], ctx_id);
-                            ncclTeam world = ncclTeamWorld(dcomms[comm_id]);
-                            auto nccl_window = nccl_windows[comm_id];
-                            net.put(world,
-                                    dst_rank,
-                                    nccl_window,
-                                    expected_dst_offset,
-                                    nccl_window,
-                                    expected_src_offset,
-                                    num_bytes_per_msg,
-                                    ncclGin_None{},  // no signal
-                                    ncclGin_None{},  // no counter
-                                    ncclCoopThread());
-                        }
+                        size_t expected_src_offset = rdma_x_offset + token_idx * num_bytes_per_msg;
+                        auto comm_id = dst_expert_local_idx / DEEP_EP_NCCL_GIN_CTXS_PER_COMM;
+                        auto ctx_id = dst_expert_local_idx % DEEP_EP_NCCL_GIN_CTXS_PER_COMM;
+                        ncclGin net(dcomms[comm_id], ctx_id);
+                        ncclTeam world = ncclTeamWorld(dcomms[comm_id]);
+                        auto nccl_window = nccl_windows[comm_id];
+                        net.put(world,
+                                dst_rank,
+                                nccl_window,
+                                expected_dst_offset,
+                                nccl_window,
+                                expected_src_offset,
+                                num_bytes_per_msg,
+                                ncclGin_None{},  // no signal
+                                ncclGin_None{},  // no counter
+                                ncclCoopWarp());
                     } else {
                         // NOTES: only 2 load iterations for 7K hidden with 8 unrolls
                         const auto* src_int4_ptr = reinterpret_cast<const int4*>(src_ptr);
@@ -587,13 +585,19 @@ __global__ __launch_bounds__(1024, 1) void dispatch(void* packed_recv_x,
 
         if (not is_rank_masked(mask_buffer_ptr, dst_rank)) {
             if (dst_p2p_ptr == 0) {  // if (rank != dst_rank) {
-                // Each thread writes its value to its slot in shared memory
-
                 auto comm_id = dst_expert_local_idx / DEEP_EP_NCCL_GIN_CTXS_PER_COMM;
                 auto ctx_id = dst_expert_local_idx % DEEP_EP_NCCL_GIN_CTXS_PER_COMM;
                 auto signal_id = signals_base + dst_expert_local_idx * num_ranks + rank;
                 ncclGin net(dcomms[comm_id], ctx_id);
                 ncclTeam world = ncclTeamWorld(dcomms[comm_id]);
+                // NOTE: net.signal() is semantically cleaner but adds latency to Dispatch-Send 
+                //       and Combine-Send compared to net.put() with 0 bytes
+                // net.signal(world,
+                //            dst_rank,
+                //            ncclGin_SignalAdd{signal_id, (uint64_t)num_tokens_sent + 1},
+                //            ncclCoopThread(),
+                //            ncclGin_None(),
+                //            cuda::thread_scope_system);
                 auto nccl_window = nccl_windows[comm_id];
                 net.put(world,
                         dst_rank,
@@ -601,7 +605,7 @@ __global__ __launch_bounds__(1024, 1) void dispatch(void* packed_recv_x,
                         dst_offset,
                         nccl_window,
                         0,
-                        0,  // 0 bytes transfer
+                        0,               // 0 bytes transfer
                         ncclGin_SignalAdd{signal_id, (uint64_t)num_tokens_sent + 1},
                         ncclGin_None{},  // no counter
                         ncclCoopThread());
@@ -1316,39 +1320,26 @@ __global__ __launch_bounds__(1024, 1) void combine(void* combined_x,
                 // Issue RDMA
                 // NOTES: for zero-copy mode, we assume the data is already in the send buffer
                 if (dst_p2p_ptr == 0) {
-                    if (lane_id == 0) {
-                        // const auto expected_dst_offset =
-                        //     rdma_recv_x_offset + (global_expert_idx * num_max_dispatch_tokens_per_rank + src_idx) * num_bytes_per_slot;
-                        const auto expected_buf_offset = rdma_send_x_offset +
-                            (local_expert_idx * num_ranks * num_max_dispatch_tokens_per_rank * num_bytes_per_slot) +
-                            token_idx * num_bytes_per_slot;
+                    const auto expected_buf_offset = rdma_send_x_offset +
+                        (local_expert_idx * num_ranks * num_max_dispatch_tokens_per_rank * num_bytes_per_slot) +
+                        token_idx * num_bytes_per_slot;
 
-                        //const size_t buf_offset = buf_ptr - reinterpret_cast<uint64_t>(rdma_send_x);
-                        //const size_t dst_offset = dst_ptr - reinterpret_cast<uint64_t>(rdma_send_x);
+                    auto comm_id = local_expert_idx / DEEP_EP_NCCL_GIN_CTXS_PER_COMM;
+                    auto ctx_id = local_expert_idx % DEEP_EP_NCCL_GIN_CTXS_PER_COMM;
 
-                        //if (rdma_send_x_offset == 0) { /*these assertions are only valid for buffer[0]*/
-                        //    EP_DEVICE_ASSERT(dst_offset == expected_dst_offset);
-                        //    EP_DEVICE_ASSERT(buf_offset == expected_buf_offset);
-                        //}
-
-                        auto comm_id = local_expert_idx / DEEP_EP_NCCL_GIN_CTXS_PER_COMM;
-                        auto ctx_id = local_expert_idx % DEEP_EP_NCCL_GIN_CTXS_PER_COMM;
-                        //EP_DEVICE_ASSERT(comm_id >= 0 && comm_id < num_gin_comms);
-
-                        ncclGin net(dcomms[comm_id], ctx_id);
-                        ncclTeam world = ncclTeamWorld(dcomms[comm_id]);
-                        auto nccl_window = nccl_windows[comm_id];
-                        net.put(world,
-                                dst_rank,
-                                nccl_window,
-                                expected_dst_offset,
-                                nccl_window,
-                                expected_buf_offset,
-                                hidden * sizeof(nv_bfloat16),
-                                ncclGin_None{},  // no signal
-                                ncclGin_None{},  // no counter
-                                ncclCoopThread());
-                    }
+                    ncclGin net(dcomms[comm_id], ctx_id);
+                    ncclTeam world = ncclTeamWorld(dcomms[comm_id]);
+                    auto nccl_window = nccl_windows[comm_id];
+                    net.put(world,
+                            dst_rank,
+                            nccl_window,
+                            expected_dst_offset,
+                            nccl_window,
+                            expected_buf_offset,
+                            hidden * sizeof(nv_bfloat16),
+                            ncclGin_None{},  // no signal
+                            ncclGin_None{},  // no counter
+                            ncclCoopWarp());
                 }
 #elif defined(ENABLE_NVSHMEM)
                 // Issue RDMA
@@ -1379,18 +1370,22 @@ __global__ __launch_bounds__(1024, 1) void combine(void* combined_x,
             if (not is_rank_masked(mask_buffer_ptr, dst_rank)) {
                 if (dst_p2p_ptr == 0) {
 #ifdef ENABLE_NCCL
-
                     auto signal_id = signals_base + global_expert_idx;
-
                     auto local_expert_idx_flag = responsible_expert_idx % num_local_experts;
                     auto comm_id = local_expert_idx_flag / DEEP_EP_NCCL_GIN_CTXS_PER_COMM;
                     auto ctx_id = local_expert_idx_flag % DEEP_EP_NCCL_GIN_CTXS_PER_COMM;
-                    //EP_DEVICE_ASSERT(comm_id >= 0 && comm_id < num_gin_comms);
 
                     ncclGin net(dcomms[comm_id], ctx_id);
                     ncclTeam world = ncclTeamWorld(dcomms[comm_id]);
+                    // NOTE: net.signal() is semantically cleaner but currently slower 
+                    //       for Dispatch-Send and Combine-Send compared to net.put() with 0 bytes
+                    // net.signal(world,
+                    //            dst_rank,
+                    //            ncclGin_SignalAdd{signal_id, 1},
+                    //            ncclCoopThread(),
+                    //            ncclGin_None(),
+                    //            cuda::thread_scope_system);
                     auto nccl_window = nccl_windows[comm_id];
-
                     net.put(world,
                             dst_rank,
                             nccl_window,
