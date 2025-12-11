@@ -60,6 +60,7 @@ class HybridEPBuffer:
             use_mnnvl = os.getenv("USE_MNNVL", "0").strip().lower() in {"1", "true", "t", "yes", "y", "on"}
         if num_of_hybrid_ep_ranks_per_nvlink_domain is None:
             num_of_hybrid_ep_ranks_per_nvlink_domain = int(os.getenv("NUM_OF_HYBRID_EP_RANKS_PER_NVLINK_DOMAIN", "8"))
+        num_of_hybrid_ep_ranks_per_nvlink_domain = min(num_of_hybrid_ep_ranks_per_nvlink_domain, self.group_size)
         if num_of_hybrid_ep_ranks_per_nvlink_domain > 8: 
             use_mnnvl = True
         
@@ -180,9 +181,15 @@ class HybridEPBuffer:
 
         # Metadata-preprocessing API Config
         config.num_of_blocks_preprocessing_api = self.num_sms_preprocessing_api
-        config.num_of_threads_per_block_preprocessing_api = int(
-            os.getenv("NUM_OF_THREADS_PER_BLOCK_PREPROCESSING_API", "512")
-        )
+        if config.num_of_ranks_per_node >= 64:
+            # Use less threads to avoid the register overflow in large EP size.
+            config.num_of_threads_per_block_preprocessing_api = int(
+                os.getenv("NUM_OF_THREADS_PER_BLOCK_PREPROCESSING_API", "256")
+            )
+        else:
+            config.num_of_threads_per_block_preprocessing_api = int(
+                os.getenv("NUM_OF_THREADS_PER_BLOCK_PREPROCESSING_API", "512")
+            )
         config.num_of_blocks_permute_api = self.num_blocks_permute_api
 
         # Dispatch API Config
