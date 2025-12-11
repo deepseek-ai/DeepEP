@@ -113,20 +113,6 @@ int NCCLGINBackend::init(const std::vector<uint8_t>& root_unique_id_val, int ran
         CUDA_CHECK(cudaGetDevice(&current_device));
         CUDA_CHECK(cudaSetDevice(current_device));
 
-        // Validate GPU count matches compile-time configuration for low-latency mode
-        if (low_latency_mode) {
-            int actual_gpu_count;
-            CUDA_CHECK(cudaGetDeviceCount(&actual_gpu_count));
-
-            if (actual_gpu_count != NUM_GPUS_PER_NODE_LOW_LATENCY) {
-                throw std::runtime_error("GPU count mismatch: NUM_GPUS_PER_NODE_LOW_LATENCY is set to " +
-                                         std::to_string(NUM_GPUS_PER_NODE_LOW_LATENCY) + " but system has " +
-                                         std::to_string(actual_gpu_count) +
-                                         " GPUs. When using low-latency mode with NCCL backend, "
-                                         "please recompile with matching NUM_GPUS_PER_NODE_LOW_LATENCY in csrc/kernels/configs.cuh");
-            }
-        }
-
         nccl_comms_.resize(num_comms_);
         for (int i = 0; i < num_comms_; i++) {
             ncclUniqueId id;
@@ -149,9 +135,7 @@ int NCCLGINBackend::init(const std::vector<uint8_t>& root_unique_id_val, int ran
         if (rank == 0)
             printf("[NCCL Backend] Rank %d successfully initialized %d communicator(s)\n", comm_rank, num_comms_);
 
-        // Verify we have communicators initialized
-        // Note: We assume NCCL GIN provides DEEP_EP_NCCL_GIN_CTXS_PER_COMM (4) contexts per communicator
-        // This is a build-time configuration in NCCL GIN
+        // Verify we have at least one communicator initialized
         EP_HOST_ASSERT(num_comms_ > 0);
 
         // Allocate signals per context per buffer (double buffered total)

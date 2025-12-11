@@ -65,12 +65,6 @@ __device__ __forceinline__ uint64_t nccl_get_p2p_ptr(const uint64_t& dst_ptr,
     if (!ncclTeamRankIsMember(lsa, world, dst_rank))
         return 0;  // Different nodes (not in same LSA team), must use RDMA
 
-    // Old implementation using compile-time constant (faster but assumes fixed 8 GPUs/node):
-    // int rank_node = rank / NUM_GPUS_PER_NODE_LOW_LATENCY;
-    // int dst_rank_node = dst_rank / NUM_GPUS_PER_NODE_LOW_LATENCY;
-    // if (rank_node != dst_rank_node)
-    //     return 0;  // Different nodes, must use RDMA
-
     auto const p2p_ptr =
         reinterpret_cast<uint64_t>(ncclGetPeerPointer(nccl_windows[comm_id], offset, dst_rank));
 
