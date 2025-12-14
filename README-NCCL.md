@@ -100,3 +100,69 @@ rm -rf build/ dist/ *.egg-info/ *.so;
 - When switching between NCCL and NVSHMEM backends, always rebuild and reinstall
 - Adjust paths according to your system configuration (CUDA_HOME, NCCL_DIR, etc.)
 - The NVCC_GENCODE flag should match your GPU architecture (e.g., `-gencode=arch=compute_90,code=sm_90` for H100)
+
+### GIN Backend Selection
+
+The `NCCL_GIN_TYPE` environment variable selects the GPU-Initiated Networking (GIN) backend:
+
+| Value | Backend | Description |
+|:-----:|:-------:|:------------|
+| `2`   | Proxy   | Uses CPU proxy for network operations |
+| `3`   | GDAKI   | GPU Direct Async Kernel-Initiated - direct GPU-to-network communication |
+
+Example usage:
+```bash
+# Use GDAKI backend (recommended for best performance)
+NCCL_GIN_TYPE=3 python tests/test_low_latency.py ...
+
+# Use Proxy backend
+NCCL_GIN_TYPE=2 python tests/test_low_latency.py ...
+```
+
+---
+
+## Performance
+
+We benchmark DeepEP on H100 (900 GB/s NVLink bidirectional bandwidth) with 8×400 Gbit/s InfiniBand (~50 GB/s per NIC maximum bandwidth), comparing **NVSHMEM** and **NCCL** backends.
+
+### Normal kernels with NVLink and RDMA forwarding
+
+We follow the DeepSeek-V3/R1 pretraining setting (4096 tokens per batch, 7168 hidden, top-4 groups, top-8 experts, FP8 dispatching and BF16 combining).
+
+**NVSHMEM**
+
+|   Type    | Dispatch #EP | Bottleneck bandwidth | Combine #EP | Bottleneck bandwidth |
+|:---------:|:------------:|:--------------------:|:-----------:|:--------------------:|
+| Internode |      16      |  79.7 GB/s (RDMA)    |     16      |  66.4 GB/s (RDMA)    |
+| Internode |      32      |  62.9 GB/s (RDMA)    |     32      |  62.9 GB/s (RDMA)    |
+| Internode |      64      |  53.5 GB/s (RDMA)    |     64      |  53.2 GB/s (RDMA)    |
+
+**NCCL**
+
+|   Type    | Dispatch #EP | Bottleneck bandwidth | Combine #EP | Bottleneck bandwidth |
+|:---------:|:------------:|:--------------------:|:-----------:|:--------------------:|
+| Internode |      16      |  76.9 GB/s (RDMA)    |     16      |  66.2 GB/s (RDMA)    |
+| Internode |      32      |  61.7 GB/s (RDMA)    |     32      |  62.3 GB/s (RDMA)    |
+| Internode |      64      |  52.7 GB/s (RDMA)    |     64      |  52.9 GB/s (RDMA)    |
+
+### Low-latency kernels with pure RDMA
+
+We follow a typical DeepSeek-V3/R1 production setting (128 tokens per batch, 7168 hidden, top-8 experts, FP8 dispatching and BF16 combining).
+
+**NVSHMEM**
+
+| Dispatch #EP | Latency  | RDMA bandwidth | Combine #EP | Latency  | RDMA bandwidth |
+|:------------:|:--------:|:--------------:|:-----------:|:--------:|:--------------:|
+|      8       | 160.7 μs |   46.8 GB/s    |      8      | 304.2 μs |   47.8 GB/s    |
+|      16      | 182.3 μs |   41.4 GB/s    |     16      | 319.8 μs |   45.5 GB/s    |
+|      32      | 188.7 μs |   40.0 GB/s    |     32      | 332.9 μs |   43.7 GB/s    |
+|      64      | 225.1 μs |   34.8 GB/s    |     64      | 343.1 μs |   42.4 GB/s    |
+
+**NCCL**
+
+| Dispatch #EP | Latency  | RDMA bandwidth | Combine #EP | Latency  | RDMA bandwidth |
+|:------------:|:--------:|:--------------:|:-----------:|:--------:|:--------------:|
+|      8       | 160.8 μs |   47.0 GB/s    |      8      | 302.8 μs |   47.9 GB/s    |
+|      16      | 178.6 μs |   42.2 GB/s    |     16      | 320.8 μs |   45.3 GB/s    |
+|      32      | 190.1 μs |   39.8 GB/s    |     32      | 333.2 μs |   43.6 GB/s    |
+|      64      | 218.9 μs |   34.5 GB/s    |     64      | 351.1 μs |   41.4 GB/s    |

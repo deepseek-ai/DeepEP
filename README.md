@@ -12,51 +12,29 @@ Notice: the implementation in this library may have some slight differences from
 
 ### Normal kernels with NVLink and RDMA forwarding
 
-We test normal kernels on H100 (900 GB/s NVLink bidirectional bandwidth), with 8×400 Gbit/s InfiniBand (~50 GB/s per NIC maximum bandwidth). And we follow the DeepSeek-V3/R1 pretraining setting (4096 tokens per batch, 7168 hidden, top-4 groups, top-8 experts, FP8 dispatching and BF16 combining).
-
-We benchmark two communication backends: **NVSHMEM** and **NCCL**.
-
-**NVSHMEM**
+We test normal kernels on H800 (~160 GB/s NVLink maximum bandwidth), with each connected to a CX7 InfiniBand 400 Gb/s RDMA network card (~50 GB/s maximum bandwidth). And we follow the DeepSeek-V3/R1 pretraining setting (4096 tokens per batch, 7168 hidden, top-4 groups, top-8 experts, FP8 dispatching and BF16 combining).
 
 |   Type    | Dispatch #EP | Bottleneck bandwidth | Combine #EP | Bottleneck bandwidth |
 |:---------:|:------------:|:--------------------:|:-----------:|:--------------------:|
-| Internode |      16      |  79.7 GB/s (RDMA)    |     16      |  66.4 GB/s (RDMA)    |
-| Internode |      32      |  62.9 GB/s (RDMA)    |     32      |  62.9 GB/s (RDMA)    |
-| Internode |      64      |  53.5 GB/s (RDMA)    |     64      |  53.2 GB/s (RDMA)    |
-
-**NCCL**
-
-|   Type    | Dispatch #EP | Bottleneck bandwidth | Combine #EP | Bottleneck bandwidth |
-|:---------:|:------------:|:--------------------:|:-----------:|:--------------------:|
-| Internode |      16      |  76.9 GB/s (RDMA)    |     16      |  66.2 GB/s (RDMA)    |
-| Internode |      32      |  61.7 GB/s (RDMA)    |     32      |  62.3 GB/s (RDMA)    |
-| Internode |      64      |  52.7 GB/s (RDMA)    |     64      |  52.9 GB/s (RDMA)    |
+| Intranode |      8       |  153 GB/s (NVLink)   |      8      |  158 GB/s (NVLink)   |
+| Internode |      16      |    43 GB/s (RDMA)    |     16      |    43 GB/s (RDMA)    |
+| Internode |      32      |    58 GB/s (RDMA)    |     32      |    57 GB/s (RDMA)    |
+| Internode |      64      |    51 GB/s (RDMA)    |     64      |    50 GB/s (RDMA)    |
 
 **News (2025.04.22)**: with optimizations from Tencent Network Platform Department, performance was enhanced by up to 30%, see [#130](https://github.com/deepseek-ai/DeepEP/pull/130) for more details. Thanks for the contribution!
 
 ### Low-latency kernels with pure RDMA
 
-We test low-latency kernels on H100 with 8×400 Gbit/s InfiniBand (~50 GB/s per NIC maximum bandwidth). And we follow a typical DeepSeek-V3/R1 production setting (128 tokens per batch, 7168 hidden, top-8 experts, FP8 dispatching and BF16 combining).
+We test low-latency kernels on H800 with each connected to a CX7 InfiniBand 400 Gb/s RDMA network card (~50 GB/s maximum bandwidth). And we follow a typical DeepSeek-V3/R1 production setting (128 tokens per batch, 7168 hidden, top-8 experts, FP8 dispatching and BF16 combining).
 
-We benchmark two communication backends: **NVSHMEM** and **NCCL**.
-
-**NVSHMEM**
-
-| Dispatch #EP | Latency  | RDMA bandwidth | Combine #EP | Latency  | RDMA bandwidth |
-|:------------:|:--------:|:--------------:|:-----------:|:--------:|:--------------:|
-|      8       | 160.7 μs |   46.8 GB/s    |      8      | 304.2 μs |   47.8 GB/s    |
-|      16      | 182.3 μs |   41.4 GB/s    |     16      | 319.8 μs |   45.5 GB/s    |
-|      32      | 188.7 μs |   40.0 GB/s    |     32      | 332.9 μs |   43.7 GB/s    |
-|      64      | 225.1 μs |   34.8 GB/s    |     64      | 343.1 μs |   42.4 GB/s    |
-
-**NCCL**
-
-| Dispatch #EP | Latency  | RDMA bandwidth | Combine #EP | Latency  | RDMA bandwidth |
-|:------------:|:--------:|:--------------:|:-----------:|:--------:|:--------------:|
-|      8       | 160.8 μs |   47.0 GB/s    |      8      | 302.8 μs |   47.9 GB/s    |
-|      16      | 178.6 μs |   42.2 GB/s    |     16      | 320.8 μs |   45.3 GB/s    |
-|      32      | 190.1 μs |   39.8 GB/s    |     32      | 333.2 μs |   43.6 GB/s    |
-|      64      | 218.9 μs |   34.5 GB/s    |     64      | 351.1 μs |   41.4 GB/s    |
+| Dispatch #EP | Latency | RDMA bandwidth | Combine #EP | Latency | RDMA bandwidth |
+|:------------:|:-------:|:--------------:|:-----------:|:-------:|:--------------:|
+|      8       |  77 us  |    98 GB/s     |      8      | 114 us  |    127 GB/s    |
+|      16      | 118 us  |    63 GB/s     |     16      | 195 us  |    74 GB/s     |
+|      32      | 155 us  |    48 GB/s     |     32      | 273 us  |    53 GB/s     |
+|      64      | 173 us  |    43 GB/s     |     64      | 314 us  |    46 GB/s     |
+|     128      | 192 us  |    39 GB/s     |     128     | 369 us  |    39 GB/s     |
+|     256      | 194 us  |    39 GB/s     |     256     | 360 us  |    40 GB/s     |
 
 **News (2025.06.05)**: low-latency kernels now leverage NVLink as much as possible, see [#173](https://github.com/deepseek-ai/DeepEP/pull/173) for more details. Thanks for the contribution!
 

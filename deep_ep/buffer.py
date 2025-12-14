@@ -123,6 +123,10 @@ class Buffer:
             self.nvshmem_qp_depth = int(os.environ.get('NVSHMEM_QP_DEPTH', '1024'))
             os.environ['NVSHMEM_QP_DEPTH'] = str(self.nvshmem_qp_depth)
 
+            # NCCL QP depth settings (similar to NVSHMEM_QP_DEPTH)
+            os.environ.setdefault('NCCL_RMA_PROXY_QUEUE_SIZE', '1024')
+            os.environ.setdefault('NCCL_GIN_GDAKI_QP_DEPTH', '1024')
+
             # Reduce gpu memory usage
             # 6 default teams + 1 extra team
             os.environ['NVSHMEM_MAX_TEAMS'] = '7'
