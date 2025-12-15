@@ -370,8 +370,7 @@ void Buffer::sync(const std::vector<int>& device_ids,
         auto root_unique_id_str = root_unique_id_opt->cast<std::string>();
         std::memcpy(root_unique_id.data(), root_unique_id_str.c_str(), root_unique_id_opt->size());
 
-        int result_rank = internode::init(root_unique_id, rank, rdma_rank, num_ranks, num_rdma_ranks, low_latency_mode, qps_per_rank);
-        EP_HOST_ASSERT(result_rank == rank);
+        internode::init(root_unique_id, rank, rdma_rank, num_ranks, num_rdma_ranks, low_latency_mode, qps_per_rank);
         internode::barrier();
 
         // Allocate
