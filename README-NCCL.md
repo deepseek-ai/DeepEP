@@ -8,7 +8,7 @@ For system requirements and dependencies, please refer to the main [README.md](R
 
 This guide requires NCCL with the Device API support including, in particular, GPU-Initiated Networking (GIN). The recommended supported version is:
 
-- **NCCL 2.29.1** or later
+- **NCCL 2.28.9** or later
 - Repository: [https://github.com/NVIDIA/nccl](https://github.com/NVIDIA/nccl)
 
 ## Step 1: Setup the environment and compile NCCL

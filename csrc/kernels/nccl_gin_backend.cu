@@ -168,7 +168,7 @@ int NCCLGINBackend::init(const std::vector<uint8_t>& root_unique_id_val, int ran
         dcomms_ = new ncclDevComm_t[num_comms_];
         for (int c = 0; c < num_comms_; ++c) {
             dcomms_[c] = ncclDevComm_t{};  // Initialize to default
-            ncclDevCommRequirements reqs = NCCL_DEV_COMM_REQUIREMENTS_INITIALIZER;
+            ncclDevCommRequirements reqs{}; 
             reqs.barrierCount = MAX_BARRIER_SESSIONS;
             reqs.ginSignalCount = num_total_signals_ + MAX_BARRIER_SESSIONS;
             reqs.ginForceEnable = true;
