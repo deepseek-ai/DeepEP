@@ -18,6 +18,7 @@ TOPK = int(os.environ.get("TOPK", 8))
 PAD_MULTIPLE = int(os.environ.get("PAD_MULTIPLE", 32))
 ITERATIONS = int(os.environ.get("ITERATIONS", 100))
 SEED = int(os.environ.get("SEED", 42))
+USE_MNNVL = os.environ.get("USE_MNNVL", "0").strip().lower() in {"1", "true", "t", "yes", "y", "on"}
 torch.manual_seed(SEED)
 torch.cuda.manual_seed(SEED)
 torch.cuda.manual_seed_all(SEED)
@@ -359,9 +360,14 @@ def test_main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
 
     # Set missing global vars
     global NUM_OF_RANKS_PER_NODE, NUM_OF_NODES, NUM_OF_EXPERTS
-    NUM_OF_RANKS_PER_NODE = args.num_processes
-    NUM_OF_NODES = group.size() // NUM_OF_RANKS_PER_NODE
-    NUM_OF_EXPERTS = NUM_LOCAL_EXPERTS * NUM_OF_RANKS_PER_NODE * NUM_OF_NODES
+    if USE_MNNVL:
+        NUM_OF_RANKS_PER_NODE = group.size()
+        NUM_OF_NODES = 1
+        NUM_OF_EXPERTS = NUM_LOCAL_EXPERTS * NUM_OF_RANKS_PER_NODE * NUM_OF_NODES
+    else:
+        NUM_OF_RANKS_PER_NODE = args.num_processes
+        NUM_OF_NODES = group.size() // NUM_OF_RANKS_PER_NODE
+        NUM_OF_EXPERTS = NUM_LOCAL_EXPERTS * NUM_OF_RANKS_PER_NODE * NUM_OF_NODES
 
     for use_fp8 in [False, True]:
         buffer = deep_ep.HybridEPBuffer(
