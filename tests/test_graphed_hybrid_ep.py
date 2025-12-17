@@ -14,19 +14,19 @@ MAX_NUM_OF_TOKENS_PER_RANK = int(os.environ.get("MAX_NUM_OF_TOKENS_PER_RANK", 40
 # NUM_TOKENS_PER_RANK should equal or less than MAX_NUM_OF_TOKENS_PER_RANK
 NUM_TOKENS_PER_RANK = int(os.environ.get("NUM_TOKENS_PER_RANK", 4096))
 NUM_LOCAL_EXPERTS = int(os.environ.get("NUM_LOCAL_EXPERTS", 8))
-NUM_OF_RANKS_PER_NODE = int(os.environ.get("NUM_OF_RANKS_PER_NODE", 4))
-NUM_OF_NODES = int(os.environ.get("NUM_OF_NODES", 1))
 TOPK = int(os.environ.get("TOPK", 8))
 PAD_MULTIPLE = int(os.environ.get("PAD_MULTIPLE", 32))
-NUM_OF_EXPERTS = NUM_LOCAL_EXPERTS * NUM_OF_RANKS_PER_NODE * NUM_OF_NODES
 ITERATIONS = int(os.environ.get("ITERATIONS", 100))
 SEED = int(os.environ.get("SEED", 42))
-USE_MNNVL = os.environ.get("USE_MNNVL", "0").strip().lower() in {"1", "true", "t", "yes", "y", "on"}
 torch.manual_seed(SEED)
 torch.cuda.manual_seed(SEED)
 torch.cuda.manual_seed_all(SEED)
 torch.backends.cudnn.deterministic = True
 torch.backends.cudnn.benchmark = False
+# Will be set after the process group is initialized
+NUM_OF_RANKS_PER_NODE = None
+NUM_OF_NODES = None
+NUM_OF_EXPERTS = None
 
 def print_in_order(msg: str):
     """Print message in order by rank to avoid interleaved output"""
@@ -195,6 +195,13 @@ def test_hybrid_ep_correctness(buffer: deep_ep.HybridEPBuffer, ref: TorchRef, us
 
 def test_main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
     _, _, group = init_dist(local_rank, num_local_ranks)
+
+    # Set missing global vars
+    global NUM_OF_RANKS_PER_NODE, NUM_OF_NODES, NUM_OF_EXPERTS
+    NUM_OF_RANKS_PER_NODE = args.num_processes
+    NUM_OF_NODES = group.size() // NUM_OF_RANKS_PER_NODE
+    NUM_OF_EXPERTS = NUM_LOCAL_EXPERTS * NUM_OF_RANKS_PER_NODE * NUM_OF_NODES
+
     for use_fp8 in [False, True]:
         for with_probs in [True, False]:
             buffer = deep_ep.HybridEPBuffer(
@@ -202,8 +209,6 @@ def test_main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
                 hidden_dim=HIDDEN_DIM,
                 max_num_of_tokens_per_rank=MAX_NUM_OF_TOKENS_PER_RANK,
                 num_local_experts=NUM_LOCAL_EXPERTS,
-                num_of_hybrid_ep_ranks_per_nvlink_domain=NUM_OF_RANKS_PER_NODE,
-                use_mnnvl=USE_MNNVL,
                 use_fp8=use_fp8
             )
             ref = TorchRef(
