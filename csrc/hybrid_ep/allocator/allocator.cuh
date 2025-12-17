@@ -6,6 +6,7 @@
 #include <cuda_profiler_api.h>
 #include <cuda_runtime.h>
 #include <cuda_runtime_api.h>
+#include <torch/torch.h>
 #include "utils.cuh"
 
 struct MemHandle {
@@ -19,10 +20,8 @@ struct MemHandle {
 // Remote memory allocator, allocate memory which can be accessed by remote devices.
 class ExtendedMemoryAllocator {
  public:
-  // @param enable_fabric Whether to enable fabric.
-  // The fabric handle is used on the GB200 case currently.
-  void init(bool enable_fabric);
-
+  ExtendedMemoryAllocator();
+  
   void allocate(void** ptr, size_t size_raw);
   
   void free(void* ptr);
@@ -33,11 +32,16 @@ class ExtendedMemoryAllocator {
   
   void close_handle(void* ptr);
 
-  bool get_fabric_status() { return enable_fabric_; }
+  bool is_accessible(MemHandle* mem_handle);
+  
+  // @param process_group: The process group for the hybrid ep.
+  // @return use_mnnvl, num_ranks_per_nvldomain
+  // support_mnnvl: Whether to support mnnvl.
+  // num_ranks_per_nvldomain: The number of ranks per nvldomain.
+  std::tuple<bool, int> detect_accessible_ranks(pybind11::object process_group);
 
  private:
   bool support_fabric_ = false;
-  bool enable_fabric_ = false;
   size_t fabric_granularity_;
   CUdevice device_;
   CUmemAllocationProp fabric_prop_ = {};

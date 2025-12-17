@@ -3,42 +3,15 @@
 
 #include "allocator.cuh"
 
-// Check if the current device supports fabric.
-bool ExtendedMemoryAllocator::support_fabric() {
-  int device_count;
-  CUDA_CHECK(cudaGetDeviceCount(&device_count));
+ExtendedMemoryAllocator::ExtendedMemoryAllocator() {
+  this->support_fabric_ = support_fabric();
 
-  for (int device = 0; device < device_count; ++device) {
-    int support = 0;
-    CU_CHECK(
-        cuDeviceGetAttribute(&support, CU_DEVICE_ATTRIBUTE_HANDLE_TYPE_FABRIC_SUPPORTED, device));
-    if (!support) {
-      printf("[Warning] Device %d does not support fabric memory handle.\n", device);
-      return false;
-    }
-  }
-  return true;
-}
+  // It seems a dummy call to set the device. but it is useful to prevent the invalid device context error in gb..
+  int device_id = -1;
+  CUDA_CHECK(cudaGetDevice(&device_id));
+  CUDA_CHECK(cudaSetDevice(device_id));
 
-// Round-up allocation size to fabric granularity.
-size_t inline get_size_align_to_granularity(size_t size_raw, size_t granularity) {
-  size_t size = (size_raw + granularity - 1) & ~(granularity - 1);
-  if (size == 0)
-    size = granularity;
-  return size;
-}
-
-void ExtendedMemoryAllocator::init(bool enable_fabric) {
-  if (enable_fabric) {
-    this->support_fabric_ = support_fabric();
-    this->enable_fabric_ = enable_fabric && this->support_fabric_;
-  }
-
-  if (this->enable_fabric_) {
-    int device_id = -1;
-    // It seems a dummy call to set the device. but it is useful to prevent the invalid device context error in gb..
-    CUDA_CHECK(cudaGetDevice(&device_id));
-    CUDA_CHECK(cudaSetDevice(device_id));
+  if (this->support_fabric_) {
     // Get the device context.
     CU_CHECK(cuCtxGetDevice(&device_));
     fabric_prop_.type = CU_MEM_ALLOCATION_TYPE_PINNED;
@@ -53,8 +26,32 @@ void ExtendedMemoryAllocator::init(bool enable_fabric) {
   }
 }
 
+
+// Check if the current device supports fabric.
+bool ExtendedMemoryAllocator::support_fabric() {
+  int device_count;
+  CUDA_CHECK(cudaGetDeviceCount(&device_count));
+
+  for (int device = 0; device < device_count; ++device) {
+    int support = 0;
+    CU_CHECK(cuDeviceGetAttribute(&support, CU_DEVICE_ATTRIBUTE_HANDLE_TYPE_FABRIC_SUPPORTED, device));
+    if (!support) {
+      return false;
+    }
+  }
+  return true;
+}
+
+// Round-up allocation size to fabric granularity.
+size_t inline get_size_align_to_granularity(size_t size_raw, size_t granularity) {
+  size_t size = (size_raw + granularity - 1) & ~(granularity - 1);
+  if (size == 0)
+    size = granularity;
+  return size;
+}
+
 void ExtendedMemoryAllocator::allocate(void** ptr, size_t size_raw) {
-  if (enable_fabric_) {
+  if (support_fabric_) {
     size_t size = get_size_align_to_granularity(size_raw, fabric_granularity_);
     CUmemGenericAllocationHandle handle;
     CU_CHECK(cuMemCreate(&handle, size, &fabric_prop_, 0));
@@ -67,7 +64,7 @@ void ExtendedMemoryAllocator::allocate(void** ptr, size_t size_raw) {
 }
 
 void ExtendedMemoryAllocator::free(void* ptr) {
-  if (enable_fabric_) {
+  if (support_fabric_) {
     CUmemGenericAllocationHandle handle;
     CU_CHECK(cuMemRetainAllocationHandle(&handle, ptr));
     size_t size = 0;
@@ -85,7 +82,7 @@ void ExtendedMemoryAllocator::get_handle(MemHandle* mem_handle, void* ptr) {
   CU_CHECK(cuMemGetAddressRange(NULL, &size, (CUdeviceptr)ptr));
   
   mem_handle->size = size;
-  if (enable_fabric_) {
+  if (support_fabric_) {
     CUmemGenericAllocationHandle handle;
     CU_CHECK(cuMemRetainAllocationHandle(&handle, ptr));
     CU_CHECK(cuMemExportToShareableHandle(&mem_handle->inner.cu_mem_fabric_handle, handle,
@@ -96,7 +93,7 @@ void ExtendedMemoryAllocator::get_handle(MemHandle* mem_handle, void* ptr) {
 }
 
 void ExtendedMemoryAllocator::open_handle(void** ptr, MemHandle* mem_handle) {
-  if (enable_fabric_) {
+  if (support_fabric_) {
     size_t size = mem_handle->size;
     CUmemGenericAllocationHandle handle;
     CU_CHECK(cuMemImportFromShareableHandle(&handle, &mem_handle->inner.cu_mem_fabric_handle,
@@ -111,7 +108,7 @@ void ExtendedMemoryAllocator::open_handle(void** ptr, MemHandle* mem_handle) {
 }
 
 void ExtendedMemoryAllocator::close_handle(void* ptr) {
-  if (enable_fabric_) {
+  if (support_fabric_) {
     size_t size = 0;
     CU_CHECK(cuMemGetAddressRange(NULL, &size, (CUdeviceptr)ptr));
     CU_CHECK(cuMemUnmap((CUdeviceptr)ptr, size));
@@ -119,4 +116,68 @@ void ExtendedMemoryAllocator::close_handle(void* ptr) {
   } else {
     CUDA_CHECK(cudaIpcCloseMemHandle(ptr));
   }
+}
+
+bool ExtendedMemoryAllocator::is_accessible(MemHandle* mem_handle) {
+  bool accessible = false;
+  if (support_fabric_) {
+    CUmemGenericAllocationHandle handle;
+    auto ret = cuMemImportFromShareableHandle(&handle, &mem_handle->inner.cu_mem_fabric_handle, CU_MEM_HANDLE_TYPE_FABRIC);
+    accessible = ret == CUDA_SUCCESS;
+  } else {
+    CUDA_CHECK(cudaGetLastError());
+    void* tmp;
+    auto ret = cudaIpcOpenMemHandle(&tmp, mem_handle->inner.cuda_ipc_mem_handle,
+                                    cudaIpcMemLazyEnablePeerAccess);
+    accessible = ret == cudaSuccess;
+    if (accessible) {
+      CUDA_CHECK(cudaIpcCloseMemHandle(tmp));
+    }
+  }
+
+  cudaGetLastError(); // Clear the last error
+  return accessible;
+}
+
+std::tuple<bool, int> ExtendedMemoryAllocator::detect_accessible_ranks(pybind11::object process_group) {
+  // Create test memory 
+  int * test_memory;
+  allocate((void**)&test_memory, 128 * sizeof(int));
+  MemHandle test_mem_handle;
+  get_handle(&test_mem_handle, test_memory);
+
+  // Put the test memory on a CUDA tensor
+  auto opts = torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA);
+  torch::Tensor test_tensor = torch::empty({static_cast<long>(sizeof(MemHandle))}, opts);
+  CUDA_CHECK(cudaMemcpy(test_tensor.data_ptr(), &test_mem_handle, sizeof(MemHandle),
+                        cudaMemcpyHostToDevice));
+
+  auto torch_distributed = py::module_::import("torch.distributed");  
+  int world_size = process_group.attr("size")().cast<int>();
+  int current_rank = process_group.attr("rank")().cast<int>();
+  
+  // All gather the test memory
+  py::list test_handle_list;  
+  for (int i = 0; i < world_size; i++) {
+    test_handle_list.append(torch::empty_like(test_tensor));
+  }
+  torch_distributed.attr("all_gather")(test_handle_list, test_tensor, process_group);
+
+  // Check if the test memory is accessible on each rank
+  int num_accessible_ranks = 1; // include the current rank
+  for (int i = 0; i < world_size; i++) {
+    if (i != current_rank) {
+      MemHandle test_handle;
+      torch::Tensor gathered = test_handle_list[i].cast<torch::Tensor>();
+      CUDA_CHECK(cudaMemcpy(&test_handle, gathered.data_ptr(), sizeof(MemHandle), cudaMemcpyDeviceToHost));
+      if (is_accessible(&test_handle)) {
+        num_accessible_ranks++;
+      }
+    }
+  }
+
+  torch_distributed.attr("barrier")(process_group);
+  this->free((void*)test_memory);
+  CUDA_CHECK(cudaGetLastError());
+  return std::make_tuple(support_fabric_, num_accessible_ranks);
 }

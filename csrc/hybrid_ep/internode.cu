@@ -264,7 +264,6 @@ void RDMACoordinator::init(
       pybind11::object process_group,
       int node_rank,
       int local_rank, 
-      bool use_mnnvl,
       BufferConfig config
   ) {
   this->process_group = process_group;
@@ -272,14 +271,13 @@ void RDMACoordinator::init(
   this->local_rank = local_rank;
   this->buffer_config = config;
   assert(buffer_config.num_of_nodes > 1);
-  
+
   std::vector<int> gpu_idx_vec;
   // The node in config means the nvlink domain
   // The local device index is the index of the device in the real device list within the physical node. 
-  int num_of_local_devices = buffer_config.num_of_ranks_per_node;
-  if (use_mnnvl) {
-    num_of_local_devices = std::min(num_of_local_devices, 4);
-  }
+  int num_of_local_devices;
+  CUDA_CHECK(cudaGetDeviceCount(&num_of_local_devices));
+  num_of_local_devices = std::min(num_of_local_devices, buffer_config.num_of_ranks_per_node);
   int local_device_idx = local_rank % num_of_local_devices;
   for (int i = 0; i < num_of_local_devices; ++i) {
     gpu_idx_vec.push_back(i);

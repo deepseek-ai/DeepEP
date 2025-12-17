@@ -55,20 +55,11 @@ class HybridEPBuffer:
             self.group_size > 1
         ), f"The hybrid-ep kernel should be used with at least 2 ranks, but got {self.group_size}."
 
-        # Number of ranks in the first nvlink domain.
-        if use_mnnvl is None:
-            use_mnnvl = os.getenv("USE_MNNVL", "0").strip().lower() in {"1", "true", "t", "yes", "y", "on"}
-        if num_of_hybrid_ep_ranks_per_nvlink_domain is None:
-            num_of_hybrid_ep_ranks_per_nvlink_domain = int(os.getenv("NUM_OF_HYBRID_EP_RANKS_PER_NVLINK_DOMAIN", "8"))
-        num_of_hybrid_ep_ranks_per_nvlink_domain = min(num_of_hybrid_ep_ranks_per_nvlink_domain, self.group_size)
-        if num_of_hybrid_ep_ranks_per_nvlink_domain > 8: 
-            use_mnnvl = True
-        
+        allocator = hybrid_ep_cpp.ExtendedMemoryAllocator()
+        [support_mnnvl, self.num_of_hybrid_ep_ranks_per_nvlink_domain] = allocator.detect_accessible_ranks(self.group)
         assert (
-            self.group_size % num_of_hybrid_ep_ranks_per_nvlink_domain == 0
+            self.group_size % self.num_of_hybrid_ep_ranks_per_nvlink_domain == 0
         ), "The number of ranks should be divisible by the number of ranks per node."
-        self.rank = self.group.rank()
-        self.num_of_hybrid_ep_ranks_per_nvlink_domain = num_of_hybrid_ep_ranks_per_nvlink_domain
 
         # Local rank: the active rank in the nvlink domain.
         self.local_rank = self.rank % self.num_of_hybrid_ep_ranks_per_nvlink_domain
@@ -121,7 +112,6 @@ class HybridEPBuffer:
         self.config.num_of_tokens_per_chunk_combine_api = int(
             os.getenv("NUM_OF_TOKENS_PER_CHUNK_COMBINE_API", "128")
         )
-
         assert self.config.is_valid(), "The buffer config is not valid."
 
         # Create C++ buffer - this will allocate all buffers during construction
@@ -134,7 +124,7 @@ class HybridEPBuffer:
             os.path.dirname(os.path.abspath(__file__)), 
             load_cached_kernels = False, 
             use_shared_buffer = True,
-            use_mnnvl = use_mnnvl, # If use_mnnvl is True, the fabric memory handle will be used.
+            use_mnnvl = support_mnnvl, # If use_mnnvl is True, the fabric memory handle will be used.
         )
 
     def empty_jit_cache(self):

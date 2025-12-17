@@ -5,6 +5,7 @@
 #include <pybind11/functional.h>
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
+#include "allocator/allocator.cuh"
 #include "hybrid_ep.cuh"
 #include "utils.cuh"
 #include "config.cuh"
@@ -14,6 +15,10 @@ namespace py = pybind11;
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.doc() = "HybridEP, efficiently enable the expert-parallel communication in "
               "the Hopper+ architectures";
+    
+    pybind11::class_<ExtendedMemoryAllocator>(m, "ExtendedMemoryAllocator")
+        .def(py::init<>())
+        .def("detect_accessible_ranks", &ExtendedMemoryAllocator::detect_accessible_ranks, py::arg("process_group"));
       
     pybind11::enum_<APP_TOKEN_DATA_TYPE>(m, "APP_TOKEN_DATA_TYPE")
         .value("UINT16", APP_TOKEN_DATA_TYPE::UINT16)
