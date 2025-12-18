@@ -226,6 +226,7 @@ Refer to `tests/test_hybrid_ep.py` for comprehensive usage examples including:
 - Intra-node testing scenarios
 - Inter-node testing scenarios
 - Performance benchmarking setups
+Users can set HYBRID_EP_CACHE_DIR to store jitted files in an appropriate directory.
 
 
 ### Important Configuration Note

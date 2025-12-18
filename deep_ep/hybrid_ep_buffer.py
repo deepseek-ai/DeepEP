@@ -59,7 +59,7 @@ class HybridEPBuffer:
         self.num_of_hybrid_ep_ranks_per_nvlink_domain = allocator.detect_accessible_ranks(self.group)
         assert (
             self.group_size % self.num_of_hybrid_ep_ranks_per_nvlink_domain == 0
-        ), "The number of ranks should be divisible by the number of ranks per node."
+        ), f"The number of ranks {self.group_size} should be divisible by the number of ranks per node {self.num_of_hybrid_ep_ranks_per_nvlink_domain}."
 
         # Local rank: the active rank in the nvlink domain.
         self.local_rank = self.rank % self.num_of_hybrid_ep_ranks_per_nvlink_domain
