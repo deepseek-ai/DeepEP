@@ -3,6 +3,14 @@
 
 #include "allocator.cuh"
 
+// Round-up allocation size to fabric granularity.
+size_t inline get_size_align_to_granularity(size_t size_raw, size_t granularity) {
+  size_t size = (size_raw + granularity - 1) & ~(granularity - 1);
+  if (size == 0)
+    size = granularity;
+  return size;
+}
+
 ExtendedMemoryAllocator::ExtendedMemoryAllocator() {
   this->support_fabric_ = support_fabric();
 
@@ -24,6 +32,18 @@ ExtendedMemoryAllocator::ExtendedMemoryAllocator() {
     access_desc.location.id = device_;
     access_desc.flags = CU_MEM_ACCESS_FLAGS_PROT_READWRITE;
   }
+
+  // Test the fabric support
+  // Somtimes support_fabric() returns true, but the fabric can not be used.
+  if (this->support_fabric_) {
+    size_t size = get_size_align_to_granularity(128, fabric_granularity_);
+    CUmemGenericAllocationHandle handle;
+    if (CUDA_SUCCESS != cuMemCreate(&handle, size, &fabric_prop_, 0)) {
+      this->support_fabric_ = false;
+    } else {
+      cuMemRelease(handle);
+    }
+  }
 }
 
 
@@ -40,14 +60,6 @@ bool ExtendedMemoryAllocator::support_fabric() {
     }
   }
   return true;
-}
-
-// Round-up allocation size to fabric granularity.
-size_t inline get_size_align_to_granularity(size_t size_raw, size_t granularity) {
-  size_t size = (size_raw + granularity - 1) & ~(granularity - 1);
-  if (size == 0)
-    size = granularity;
-  return size;
 }
 
 void ExtendedMemoryAllocator::allocate(void** ptr, size_t size_raw) {
@@ -133,9 +145,8 @@ bool ExtendedMemoryAllocator::is_accessible(MemHandle* mem_handle) {
     if (accessible) {
       CUDA_CHECK(cudaIpcCloseMemHandle(tmp));
     }
+    cudaGetLastError(); // Clear the last error
   }
-
-  cudaGetLastError(); // Clear the last error
   return accessible;
 }
 
