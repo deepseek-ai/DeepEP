@@ -35,10 +35,8 @@ class ExtendedMemoryAllocator {
   bool is_accessible(MemHandle* mem_handle);
   
   // @param process_group: The process group for the hybrid ep.
-  // @return use_mnnvl, num_ranks_per_nvldomain
-  // support_mnnvl: Whether to support mnnvl.
-  // num_ranks_per_nvldomain: The number of ranks per nvldomain.
-  std::tuple<bool, int> detect_accessible_ranks(pybind11::object process_group);
+  // @return num_accessible_ranks: The number of accessible ranks.
+  int detect_accessible_ranks(pybind11::object process_group);
 
  private:
   bool support_fabric_ = false;

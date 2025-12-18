@@ -150,7 +150,7 @@ bool ExtendedMemoryAllocator::is_accessible(MemHandle* mem_handle) {
   return accessible;
 }
 
-std::tuple<bool, int> ExtendedMemoryAllocator::detect_accessible_ranks(pybind11::object process_group) {
+int ExtendedMemoryAllocator::detect_accessible_ranks(pybind11::object process_group) {
   // Create test memory 
   int * test_memory;
   allocate((void**)&test_memory, 128 * sizeof(int));
@@ -190,5 +190,5 @@ std::tuple<bool, int> ExtendedMemoryAllocator::detect_accessible_ranks(pybind11:
   torch_distributed.attr("barrier")(process_group);
   this->free((void*)test_memory);
   CUDA_CHECK(cudaGetLastError());
-  return std::make_tuple(support_fabric_, num_accessible_ranks);
+  return num_accessible_ranks;
 }

@@ -44,7 +44,7 @@ class HybridEPBuffer:
         num_sms_dispatch_api: int = None,
         num_sms_combine_api: int = None,
         num_sms_preprocessing_api: int = None,
-        # Rank-based setting
+        # Deprecated parameters
         num_of_hybrid_ep_ranks_per_nvlink_domain: int = None,
         use_mnnvl: bool = None
     ):
@@ -56,7 +56,7 @@ class HybridEPBuffer:
         ), f"The hybrid-ep kernel should be used with at least 2 ranks, but got {self.group_size}."
 
         allocator = hybrid_ep_cpp.ExtendedMemoryAllocator()
-        [support_mnnvl, self.num_of_hybrid_ep_ranks_per_nvlink_domain] = allocator.detect_accessible_ranks(self.group)
+        self.num_of_hybrid_ep_ranks_per_nvlink_domain = allocator.detect_accessible_ranks(self.group)
         assert (
             self.group_size % self.num_of_hybrid_ep_ranks_per_nvlink_domain == 0
         ), "The number of ranks should be divisible by the number of ranks per node."
@@ -123,8 +123,7 @@ class HybridEPBuffer:
             self.group_size, 
             os.path.dirname(os.path.abspath(__file__)), 
             load_cached_kernels = False, 
-            use_shared_buffer = True,
-            use_mnnvl = support_mnnvl, # If use_mnnvl is True, the fabric memory handle will be used.
+            use_shared_buffer = True
         )
 
     def empty_jit_cache(self):

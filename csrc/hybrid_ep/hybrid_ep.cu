@@ -12,8 +12,7 @@ HybridEPBuffer::HybridEPBuffer(
   int group_size, 
   std::string base_path,
   bool load_cached_kernels,
-  bool use_shared_buffer,
-  bool use_mnnvl
+  bool use_shared_buffer
 ) : process_group(process_group), 
     buffer_config(config), 
     local_rank(local_rank), 

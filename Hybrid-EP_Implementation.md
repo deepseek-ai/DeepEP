@@ -227,15 +227,6 @@ Refer to `tests/test_hybrid_ep.py` for comprehensive usage examples including:
 - Inter-node testing scenarios
 - Performance benchmarking setups
 
-**Explicitly configure `num_of_hybrid_ep_ranks_per_nvlink_domain` (default 8, representing the number of Hybrid-EP ranks that participate in the same Hybrid-EP communication within a single NVLink domain, this value is critical for MNNVL case) and `USE_MNNVL` (default disabled/False) either via uppercase environment variables or by passing arguments to `HybridEPBuffer.__init__`. In multi-node NVLink deployments you must enable `USE_MNNVL=1`.**
-
-Example configuration on EP64, MNNVL:
-- Environment variables:
-  ```
-  export NUM_OF_HYBRID_EP_RANKS_PER_NVLINK_DOMAIN=64
-  export USE_MNNVL=1
-  ```
-- Python init: `HybridEPBuffer(..., num_of_hybrid_ep_ranks_per_nvlink_domain=64, use_mnnvl=True)`
 
 ### Important Configuration Note
 Here are important parameter settings in `csrc/hybrid_ep/config.cuh`. You can modify these parameters via `HybridEPBuffer.init_config()` or by setting proper environment variables (see `deep_ep/hybrid_ep_buffer.py`) to achieve better performance/usability:
