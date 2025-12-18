@@ -3,6 +3,37 @@
 #include "hybrid_ep.cuh"
 #include <iostream>
 #include <sstream>
+#include <vector>
+#include <functional>
+
+std::string get_comm_id(pybind11::object process_group) {
+  auto torch = pybind11::module_::import("torch");
+  auto torch_distributed = torch.attr("distributed");
+
+  // Get the global id of each rank in the process group
+  std::vector<int> global_ranks;
+  pybind11::object get_global_rank;
+  if (pybind11::hasattr(torch_distributed, "get_global_rank")) {
+    get_global_rank = torch_distributed.attr("get_global_rank");
+  } 
+  int group_size = process_group.attr("size")().cast<int>();
+  global_ranks.reserve(group_size);
+  for (int i = 0; i < group_size; ++i) {
+    int g = get_global_rank(process_group, i).cast<int>();
+    global_ranks.push_back(g);
+  }
+
+  // Concatenate the global ranks into a string
+  std::ostringstream ranks_ss;
+  for (size_t i = 0; i < global_ranks.size(); ++i) {
+    if (i) ranks_ss << ",";
+    ranks_ss << global_ranks[i];
+  }
+
+  // Hash the string to get the comm id
+  auto hashed = std::hash<std::string>{}(ranks_ss.str());
+  return std::to_string(hashed);
+}
 
 HybridEPBuffer::HybridEPBuffer(
   pybind11::object process_group, 
@@ -19,7 +50,7 @@ HybridEPBuffer::HybridEPBuffer(
     node_rank(node_rank), 
     group_size(group_size), 
     use_shared_buffer(use_shared_buffer),
-    executor(local_rank, node_rank, base_path, load_cached_kernels) 
+    executor(local_rank, node_rank, base_path, get_comm_id(process_group), load_cached_kernels) 
 {
   CUDA_CHECK(cudaGetLastError());
   CUDA_CHECK(cudaDeviceSynchronize());

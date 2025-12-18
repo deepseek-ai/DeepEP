@@ -19,7 +19,8 @@ std::string get_jit_dir() {
     return home_dir + "/.deepep/hybrid_ep/jit";
 }
 
-NVCCCompiler::NVCCCompiler(std::string base_path): base_path(base_path) {
+NVCCCompiler::NVCCCompiler(std::string base_path, std::string comm_id): 
+    base_path(base_path), comm_id(comm_id) {
     jit_dir = get_jit_dir();
 
     nvcc_path = get_env("CUDA_HOME") + "/bin/nvcc";
@@ -75,7 +76,7 @@ std::string NVCCCompiler::build(std::string code, std::string signature, int loc
     auto now = std::chrono::steady_clock::now();
     auto ns  = std::chrono::duration_cast<std::chrono::nanoseconds>(now.time_since_epoch()).count();
     std::string timestamp_str = std::to_string(ns);
-    std::string extended_signature = signature + "-rank-" + std::to_string(local_rank) + "-node-" + std::to_string(node_rank) + "-" + timestamp_str;
+    std::string extended_signature = signature + "-rank-" + std::to_string(local_rank) + "-node-" + std::to_string(node_rank) + "-" + timestamp_str + "-" + comm_id;
 
     // Write the code to the source file
     std::string source_path =
@@ -134,7 +135,8 @@ std::any NVCCCompiler::get_instance(std::string library_path, std::string kernel
     if(library_path != unique_library_path) {
         auto ret = std::system(unique_command.c_str());
         if (ret != 0) {
-            throw std::runtime_error("Failed to unique the library: " + unique_command);
+            // If mv failed, the comm should not be blocked, so we just print a warning message
+            printf("[Warning] Failed to unique the library: %s\n", unique_command.c_str());
         }
     }
 
@@ -208,8 +210,8 @@ std::string NVCCCompiler::get_combine_code(HybridEpConfigInstance config) {
       )";
 }
 
-KernelCache::KernelCache(int node_rank, int local_rank, std::string base_path, bool load_cached_kernels): 
-node_rank(node_rank), local_rank(local_rank), nvcc_compiler(base_path) {
+KernelCache::KernelCache(int node_rank, int local_rank, std::string base_path, std::string comm_id, bool load_cached_kernels): 
+node_rank(node_rank), local_rank(local_rank), nvcc_compiler(base_path, comm_id) {
     // Load all cached kernels from the cache directory
     jit_dir = get_jit_dir();
     std::filesystem::create_directories(jit_dir);
