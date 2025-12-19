@@ -32,6 +32,8 @@ class ExtendedMemoryAllocator {
   
   void close_handle(void* ptr);
 
+  // Check if a memory handle is accessible from the current rank
+  // @param mem_handle: The memory handle to check
   bool is_accessible(MemHandle* mem_handle);
   
   // @param process_group: The process group for the hybrid ep.

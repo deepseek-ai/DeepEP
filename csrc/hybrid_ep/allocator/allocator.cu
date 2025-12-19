@@ -43,6 +43,7 @@ ExtendedMemoryAllocator::ExtendedMemoryAllocator() {
     } else {
       cuMemRelease(handle);
     }
+    cudaGetLastError();// Clear the last error
   }
 }
 
@@ -136,8 +137,10 @@ bool ExtendedMemoryAllocator::is_accessible(MemHandle* mem_handle) {
     CUmemGenericAllocationHandle handle;
     auto ret = cuMemImportFromShareableHandle(&handle, &mem_handle->inner.cu_mem_fabric_handle, CU_MEM_HANDLE_TYPE_FABRIC);
     accessible = ret == CUDA_SUCCESS;
+    if (accessible) {
+      cuMemRelease(handle);
+    }
   } else {
-    CUDA_CHECK(cudaGetLastError());
     void* tmp;
     auto ret = cudaIpcOpenMemHandle(&tmp, mem_handle->inner.cuda_ipc_mem_handle,
                                     cudaIpcMemLazyEnablePeerAccess);
@@ -145,12 +148,16 @@ bool ExtendedMemoryAllocator::is_accessible(MemHandle* mem_handle) {
     if (accessible) {
       CUDA_CHECK(cudaIpcCloseMemHandle(tmp));
     }
-    cudaGetLastError(); // Clear the last error
   }
+  cudaGetLastError(); // Clear the last error
   return accessible;
 }
 
 int ExtendedMemoryAllocator::detect_accessible_ranks(pybind11::object process_group) {
+  auto torch_distributed = py::module_::import("torch.distributed");  
+  int world_size = process_group.attr("size")().cast<int>();
+  int current_rank = process_group.attr("rank")().cast<int>();
+
   // Create test memory 
   int * test_memory;
   allocate((void**)&test_memory, 128 * sizeof(int));
@@ -162,11 +169,7 @@ int ExtendedMemoryAllocator::detect_accessible_ranks(pybind11::object process_gr
   torch::Tensor test_tensor = torch::empty({static_cast<long>(sizeof(MemHandle))}, opts);
   CUDA_CHECK(cudaMemcpy(test_tensor.data_ptr(), &test_mem_handle, sizeof(MemHandle),
                         cudaMemcpyHostToDevice));
-
-  auto torch_distributed = py::module_::import("torch.distributed");  
-  int world_size = process_group.attr("size")().cast<int>();
-  int current_rank = process_group.attr("rank")().cast<int>();
-  
+                        
   // All gather the test memory
   py::list test_handle_list;  
   for (int i = 0; i < world_size; i++) {
@@ -180,10 +183,10 @@ int ExtendedMemoryAllocator::detect_accessible_ranks(pybind11::object process_gr
     if (i != current_rank) {
       MemHandle test_handle;
       torch::Tensor gathered = test_handle_list[i].cast<torch::Tensor>();
-      CUDA_CHECK(cudaMemcpy(&test_handle, gathered.data_ptr(), sizeof(MemHandle), cudaMemcpyDeviceToHost));
+      CUDA_CHECK(cudaMemcpy(&test_handle, gathered.data_ptr(), sizeof(MemHandle), cudaMemcpyDeviceToHost)); 
       if (is_accessible(&test_handle)) {
         num_accessible_ranks++;
-      }
+      } 
     }
   }
 
