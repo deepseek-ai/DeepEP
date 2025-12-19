@@ -838,7 +838,8 @@ __global__ __launch_bounds__(1024, 1) void combine(void* combined_x,
                                                    bool zero_copy,
                                                    bool use_expert_overlap,
                                                    int num_rounds,
-                                                   int send_round_id) {
+                                                   int send_round_id,
+                                                   bool is_x_in_round) {
     const auto sm_id = __shfl_sync(0xffffffff, static_cast<int>(blockIdx.x), 0);
     const auto num_sms = __shfl_sync(0xffffffff, static_cast<int>(gridDim.x), 0);
     const auto thread_id = static_cast<int>(threadIdx.x);
@@ -909,8 +910,9 @@ __global__ __launch_bounds__(1024, 1) void combine(void* combined_x,
         const auto local_expert_idx = responsible_expert_idx % num_local_experts;
         const auto global_expert_idx = rank * num_local_experts + local_expert_idx;
         const auto layout = __ldg(layout_range + local_expert_idx * num_ranks + dst_rank);
-        const auto local_x =
-            static_cast<const int4*>(x) + local_expert_idx * num_ranks * num_max_dispatch_tokens_per_rank * hidden_bf16_int4;
+        int local_expert_idx_per_round = is_x_in_round ? local_expert_idx % num_local_experts_per_round : local_expert_idx;
+        const auto local_x = static_cast<const int4*>(x) +
+                (is_x_in_round ? local_expert_idx_per_round : local_expert_idx) * num_ranks * num_max_dispatch_tokens_per_rank * hidden_bf16_int4;
         const auto local_src_info = src_info + local_expert_idx * num_ranks * num_max_dispatch_tokens_per_rank;
         const auto rdma_send_x_vec =
             static_cast<uint8_t*>(rdma_send_x) + local_expert_idx * num_ranks * num_max_dispatch_tokens_per_rank * num_bytes_per_slot;
@@ -1283,7 +1285,8 @@ void combine(void* combined_x,
              bool zero_copy,
              bool use_expert_overlap,
              int num_rounds,
-             int send_round_id) {
+             int send_round_id,
+             bool is_x_in_round) {
     constexpr int kNumMaxTopk = 11;
     if (not use_expert_overlap) {
         num_rounds = 1;
@@ -1355,7 +1358,8 @@ void combine(void* combined_x,
                       zero_copy,                                                                                                   \
                       use_expert_overlap,                                                                                          \
                       num_rounds,                                                                                                  \
-                      send_round_id);                                                                                              \
+                      send_round_id,                                                                                               \
+                      is_x_in_round);                                                                                              \
     }                                                                                                                              \
     break
 

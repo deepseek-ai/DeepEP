@@ -620,7 +620,7 @@ class Buffer:
                             handle: tuple, use_logfmt: bool = False, zero_copy: bool = False, async_finish: bool = False,
                             return_recv_hook: bool = False, out: Optional[torch.Tensor] = None,
                             combine_wait_recv_cost_stats: Optional[torch.Tensor] = None,
-                            use_expert_overlap: bool = False, num_rounds: int = -1, round_id: int = -1, send_num_sms: int = -1, recv_num_sms: int = -1, hook_use_comm_stream: bool = False) -> \
+                            use_expert_overlap: bool = False, num_rounds: int = -1, round_id: int = -1, send_num_sms: int = -1, recv_num_sms: int = -1, hook_use_comm_stream: bool = False, is_x_in_round: bool = False) -> \
             Tuple[torch.Tensor, EventOverlap, Callable]:
         """
         A low-latency implementation for combining tokens (reduce **with weights**) with IBGDA.
@@ -631,7 +631,7 @@ class Buffer:
 
         Arguments:
             x: `[num_local_experts, num_max_dispatch_tokens_per_rank * num_ranks, hidden]` with `torch.bfloat16`,
-                the local calculated tokens to be sent to this original rank and reduced.
+                the local calculated tokens to be sent to this original rank and reduced. If `is_x_in_round` is True, `x` is a tensor with shape `[num_local_experts_per_round, num_max_dispatch_tokens_per_rank * num_ranks, hidden]`.
             topk_idx: `[num_combined_tokens, num_topk]` with `deep_ep.topk_idx_t` (typically `torch.int64`), the expert
                 indices selected by the dispatched tokens. `-1` indices (not selecting any expert) are supported. Note that,
                 `num_combined_tokens` equals to the number of dispatched tokens.
@@ -660,7 +660,7 @@ class Buffer:
         combined_x, event, hook = self.runtime.low_latency_combine(x, topk_idx, topk_weights, src_info, layout_range,
                                                                    combine_wait_recv_cost_stats, num_max_dispatch_tokens_per_rank,
                                                                    num_experts, use_logfmt, zero_copy, async_finish, return_recv_hook, 
-                                                                   use_expert_overlap, num_rounds, round_id, send_num_sms, recv_num_sms, hook_use_comm_stream,
+                                                                   use_expert_overlap, num_rounds, round_id, send_num_sms, recv_num_sms, hook_use_comm_stream, is_x_in_round,
                                                                    out)
         tensors_to_record = (x, topk_idx, topk_weights, src_info, layout_range, combined_x)
         return combined_x, EventOverlap(event, tensors_to_record if async_finish else None), hook

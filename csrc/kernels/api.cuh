@@ -343,7 +343,8 @@ void combine(void* combined_x,
              bool zero_copy,
              bool use_expert_overlap,
              int num_rounds,
-             int round_id);
+             int round_id,
+             bool is_x_in_round);
 
 void query_mask_buffer(int* mask_buffer_ptr, int num_ranks, int* output_mask_tensor, cudaStream_t stream);
 

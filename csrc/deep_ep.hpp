@@ -294,7 +294,7 @@ public:
         bool zero_copy,
         bool async,
         bool return_recv_hook,
-        bool use_expert_overlap, int num_rounds, int send_round_id, int send_num_sms, int recv_num_sms, bool hook_use_comm_stream,
+        bool use_expert_overlap, int num_rounds, int send_round_id, int send_num_sms, int recv_num_sms, bool hook_use_comm_stream, bool is_x_in_round,
         const std::optional<torch::Tensor>& out = std::nullopt);
 
     torch::Tensor get_next_low_latency_combine_buffer(int num_max_dispatch_tokens_per_rank, int hidden, int num_experts) const;

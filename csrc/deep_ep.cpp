@@ -1712,14 +1712,25 @@ std::tuple<torch::Tensor, std::optional<EventHandle>, std::optional<std::functio
     bool zero_copy,
     bool async,
     bool return_recv_hook,
-    bool use_expert_overlap, int num_rounds, int send_round_id, int send_num_sms, int recv_num_sms, bool hook_use_comm_stream,
+    bool use_expert_overlap, int num_rounds, int send_round_id, int send_num_sms, int recv_num_sms, bool hook_use_comm_stream, bool is_x_in_round,
     const std::optional<torch::Tensor>& out) {
 #ifndef DISABLE_NVSHMEM
     EP_HOST_ASSERT(low_latency_mode);
+    
+    int num_local_experts_per_round = -1;
+    if (is_x_in_round) {
+        EP_HOST_ASSERT(use_expert_overlap and "is_x_in_round is only supported when use_expert_overlap is enabled");
+    }
+    if (use_expert_overlap) {
+        EP_HOST_ASSERT(num_rounds >= 1 && num_experts / num_ranks % num_rounds == 0 && return_recv_hook);
+        if (send_num_sms == -1) send_num_sms = num_device_sms;
+        if (recv_num_sms == -1) recv_num_sms = num_device_sms;
+        num_local_experts_per_round = num_experts / num_ranks / num_rounds;
+    }
 
     // Tensor checks
     EP_HOST_ASSERT(x.dim() == 3 and x.is_contiguous() and x.scalar_type() == torch::kBFloat16);
-    EP_HOST_ASSERT(x.size(0) == num_experts / num_ranks);
+    EP_HOST_ASSERT(x.size(0) == num_experts / num_ranks or (use_expert_overlap and is_x_in_round and x.size(0) == num_local_experts_per_round));
     EP_HOST_ASSERT(x.size(1) == num_ranks * num_max_dispatch_tokens_per_rank);
     EP_HOST_ASSERT(x.size(2) % sizeof(int4) == 0 and x.size(2) % 128 == 0);
     EP_HOST_ASSERT(topk_idx.dim() == 2 and topk_idx.is_contiguous());
@@ -1729,7 +1740,7 @@ std::tuple<torch::Tensor, std::optional<EventHandle>, std::optional<std::functio
     EP_HOST_ASSERT(topk_weights.size(0) <= num_max_dispatch_tokens_per_rank);
     EP_HOST_ASSERT(topk_weights.scalar_type() == torch::kFloat32);
     EP_HOST_ASSERT(src_info.dim() == 2 and src_info.is_contiguous());
-    EP_HOST_ASSERT(src_info.scalar_type() == torch::kInt32 and x.size(0) == src_info.size(0));
+    EP_HOST_ASSERT(src_info.scalar_type() == torch::kInt32 and (x.size(0) == src_info.size(0) or (use_expert_overlap and is_x_in_round)));
     EP_HOST_ASSERT(layout_range.dim() == 2 and layout_range.is_contiguous());
     EP_HOST_ASSERT(layout_range.scalar_type() == torch::kInt64);
     EP_HOST_ASSERT(layout_range.size(0) == num_experts / num_ranks and layout_range.size(1) == num_ranks);
@@ -1738,12 +1749,6 @@ std::tuple<torch::Tensor, std::optional<EventHandle>, std::optional<std::functio
         EP_HOST_ASSERT(combine_wait_recv_cost_stats->scalar_type() == torch::kInt64);
         EP_HOST_ASSERT(combine_wait_recv_cost_stats->dim() == 1 and combine_wait_recv_cost_stats->is_contiguous());
         EP_HOST_ASSERT(combine_wait_recv_cost_stats->size(0) == num_ranks);
-    }
-
-    if (use_expert_overlap) {
-        EP_HOST_ASSERT(num_rounds >= 1 && num_experts / num_ranks % num_rounds == 0 && return_recv_hook);
-        if (send_num_sms == -1) send_num_sms = num_device_sms;
-        if (recv_num_sms == -1) recv_num_sms = num_device_sms;
     }
 
     auto hidden = static_cast<int>(x.size(2));
@@ -1808,7 +1813,7 @@ std::tuple<torch::Tensor, std::optional<EventHandle>, std::optional<std::functio
                               stream,
                               phases,
                               zero_copy,
-                              use_expert_overlap, num_rounds, send_round_id);
+                              use_expert_overlap, num_rounds, send_round_id, is_x_in_round);
     };
     launcher(return_recv_hook ? LOW_LATENCY_SEND_PHASE : (LOW_LATENCY_SEND_PHASE | LOW_LATENCY_RECV_PHASE), use_expert_overlap ? send_num_sms : num_device_sms, launch_stream, num_rounds, send_round_id);
 

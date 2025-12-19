@@ -161,15 +161,18 @@ def test_main(num_tokens: int,
                                 buffer.get_next_low_latency_combine_buffer(handle)[:, :, :] = simulated_gemm_x
                             out = torch.empty((num_tokens, hidden), dtype=torch.bfloat16, device='cuda')
                             num_rounds = num_rounds if use_expert_overlap else 1
+                            num_local_experts_per_round = num_local_experts // num_rounds
                             for round_id in range(num_rounds):
-                                combined_x, event, hook = buffer.low_latency_combine(simulated_gemm_x,
+                                local_expert_start_idx_per_round = num_local_experts_per_round * round_id
+                                local_expert_end_idx_per_round = num_local_experts_per_round * (round_id + 1)
+                                combined_x, event, hook = buffer.low_latency_combine(simulated_gemm_x[local_expert_start_idx_per_round : local_expert_end_idx_per_round],
                                                                                  topk_idx,
                                                                                  topk_weights,
                                                                                  handle,
                                                                                  async_finish=not use_expert_overlap and not return_recv_hook,
                                                                                  zero_copy=zero_copy and not use_expert_overlap,
                                                                                  return_recv_hook=use_expert_overlap or return_recv_hook,
-                                                                                 use_expert_overlap=use_expert_overlap, num_rounds=num_rounds, round_id=round_id, send_num_sms=send_num_sms, recv_num_sms=recv_num_sms,
+                                                                                 use_expert_overlap=use_expert_overlap, num_rounds=num_rounds, round_id=round_id, send_num_sms=send_num_sms, recv_num_sms=recv_num_sms, is_x_in_round=use_expert_overlap,
                                                                                  out=out)
                             hook() if return_recv_hook or use_expert_overlap else event.current_stream_wait()
                             if shrink_test:
