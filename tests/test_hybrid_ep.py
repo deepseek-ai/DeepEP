@@ -369,23 +369,26 @@ def test_main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
         NUM_OF_NODES = group.size() // NUM_OF_RANKS_PER_NODE
         NUM_OF_EXPERTS = NUM_LOCAL_EXPERTS * NUM_OF_RANKS_PER_NODE * NUM_OF_NODES
 
-    for use_fp8 in [False, True]:
-        buffer = deep_ep.HybridEPBuffer(
-            group=group,
-            hidden_dim=HIDDEN_DIM,
-            max_num_of_tokens_per_rank=MAX_NUM_OF_TOKENS_PER_RANK,
-            num_local_experts=NUM_LOCAL_EXPERTS,
-            use_fp8=use_fp8
-        )
-        
-        ref = TorchRef(
-            ep_group=group,
-            num_of_experts=NUM_OF_EXPERTS,
-            num_of_ranks_per_node=NUM_OF_RANKS_PER_NODE,
-        )
+    stream = torch.cuda.Stream()
+    # with torch.cuda.stream(stream):
+    with torch.cuda.current_stream():
+        for use_fp8 in [False, True]:
+            buffer = deep_ep.HybridEPBuffer(
+                group=group,
+                hidden_dim=HIDDEN_DIM,
+                max_num_of_tokens_per_rank=MAX_NUM_OF_TOKENS_PER_RANK,
+                num_local_experts=NUM_LOCAL_EXPERTS,
+                use_fp8=use_fp8
+            )
+            
+            ref = TorchRef(
+                ep_group=group,
+                num_of_experts=NUM_OF_EXPERTS,
+                num_of_ranks_per_node=NUM_OF_RANKS_PER_NODE,
+            )
 
-        test_hybrid_ep_correctness(buffer, ref, use_fp8)
-        test_hybrid_ep_benchmark(buffer, group, use_fp8, args.nsys_profile)
+            test_hybrid_ep_correctness(buffer, ref, use_fp8)
+            test_hybrid_ep_benchmark(buffer, group, use_fp8, args.nsys_profile)
     dist.barrier()
     dist.destroy_process_group()
 

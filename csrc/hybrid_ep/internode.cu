@@ -699,8 +699,9 @@ void RDMACoordinator::exchange_remote_rdma_info(remote_info* dst, remote_info *s
   auto torch_distributed = py::module_::import("torch.distributed");
   auto num_bytes = static_cast<int64_t>(num_of_qps) *
                 static_cast<int64_t>(sizeof(remote_info));
-  torch::Tensor buffer = torch::empty({num_bytes}, at::device(at::kCUDA).dtype(at::kByte));
-  CUDA_CHECK(cudaMemcpy(buffer.data_ptr(), reinterpret_cast<void *>(src), num_of_qps * sizeof(remote_info), cudaMemcpyHostToDevice));
+  torch::Tensor buffer = torch::empty({num_bytes}, at::device(at::kCPU).dtype(at::kByte));
+  memcpy(buffer.data_ptr<uint8_t>(), reinterpret_cast<void *>(src), num_of_qps * sizeof(remote_info));
+  buffer = buffer.cuda();
 
   // Get world size from process group
   int world_size = process_group.attr("size")().cast<int>();
@@ -714,7 +715,8 @@ void RDMACoordinator::exchange_remote_rdma_info(remote_info* dst, remote_info *s
 
   // Move the gathered remote info to CPU.
   for(int i = local_rank; i < world_size; i += buffer_config.num_of_ranks_per_node) {
-    CUDA_CHECK(cudaMemcpy(dst + num_of_qps * (i / buffer_config.num_of_ranks_per_node), output_list[i].cast<torch::Tensor>().data_ptr<uint8_t>(), num_of_qps * sizeof(remote_info), cudaMemcpyDeviceToHost));
+    auto tensor = output_list[i].cast<torch::Tensor>().cpu();
+    memcpy(dst + num_of_qps * (i / buffer_config.num_of_ranks_per_node), tensor.data_ptr<uint8_t>(), num_of_qps * sizeof(remote_info));
   }
 }
 

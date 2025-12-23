@@ -7,6 +7,7 @@
 #include <cuda_runtime.h>
 #include <cuda_runtime_api.h>
 #include <torch/torch.h>
+#include <ATen/cuda/CUDAContext.h>
 #include "utils.cuh"
 
 struct MemHandle {
@@ -21,6 +22,7 @@ struct MemHandle {
 class ExtendedMemoryAllocator {
  public:
   ExtendedMemoryAllocator();
+  ~ExtendedMemoryAllocator();
   
   void allocate(void** ptr, size_t size_raw);
   
@@ -46,6 +48,10 @@ class ExtendedMemoryAllocator {
   CUdevice device_;
   CUmemAllocationProp fabric_prop_ = {};
   CUmemAccessDesc access_desc = {};
+
+  // Test memory for accessing check.
+  int* test_memory_ = nullptr;
+  MemHandle test_mem_handle_;
 
   bool support_fabric();
 };

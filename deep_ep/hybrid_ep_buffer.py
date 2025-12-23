@@ -60,6 +60,11 @@ class HybridEPBuffer:
         assert (
             self.group_size % self.num_of_hybrid_ep_ranks_per_nvlink_domain == 0
         ), f"The number of ranks {self.group_size} should be divisible by the number of ranks per node {self.num_of_hybrid_ep_ranks_per_nvlink_domain}."
+        print(f"group_size={self.group_size}, num_of_hybrid_ep_ranks_per_nvlink_domain={self.num_of_hybrid_ep_ranks_per_nvlink_domain}", flush=True)
+
+        cur = torch.cuda.current_stream()
+        default = torch.cuda.default_stream()
+        print("is default:", cur == default, flush=True)
 
         # Local rank: the active rank in the nvlink domain.
         self.local_rank = self.rank % self.num_of_hybrid_ep_ranks_per_nvlink_domain
@@ -112,7 +117,10 @@ class HybridEPBuffer:
         self.config.num_of_tokens_per_chunk_combine_api = int(
             os.getenv("NUM_OF_TOKENS_PER_CHUNK_COMBINE_API", "128")
         )
-        assert self.config.is_valid(), "The buffer config is not valid."
+        # assert self.config.is_valid(), "The buffer config is not valid."
+        if not self.config.is_valid():
+            print(f"The buffer config is not valid. hidden_dim={hidden_dim}, max_num_of_tokens_per_rank={max_num_of_tokens_per_rank}, num_local_experts={num_local_experts}, self.config.num_of_ranks_per_node={self.config.num_of_ranks_per_node}, self.config.num_of_nodes={self.config.num_of_nodes}, use_fp8={use_fp8}")
+            raise ValueError("The buffer config is not valid.")
 
         # Create C++ buffer - this will allocate all buffers during construction
         self.runtime = hybrid_ep_cpp.HybridEPBuffer(

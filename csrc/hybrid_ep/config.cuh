@@ -36,6 +36,10 @@ struct BufferConfig {
     }
     valid &= ((num_of_experts_per_rank * num_of_ranks_per_node) % 4 == 0);
     valid &= (num_of_ranks_per_node % 2 == 0);
+    if(!valid){
+      fprintf(stderr, "[Error] Invalid BufferConfig: hidden_dim=%d, num_of_experts_per_rank=%d, num_of_ranks_per_node=%d\n", hidden_dim, num_of_experts_per_rank, num_of_ranks_per_node);
+      fflush(stderr);
+    }
     return valid;
   }
 };
@@ -93,6 +97,10 @@ struct HybridEpConfigInstance {
     }
     valid &= ((num_of_experts_per_rank * num_of_ranks_per_node) % 4 == 0);
     valid &= (num_of_ranks_per_node % 2 == 0);
+    if(!valid){
+      fprintf(stderr, "[Error] Invalid HybridEpConfigInstance: hidden_dim=%d, num_of_experts_per_rank=%d, num_of_ranks_per_node=%d\n", hidden_dim, num_of_experts_per_rank, num_of_ranks_per_node);
+      fflush(stderr);
+    }
     return valid;
   }
 };

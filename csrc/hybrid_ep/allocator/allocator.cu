@@ -45,6 +45,13 @@ ExtendedMemoryAllocator::ExtendedMemoryAllocator() {
     }
     cudaGetLastError();// Clear the last error
   }
+
+  this->allocate((void**)&test_memory_, 128 * sizeof(int));
+  this->get_handle(&test_mem_handle_, test_memory_);
+}
+
+ExtendedMemoryAllocator::~ExtendedMemoryAllocator() {
+  this->free((void*)test_memory_);
 }
 
 
@@ -139,6 +146,13 @@ bool ExtendedMemoryAllocator::is_accessible(MemHandle* mem_handle) {
     accessible = ret == CUDA_SUCCESS;
     if (accessible) {
       cuMemRelease(handle);
+    }else{
+      if (ret != CUDA_SUCCESS) {
+          const char* errStr;
+          cuGetErrorString(ret, &errStr);
+          fprintf(stderr, "[Error] Failed to import the fabric handle: %s\n", errStr);
+          fflush(stderr);
+      }
     }
   } else {
     void* tmp;
@@ -157,18 +171,13 @@ int ExtendedMemoryAllocator::detect_accessible_ranks(pybind11::object process_gr
   auto torch_distributed = py::module_::import("torch.distributed");  
   int world_size = process_group.attr("size")().cast<int>();
   int current_rank = process_group.attr("rank")().cast<int>();
+  auto stream = at::cuda::getCurrentCUDAStream();
 
-  // Create test memory 
-  int * test_memory;
-  allocate((void**)&test_memory, 128 * sizeof(int));
-  MemHandle test_mem_handle;
-  get_handle(&test_mem_handle, test_memory);
-
-  // Put the test memory on a CUDA tensor
+  // Put the test memory handle on a CUDA tensor
   auto opts = torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA);
   torch::Tensor test_tensor = torch::empty({static_cast<long>(sizeof(MemHandle))}, opts);
-  CUDA_CHECK(cudaMemcpy(test_tensor.data_ptr(), &test_mem_handle, sizeof(MemHandle),
-                        cudaMemcpyHostToDevice));
+  CUDA_CHECK(cudaMemcpyAsync(test_tensor.data_ptr(), &test_mem_handle_, sizeof(MemHandle),
+                        cudaMemcpyHostToDevice, stream));
                         
   // All gather the test memory
   py::list test_handle_list;  
@@ -176,22 +185,23 @@ int ExtendedMemoryAllocator::detect_accessible_ranks(pybind11::object process_gr
     test_handle_list.append(torch::empty_like(test_tensor));
   }
   torch_distributed.attr("all_gather")(test_handle_list, test_tensor, process_group);
-
+  
   // Check if the test memory is accessible on each rank
   int num_accessible_ranks = 1; // include the current rank
   for (int i = 0; i < world_size; i++) {
     if (i != current_rank) {
       MemHandle test_handle;
       torch::Tensor gathered = test_handle_list[i].cast<torch::Tensor>();
-      CUDA_CHECK(cudaMemcpy(&test_handle, gathered.data_ptr(), sizeof(MemHandle), cudaMemcpyDeviceToHost)); 
+      CUDA_CHECK(cudaMemcpyAsync(&test_handle, gathered.data_ptr(), sizeof(MemHandle), cudaMemcpyDeviceToHost, stream)); 
+      CUDA_CHECK(cudaStreamSynchronize(stream));
       if (is_accessible(&test_handle)) {
         num_accessible_ranks++;
-      } 
+      } else {
+        fprintf(stderr, "[Error] Failed to check the accessibility of the test memory on rank %d from rank %d\n", i, current_rank);
+        fflush(stderr);
+      }
     }
   }
 
-  torch_distributed.attr("barrier")(process_group);
-  this->free((void*)test_memory);
-  CUDA_CHECK(cudaGetLastError());
   return num_accessible_ranks;
 }
