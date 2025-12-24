@@ -554,6 +554,7 @@ void dispatch(void* packed_recv_x,
 #undef DISPATCH_LAUNCH_CASE
 }
 
+#ifndef DISABLE_SM90_FEATURES
 template <int kNumSendUnrolls>
 __forceinline__ __device__ int logfmt_encode(void* buffer, nv_bfloat162* shared_amaxmin, const int& lane_id) {
     constexpr int kNumElemsPerInt4 = sizeof(int4) / sizeof(nv_bfloat16);
@@ -637,6 +638,7 @@ __forceinline__ __device__ int logfmt_encode(void* buffer, nv_bfloat162* shared_
     // Return TMA copy bytes
     return enable_cast ? (32 * (kNumSendUnrolls * sizeof(int4) * 8 * 10 / 16 / 8)) : (32 * (kNumSendUnrolls * sizeof(int4)));
 }
+#endif
 
 template <int kNumLanes, int kNumSendUnrolls, int kNumRecvUnrolls>
 __forceinline__ __device__ void logfmt_check_amaxmin(
@@ -801,7 +803,7 @@ __global__ __launch_bounds__(1024, 1) void combine(void* combined_x,
         // Unpack layout
         int offset, num_tokens_to_send;
         unpack2(layout, num_tokens_to_send, offset);
-
+#ifndef DISABLE_SM90_FEATURES
         // TMA stuffs
         constexpr int kNumTMABufferBytes = sizeof(int4) * 32 * kNumSendUnrolls;
         constexpr int kNumStages = 3;
@@ -831,6 +833,7 @@ __global__ __launch_bounds__(1024, 1) void combine(void* combined_x,
         auto get_num_tma_bytes = [&](const int& offset_int4) {
             return min(kNumTMABufferBytes, static_cast<int>((hidden_bf16_int4 - offset_int4) * sizeof(int4)));
         };
+#endif
 
         // Issue IBGDA send
         if (not is_rank_masked<true>(mask_buffer_ptr, dst_rank)) {
@@ -852,7 +855,7 @@ __global__ __launch_bounds__(1024, 1) void combine(void* combined_x,
                     const auto cpy_src_int4_ptr = zero_copy ? reinterpret_cast<int4*>(buf_ptr) : x_int4;
                     const auto cpy_dst_int4_ptr =
                         dst_p2p_ptr == 0 ? reinterpret_cast<int4*>(buf_ptr) : reinterpret_cast<int4*>(dst_p2p_ptr);
-
+#ifndef DISABLE_SM90_FEATURES
                     // Prefetch
                     if (elect_one_sync())
                         tma_load_and_arrive(0, cpy_src_int4_ptr, get_num_tma_bytes(0));
@@ -904,6 +907,76 @@ __global__ __launch_bounds__(1024, 1) void combine(void* combined_x,
                     // Flush all stores
                     tma_store_wait<0>();
                     __syncwarp();
+#else
+                    constexpr int kNumUnrolls = 4;
+                    constexpr int hidden_bf16_int4_pad = align_up(static_cast<int>(hidden_bf16_int4), 32 * kNumUnrolls);
+                    #pragma unroll
+                    for (int i = lane_id * kNumUnrolls; i < hidden_bf16_int4_pad; i += 32 * kNumUnrolls) {
+                        // Read
+                        int4 int4_values[kNumUnrolls];
+                        if (i < hidden_bf16_int4) {
+                            #pragma unroll
+                            for (int k = 0; k < kNumUnrolls; ++k)
+                                int4_values[k] = ld_nc_global(cpy_src_int4_ptr + i + k);
+                        }
+                        auto bf16_values = reinterpret_cast<nv_bfloat16*>(int4_values);
+                        auto uint32_values = reinterpret_cast<uint32_t*>(int4_values);
+
+                        // Simulated cast
+                        if constexpr (kUseLogFMT) {
+                            constexpr float kThreshold = 1;
+                            constexpr float kMinClip = 32;  // `== log_2(2 ^ (2 ^ 5))`
+                            constexpr int kNumBits = 10;
+                            constexpr int kNumValues = 1 << (kNumBits - 1);
+                            EP_STATIC_ASSERT(kHidden % (kNumElemsPerInt4 * 32) == 0 and kNumElemsPerInt4 == 8, "Invalid hidden");
+
+                            // Local log amax
+                            float log_abs_values[kNumElemsPerInt4 * kNumUnrolls], log_amax, log_amin, amax;
+                            #pragma unroll
+                            for (int j = 0; j < kNumElemsPerInt4 * kNumUnrolls; ++j) {
+                                auto value = static_cast<float>(bf16_values[j]);
+                                log_abs_values[j] = log2f_approx(fabsf(value));
+                                amax = j == 0 ? value : fmaxf(amax, fabsf(value));
+                                log_amax = j == 0 ? log_abs_values[j] : fmaxf(log_amax, log_abs_values[j]);
+                                log_amin = value != 0 ? (j == 0 ? log_abs_values[j] : fminf(log_amin, log_abs_values[j])) : log_amin;
+                            }
+
+                            // Reduce per 128 channels
+                            amax = warp_reduce_max<(16 / kNumUnrolls)>(amax);
+                            log_amax = warp_reduce_max<(16 / kNumUnrolls)>(log_amax);
+                            log_amin = fmaxf(warp_reduce_min<(16 / kNumUnrolls)>(log_amin), log_amax - kMinClip);
+
+                            const auto step = (log_amax - log_amin) / static_cast<float>(kNumValues - 2);
+                            const auto step_inv = 1.0f / step;
+                            const auto rounding = 2.0f - log2f_approx((1.0f + exp2f_approx(step)) * 0.5f) * step_inv;
+
+                            // Use LogFMT only with `amax <= kThreshold` (maybe not all quarter-warps)
+                            if (amax <= kThreshold and log_amin < log_amax) {
+                                // Transform
+                                auto transform = [=](const float& log_abs_value) -> nv_bfloat16 {
+                                    const auto encoded = floorf((log_abs_value - log_amin) * step_inv + rounding);
+                                    const auto decoded = exp2f_approx((encoded - 1) * step + log_amin);
+                                    return decoded;
+                                };
+                                #pragma unroll
+                                for (int j = 0; j < kNumElemsPerInt4 * kNumUnrolls; j += 2) {
+                                    auto bf162_pack = __nv_bfloat162(transform(log_abs_values[j]), transform(log_abs_values[j + 1]));
+                                    auto uint32_pack = *reinterpret_cast<uint32_t*>(&bf162_pack);
+                                    uint32_values[j / 2] = (uint32_values[j / 2] & 0x80008000) | uint32_pack;
+                                }
+                            }
+                            __syncwarp();
+                        }
+
+                        // Store
+                        EP_STATIC_ASSERT(hidden_bf16_int4 % kNumUnrolls == 0, "Invalid hidden");
+                        if (i < hidden_bf16_int4) {
+                            #pragma unroll
+                            for (int k = 0; k < kNumUnrolls; ++k)
+                                st_na_global(cpy_dst_int4_ptr + i + k, int4_values[k]);
+                        }
+                    }
+#endif
                 }
 
                 // Issue RDMA
@@ -931,12 +1004,13 @@ __global__ __launch_bounds__(1024, 1) void combine(void* combined_x,
             atomic_add_release_global(atomic_clean_flag, -1);
         }
         __syncwarp();
-
+#ifndef DISABLE_SM90_FEATURES
         // Destroy m-barriers
         if (lane_id < kNumStages) {
             mbarrier_inval(full_barriers[lane_id]);
             fence_barrier_init();
         }
+#endif
         __syncwarp();
     }
 
@@ -976,6 +1050,7 @@ LOW_LATENCY_COMBINE_RECV:
     }
     cg::this_grid().sync();
 
+#ifndef DISABLE_SM90_FEATURES
     // Reassign warp groups
     constexpr int kMaxNumGroups = 2;
     const int num_decode_warps = hidden_bf16_int4_pad / (kNumRecvUnrolls * 32);
@@ -1136,6 +1211,46 @@ LOW_LATENCY_COMBINE_RECV:
             }
         }
     }
+#else
+    // Reduce tokens
+    EP_DEVICE_ASSERT(num_topk <= 32);
+    EP_STATIC_ASSERT(kHidden % (32 * kNumElemsPerInt4) == 0, "Invalid vectorization");
+    for (int hidden_idx = thread_id; hidden_idx < hidden_bf16_int4; hidden_idx += num_threads) {
+        for (int token_idx = sm_id; token_idx < num_combined_tokens; token_idx += num_sms) {
+            // Read top-k indices and weights
+            int reg_topk_idx[kNumMaxTopk];
+            float reg_topk_weights[kNumMaxTopk];
+            #pragma unroll
+            for (int i = 0; i < num_topk; ++ i) {
+                reg_topk_idx[i] = static_cast<int>(__ldg(topk_idx + token_idx * num_topk + i));
+                reg_topk_weights[i] = __ldg(topk_weights + token_idx * num_topk + i);
+            }
+
+            float combined_values[kNumElemsPerInt4] = {0.0f};
+            #pragma unroll
+            for (int i = 0; i < num_topk; ++ i) if (reg_topk_idx[i] >= 0) {
+                // Read from sources
+                auto rdma_buffer_type = reinterpret_cast<const int*>(static_cast<uint8_t*>(rdma_recv_x) + (reg_topk_idx[i] * num_max_dispatch_tokens_per_rank + token_idx) * num_bytes_per_slot);
+                auto rdma_buffer_row = reinterpret_cast<const uint8_t*>(rdma_buffer_type);
+
+                // Reduce
+                auto x_vec = ld_nc_global(reinterpret_cast<const int4*>(rdma_buffer_row) + hidden_idx);
+                const auto x_bf16 = reinterpret_cast<nv_bfloat16*>(&x_vec);
+                #pragma unroll
+                for (int j = 0; j < kNumElemsPerInt4; ++ j)
+                    combined_values[j] += static_cast<float>(x_bf16[j]) * reg_topk_weights[i];
+            }
+
+            // Write results
+            int4& combined_int4 = *reinterpret_cast<int4*>(combined_values);
+            auto combined_bf16 = reinterpret_cast<nv_bfloat16*>(&combined_values);
+            #pragma unroll
+            for (int j = 0; j < kNumElemsPerInt4; ++ j)
+                combined_bf16[j] = static_cast<nv_bfloat16>(combined_values[j]);
+            (static_cast<int4*>(combined_x) + token_idx * hidden_bf16_int4)[hidden_idx] = combined_int4;
+        }
+    }
+#endif
 }
 
 void combine(void* combined_x,

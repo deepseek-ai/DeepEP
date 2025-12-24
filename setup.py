@@ -62,8 +62,8 @@ if __name__ == '__main__':
         cxx_flags.append('-DDISABLE_SM90_FEATURES')
         nvcc_flags.append('-DDISABLE_SM90_FEATURES')
 
-        # Disable internode and low-latency kernels
-        assert disable_nvshmem
+        # CUDA 12 flags
+        nvcc_flags.extend(['-rdc=true', '--ptxas-options=--register-usage-level=10'])
     else:
         # Prefer H800 series
         os.environ['TORCH_CUDA_ARCH_LIST'] = os.getenv('TORCH_CUDA_ARCH_LIST', '9.0')

@@ -1,6 +1,7 @@
 import argparse
 import os
 import time
+from typing import Any
 import torch
 import torch.distributed as dist
 
@@ -22,7 +23,8 @@ def test_main(args: argparse.Namespace,
               rank: int,
               buffer: deep_ep.Buffer,
               group: dist.ProcessGroup,
-              skip_benchmark: bool = False):
+              skip_benchmark: bool = False,
+              sm80_mode: bool = False):
     # Settings
     num_tokens, hidden = args.num_tokens, args.hidden
     num_topk_groups, num_topk, num_experts = args.num_topk_groups, args.num_topk, args.num_experts
@@ -34,9 +36,12 @@ def test_main(args: argparse.Namespace,
     # Random data
     x = torch.ones((num_tokens, hidden), dtype=torch.bfloat16, device='cuda') * rank
     x_pure_rand = torch.randn((num_tokens, hidden), dtype=torch.bfloat16, device='cuda')
-    x_e4m3 = per_token_cast_to_fp8(x)
-    x_pure_rand_e4m3 = per_token_cast_to_fp8(x_pure_rand)
-    x_e4m3 = (x_e4m3[0], x_e4m3[1].T.contiguous().T)
+    
+    x_e4m3, x_pure_rand_e4m3 = None, None
+    if not sm80_mode:
+        x_e4m3 = per_token_cast_to_fp8(x)
+        x_pure_rand_e4m3 = per_token_cast_to_fp8(x_pure_rand)
+        x_e4m3 = (x_e4m3[0], x_e4m3[1].T.contiguous().T)
     scores = torch.randn((num_tokens, num_experts), dtype=torch.float32, device='cuda').abs() + 1
     group_scores = scores.view(num_tokens, num_nodes, -1).amax(dim=-1)
     group_idx = torch.topk(group_scores, k=num_topk_groups, dim=-1, sorted=False).indices
@@ -111,12 +116,16 @@ def test_main(args: argparse.Namespace,
             check_end = recv_gbl_rank_prefix_sum[i].item()
             assert (check_x[check_start:check_end, :].int() - i).sum().item() == 0
             check_start = check_end
-
     for previous_mode in (False, True):
         for async_mode in (False, True):
-            for current_x in (x_pure_rand, x, x_pure_rand_e4m3, x_e4m3):
+            test_x_list = [x_pure_rand, x]
+            if not sm80_mode:
+                test_x_list.extend([x_pure_rand_e4m3, x_e4m3])
+            
+            for current_x in test_x_list:
                 for with_topk in (False, True):
-                    is_rand = current_x is x_pure_rand or current_x is x_pure_rand_e4m3
+                    is_rand = current_x is x_pure_rand or (current_x is x_pure_rand_e4m3 if x_pure_rand_e4m3 is not None else False)
+                    data_type = "FP8" if isinstance(current_x, tuple) else "BF16"
                     if local_rank == 0:
                         print(
                             f'[testing] Running with {"FP8" if isinstance(current_x, tuple) else "BF16"}, {"with" if with_topk else "without"} top-k (async={async_mode}, previous={previous_mode}) ...',
@@ -231,11 +240,12 @@ def test_main(args: argparse.Namespace,
 
     if skip_benchmark:
         return hash_value
-
     # Tune dispatch performance
     best_dispatch_results = None
     fp8_factor = (1 + 4 / 128) / 2
-    for current_x in (x_e4m3, x):
+    test_x_list: list[Any] = [x] if sm80_mode else [x_e4m3, x]
+    
+    for current_x in test_x_list:
         best_time, best_results = 1e10, None
         rdma_send_bytes = (dispatch_bf16_rdma_send_bytes * fp8_factor) if isinstance(current_x, tuple) else dispatch_bf16_rdma_send_bytes
         nvl_recv_bytes = (dispatch_bf16_nvl_recv_bytes * fp8_factor) if isinstance(current_x, tuple) else dispatch_bf16_nvl_recv_bytes
@@ -243,32 +253,57 @@ def test_main(args: argparse.Namespace,
             for rdma_chunk_size in range(4, 33, 4):
                 config = deep_ep.Config(num_sms, nvl_chunk_size, nvl_buffer_size, rdma_chunk_size, rdma_buffer_size)
                 tune_args = {'x': current_x, 'handle': handle, 'config': config}
-                t, notify_t = bench_kineto(
-                    lambda: buffer.dispatch(**tune_args),  # noqa: B023
-                    ('dispatch', 'notify'),
-                    suppress_kineto_output=True)
+                if not sm80_mode:
+                    t, notify_t = bench_kineto(
+                        lambda: buffer.dispatch(**tune_args),  # noqa: B023
+                        ('dispatch', 'notify'),
+                        suppress_kineto_output=True)
+                else:
+                    t = bench(lambda: buffer.dispatch(**tune_args))[0]
+
                 if t < best_time:
-                    best_time, best_results = t, (num_sms, nvl_chunk_size, rdma_chunk_size, notify_t)
+                    if not sm80_mode:
+                        best_time, best_results = t, (num_sms, nvl_chunk_size, rdma_chunk_size, notify_t)
+                    else:
+                        best_time, best_results = t, (num_sms, nvl_chunk_size, rdma_chunk_size)
+                    
                 if local_rank == 0:
-                    print(
-                        f'[tuning] SMs {num_sms}, NVL chunk {nvl_chunk_size}, RDMA chunk {rdma_chunk_size}: '
-                        f'{notify_t * 1e6:.0f} + {t * 1e6:.0f} us, '
-                        f'{rdma_send_bytes / 1e9 / t:.2f} GB/s (RDMA), {nvl_recv_bytes / 1e9 / t:.2f} GB/s (NVL) ',
-                        flush=True)
+                    if not sm80_mode:
+                        print(
+                            f'[tuning] SMs {num_sms}, NVL chunk {nvl_chunk_size}, RDMA chunk {rdma_chunk_size}: '
+                            f'{notify_t * 1e6:.0f} + {t * 1e6:.0f} us, '
+                            f'{rdma_send_bytes / 1e9 / t:.2f} GB/s (RDMA), {nvl_recv_bytes / 1e9 / t:.2f} GB/s (NVL) ',
+                            flush=True)
+                    else:
+                        print(
+                            f'[tuning] SMs {num_sms}, NVL chunk {nvl_chunk_size}, RDMA chunk {rdma_chunk_size}: '
+                            f'{rdma_send_bytes / 1e9 / t:.2f} GB/s (RDMA), {nvl_recv_bytes / 1e9 / t:.2f} GB/s (NVL) ',
+                            flush=True)
+                            
         if local_rank == 0:
-            print(
-                f'[tuning] Best dispatch ({"FP8" if isinstance(current_x, tuple) else "BF16"}): SMs {best_results[0]}, NVL chunk {best_results[1]}, RDMA chunk {best_results[2]}: '
-                f'{best_results[3] * 1e6:.0f} + {best_time * 1e6:.0f} us, '
-                f'{rdma_send_bytes / 1e9 / best_time:.2f} GB/s (RDMA), {nvl_recv_bytes / 1e9 / best_time:.2f} GB/s (NVL)',
-                flush=True)
+            data_type = "FP8" if isinstance(current_x, tuple) else "BF16"
+            if not sm80_mode:
+                print(
+                    f'[tuning] Best dispatch ({data_type}): SMs {best_results[0]}, NVL chunk {best_results[1]}, RDMA chunk {best_results[2]}: '
+                    f'{best_results[3] * 1e6:.0f} + {best_time * 1e6:.0f} us, '
+                    f'{rdma_send_bytes / 1e9 / best_time:.2f} GB/s (RDMA), {nvl_recv_bytes / 1e9 / best_time:.2f} GB/s (NVL)',
+                    flush=True)
+            else:
+                print(
+                    f'[tuning] Best dispatch ({data_type}): SMs {best_results[0]}, NVL chunk {best_results[1]}, RDMA chunk {best_results[2]}: '
+                    f'{rdma_send_bytes / 1e9 / best_time:.2f} GB/s (RDMA), {nvl_recv_bytes / 1e9 / best_time:.2f} GB/s (NVL)',
+                    flush=True)
             print('', flush=True)
 
-        if isinstance(current_x, tuple):
+        if not sm80_mode and isinstance(current_x, tuple):
             # Gather FP8 the best config from rank 0
             best_dispatch_results = torch.tensor([best_results[0], best_results[1], best_results[2]], dtype=torch.int32, device='cuda')
             all_best_fp8_results_list = [torch.zeros_like(best_dispatch_results) for _ in range(torch.distributed.get_world_size())]
             dist.all_gather(all_best_fp8_results_list, best_dispatch_results, group=group)
             best_dispatch_results = all_best_fp8_results_list[0].tolist()
+        else:
+            best_dispatch_results = [best_results[0], best_results[1], best_results[2]]
+            
     dispatch_config = deep_ep.Config(best_dispatch_results[0], best_dispatch_results[1], nvl_buffer_size, best_dispatch_results[2],
                                      rdma_buffer_size)
 
@@ -337,7 +372,7 @@ def test_loop(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
         ref_hash = 0
         for i in (num_sms, ):
             ref_hash += test_main(args, i, local_rank, num_local_ranks, num_ranks, num_nodes, rank, buffer, group,
-                                  args.pressure_test_mode == 1)
+                                  args.pressure_test_mode == 1, sm80_mode=args.disable_sm90_features)
             if local_rank == 0:
                 print('', flush=True)
         if args.pressure_test_mode == 0:
@@ -352,7 +387,7 @@ def test_loop(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
             current_hash = 0
             for i in (num_sms, ):
                 current_hash += test_main(args, i, local_rank, num_local_ranks, num_ranks, num_nodes, rank, buffer, group,
-                                          args.pressure_test_mode == 1)
+                                          args.pressure_test_mode == 1, sm80_mode=args.disable_sm90_features)
                 if local_rank == 0:
                     print('', flush=True)
             assert current_hash == ref_hash
@@ -361,6 +396,10 @@ def test_loop(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
     if args.test_ll_compatibility:
         buffer.clean_low_latency_buffer(ll_num_tokens, ll_hidden, ll_num_experts)
         test_low_latency.test_main(ll_num_tokens, ll_hidden, ll_num_experts, ll_num_topk, rank, num_ranks, group, buffer, seed=1)
+    
+    if local_rank == 0:
+        if args.disable_sm90_features:
+            print('[info] Running in SM80 compatibility mode')
 
     # Destroy the buffer runtime and communication group
     buffer.destroy()
@@ -382,6 +421,7 @@ if __name__ == '__main__':
         help='Pressure test mode. 0: don\'t do pressure test, 1: do pressure test without benchmarks, 2: do pressure test with benchmarks')
     parser.add_argument('--num-experts', type=int, default=256, help='Number of experts (default: 256')
     parser.add_argument('--test-ll-compatibility', action='store_true', help='whether to test compatibility with low-latency kernels')
+    parser.add_argument('--disable-sm90-features', action='store_true', help='Enable SM80 (A100) compatibility mode, disable FP8 features')
     args = parser.parse_args()
 
     # Set default `num_topk_groups` if not provided
