@@ -5,7 +5,7 @@ import torch.distributed as dist
 
 # noinspection PyUnresolvedReferences
 import deep_ep
-from utils import init_dist, bench, calc_diff, inplace_unique, per_token_cast_to_fp8, per_token_cast_back
+from utils import init_dist, bench, calc_diff, inplace_unique, per_token_cast_to_fp8, per_token_cast_back, backend_aware_all_reduce, backend_aware_all_gather
 
 # Test compatibility with low latency functions
 import test_low_latency
@@ -42,7 +42,7 @@ def test_main(args: argparse.Namespace, num_sms: int, local_rank: int, num_ranks
     for i in range(num_experts):
         num_tokens_per_expert[i] = (topk_idx == i).sum()
     gbl_num_tokens_per_expert = num_tokens_per_expert.clone()
-    dist.all_reduce(gbl_num_tokens_per_expert, group=group)
+    backend_aware_all_reduce(gbl_num_tokens_per_expert, group=group)
 
     # Rank layout meta
     num_tokens_per_rank = torch.empty((num_ranks, ), dtype=torch.int, device='cuda')
@@ -57,7 +57,7 @@ def test_main(args: argparse.Namespace, num_sms: int, local_rank: int, num_ranks
     token_idx_in_rank = token_idx_in_rank.T.contiguous().to(torch.int)
     is_token_in_rank = token_idx_in_rank >= 0
     gbl_num_tokens_per_rank = num_tokens_per_rank.clone()
-    dist.all_reduce(gbl_num_tokens_per_rank, group=group)
+    backend_aware_all_reduce(gbl_num_tokens_per_rank, group=group)
 
     ref_num_tokens_per_rank, _, ref_num_tokens_per_expert, ref_is_token_in_rank, _ = \
         buffer.get_dispatch_layout(topk_idx, num_experts)
@@ -223,7 +223,7 @@ def test_main(args: argparse.Namespace, num_sms: int, local_rank: int, num_ranks
         if best_dispatch_results is None:
             best_dispatch_results = torch.tensor([best_results[0], best_results[1]], dtype=torch.int32, device='cuda')
             all_best_fp8_results_list = [torch.zeros_like(best_dispatch_results) for _ in range(torch.distributed.get_world_size())]
-            dist.all_gather(all_best_fp8_results_list, best_dispatch_results, group=group)
+            backend_aware_all_gather(all_best_fp8_results_list, best_dispatch_results, group=group)
             best_dispatch_results = all_best_fp8_results_list[0].tolist()
     dispatch_config = deep_ep.Config(best_dispatch_results[0], best_dispatch_results[1], nvl_buffer_size)
 
