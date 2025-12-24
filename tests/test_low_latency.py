@@ -221,8 +221,13 @@ def test_main(num_tokens: int,
         num_dispatch_comm_bytes += num_fp8_bytes * num_selections
         num_combine_comm_bytes += (num_logfmt10_bytes if use_logfmt else num_bf16_bytes) * num_selections
 
+    shuffle_fn = None
+    if args.shuffle_expert_columns:
+        def shuffle_fn():
+            buffer.shuffle_expert_columns(topk_idx, num_experts, num_ranks, seed=args.shuffle_seed)
+
     # Dispatch + combine testing
-    avg_t, min_t, max_t = bench(partial(test_func, return_recv_hook=False))
+    avg_t, min_t, max_t = bench(partial(test_func, return_recv_hook=False), pre_iteration_fn=shuffle_fn)
     print(
         f'[rank {rank}] Dispatch + combine bandwidth: {(num_dispatch_comm_bytes + num_combine_comm_bytes) / 1e9 / avg_t:.2f} GB/s, '
         f'avg_t={avg_t * 1e6:.2f} us, min_t={min_t * 1e6:.2f} us, max_t={max_t * 1e6:.2f} us',
@@ -235,7 +240,8 @@ def test_main(num_tokens: int,
                                              kernel_names=('dispatch', 'combine'),
                                              barrier_comm_profiling=True,
                                              suppress_kineto_output=True,
-                                             num_kernels_per_period=2 if return_recv_hook else 1)
+                                             num_kernels_per_period=2 if return_recv_hook else 1,
+                                             pre_iteration_fn=shuffle_fn)
         if not return_recv_hook:
             print(
                 f'[rank {rank}] Dispatch bandwidth: {num_dispatch_comm_bytes / 1e9 / dispatch_t:.2f} GB/s, avg_t={dispatch_t * 1e6:.2f} us | '
@@ -324,6 +330,8 @@ if __name__ == '__main__':
     parser.add_argument('--use-logfmt', action='store_true', help='Whether to test LogFMT combine')
     parser.add_argument("--pressure-test", action='store_true', help='Whether to do pressure test')
     parser.add_argument("--shrink-test", action='store_true', help='Whether to simulate failure and test shrink mode')
+    parser.add_argument('--shuffle-expert-columns', type=bool, default=False, help='whether to shuffle expert columns')
+    parser.add_argument('--shuffle-seed', type=int, default=1, help='seed for shuffling expert columns')
     args = parser.parse_args()
 
     num_processes = args.num_processes
