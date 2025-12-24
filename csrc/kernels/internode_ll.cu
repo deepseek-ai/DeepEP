@@ -866,7 +866,7 @@ __global__ __launch_bounds__(1024, 1) void combine(void* combined_x,
                         const int& next_stage_idx = (iter_idx + 1) % kNumStages;
                         if (iter_idx + 1 < kNumIters and elect_one_sync()) {
                             tma_store_wait<kNumStages - kNumPrefetch - 1>();
-                            const auto& offset_int4 = i + 32 * kNumSendUnrolls;
+                            const auto& offset_int4 = (iter_idx + 1) * 32 * kNumSendUnrolls;
                             tma_load_and_arrive(next_stage_idx, cpy_src_int4_ptr + offset_int4, get_num_tma_bytes(offset_int4));
                         }
                         __syncwarp();
