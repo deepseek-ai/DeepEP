@@ -8,6 +8,7 @@
 
 #define FINISHED_SUM_TAG 1024
 #define NUM_WAIT_NANOSECONDS 500
+#define NUM_TRAP_FLUSH_ITERATIONS 1000  // Delay iterations before trap to allow printf buffer flush
 
 #ifndef ENABLE_FAST_DEBUG
 #define NUM_CPU_TIMEOUT_SECS 100
