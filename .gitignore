@@ -1,8 +1,30 @@
+# Build outputs
 compile_commands.json
-.idea
-.DS_Store
-*.pyc
 build/
-.cache/
+dist/
+*.egg-info/
+*.egg
+*.so
+
+# IDE
+.idea/
 .vscode/
 */cmake-build-*/
+
+# OS
+.DS_Store
+
+# Python
+*.pyc
+__pycache__/
+.cache/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Coverage
+.coverage
+htmlcov/
+
+# Logs
+*.log
