@@ -62,6 +62,13 @@ struct PatternVisitor {
 };
 
 __device__ __forceinline__ void trap() {
+    // Delay before trap to allow printf buffers from other warps to flush
+    // Without this delay, error logs may be lost when one warp traps before
+    // others can output their diagnostic messages (see issue #480)
+    #pragma unroll 1
+    for (int i = 0; i < NUM_TRAP_FLUSH_ITERATIONS; ++i) {
+        __nanosleep(NUM_WAIT_NANOSECONDS);
+    }
     asm("trap;");
 }
 
