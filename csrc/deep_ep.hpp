@@ -98,6 +98,13 @@ private:
     // Workspace
     void* workspace = nullptr;
 
+    // cached per-expert overlap pointers
+    void* cached_packed_recv_x_ptr = nullptr;
+    void* cached_packed_recv_x_scales_ptr = nullptr;
+    int* cached_packed_recv_count_ptr = nullptr;
+    int* cached_packed_recv_src_info_ptr = nullptr;
+    int64_t* cached_packed_recv_layout_range_ptr = nullptr;
+
     // Host-side MoE info
     volatile int* moe_recv_counter = nullptr;
     int* moe_recv_counter_mapped = nullptr;
@@ -254,17 +261,18 @@ public:
 
     void clean_low_latency_buffer(int num_max_dispatch_tokens_per_rank, int hidden, int num_experts);
 
-    std::tuple<torch::Tensor,
+    std::tuple<std::optional<torch::Tensor>,
                std::optional<torch::Tensor>,
-               torch::Tensor,
-               torch::Tensor,
-               torch::Tensor,
+               std::optional<torch::Tensor>,
+               std::optional<torch::Tensor>,
+               std::optional<torch::Tensor>,
                std::optional<EventHandle>,
                std::optional<std::function<void()>>>
     low_latency_dispatch(const torch::Tensor& x,
                          const torch::Tensor& topk_idx,
                          const std::optional<torch::Tensor>& cumulative_local_expert_recv_stats,
                          const std::optional<torch::Tensor>& dispatch_wait_recv_cost_stats,
+                         bool use_expert_overlap, int num_rounds, int round_id,int send_num_sms, int recv_num_sms, bool hook_use_comm_stream,
                          int num_max_dispatch_tokens_per_rank,
                          int num_experts,
                          bool use_fp8,
@@ -286,6 +294,7 @@ public:
         bool zero_copy,
         bool async,
         bool return_recv_hook,
+        bool use_expert_overlap, int num_rounds, int send_round_id, int send_num_sms, int recv_num_sms, bool hook_use_comm_stream, bool is_x_in_round,
         const std::optional<torch::Tensor>& out = std::nullopt);
 
     torch::Tensor get_next_low_latency_combine_buffer(int num_max_dispatch_tokens_per_rank, int hidden, int num_experts) const;

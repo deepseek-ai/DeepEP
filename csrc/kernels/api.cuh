@@ -310,7 +310,10 @@ void dispatch(void* packed_recv_x,
               void* workspace,
               int num_device_sms,
               cudaStream_t stream,
-              int phases);
+              int phases,
+              bool use_expert_overlap,
+              int num_rounds,
+              int round_id);
 
 void combine(void* combined_x,
              void* rdma_recv_x,
@@ -337,7 +340,11 @@ void combine(void* combined_x,
              int num_device_sms,
              cudaStream_t stream,
              int phases,
-             bool zero_copy);
+             bool zero_copy,
+             bool use_expert_overlap,
+             int num_rounds,
+             int round_id,
+             bool is_x_in_round);
 
 void query_mask_buffer(int* mask_buffer_ptr, int num_ranks, int* output_mask_tensor, cudaStream_t stream);
 
