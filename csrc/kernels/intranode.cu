@@ -983,8 +983,9 @@ __global__ void __launch_bounds__(kNumThreads, 1) combine(dtype_t* recv_x,
 #ifndef DISABLE_SM90_FEATURES
                     if (i < hidden_int4_aligned) {
                         // Wait TMA arrival
-                        tma_store_wait<kNumStages - 1>();
-                        __syncwarp();
+                        if (lane_id < kNumStages) {
+                            tma_store_wait<0>();
+                        }
 
                         // Write into TMA buffer
                         auto tma_stage_idx = (i / 32) % kNumStages;
@@ -993,7 +994,7 @@ __global__ void __launch_bounds__(kNumThreads, 1) combine(dtype_t* recv_x,
                         // Issue TMA
                         tma_store_fence();
                         __syncwarp();
-                        if (elect_one_sync()) {
+                        if (lane_id < kNumStages) {
                             auto tma_bytes = min(32, hidden_int4 - i) * static_cast<int>(sizeof(int4));
                             tma_store_1d(reinterpret_cast<int4*>(tma_buffer) + tma_stage_idx * 32,
                                          recv_int4 + token_idx * hidden_int4 + i,
@@ -1005,7 +1006,11 @@ __global__ void __launch_bounds__(kNumThreads, 1) combine(dtype_t* recv_x,
 #endif
                         recv_int4[token_idx * hidden_int4 + i] = out_int4;
 #ifndef DISABLE_SM90_FEATURES
-                    }
+                     }
+                }
+                // Flush all stores
+                tma_store_wait<0>();
+                __syncwarp();
 #endif
                 }
 
