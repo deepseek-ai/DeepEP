@@ -7,6 +7,28 @@ from pathlib import Path
 from torch.utils.cpp_extension import BuildExtension, CUDAExtension
 
 
+def get_cuda_arch_from_device():
+    """Detect GPU architecture from available CUDA devices."""
+    try:
+        import torch
+        if torch.cuda.is_available():
+            major, minor = torch.cuda.get_device_capability(0)
+            if major == 10:
+                # Blackwell GPUs (sm_100a)
+                return '10.0a'
+            elif major == 9:
+                # Hopper GPUs (sm_90a)
+                return '9.0a'
+            elif major == 8:
+                # Ampere GPUs
+                return f'{major}.{minor}'
+            else:
+                return f'{major}.{minor}'
+    except Exception:
+        pass
+    return None
+
+
 # Wheel specific: the wheels only include the soname of the host library `libnvshmem_host.so.X`
 def get_nvshmem_host_lib_name(base_dir):
     path = Path(base_dir).joinpath('lib')
@@ -65,8 +87,14 @@ if __name__ == '__main__':
         # Disable internode and low-latency kernels
         assert disable_nvshmem
     else:
-        # Prefer H800 series
-        os.environ['TORCH_CUDA_ARCH_LIST'] = os.getenv('TORCH_CUDA_ARCH_LIST', '9.0')
+        # Auto-detect GPU architecture if not specified
+        detected_arch = get_cuda_arch_from_device()
+        default_arch = detected_arch if detected_arch else '9.0'
+        os.environ['TORCH_CUDA_ARCH_LIST'] = os.getenv('TORCH_CUDA_ARCH_LIST', default_arch)
+
+        # Print detected architecture for user information
+        if detected_arch:
+            print(f'Auto-detected GPU architecture: {detected_arch}')
 
         # CUDA 12 flags
         nvcc_flags.extend(['-rdc=true', '--ptxas-options=--register-usage-level=10'])

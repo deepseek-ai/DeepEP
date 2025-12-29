@@ -1507,8 +1507,8 @@ void Buffer::clean_low_latency_buffer(int num_max_dispatch_tokens_per_rank, int 
         auto offset = reinterpret_cast<int64_t>(ptr) - reinterpret_cast<int64_t>(rdma_buffer_ptr);
         EP_HOST_ASSERT(0 <= offset and offset + num_bytes <= num_rdma_bytes);
     };
-    check_boundary(clean_meta_0.first, clean_meta_0.second * sizeof(int));
-    check_boundary(clean_meta_1.first, clean_meta_1.second * sizeof(int));
+    check_boundary(clean_meta_0.first, clean_meta_0.second * sizeof(ll_signal_t));
+    check_boundary(clean_meta_1.first, clean_meta_1.second * sizeof(ll_signal_t));
 
     internode_ll::clean_low_latency_buffer(clean_meta_0.first,
                                            clean_meta_0.second,
