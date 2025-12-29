@@ -65,9 +65,17 @@ namespace deep_ep {
 #define TOPK_IDX_BITS 64
 #endif
 
+// Low-latency signaling buffer element type configuration.
+// Set LL_SIGNAL_BITS=64 to support larger token counts (> 2^31) in low-latency mode.
+// Default is 32-bit for backward compatibility.
+#ifndef LL_SIGNAL_BITS
+#define LL_SIGNAL_BITS 32
+#endif
+
 #define INT_BITS_T2(bits) int##bits##_t
 #define INT_BITS_T(bits) INT_BITS_T2(bits)
 typedef INT_BITS_T(TOPK_IDX_BITS) topk_idx_t;  // int32_t or int64_t
+typedef INT_BITS_T(LL_SIGNAL_BITS) ll_signal_t;  // int32_t or int64_t for low-latency signaling
 #undef INT_BITS_T
 #undef INT_BITS_T2
 
