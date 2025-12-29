@@ -16,11 +16,19 @@ void barrier(int** barrier_signal_ptrs, int rank, int num_ranks, cudaStream_t st
 // Internode runtime
 namespace internode {
 
-std::vector<uint8_t> get_unique_id();
+std::vector<uint8_t> get_unique_id(int qps_per_rank, int num_ranks);
 
-int init(const std::vector<uint8_t>& root_unique_id_val, int rank, int num_ranks, bool low_latency_mode);
+int init(const std::vector<uint8_t>& root_unique_id_val,
+         int rank,
+         int rdma_rank,
+         int num_ranks,
+         int num_rdma_ranks,
+         bool low_latency_mode,
+         int qps_per_rank);
 
 void* alloc(size_t size, size_t alignment);
+
+void register_memory(void* ptr, size_t size);
 
 void free(void* ptr);
 
@@ -293,6 +301,11 @@ void dispatch(void* packed_recv_x,
               void* rdma_recv_x,
               int* rdma_recv_count,
               void* rdma_x,
+#ifdef ENABLE_NCCL
+              size_t rdma_recv_x_offset,
+              size_t rdma_recv_count_offset,
+              size_t rdma_x_offset,
+#endif
               const void* x,
               const topk_idx_t* topk_idx,
               int* next_clean,
@@ -310,12 +323,18 @@ void dispatch(void* packed_recv_x,
               void* workspace,
               int num_device_sms,
               cudaStream_t stream,
-              int phases);
+              int phases,
+              int ll_buffer_idx);
 
 void combine(void* combined_x,
              void* rdma_recv_x,
              int* rdma_recv_flag,
              void* rdma_send_x,
+#ifdef ENABLE_NCCL
+             size_t rdma_recv_x_offset,
+             size_t rdma_recv_flag_offset,
+             size_t rdma_send_x_offset,
+#endif
              const void* x,
              const topk_idx_t* topk_idx,
              const float* topk_weights,
@@ -337,7 +356,8 @@ void combine(void* combined_x,
              int num_device_sms,
              cudaStream_t stream,
              int phases,
-             bool zero_copy);
+             bool zero_copy,
+             int ll_buffer_idx);
 
 void query_mask_buffer(int* mask_buffer_ptr, int num_ranks, int* output_mask_tensor, cudaStream_t stream);
 

@@ -63,7 +63,7 @@ struct Config {
         size_t num_bytes = 0;
         num_bytes += num_channels * num_nvl_ranks * (2 * num_rdma_ranks + 3) * sizeof(int);
         num_bytes += num_channels * num_nvl_ranks * num_max_nvl_chunked_recv_tokens * hidden_bytes;
-#ifndef DISABLE_NVSHMEM
+#ifndef DISABLE_NVSHMEM_AND_NCCL
         num_bytes += num_channels * num_nvl_ranks * num_max_nvl_chunked_recv_tokens * internode::get_source_meta_bytes();
 #endif
         num_bytes += num_channels * num_nvl_ranks * num_max_nvl_chunked_recv_tokens * kNumMaxTopK * sizeof(topk_idx_t);
@@ -74,7 +74,7 @@ struct Config {
     }
 
     size_t get_rdma_buffer_size_hint(int64_t hidden_bytes, int num_ranks) const {
-#ifndef DISABLE_NVSHMEM
+#ifndef DISABLE_NVSHMEM_AND_NCCL
         // Legacy mode
         if (num_ranks <= NUM_MAX_NVL_PEERS)
             return 0;
@@ -108,12 +108,30 @@ struct LowLatencyBuffer {
     int num_clean_int = 0;
 
     void* dispatch_rdma_send_buffer = nullptr;
+#ifdef ENABLE_NCCL
+    size_t dispatch_rdma_send_buffer_offset = 0;
+#endif
     void* dispatch_rdma_recv_data_buffer = nullptr;
+#ifdef ENABLE_NCCL
+    size_t dispatch_rdma_recv_data_buffer_offset = 0;
+#endif
     int* dispatch_rdma_recv_count_buffer = nullptr;
+#ifdef ENABLE_NCCL
+    size_t dispatch_rdma_recv_count_buffer_offset = 0;
+#endif
 
     void* combine_rdma_send_buffer = nullptr;
+#ifdef ENABLE_NCCL
+    size_t combine_rdma_send_buffer_offset = 0;
+#endif
     void* combine_rdma_recv_data_buffer = nullptr;
+#ifdef ENABLE_NCCL
+    size_t combine_rdma_recv_data_buffer_offset = 0;
+#endif
     int* combine_rdma_recv_flag_buffer = nullptr;
+#ifdef ENABLE_NCCL
+    size_t combine_rdma_recv_flag_buffer_offset = 0;
+#endif
 
     void* combine_rdma_send_buffer_data_start = nullptr;
     size_t num_bytes_per_combine_msg = 0;
@@ -176,11 +194,29 @@ struct LowLatencyLayout {
         for (int i = 0; i < 2; ++i) {
             buffers[i] = {static_cast<int>(signaling_buffer_bytes / sizeof(int)),
                           advance(rdma_buffer, signaling_buffer_bytes_aligned * 2 + send_buffer_bytes * i),
+#ifdef ENABLE_NCCL
+                          signaling_buffer_bytes_aligned * 2 + send_buffer_bytes * i,
+#endif
                           advance(rdma_buffer, signaling_buffer_bytes_aligned * 2 + send_buffer_bytes * 2 + recv_buffer_bytes * i),
+#ifdef ENABLE_NCCL
+                          signaling_buffer_bytes_aligned * 2 + send_buffer_bytes * 2 + recv_buffer_bytes * i,
+#endif
                           advance<int*>(rdma_buffer, signaling_buffer_bytes_aligned * i),
+#ifdef ENABLE_NCCL
+                          signaling_buffer_bytes_aligned * i,
+#endif
                           advance(rdma_buffer, signaling_buffer_bytes_aligned * 2 + send_buffer_bytes * i),
+#ifdef ENABLE_NCCL
+                          signaling_buffer_bytes_aligned * 2 + send_buffer_bytes * i,
+#endif
                           advance(rdma_buffer, signaling_buffer_bytes_aligned * 2 + send_buffer_bytes * 2 + recv_buffer_bytes * i),
+#ifdef ENABLE_NCCL
+                          signaling_buffer_bytes_aligned * 2 + send_buffer_bytes * 2 + recv_buffer_bytes * i,
+#endif
                           advance<int*>(rdma_buffer, signaling_buffer_bytes_aligned * i),
+#ifdef ENABLE_NCCL
+                          signaling_buffer_bytes_aligned * i,
+#endif
                           advance(rdma_buffer, signaling_buffer_bytes_aligned * 2 + send_buffer_bytes * i),
                           num_bytes_per_combine_msg};
         }
