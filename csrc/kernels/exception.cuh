@@ -57,6 +57,10 @@ public:
     do {                                                                                   \
         if (not(cond)) {                                                                   \
             printf("Assertion failed: %s:%d, condition: %s\n", __FILE__, __LINE__, #cond); \
+            /* Delay before trap to allow printf buffer flush (see issue #480) */         \
+            for (int _i = 0; _i < NUM_TRAP_FLUSH_ITERATIONS; ++_i) {                       \
+                __nanosleep(NUM_WAIT_NANOSECONDS);                                         \
+            }                                                                              \
             asm("trap;");                                                                  \
         }                                                                                  \
     } while (0)
