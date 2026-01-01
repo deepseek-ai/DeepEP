@@ -415,7 +415,7 @@ LOW_LATENCY_DISPATCH_RECV:
             if (cumulative_local_expert_recv_stats != nullptr)
                 atomicAdd(cumulative_local_expert_recv_stats + local_expert_idx, num_recv_tokens);
             if (dispatch_wait_recv_cost_stats != nullptr)
-                atomicAdd(reinterpret_cast<unsigned long long*>(dispatch_wait_recv_cost_stats + src_rank), wait_recv_cost);
+                atomicMax(reinterpret_cast<unsigned long long*>(dispatch_wait_recv_cost_stats + src_rank), wait_recv_cost);
         }
         asm volatile("bar.sync %0, %1;" ::"r"(warp_group_id + 2), "r"(num_warps_per_group * 32));
         num_recv_tokens = shared_num_recv_tokens[warp_group_id];
@@ -970,7 +970,7 @@ LOW_LATENCY_COMBINE_RECV:
             }
 
             if (combine_wait_recv_cost_stats != nullptr) {
-                atomicAdd(reinterpret_cast<unsigned long long*>(combine_wait_recv_cost_stats + src_rank), wait_recv_cost);
+                atomicMax(reinterpret_cast<unsigned long long*>(combine_wait_recv_cost_stats + src_rank), wait_recv_cost);
             }
         }
     }
