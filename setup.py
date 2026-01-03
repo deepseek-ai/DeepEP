@@ -51,7 +51,9 @@ if __name__ == '__main__':
         sources.extend(['csrc/kernels/internode.cu', 'csrc/kernels/internode_ll.cu'])
         include_dirs.extend([f'{nvshmem_dir}/include'])
         library_dirs.extend([f'{nvshmem_dir}/lib'])
-        nvcc_dlink.extend(['-dlink', f'-L{nvshmem_dir}/lib', '-lnvshmem_device'])
+        arch_list = os.getenv('TORCH_CUDA_ARCH_LIST', '9.0').strip()
+        arch_version = arch_list.replace('.', '')  # e.g., "9.0" -> "90"
+        nvcc_dlink.extend(['-dlink', f'-gencode=arch=compute_{arch_version},code=sm_{arch_version}', f'-L{nvshmem_dir}/lib', '-lnvshmem_device'])
         extra_link_args.extend([f'-l:{nvshmem_host_lib}', '-l:libnvshmem_device.a', f'-Wl,-rpath,{nvshmem_dir}/lib'])
 
     if int(os.getenv('DISABLE_SM90_FEATURES', 0)):
