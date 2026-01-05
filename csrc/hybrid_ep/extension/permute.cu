@@ -33,7 +33,7 @@
   * token, >0 values means the offset in the permuted tokens buffer
   */
  template <const int block_size = 512, const int warp_size = 32>
- __global__ void permute_processing_kernel(bool* routing_map,
+ __global__ void permute_preprocessing_kernel(bool* routing_map,
                                            int* num_dispatched_tokens_ptr,
                                            int num_of_local_experts,
                                            int* workspace_1,
@@ -41,7 +41,7 @@
                                            int* workspace_2,
                                            int rows_workspace_2,
                                            int pad_multiple,
-                                           int* tokens_per_expert,
+                                           int64_t* tokens_per_expert,
                                            int* row_id_map,
                                            int* overflow_flag,
                                            int num_permuted_tokens) {
@@ -51,7 +51,7 @@
    auto grid = cooperative_groups::this_grid();
    using BlockScan = cub::BlockScan<int32_t, block_size>;
    __shared__ typename BlockScan::TempStorage temp_storage;
-   extern __shared__ int shmem_in_permute_processing_kernel[];
+   extern __shared__ int shmem_in_permute_preprocessing_kernel[];
    int num_dispatched_tokens = *num_dispatched_tokens_ptr;
  
    /**
@@ -62,7 +62,7 @@
    for (int i = grid.thread_rank(); i < rows_workspace_2 * num_of_local_experts; i += grid.size())
      workspace_2[i] = 0;
    for (int i = grid.thread_rank(); i < num_of_local_experts; i += grid.size())
-     tokens_per_expert[i] = 0;
+     tokens_per_expert[i] = 0L;
 
    // Initialize the overflow flag
    if(threadIdx.x == 0 && blockIdx.x == 0) {
@@ -74,7 +74,7 @@
    }
  
    // tile size [block_size, num_of_local_experts]
-   int* tile_pass_1 = reinterpret_cast<int*>(shmem_in_permute_processing_kernel);
+   int* tile_pass_1 = reinterpret_cast<int*>(shmem_in_permute_preprocessing_kernel);
    for (int tile_idx = blockIdx.x; tile_idx < rows_workspace_1; tile_idx += gridDim.x) {
      int tile_offset = tile_idx * block_size;
      // Load the routing map to the tile
@@ -114,7 +114,7 @@
     * in the workspace_2, update the tokens_per_expert
     */
    // tile size [block_size, num_of_local_experts]
-   int* tile_pass_2 = reinterpret_cast<int*>(shmem_in_permute_processing_kernel);
+   int* tile_pass_2 = reinterpret_cast<int*>(shmem_in_permute_preprocessing_kernel);
    for (int tile_idx = blockIdx.x; tile_idx < rows_workspace_2; tile_idx += gridDim.x) {
      int tile_offset = tile_idx * block_size;
      // Load the workspace_1 to the tile
@@ -136,7 +136,9 @@
          atomicAdd(&workspace_2[pos * num_of_local_experts + i], sum);
        }
        if (threadIdx.x == 0) {
-         atomicAdd(&tokens_per_expert[i], static_cast<int>(sum));
+          // This method works because, in two’s complement representation, addition on signed and unsigned integers uses exactly the same bitwise operations.
+          atomicAdd(reinterpret_cast<unsigned long long*>(&tokens_per_expert[i]), 
+            static_cast<unsigned long long>(sum));
        }
      }
      __syncthreads();
@@ -153,7 +155,7 @@
    grid.sync();
  
    // These 2 buffers will be used in both pass 3 and pass 4
-   int* tokens_per_expert_shmem = reinterpret_cast<int*>(shmem_in_permute_processing_kernel);
+   int* tokens_per_expert_shmem = reinterpret_cast<int*>(shmem_in_permute_preprocessing_kernel);
    int* tokens_per_expert_prefix_sum =
        reinterpret_cast<int*>(tokens_per_expert_shmem + num_of_local_experts);
  
@@ -162,7 +164,7 @@
     * token_per_expert. workspace_1, workspace_2 to update the row_id_map
     */
    for (int i = threadIdx.x; i < num_of_local_experts; i += block_size) {
-     tokens_per_expert_shmem[i] = tokens_per_expert[i];
+     tokens_per_expert_shmem[i] = static_cast<int>(tokens_per_expert[i]);
      tokens_per_expert_prefix_sum[i] =
          (tokens_per_expert_shmem[i] + pad_multiple - 1) / pad_multiple * pad_multiple;
    }
@@ -237,16 +239,16 @@
        auto tokens_for_expert_i = tokens_per_expert_shmem[i] + num_padded_tokens[i];
        auto overflow_num = tokens_for_expert_i + tokens_per_expert_prefix_sum[i] - num_permuted_tokens;
        if(overflow_num < 0) {
-        tokens_per_expert[i] = tokens_for_expert_i;
+        tokens_per_expert[i] = static_cast<int64_t>(tokens_for_expert_i);
        }else{
-        tokens_per_expert[i] = max(0, tokens_for_expert_i - overflow_num);
+        tokens_per_expert[i] = static_cast<int64_t>(max(0, tokens_for_expert_i - overflow_num));
        }
      }
    }
  }
  
  std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> 
- permute_processing(
+ permute_preprocessing(
      bool* routing_map,
      torch::Tensor num_dispatched_token_tensor,
      // Used in the permute case, use up-bound to avoid synchronization to get the real num_dispatched_tokens from the pinned memory
@@ -268,10 +270,10 @@
    torch::Tensor tokens_per_expert;
    if (non_blocking) {
      tokens_per_expert =
-         torch::empty({num_of_local_experts}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
+         torch::empty({num_of_local_experts}, torch::TensorOptions().dtype(torch::kInt64).device(torch::kCUDA));
    } else {
      tokens_per_expert =
-         torch::empty({num_of_local_experts}, torch::TensorOptions().dtype(torch::kInt32).pinned_memory(true));
+         torch::empty({num_of_local_experts}, torch::TensorOptions().dtype(torch::kInt64).pinned_memory(true));
    }
    torch::Tensor overflow_flag = torch::empty({1}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
  
@@ -291,7 +293,7 @@
    // Construct the parameters for the cooperative kernel
    auto workspace1_ptr = workspace1.data_ptr<int>();
    auto workspace2_ptr = workspace2.data_ptr<int>();
-   auto tokens_per_expert_ptr = tokens_per_expert.data_ptr<int>();
+   auto tokens_per_expert_ptr = tokens_per_expert.data_ptr<int64_t>();
    auto row_id_map_ptr = row_id_map.data_ptr<int>();
    auto num_dispatched_token_ptr = num_dispatched_token_tensor.data_ptr<int>();
    auto overflow_flag_ptr = overflow_flag.data_ptr<int>();
@@ -301,9 +303,9 @@
        &tokens_per_expert_ptr, &row_id_map_ptr,           &overflow_flag_ptr,    &num_permuted_tokens,
    };
  
-   cudaFuncSetAttribute(permute_processing_kernel<block_size, warp_size>,
+   cudaFuncSetAttribute(permute_preprocessing_kernel<block_size, warp_size>,
                         cudaFuncAttributeMaxDynamicSharedMemorySize, shared_mem_size);
-   cudaLaunchCooperativeKernel(permute_processing_kernel<block_size, warp_size>, num_of_blocks,
+   cudaLaunchCooperativeKernel(permute_preprocessing_kernel<block_size, warp_size>, num_of_blocks,
                                block_size, args, shared_mem_size, stream);
  
    return std::make_tuple(row_id_map, tokens_per_expert, overflow_flag);

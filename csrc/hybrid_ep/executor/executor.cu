@@ -2,8 +2,49 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 
 #include "executor.cuh"
+#include <vector>
+#include <cstdint>
 
 Executor::Executor(int local_rank, int node_rank, std::string base_path, std::string comm_id, bool load_cached_kernels) : local_rank(local_rank), node_rank(node_rank), kernel_cache(node_rank, local_rank, base_path, comm_id, load_cached_kernels) {}  
+
+torch::Tensor Executor::allgather_routing_map(
+    CustomAllgather &allgather_obj,
+    HybridEpConfigInstance config,
+    torch::Tensor local_routing_map,
+    py::object process_group
+){
+    nvtxRangePushA("allgather_routing_map in hybrid-ep");
+    auto num_of_expert = local_routing_map.size(-1);
+    assert(num_of_expert == config.num_of_experts_per_rank * config.num_of_ranks_per_node * config.num_of_nodes);
+
+    torch::Tensor global_routing_map;
+
+    // At inter-node case, we will use NCCL allgather
+    if(config.num_of_nodes > 1) {
+        auto torch_distributed = py::module_::import("torch.distributed");
+        global_routing_map = torch::empty(
+            {
+                config.max_num_of_tokens_per_rank * config.num_of_ranks_per_node * config.num_of_nodes, 
+                num_of_expert
+            }, 
+            torch::TensorOptions().dtype(torch::kBool).device(torch::kCUDA)
+        );
+        torch_distributed.attr("all_gather_into_tensor")(global_routing_map, local_routing_map, process_group);
+    } else { // At intra-node case, we will use custom allgather
+        allgather_obj.launch(local_routing_map, /*NUM_OF_SMS=*/32, at::cuda::getCurrentCUDAStream());
+        global_routing_map = torch::from_blob(
+            allgather_obj.get_output_buffer(), 
+            {   
+                config.max_num_of_tokens_per_rank * config.num_of_ranks_per_node * config.num_of_nodes, 
+                num_of_expert
+            }, 
+            torch::TensorOptions().dtype(torch::kBool).device(torch::kCUDA)
+        );
+    }
+
+    nvtxRangePop();  // End of allgather_routing_map nvtx range
+    return global_routing_map;
+}
 
 std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
 Executor::metadata_preprocess_core(
@@ -16,9 +57,6 @@ Executor::metadata_preprocess_core(
   nvtxRangePushA("metadata_preprocess_core in hybrid-ep");
   // padding for the routing map
   const int rdma_to_attn_map_size_per_node = (((num_of_tokens_per_rank - 1) / 16) + 1) * 16;
-
-  auto num_of_expert = global_routing_map.size(-1);
-  assert(num_of_expert == config.num_of_experts_per_rank * config.num_of_ranks_per_node * config.num_of_nodes);
 
   // Construt the output tensor of the metadata preprocessing kernel.
   auto sparse_to_dense_map =
@@ -88,7 +126,7 @@ Executor::dispatch_preprocess(HybridEpConfigInstance config, DispatchBuffers& di
             row_id_map = args.row_id_map.value();
         } else {
             assert(args.local_expert_routing_map.has_value());
-            std::tie(row_id_map, tokens_per_expert, overflow_flag) = permute_processing(
+            std::tie(row_id_map, tokens_per_expert, overflow_flag) = permute_preprocessing(
                 args.local_expert_routing_map.value().data_ptr<bool>(), 
                 args.num_dispatched_tokens_tensor.value(),
                 args.max_num_dispatched_tokens, 
@@ -105,7 +143,7 @@ Executor::dispatch_preprocess(HybridEpConfigInstance config, DispatchBuffers& di
             if (!args.non_blocking) {
                 cudaStreamSynchronize(args.stream);
                 if (args.num_permuted_tokens < 0) {
-                    const int32_t* tokens_per_expert_ptr = tokens_per_expert.data_ptr<int32_t>();
+                    const int64_t* tokens_per_expert_ptr = tokens_per_expert.data_ptr<int64_t>();
                     int64_t num_permuted_tokens = 0;
                     for (int i = 0; i < config.num_of_experts_per_rank; ++i) {
                         num_permuted_tokens += static_cast<int64_t>(tokens_per_expert_ptr[i]);

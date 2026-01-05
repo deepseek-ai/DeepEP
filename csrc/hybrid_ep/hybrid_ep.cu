@@ -52,8 +52,21 @@ HybridEPBuffer::HybridEPBuffer(
     use_shared_buffer(use_shared_buffer),
     executor(local_rank, node_rank, base_path, get_comm_id(process_group), load_cached_kernels) 
 {
-  CUDA_CHECK(cudaGetLastError());
-  CUDA_CHECK(cudaDeviceSynchronize());
+    CUDA_CHECK(cudaGetLastError());
+    CUDA_CHECK(cudaDeviceSynchronize());
+    
+    // Initialize the allgather object
+    allgather_obj.init(
+      local_rank, 
+      buffer_config.num_of_ranks_per_node, 
+      buffer_config.num_of_experts_per_rank, 
+      buffer_config.max_num_of_tokens_per_rank,
+      buffer_config.num_of_nodes,
+      &this->remote_allocator, 
+      process_group
+    );
+
+    // Initialize the rdma coordinator
     if(group_size > buffer_config.num_of_ranks_per_node) {
 #ifdef HYBRID_EP_BUILD_MULTINODE_ENABLE
       rdma_coordinator.init(process_group, node_rank, local_rank, buffer_config);
@@ -159,6 +172,8 @@ void HybridEPBuffer::release_buffer() {
     rdma_coordinator.destroy();
   }
 #endif
+
+  allgather_obj.destroy();
 }
 
 void HybridEPBuffer::allocate_buffer_for_preprocessing() {
@@ -275,6 +290,9 @@ void HybridEPBuffer::allocate_buffer() {
   allocate_buffer_for_combine(); // We should allocate the combine buffer first, because the dispatch could have chance to reuse the combine buffer sometimes.
   allocate_buffer_for_dispatch();
   exchange_remote_handle();
+  if(buffer_config.num_of_nodes == 1) {
+    allgather_obj.allocate_ag_buffer();
+  }
 }
 
 void HybridEPBuffer::exchange_remote_handle() {
@@ -444,6 +462,8 @@ bool HybridEPBuffer::update_buffer(HybridEpConfigInstance config) {
   #ifdef HYBRID_EP_BUILD_MULTINODE_ENABLE
     rdma_coordinator.update_config(buffer_config);
   #endif
+    // Update the allgather object
+    allgather_obj.update(buffer_config);
     release_buffer();
     allocate_buffer();
   }
@@ -452,10 +472,15 @@ bool HybridEPBuffer::update_buffer(HybridEpConfigInstance config) {
 
 std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor,
            torch::Tensor>
-HybridEPBuffer::metadata_preprocessing(HybridEpConfigInstance config, torch::Tensor global_routing_map, int64_t num_of_tokens_per_rank, bool non_blocking) {
+HybridEPBuffer::metadata_preprocessing(HybridEpConfigInstance config, torch::Tensor local_routing_map, int64_t num_of_tokens_per_rank, bool non_blocking) {
   // Basic checks
-  assert(global_routing_map.device().is_cuda());
-  assert(global_routing_map.is_contiguous());
+  assert(local_routing_map.device().is_cuda());
+  assert(local_routing_map.is_contiguous());
+
+  // Prepare the global routing map
+  auto global_routing_map = executor.allgather_routing_map(
+    allgather_obj, config, local_routing_map, process_group
+  );
 
   // Run the hybrid-ep metadata preprocessing kernel
   return executor.metadata_preprocess_core(config, preprocessing_tmp, global_routing_map, num_of_tokens_per_rank, non_blocking);

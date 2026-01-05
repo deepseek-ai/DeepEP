@@ -8,6 +8,8 @@
 #include <cuda_runtime_api.h>
 #include <torch/torch.h>
 #include <ATen/cuda/CUDAContext.h>
+#include <pybind11/pybind11.h>
+#include <pybind11/pytypes.h>
 #include "utils.cuh"
 
 struct MemHandle {

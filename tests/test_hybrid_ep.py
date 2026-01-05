@@ -370,8 +370,7 @@ def test_main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
         NUM_OF_EXPERTS = NUM_LOCAL_EXPERTS * NUM_OF_RANKS_PER_NODE * NUM_OF_NODES
 
     stream = torch.cuda.Stream()
-    # with torch.cuda.stream(stream):
-    with torch.cuda.current_stream():
+    with torch.cuda.stream(stream):
         for use_fp8 in [False, True]:
             buffer = deep_ep.HybridEPBuffer(
                 group=group,

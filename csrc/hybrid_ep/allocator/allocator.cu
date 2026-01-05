@@ -196,9 +196,6 @@ int ExtendedMemoryAllocator::detect_accessible_ranks(pybind11::object process_gr
       CUDA_CHECK(cudaStreamSynchronize(stream));
       if (is_accessible(&test_handle)) {
         num_accessible_ranks++;
-      } else {
-        fprintf(stderr, "[Error] Failed to check the accessibility of the test memory on rank %d from rank %d\n", i, current_rank);
-        fflush(stderr);
       }
     }
   }

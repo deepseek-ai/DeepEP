@@ -74,7 +74,7 @@ struct UnpermuteArgs {
   * type: int
   */
  std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> 
- permute_processing(
+ permute_preprocessing(
      bool* routing_map,
      torch::Tensor num_dispatched_token_tensor,
      int max_num_dispatched_tokens,

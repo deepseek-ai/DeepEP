@@ -6,6 +6,7 @@
 #include "allocator/allocator.cuh"
 #include "utils.cuh"
 #include "executor/executor.cuh"
+#include "extension/allgather.cuh"
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/util/Optional.h>
 #include <torch/torch.h>
@@ -76,14 +77,13 @@ public:
 private:
 #ifdef HYBRID_EP_BUILD_MULTINODE_ENABLE
   std::vector<std::string> ib_dev_name_list;
+  RDMACoordinator rdma_coordinator;
 #endif
   ExtendedMemoryAllocator remote_allocator;
   BufferConfig buffer_config;
   Executor executor;
   pybind11::object process_group;
-#ifdef HYBRID_EP_BUILD_MULTINODE_ENABLE
-  RDMACoordinator rdma_coordinator;
-#endif
+  CustomAllgather allgather_obj;
 
   void allocate_buffer();
   void allocate_buffer_for_preprocessing();
