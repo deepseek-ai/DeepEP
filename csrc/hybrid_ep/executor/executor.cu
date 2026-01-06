@@ -14,19 +14,18 @@ torch::Tensor Executor::allgather_routing_map(
     py::object process_group
 ){
     nvtxRangePushA("allgather_routing_map in hybrid-ep");
+
+    auto torch_distributed = py::module_::import("torch.distributed");
     auto num_of_expert = local_routing_map.size(-1);
+    auto num_of_tokens_per_rank = local_routing_map.size(-2);
+    auto group_size = process_group.attr("size")().cast<int>();
     assert(num_of_expert == config.num_of_experts_per_rank * config.num_of_ranks_per_node * config.num_of_nodes);
 
     torch::Tensor global_routing_map;
-
     // At inter-node case, we will use NCCL allgather
     if(config.num_of_nodes > 1) {
-        auto torch_distributed = py::module_::import("torch.distributed");
         global_routing_map = torch::empty(
-            {
-                config.max_num_of_tokens_per_rank * config.num_of_ranks_per_node * config.num_of_nodes, 
-                num_of_expert
-            }, 
+            {num_of_tokens_per_rank * group_size, num_of_expert},
             torch::TensorOptions().dtype(torch::kBool).device(torch::kCUDA)
         );
         torch_distributed.attr("all_gather_into_tensor")(global_routing_map, local_routing_map, process_group);
@@ -34,10 +33,7 @@ torch::Tensor Executor::allgather_routing_map(
         allgather_obj.launch(local_routing_map, /*NUM_OF_SMS=*/32, at::cuda::getCurrentCUDAStream());
         global_routing_map = torch::from_blob(
             allgather_obj.get_output_buffer(), 
-            {   
-                config.max_num_of_tokens_per_rank * config.num_of_ranks_per_node * config.num_of_nodes, 
-                num_of_expert
-            }, 
+            {num_of_tokens_per_rank * group_size, num_of_expert},
             torch::TensorOptions().dtype(torch::kBool).device(torch::kCUDA)
         );
     }

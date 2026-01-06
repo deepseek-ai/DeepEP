@@ -118,37 +118,41 @@ void CustomAllgather::allocate_ag_buffer() {
     auto gathered_bytes = gathered_elets * sizeof(bool);
     allocator->allocate(&dst_buffer, gathered_bytes);
 
-    // Allocate the nvl sync flag on the rank 0
-    if(rank_idx == 0) {
-        allocator->allocate((void**)&flag_nvl_ptr, sizeof(unsigned long long));
-        CUDA_CHECK(cudaMemset(flag_nvl_ptr, 0, sizeof(unsigned long long)));
+    if(num_of_nodes == 1) {
+        // Allocate the nvl sync flag on the rank 0
+        if(rank_idx == 0) {
+            allocator->allocate((void**)&flag_nvl_ptr, sizeof(unsigned long long));
+            CUDA_CHECK(cudaMemset(flag_nvl_ptr, 0, sizeof(unsigned long long)));
+        }
+
+        // Allocate the sm sync flag
+        CUDA_CHECK(cudaMalloc((void**)&flag_sm_ptr, sizeof(unsigned long long)));
+        CUDA_CHECK(cudaMemset(flag_sm_ptr, 0, sizeof(unsigned long long)));
+        CUDA_CHECK(cudaMalloc((void**)&iter_id_ptr, sizeof(int64_t)));
+        CUDA_CHECK(cudaMemset(iter_id_ptr, 0, sizeof(int64_t)));
+
+        // Allocate the dst_buffers_all_ranks
+        dst_buffers_all_ranks = (void**)malloc(num_of_ranks_per_node * sizeof(void*));
+        CUDA_CHECK(cudaMalloc((void**)&dst_buffers_all_ranks_gpu, num_of_ranks_per_node * sizeof(void*)));
+
+        // Get handle of the nvl sync flag
+        MemHandle handles[2];
+        allocator->get_handle(&handles[0], dst_buffer);
+        if (rank_idx == 0) {
+            allocator->get_handle(&handles[1], flag_nvl_ptr);
+        }
+        // Pack handles into tensor
+        ag_handles = torch::empty({static_cast<int64_t>(sizeof(handles))},
+                                                torch::dtype(torch::kUInt8).device(torch::kCPU));
+        memcpy(ag_handles.data_ptr<uint8_t>(), handles, sizeof(handles));
+
+        open_ag_handles();
     }
-
-    // Allocate the sm sync flag
-    CUDA_CHECK(cudaMalloc((void**)&flag_sm_ptr, sizeof(unsigned long long)));
-    CUDA_CHECK(cudaMemset(flag_sm_ptr, 0, sizeof(unsigned long long)));
-    CUDA_CHECK(cudaMalloc((void**)&iter_id_ptr, sizeof(int64_t)));
-    CUDA_CHECK(cudaMemset(iter_id_ptr, 0, sizeof(int64_t)));
-
-    // Allocate the dst_buffers_all_ranks
-    dst_buffers_all_ranks = (void**)malloc(num_of_ranks_per_node * sizeof(void*));
-    CUDA_CHECK(cudaMalloc((void**)&dst_buffers_all_ranks_gpu, num_of_ranks_per_node * sizeof(void*)));
-
-    // Get handle of the nvl sync flag
-    MemHandle handles[2];
-    allocator->get_handle(&handles[0], dst_buffer);
-    if (rank_idx == 0) {
-        allocator->get_handle(&handles[1], flag_nvl_ptr);
-    }
-    // Pack handles into tensor
-    ag_handles = torch::empty({static_cast<int64_t>(sizeof(handles))},
-                                            torch::dtype(torch::kUInt8).device(torch::kCPU));
-    memcpy(ag_handles.data_ptr<uint8_t>(), handles, sizeof(handles));
-
-    open_ag_handles();
 }
 
 void CustomAllgather::open_ag_handles() {
+    if(num_of_nodes > 1 ) return;
+
     // Use Python's torch.distributed APIs through py::object
     auto torch_distributed = py::module_::import("torch.distributed");    
     // Move tensors to CUDA for communication
@@ -196,25 +200,28 @@ void CustomAllgather::open_ag_handles() {
 }
 
 void CustomAllgather::destroy() {
-    if(rank_idx == 0) {
-        allocator->free(flag_nvl_ptr);
-    }else{
-        allocator->close_handle(flag_nvl_ptr);
-    }
-    CUDA_CHECK(cudaFree(flag_sm_ptr));
-    CUDA_CHECK(cudaFree(iter_id_ptr));
-
-    // Close remote memory handles (not locally allocated, just mapped)
-    for(int i = 0; i < num_of_ranks_per_node; i++) {
-        if(i != rank_idx) {
-            allocator->close_handle(dst_buffers_all_ranks[i]);
+    if(num_of_nodes == 1) {
+        if(rank_idx == 0) {
+            allocator->free(flag_nvl_ptr);
+        }else{
+            allocator->close_handle(flag_nvl_ptr);
         }
+        CUDA_CHECK(cudaFree(flag_sm_ptr));
+        CUDA_CHECK(cudaFree(iter_id_ptr));
+    
+        // Close remote memory handles (not locally allocated, just mapped)
+        for(int i = 0; i < num_of_ranks_per_node; i++) {
+            if(i != rank_idx) {
+                allocator->close_handle(dst_buffers_all_ranks[i]);
+            }
+        }
+        
+        // Free the local buffers
+        CUDA_CHECK(cudaFree(dst_buffers_all_ranks_gpu));
+        free(dst_buffers_all_ranks);
     }
     
-    // Free the local buffers
     allocator->free(dst_buffer);
-    CUDA_CHECK(cudaFree(dst_buffers_all_ranks_gpu));
-    free(dst_buffers_all_ranks);
 }
 
 void * CustomAllgather::get_output_buffer() {

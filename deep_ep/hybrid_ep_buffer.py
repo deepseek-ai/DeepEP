@@ -56,7 +56,18 @@ class HybridEPBuffer:
         ), f"The hybrid-ep kernel should be used with at least 2 ranks, but got {self.group_size}."
 
         allocator = hybrid_ep_cpp.ExtendedMemoryAllocator()
-        self.num_of_hybrid_ep_ranks_per_nvlink_domain = allocator.detect_accessible_ranks(self.group)
+        detected_ranks = allocator.detect_accessible_ranks(self.group)
+        env_value = os.getenv("NUM_OF_HYBRID_EP_RANKS_PER_NVLINK_DOMAIN")
+        if env_value is not None:
+            self.num_of_hybrid_ep_ranks_per_nvlink_domain = int(env_value)
+            if self.num_of_hybrid_ep_ranks_per_nvlink_domain != detected_ranks:
+                print(
+                    f"[Warning] NUM_OF_HYBRID_EP_RANKS_PER_NVLINK_DOMAIN={self.num_of_hybrid_ep_ranks_per_nvlink_domain} "
+                    f"differs from detected value {detected_ranks}. Using environment variable."
+                )
+        else:
+            self.num_of_hybrid_ep_ranks_per_nvlink_domain = detected_ranks
+        
         assert (
             self.group_size % self.num_of_hybrid_ep_ranks_per_nvlink_domain == 0
         ), f"The number of ranks {self.group_size} should be divisible by the number of ranks per node {self.num_of_hybrid_ep_ranks_per_nvlink_domain}."
@@ -156,12 +167,11 @@ class HybridEPBuffer:
             hidden_dim if hidden_dim is not None else self.config.hidden_dim
         )
         if num_of_tokens_per_rank is None:
-            config.max_num_of_tokens_per_rank = self.config.max_num_of_tokens_per_rank
-        else:
-            config.max_num_of_tokens_per_rank = num_of_tokens_per_rank
-            self.config.max_num_of_tokens_per_rank = max(
-                num_of_tokens_per_rank, self.config.max_num_of_tokens_per_rank
-            )
+            num_of_tokens_per_rank = self.config.max_num_of_tokens_per_rank
+        config.max_num_of_tokens_per_rank = max(
+            num_of_tokens_per_rank, self.config.max_num_of_tokens_per_rank
+        )
+        self.config.max_num_of_tokens_per_rank = config.max_num_of_tokens_per_rank
         
         config.num_of_experts_per_rank = (
             num_local_experts

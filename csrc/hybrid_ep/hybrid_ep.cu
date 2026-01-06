@@ -290,9 +290,7 @@ void HybridEPBuffer::allocate_buffer() {
   allocate_buffer_for_combine(); // We should allocate the combine buffer first, because the dispatch could have chance to reuse the combine buffer sometimes.
   allocate_buffer_for_dispatch();
   exchange_remote_handle();
-  if(buffer_config.num_of_nodes == 1) {
-    allgather_obj.allocate_ag_buffer();
-  }
+  allgather_obj.allocate_ag_buffer();
 }
 
 void HybridEPBuffer::exchange_remote_handle() {
