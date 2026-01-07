@@ -183,15 +183,9 @@ class HybridEPBuffer:
 
         # Metadata-preprocessing API Config
         config.num_of_blocks_preprocessing_api = self.num_sms_preprocessing_api
-        if config.num_of_ranks_per_node >= 64:
-            # Use less threads to avoid the register overflow in large EP size.
-            config.num_of_threads_per_block_preprocessing_api = int(
-                os.getenv("NUM_OF_THREADS_PER_BLOCK_PREPROCESSING_API", "256")
-            )
-        else:
-            config.num_of_threads_per_block_preprocessing_api = int(
-                os.getenv("NUM_OF_THREADS_PER_BLOCK_PREPROCESSING_API", "512")
-            )
+        config.num_of_threads_per_block_preprocessing_api = int(
+            os.getenv("NUM_OF_THREADS_PER_BLOCK_PREPROCESSING_API", "512")
+        )
         config.num_of_blocks_permute_api = self.num_blocks_permute_api
 
         # Dispatch API Config

@@ -31,8 +31,9 @@ __global__ void ag_nvl_kernel(
     
     // Copy the data from src to dst
     for(int i = threadIdx.x; i < chunk_end - chunk_start; i += blockDim.x) {
-        auto local_offset = (chunk_start + i) % uint4_per_rank;
-        auto dst_rank_id = (chunk_start + i) / uint4_per_rank;
+        auto chunk_idx = (rank_idx % 2) ? i : chunk_end - chunk_start - i - 1;
+        auto local_offset = (chunk_start + chunk_idx) % uint4_per_rank;
+        auto dst_rank_id = (chunk_start + chunk_idx) / uint4_per_rank;
         auto dst_offset = local_offset + rank_idx * uint4_per_rank;
         auto dst_ptr = dst_list_ptr[dst_rank_id];
         dst_ptr[dst_offset] = src_ptr[local_offset];

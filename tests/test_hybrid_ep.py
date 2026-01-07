@@ -330,7 +330,8 @@ def test_hybrid_ep_benchmark(buffer: deep_ep.HybridEPBuffer, group: dist.Process
             print_in_order(f'[rank {rank}] HybridEP dispatch kernel(IB) ({"FP8" if hidden.dtype == torch.uint8 else "BF16"}): {rdma_send_bytes / 1e9 / dispatch_t:.2f} GB/s, avg_t={dispatch_t * 1e6:.2f} us | '
                   f'HybridEP combine kernel(IB): {combine_bf16_rdma_recv_bytes / 1e9 / combine_t:.2f} GB/s, avg_t={combine_t * 1e6:.2f} us')
     else:
-        torch.cuda.profiler.start()
+        if torch.distributed.get_rank() == 0:
+            torch.cuda.profiler.start()
         with torch.cuda.nvtx.range(f"hybrid-ep dispatch ({"FP8" if hidden.dtype == torch.uint8 else "BF16"})"):
             if rank == 0:
                 print(f"profile hybrid-ep dispatch ({"FP8" if hidden.dtype == torch.uint8 else "BF16"})", flush=True)
@@ -352,7 +353,8 @@ def test_hybrid_ep_benchmark(buffer: deep_ep.HybridEPBuffer, group: dist.Process
             combine_with_unpermute_args = {'hidden': dispatched_hidden_bf16_with_permute, 'probs': dispatched_probs_with_permute, 'handle': handle_with_permute, 'pad_multiple': PAD_MULTIPLE}
             bench(lambda: buffer.combine_with_unpermute(**combine_with_unpermute_args))
         time.sleep(1)
-        torch.cuda.profiler.stop()
+        if torch.distributed.get_rank() == 0:
+            torch.cuda.profiler.stop()
 
 
 def test_main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
