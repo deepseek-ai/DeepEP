@@ -3,9 +3,10 @@
 
 #include "allgather.cuh"
 
-#define MAX_BLOCKS 1024
+#define MAX_BLOCKS 256
 #define TIMEOUT 20000000000ull
 
+template<int SHARED_SIZE = 2048>
 __global__ void ag_nvl_kernel(
     void** dst_buffers_all_ranks, 
     void* src, 
@@ -22,21 +23,34 @@ __global__ void ag_nvl_kernel(
     auto iter_id = *iter_id_ptr;
     iter_id ++ ; // increment iter_id
 
+    __shared__ uint4 shared_data[SHARED_SIZE];
     // Compute the data size assigned to each SM
     int uint4_per_rank = bytes_per_rank / sizeof(uint4);  // uint4 = 16 bytes
-    int sum_uint4 = rank_num * uint4_per_rank;
-    int chunk_size = (sum_uint4 + gridDim.x - 1) / gridDim.x;
+    int chunk_size = (uint4_per_rank + gridDim.x - 1) / gridDim.x;
     int chunk_start = blockIdx.x * chunk_size;
-    int chunk_end = min(chunk_start + chunk_size, sum_uint4);
-    
-    // Copy the data from src to dst
-    for(int i = threadIdx.x; i < chunk_end - chunk_start; i += blockDim.x) {
-        auto chunk_idx = (rank_idx % 2) ? i : chunk_end - chunk_start - i - 1;
-        auto local_offset = (chunk_start + chunk_idx) % uint4_per_rank;
-        auto dst_rank_id = (chunk_start + chunk_idx) / uint4_per_rank;
-        auto dst_offset = local_offset + rank_idx * uint4_per_rank;
-        auto dst_ptr = dst_list_ptr[dst_rank_id];
-        dst_ptr[dst_offset] = src_ptr[local_offset];
+    int chunk_end = min(chunk_start + chunk_size, uint4_per_rank);
+
+    int loop_time = (chunk_end - chunk_start + SHARED_SIZE - 1) / SHARED_SIZE;
+    for(int i = 0; i < loop_time; i++) {
+        int start_idx = chunk_start + i * SHARED_SIZE;
+        int end_idx = min(start_idx + SHARED_SIZE, chunk_end);
+
+        // Load the data from src to shared_data
+        for(int j = threadIdx.x; j < end_idx - start_idx; j += blockDim.x) {
+            shared_data[j] = src_ptr[start_idx + j];
+        }
+        __syncthreads();
+
+        // Copy the data from src to dst
+        for(int j = 0; j < rank_num; j++) {
+            auto dst_rank = (rank_idx + j) % rank_num;
+            auto dst_ptr = dst_list_ptr[dst_rank];
+            for(int k = threadIdx.x; k < end_idx - start_idx; k += blockDim.x) {
+                auto local_offset = start_idx + k;
+                auto dst_offset = local_offset + rank_idx * uint4_per_rank;
+                dst_ptr[dst_offset] = shared_data[k];
+            }
+        }
     }
 
     __syncthreads();
@@ -80,7 +94,7 @@ void CustomAllgather::launch(torch::Tensor src, int ag_sms, cudaStream_t stream)
     auto rank_num = num_of_ranks_per_node;
     assert(rank_idx >= 0 && rank_idx < rank_num);
     assert(rank_num <= MAX_NUM_OF_RANKS_PER_NODE);
-    assert(bytes_per_rank % 16 == 0); // Use LDG.256 / STG.256
+    assert(bytes_per_rank % 16 == 0); // Use LDG.128 / STG.128
 
     int block_size = 1024;
     ag_nvl_kernel<<<ag_sms, block_size, 0, stream>>>(

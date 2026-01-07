@@ -14,7 +14,7 @@
 
 class Executor {
 public:
-    Executor(int local_rank, int node_rank, std::string base_path, std::string comm_id, bool load_cached_kernels);
+    Executor(int local_rank, int node_rank, std::string base_path, std::string comm_id, bool load_cached_kernels, bool enable_custom_allgather);
 
     struct DispatchArgs {
         // Input tensors
@@ -104,5 +104,6 @@ private:
     HybridEpConfigInstance config;
     int local_rank;
     int node_rank;
+    bool enable_custom_allgather;
 };
 

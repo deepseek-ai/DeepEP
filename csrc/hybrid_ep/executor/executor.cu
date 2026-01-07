@@ -5,7 +5,7 @@
 #include <vector>
 #include <cstdint>
 
-Executor::Executor(int local_rank, int node_rank, std::string base_path, std::string comm_id, bool load_cached_kernels) : local_rank(local_rank), node_rank(node_rank), kernel_cache(node_rank, local_rank, base_path, comm_id, load_cached_kernels) {}  
+Executor::Executor(int local_rank, int node_rank, std::string base_path, std::string comm_id, bool load_cached_kernels, bool enable_custom_allgather) : local_rank(local_rank), node_rank(node_rank), kernel_cache(node_rank, local_rank, base_path, comm_id, load_cached_kernels), enable_custom_allgather(enable_custom_allgather) {}  
 
 torch::Tensor Executor::allgather_routing_map(
     CustomAllgather &allgather_obj,
@@ -23,7 +23,7 @@ torch::Tensor Executor::allgather_routing_map(
 
     torch::Tensor global_routing_map;
     // At inter-node case, we will use NCCL allgather
-    if(config.num_of_nodes > 1) {
+    if(config.num_of_nodes > 1 || !enable_custom_allgather) {
         global_routing_map = torch::empty(
             {num_of_tokens_per_rank * group_size, num_of_expert},
             torch::TensorOptions().dtype(torch::kBool).device(torch::kCUDA)

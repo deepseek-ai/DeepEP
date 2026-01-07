@@ -127,7 +127,7 @@ class HybridEPBuffer:
         if not self.config.is_valid():
             print(f"The buffer config is not valid. hidden_dim={hidden_dim}, max_num_of_tokens_per_rank={max_num_of_tokens_per_rank}, num_local_experts={num_local_experts}, self.config.num_of_ranks_per_node={self.config.num_of_ranks_per_node}, self.config.num_of_nodes={self.config.num_of_nodes}, use_fp8={use_fp8}")
             raise ValueError("The buffer config is not valid.")
-
+      
         # Create C++ buffer - this will allocate all buffers during construction
         self.runtime = hybrid_ep_cpp.HybridEPBuffer(
             self.group, 
@@ -136,8 +136,9 @@ class HybridEPBuffer:
             self.node_rank, 
             self.group_size, 
             os.path.dirname(os.path.abspath(__file__)), 
-            load_cached_kernels = False, 
-            use_shared_buffer = True
+            load_cached_kernels = False,   # whether to load the cached kernels in disk
+            use_shared_buffer = True,      # whether to use the shared buffer for dispatch and combine
+            enable_custom_allgather = True  # whether to use the custom allgather for intra-node communication
         )
 
     def empty_jit_cache(self):

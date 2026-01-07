@@ -43,14 +43,15 @@ HybridEPBuffer::HybridEPBuffer(
   int group_size, 
   std::string base_path,
   bool load_cached_kernels,
-  bool use_shared_buffer
+  bool use_shared_buffer,
+  bool enable_custom_allgather
 ) : process_group(process_group), 
     buffer_config(config), 
     local_rank(local_rank), 
     node_rank(node_rank), 
     group_size(group_size), 
     use_shared_buffer(use_shared_buffer),
-    executor(local_rank, node_rank, base_path, get_comm_id(process_group), load_cached_kernels) 
+    executor(local_rank, node_rank, base_path, get_comm_id(process_group), load_cached_kernels, enable_custom_allgather) 
 {
     CUDA_CHECK(cudaGetLastError());
     CUDA_CHECK(cudaDeviceSynchronize());
