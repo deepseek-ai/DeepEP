@@ -6,7 +6,7 @@
 #define MAX_BLOCKS 256
 #define TIMEOUT 20000000000ull
 
-template<int SHARED_SIZE = 2048>
+template<int SHARED_SIZE = 1024>
 __global__ void ag_nvl_kernel(
     void** dst_buffers_all_ranks, 
     void* src, 
