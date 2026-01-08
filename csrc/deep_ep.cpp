@@ -46,13 +46,17 @@ size_t get_size_align_to_granularity(size_t size_raw, size_t granularity) {
     return size;
 }
 
-SharedMemoryAllocator::SharedMemoryAllocator(bool use_fabric) : use_fabric(use_fabric) {}
+SharedMemoryAllocator::SharedMemoryAllocator() {}
 
 void SharedMemoryAllocator::malloc(void** ptr, size_t size_raw) {
-    if (use_fabric) {
-        CUdevice device;
-        CU_CHECK(cuCtxGetDevice(&device));
+    int support_fabric = 0;
+    CUdevice device;
 
+    CU_CHECK(cuCtxGetDevice(&device));
+
+    CU_CHECK(cuDeviceGetAttribute(&support_fabric, CU_DEVICE_ATTRIBUTE_HANDLE_TYPE_FABRIC_SUPPORTED, device));
+
+    if (support_fabric) {
         CUmemAllocationProp prop = {};
         prop.type = CU_MEM_ALLOCATION_TYPE_PINNED;
         prop.location.type = CU_MEM_LOCATION_TYPE_DEVICE;
@@ -65,14 +69,28 @@ void SharedMemoryAllocator::malloc(void** ptr, size_t size_raw) {
         size_t size = get_size_align_to_granularity(size_raw, granularity);
 
         CUmemGenericAllocationHandle handle;
-        CU_CHECK(cuMemCreate(&handle, size, &prop, 0));
 
-        CU_CHECK(cuMemAddressReserve((CUdeviceptr*)ptr, size, granularity, 0, 0));
-        CU_CHECK(cuMemMap((CUdeviceptr)*ptr, size, 0, handle, 0));
-        cu_mem_set_access_all(*ptr, size);
-    } else {
-        CUDA_CHECK(cudaMalloc(ptr, size_raw));
+        CUresult err = cuMemCreate(&handle, size, &prop, 0);
+        if (err == CUDA_ERROR_NOT_PERMITTED || err == CUDA_ERROR_NOT_SUPPORTED) {
+            /* fallback to IPC */
+
+        } else {
+            if (err != CUDA_SUCCESS) {
+                /* Catch and report any error from above */
+                CU_CHECK(cuMemCreate(&handle, size, &prop, 0));
+                return;
+            }
+
+            use_fabric = true;
+
+            CU_CHECK(cuMemAddressReserve((CUdeviceptr*)ptr, size, granularity, 0, 0));
+            CU_CHECK(cuMemMap((CUdeviceptr)*ptr, size, 0, handle, 0));
+            cu_mem_set_access_all(*ptr, size);
+            return;
+        }
     }
+
+    CUDA_CHECK(cudaMalloc(ptr, size_raw));
 }
 
 void SharedMemoryAllocator::free(void* ptr) {
@@ -94,13 +112,18 @@ void SharedMemoryAllocator::get_mem_handle(MemHandle* mem_handle, void* ptr) {
         CU_CHECK(cuMemRetainAllocationHandle(&handle, ptr));
 
         CU_CHECK(cuMemExportToShareableHandle(&mem_handle->inner.cu_mem_fabric_handle, handle, CU_MEM_HANDLE_TYPE_FABRIC, 0));
+
+        mem_handle->handle_type = CU_MEM_HANDLE_TYPE_FABRIC;
     } else {
         CUDA_CHECK(cudaIpcGetMemHandle(&mem_handle->inner.cuda_ipc_mem_handle, ptr));
+
+        mem_handle->handle_type = CU_MEM_HANDLE_TYPE_NONE;
     }
 }
 
 void SharedMemoryAllocator::open_mem_handle(void** ptr, MemHandle* mem_handle) {
-    if (use_fabric) {
+    if (mem_handle->handle_type == CU_MEM_HANDLE_TYPE_FABRIC) {
+
         size_t size = mem_handle->size;
 
         CUmemGenericAllocationHandle handle;
@@ -131,8 +154,7 @@ Buffer::Buffer(int rank,
                int64_t num_rdma_bytes,
                bool low_latency_mode,
                bool explicitly_destroy,
-               bool enable_shrink,
-               bool use_fabric)
+               bool enable_shrink)
     : rank(rank),
       num_ranks(num_ranks),
       num_nvl_bytes(num_nvl_bytes),
@@ -141,7 +163,7 @@ Buffer::Buffer(int rank,
       low_latency_mode(low_latency_mode),
       explicitly_destroy(explicitly_destroy),
       comm_stream(at::cuda::getStreamFromPool(true)),
-      shared_memory_allocator(use_fabric) {
+      shared_memory_allocator() {
     // Metadata memory
     int64_t barrier_signal_bytes = NUM_MAX_NVL_PEERS * sizeof(int);
     int64_t buffer_ptr_bytes = NUM_MAX_NVL_PEERS * sizeof(void*);
@@ -1862,7 +1884,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         .def("current_stream_wait", &deep_ep::EventHandle::current_stream_wait);
 
     pybind11::class_<deep_ep::Buffer>(m, "Buffer")
-        .def(pybind11::init<int, int, int64_t, int64_t, bool, bool, bool, bool>())
+        .def(pybind11::init<int, int, int64_t, int64_t, bool, bool, bool>())
         .def("is_available", &deep_ep::Buffer::is_available)
         .def("get_num_rdma_ranks", &deep_ep::Buffer::get_num_rdma_ranks)
         .def("get_rdma_rank", &deep_ep::Buffer::get_rdma_rank)

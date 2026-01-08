@@ -31,13 +31,14 @@ union MemHandleInner {
 struct MemHandle {
     MemHandleInner inner;
     size_t size;
+    CUmemAllocationHandleType handle_type;
 };
 
 constexpr size_t HANDLE_SIZE = sizeof(MemHandle);
 
 class SharedMemoryAllocator {
 public:
-    SharedMemoryAllocator(bool use_fabric);
+    SharedMemoryAllocator();
     void malloc(void** ptr, size_t size);
     void free(void* ptr);
     void get_mem_handle(MemHandle* mem_handle, void* ptr);
@@ -119,8 +120,7 @@ public:
            int64_t num_rdma_bytes,
            bool low_latency_mode,
            bool explicitly_destroy,
-           bool enable_shrink,
-           bool use_fabric);
+           bool enable_shrink);
 
     ~Buffer() noexcept(false);
 
