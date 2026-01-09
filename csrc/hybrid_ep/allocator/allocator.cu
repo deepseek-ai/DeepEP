@@ -52,6 +52,7 @@ ExtendedMemoryAllocator::ExtendedMemoryAllocator() {
 
 ExtendedMemoryAllocator::~ExtendedMemoryAllocator() {
   this->free((void*)test_memory_);
+  test_memory_ = nullptr;
 }
 
 
@@ -84,6 +85,9 @@ void ExtendedMemoryAllocator::allocate(void** ptr, size_t size_raw) {
 }
 
 void ExtendedMemoryAllocator::free(void* ptr) {
+  if (ptr == nullptr) {
+    return;
+  }
   if (support_fabric_) {
     CUmemGenericAllocationHandle handle;
     CU_CHECK(cuMemRetainAllocationHandle(&handle, ptr));
