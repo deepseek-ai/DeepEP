@@ -37,7 +37,7 @@ enum memory_type {
 };
 
 constexpr int32_t CONNECTION_TYPE = RC;
-constexpr int32_t DEF_HOP_LIMIT = 64;
+constexpr int32_t DEF_HOP_LIMIT = 255;
 constexpr int32_t DEF_RX_RDMA = 128;
 constexpr int32_t DEF_TX_BW = 512;
 constexpr int32_t EQ_NUM = 0;

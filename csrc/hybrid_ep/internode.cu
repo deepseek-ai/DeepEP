@@ -149,22 +149,26 @@ static int setup_qp_attr_for_modify(struct ibv_port_attr *port_attr, struct doca
   int status = 0;
   status = doca_verbs_qp_attr_set_dest_qp_num(qp_attr, r_info->qpn);
   assert(status == 0);
-  struct doca_verbs_ah *ah = nullptr;
-  status = doca_verbs_ah_create(ib_context, &ah);
+  struct doca_verbs_ah_attr *ah = nullptr;
+  status = doca_verbs_ah_attr_create(ib_context, &ah);
   assert(status == 0);
   if (port_attr->link_layer == IBV_LINK_LAYER_INFINIBAND) {
-    status = doca_verbs_ah_set_addr_type(ah, DOCA_VERBS_ADDR_TYPE_IB_NO_GRH);
+    status = doca_verbs_ah_attr_set_addr_type(ah, DOCA_VERBS_ADDR_TYPE_IB_NO_GRH);
   } else {
-    status = doca_verbs_ah_set_addr_type(ah, DOCA_VERBS_ADDR_TYPE_IPv4);
+    status = doca_verbs_ah_attr_set_addr_type(ah, DOCA_VERBS_ADDR_TYPE_IPv4);
   }
   assert(status == 0);
-  status = doca_verbs_ah_set_dlid(ah, r_info->lid);
+  status = doca_verbs_ah_attr_set_dlid(ah, r_info->lid);
   assert(status == 0);
-  status = doca_verbs_ah_set_gid(ah, *((struct doca_verbs_gid *)(&r_info->gid)));
+  status = doca_verbs_ah_attr_set_gid(ah, *((struct doca_verbs_gid *)(&r_info->gid)));
   assert(status == 0);
-  status = doca_verbs_ah_set_sl(ah, 0);
+  status = doca_verbs_ah_attr_set_sl(ah, 0);
   assert(status == 0);
-  status = doca_verbs_ah_set_sgid_index(ah, l_info->gid_index);
+  status = doca_verbs_ah_attr_set_sgid_index(ah, l_info->gid_index);
+  assert(status == 0);
+  status = doca_verbs_ah_attr_set_hop_limit(ah, DEF_HOP_LIMIT);
+  assert(status == 0);
+  status = doca_verbs_ah_attr_set_traffic_class(ah, DEF_IB_TC);
   assert(status == 0);
   status = doca_verbs_qp_attr_set_ah_attr(qp_attr, ah);
   assert(status == 0);
@@ -174,15 +178,15 @@ static int setup_qp_attr_for_modify(struct ibv_port_attr *port_attr, struct doca
   assert(status == 0);
   status = doca_verbs_qp_attr_set_sq_psn(qp_attr, 0);
   assert(status == 0);
-  status = doca_verbs_qp_attr_set_path_mtu(qp_attr, DOCA_VERBS_MTU_SIZE_1K_BYTES);
+  status = doca_verbs_qp_attr_set_path_mtu(qp_attr, DOCA_VERBS_MTU_SIZE_4K_BYTES);
   assert(status == 0);
-  status = doca_verbs_qp_attr_set_min_rnr_timer(qp_attr, 1);
+  status = doca_verbs_qp_attr_set_min_rnr_timer(qp_attr, 12);
   assert(status == 0);
-  status = doca_verbs_qp_attr_set_ack_timeout(qp_attr, 22);
+  status = doca_verbs_qp_attr_set_ack_timeout(qp_attr, 20);
   assert(status == 0);
   status = doca_verbs_qp_attr_set_retry_cnt(qp_attr, 7);
   assert(status == 0);
-  status = doca_verbs_qp_attr_set_rnr_retry(qp_attr, 1);
+  status = doca_verbs_qp_attr_set_rnr_retry(qp_attr, 7);
   assert(status == 0);
   return 0;
 }

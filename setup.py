@@ -101,7 +101,7 @@ def get_extension_hybrid_ep_cpp():
         # Generate the inter-node dependency to the python package for JIT compilation
         subprocess.run(["make", "-j", "src.build", f"NVCC_GENCODE={to_nvcc_gencode(os.environ['TORCH_CUDA_ARCH_LIST'])}"], cwd=nccl_dir, check=True)
         # Add third-party dependency 
-        include_dirs.append(os.path.join(nccl_dir, "src/transport/gdaki/doca-gpunetio/include"))
+        include_dirs.append(os.path.join(nccl_dir, "src/transport/net_ib/gdaki/doca-gpunetio/include"))
         include_dirs.append(os.path.join(rdma_core_dir, "include"))
         library_dirs.append(os.path.join(rdma_core_dir, "lib"))
         runtime_library_dirs.append(os.path.join(rdma_core_dir, "lib"))
@@ -109,12 +109,12 @@ def get_extension_hybrid_ep_cpp():
         libraries.append("ibverbs")
         # Copy the inter-node dependency to python package
         shutil.copytree(
-            os.path.join(nccl_dir, "src/transport/gdaki/doca-gpunetio/include"),
+            os.path.join(nccl_dir, "src/transport/net_ib/gdaki/doca-gpunetio/include"),
             os.path.join(current_dir, "deep_ep/backend/nccl/include"),
             dirs_exist_ok=True
         )
         shutil.copytree(
-            os.path.join(nccl_dir, "build/obj/transport/gdaki/doca-gpunetio"),
+            os.path.join(nccl_dir, "build/obj/transport/net_ib/gdaki/doca-gpunetio"),
             os.path.join(current_dir, "deep_ep/backend/nccl/obj"),
             dirs_exist_ok=True
         )

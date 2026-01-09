@@ -1,3 +1,4 @@
 [submodule "third-party/nccl"]
 	path = third-party/nccl
 	url = https://github.com/NVIDIA/nccl.git
+	branch = master
