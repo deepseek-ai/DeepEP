@@ -23,7 +23,7 @@ Software requirements:
 
 NVSHMEM 3.3.9 binaries are available in several formats:
    - Tarballs for  [x86_64](https://developer.download.nvidia.com/compute/nvshmem/redist/libnvshmem/linux-x86_64/libnvshmem-linux-x86_64-3.3.9_cuda12-archive.tar.xz) and [aarch64](https://developer.download.nvidia.com/compute/nvshmem/redist/libnvshmem/linux-sbsa/libnvshmem-linux-sbsa-3.3.9_cuda12-archive.tar.xz)
-   - RPM and deb packages: instructions can be found on the [NVHSMEM installer page](https://developer.nvidia.com/nvshmem-downloads?target_os=Linux)
+   - RPM and deb packages: instructions can be found on the [NVSHMEM installer page](https://developer.nvidia.com/nvshmem-downloads?target_os=Linux)
    - Conda packages through conda-forge
    - pip wheels through PyPI: `pip install nvidia-nvshmem-cu12`
 DeepEP is compatible with upstream NVSHMEM 3.3.9 and later.
