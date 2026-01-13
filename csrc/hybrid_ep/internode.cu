@@ -149,22 +149,26 @@ static int setup_qp_attr_for_modify(struct ibv_port_attr *port_attr, struct doca
   int status = 0;
   status = doca_verbs_qp_attr_set_dest_qp_num(qp_attr, r_info->qpn);
   assert(status == 0);
-  struct doca_verbs_ah *ah = nullptr;
-  status = doca_verbs_ah_create(ib_context, &ah);
+  struct doca_verbs_ah_attr *ah = nullptr;
+  status = doca_verbs_ah_attr_create(ib_context, &ah);
   assert(status == 0);
   if (port_attr->link_layer == IBV_LINK_LAYER_INFINIBAND) {
-    status = doca_verbs_ah_set_addr_type(ah, DOCA_VERBS_ADDR_TYPE_IB_NO_GRH);
+    status = doca_verbs_ah_attr_set_addr_type(ah, DOCA_VERBS_ADDR_TYPE_IB_NO_GRH);
   } else {
-    status = doca_verbs_ah_set_addr_type(ah, DOCA_VERBS_ADDR_TYPE_IPv4);
+    status = doca_verbs_ah_attr_set_addr_type(ah, DOCA_VERBS_ADDR_TYPE_IPv4);
   }
   assert(status == 0);
-  status = doca_verbs_ah_set_dlid(ah, r_info->lid);
+  status = doca_verbs_ah_attr_set_dlid(ah, r_info->lid);
   assert(status == 0);
-  status = doca_verbs_ah_set_gid(ah, *((struct doca_verbs_gid *)(&r_info->gid)));
+  status = doca_verbs_ah_attr_set_gid(ah, *((struct doca_verbs_gid *)(&r_info->gid)));
   assert(status == 0);
-  status = doca_verbs_ah_set_sl(ah, 0);
+  status = doca_verbs_ah_attr_set_sl(ah, 0);
   assert(status == 0);
-  status = doca_verbs_ah_set_sgid_index(ah, l_info->gid_index);
+  status = doca_verbs_ah_attr_set_sgid_index(ah, l_info->gid_index);
+  assert(status == 0);
+  status = doca_verbs_ah_attr_set_hop_limit(ah, DEF_HOP_LIMIT);
+  assert(status == 0);
+  status = doca_verbs_ah_attr_set_traffic_class(ah, DEF_IB_TC);
   assert(status == 0);
   status = doca_verbs_qp_attr_set_ah_attr(qp_attr, ah);
   assert(status == 0);
@@ -174,15 +178,15 @@ static int setup_qp_attr_for_modify(struct ibv_port_attr *port_attr, struct doca
   assert(status == 0);
   status = doca_verbs_qp_attr_set_sq_psn(qp_attr, 0);
   assert(status == 0);
-  status = doca_verbs_qp_attr_set_path_mtu(qp_attr, DOCA_VERBS_MTU_SIZE_1K_BYTES);
+  status = doca_verbs_qp_attr_set_path_mtu(qp_attr, DOCA_VERBS_MTU_SIZE_4K_BYTES);
   assert(status == 0);
-  status = doca_verbs_qp_attr_set_min_rnr_timer(qp_attr, 1);
+  status = doca_verbs_qp_attr_set_min_rnr_timer(qp_attr, 12);
   assert(status == 0);
-  status = doca_verbs_qp_attr_set_ack_timeout(qp_attr, 22);
+  status = doca_verbs_qp_attr_set_ack_timeout(qp_attr, 20);
   assert(status == 0);
   status = doca_verbs_qp_attr_set_retry_cnt(qp_attr, 7);
   assert(status == 0);
-  status = doca_verbs_qp_attr_set_rnr_retry(qp_attr, 1);
+  status = doca_verbs_qp_attr_set_rnr_retry(qp_attr, 7);
   assert(status == 0);
   return 0;
 }
@@ -264,7 +268,6 @@ void RDMACoordinator::init(
       pybind11::object process_group,
       int node_rank,
       int local_rank, 
-      bool use_mnnvl,
       BufferConfig config
   ) {
   this->process_group = process_group;
@@ -272,14 +275,13 @@ void RDMACoordinator::init(
   this->local_rank = local_rank;
   this->buffer_config = config;
   assert(buffer_config.num_of_nodes > 1);
-  
+
   std::vector<int> gpu_idx_vec;
   // The node in config means the nvlink domain
   // The local device index is the index of the device in the real device list within the physical node. 
-  int num_of_local_devices = buffer_config.num_of_ranks_per_node;
-  if (use_mnnvl) {
-    num_of_local_devices = std::min(num_of_local_devices, 4);
-  }
+  int num_of_local_devices;
+  CUDA_CHECK(cudaGetDeviceCount(&num_of_local_devices));
+  num_of_local_devices = std::min(num_of_local_devices, buffer_config.num_of_ranks_per_node);
   int local_device_idx = local_rank % num_of_local_devices;
   for (int i = 0; i < num_of_local_devices; ++i) {
     gpu_idx_vec.push_back(i);
@@ -701,8 +703,9 @@ void RDMACoordinator::exchange_remote_rdma_info(remote_info* dst, remote_info *s
   auto torch_distributed = py::module_::import("torch.distributed");
   auto num_bytes = static_cast<int64_t>(num_of_qps) *
                 static_cast<int64_t>(sizeof(remote_info));
-  torch::Tensor buffer = torch::empty({num_bytes}, at::device(at::kCUDA).dtype(at::kByte));
-  CUDA_CHECK(cudaMemcpy(buffer.data_ptr(), reinterpret_cast<void *>(src), num_of_qps * sizeof(remote_info), cudaMemcpyHostToDevice));
+  torch::Tensor buffer = torch::empty({num_bytes}, at::device(at::kCPU).dtype(at::kByte));
+  memcpy(buffer.data_ptr<uint8_t>(), reinterpret_cast<void *>(src), num_of_qps * sizeof(remote_info));
+  buffer = buffer.cuda();
 
   // Get world size from process group
   int world_size = process_group.attr("size")().cast<int>();
@@ -716,7 +719,8 @@ void RDMACoordinator::exchange_remote_rdma_info(remote_info* dst, remote_info *s
 
   // Move the gathered remote info to CPU.
   for(int i = local_rank; i < world_size; i += buffer_config.num_of_ranks_per_node) {
-    CUDA_CHECK(cudaMemcpy(dst + num_of_qps * (i / buffer_config.num_of_ranks_per_node), output_list[i].cast<torch::Tensor>().data_ptr<uint8_t>(), num_of_qps * sizeof(remote_info), cudaMemcpyDeviceToHost));
+    auto tensor = output_list[i].cast<torch::Tensor>().cpu();
+    memcpy(dst + num_of_qps * (i / buffer_config.num_of_ranks_per_node), tensor.data_ptr<uint8_t>(), num_of_qps * sizeof(remote_info));
   }
 }
 

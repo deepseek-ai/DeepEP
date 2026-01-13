@@ -2,6 +2,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 
 #include "compiler.cuh"
+#include <unistd.h>
+#include <pwd.h>
 
 inline std::string get_env(std::string name) {
     const char* env = std::getenv(name.c_str());
@@ -12,14 +14,21 @@ inline std::string get_env(std::string name) {
 }
 
 std::string get_jit_dir() {
-    std::string home_dir = get_env("HOME");
-    if (home_dir.empty()) {
-        home_dir = "/tmp";  // Fallback to /tmp if HOME is not set
+    std::string cache_dir = get_env("HYBRID_EP_CACHE_DIR");
+    if (cache_dir.empty()) {
+        struct passwd* pw = getpwuid(getuid());
+        if (pw != nullptr && pw->pw_dir != nullptr) {
+            cache_dir = pw->pw_dir;
+        }
+        if (cache_dir.empty()) {
+            cache_dir = "/tmp";  // Fallback 
+        }
     }
-    return home_dir + "/.deepep/hybrid_ep/jit";
+    return cache_dir + "/.deepep/hybrid_ep/jit";
 }
 
-NVCCCompiler::NVCCCompiler(std::string base_path): base_path(base_path) {
+NVCCCompiler::NVCCCompiler(std::string base_path, std::string comm_id): 
+    base_path(base_path), comm_id(comm_id) {
     jit_dir = get_jit_dir();
 
     nvcc_path = get_env("CUDA_HOME") + "/bin/nvcc";
@@ -75,7 +84,7 @@ std::string NVCCCompiler::build(std::string code, std::string signature, int loc
     auto now = std::chrono::steady_clock::now();
     auto ns  = std::chrono::duration_cast<std::chrono::nanoseconds>(now.time_since_epoch()).count();
     std::string timestamp_str = std::to_string(ns);
-    std::string extended_signature = signature + "-rank-" + std::to_string(local_rank) + "-node-" + std::to_string(node_rank) + "-" + timestamp_str;
+    std::string extended_signature = signature + "-rank-" + std::to_string(local_rank) + "-node-" + std::to_string(node_rank) + "-" + timestamp_str + "-" + comm_id;
 
     // Write the code to the source file
     std::string source_path =
@@ -130,11 +139,14 @@ std::any NVCCCompiler::get_instance(std::string library_path, std::string kernel
 
     // Unique the compiled lib from different rank
     std::string unique_library_path = jit_dir + "/" + kernel_key + ".so";
-    std::string unique_command = "mv " + library_path + " " + unique_library_path;
-    if(library_path != unique_library_path) {
-        auto ret = std::system(unique_command.c_str());
-        if (ret != 0) {
-            throw std::runtime_error("Failed to unique the library: " + unique_command);
+    if (library_path != unique_library_path) {
+        std::error_code ec;
+        std::filesystem::rename(library_path, unique_library_path, ec); 
+        if (ec) {
+            // If rename failed, the comm should not be blocked, so we just print a warning message
+            printf("[Warning] Failed to unique the library: %s -> %s, err: %s\n",
+                   library_path.c_str(), unique_library_path.c_str(), ec.message().c_str());
+            std::filesystem::remove(library_path, ec); // best-effort cleanup
         }
     }
 
@@ -208,8 +220,8 @@ std::string NVCCCompiler::get_combine_code(HybridEpConfigInstance config) {
       )";
 }
 
-KernelCache::KernelCache(int node_rank, int local_rank, std::string base_path, bool load_cached_kernels): 
-node_rank(node_rank), local_rank(local_rank), nvcc_compiler(base_path) {
+KernelCache::KernelCache(int node_rank, int local_rank, std::string base_path, std::string comm_id, bool load_cached_kernels): 
+node_rank(node_rank), local_rank(local_rank), nvcc_compiler(base_path, comm_id) {
     // Load all cached kernels from the cache directory
     jit_dir = get_jit_dir();
     std::filesystem::create_directories(jit_dir);
