@@ -13,6 +13,10 @@ size_t inline get_size_align_to_granularity(size_t size_raw, size_t granularity)
 
 ExtendedMemoryAllocator::ExtendedMemoryAllocator() {
   this->support_fabric_ = support_fabric();
+  if (gethostname(hostname_, sizeof(hostname_)) != 0) {
+    perror("gethostname");
+    std::snprintf(hostname_, sizeof(hostname_), "unknown");
+  }
 
   // It seems a dummy call to set the device. but it is useful to prevent the invalid device context error in gb..
   int device_id = -1;
@@ -114,6 +118,9 @@ void ExtendedMemoryAllocator::get_handle(MemHandle* mem_handle, void* ptr) {
   } else {
     CUDA_CHECK(cudaIpcGetMemHandle(&mem_handle->inner.cuda_ipc_mem_handle, ptr));
   }
+
+  // Record the source hostname
+  strncpy(mem_handle->src_hostname, hostname_, sizeof(mem_handle->src_hostname));
 }
 
 void ExtendedMemoryAllocator::open_handle(void** ptr, MemHandle* mem_handle) {
@@ -159,15 +166,9 @@ bool ExtendedMemoryAllocator::is_accessible(MemHandle* mem_handle) {
       }
     }
   } else {
-    void* tmp;
-    auto ret = cudaIpcOpenMemHandle(&tmp, mem_handle->inner.cuda_ipc_mem_handle,
-                                    cudaIpcMemLazyEnablePeerAccess);
-    accessible = ret == cudaSuccess;
-    if (accessible) {
-      CUDA_CHECK(cudaIpcCloseMemHandle(tmp));
-    }
+    // Check if the source hostname is the same as the current hostname
+    accessible = strncmp(mem_handle->src_hostname, hostname_, sizeof(hostname_)) == 0;
   }
-  cudaGetLastError(); // Clear the last error
   return accessible;
 }
 

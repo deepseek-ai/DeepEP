@@ -70,7 +70,7 @@ class HybridEPBuffer:
         
         assert (
             self.group_size % self.num_of_hybrid_ep_ranks_per_nvlink_domain == 0
-        ), f"The number of ranks {self.group_size} should be divisible by the number of ranks per node {self.num_of_hybrid_ep_ranks_per_nvlink_domain}."
+        ), f"The number of ranks {self.group_size} should be divisible by the number of ranks per node {self.num_of_hybrid_ep_ranks_per_nvlink_domain} at rank={self.rank}."
 
         # Local rank: the active rank in the nvlink domain.
         self.local_rank = self.rank % self.num_of_hybrid_ep_ranks_per_nvlink_domain

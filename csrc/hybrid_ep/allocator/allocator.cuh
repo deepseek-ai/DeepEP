@@ -10,6 +10,8 @@
 #include <ATen/cuda/CUDAContext.h>
 #include <pybind11/pybind11.h>
 #include <pybind11/pytypes.h>
+#include <cstring>
+
 #include "utils.cuh"
 
 struct MemHandle {
@@ -18,6 +20,7 @@ struct MemHandle {
     CUmemFabricHandle cu_mem_fabric_handle;
   } inner;
   size_t size;
+  char src_hostname[256];
 };
 
 // Remote memory allocator, allocate memory which can be accessed by remote devices.
@@ -50,6 +53,7 @@ class ExtendedMemoryAllocator {
   CUdevice device_;
   CUmemAllocationProp fabric_prop_ = {};
   CUmemAccessDesc access_desc = {};
+  char hostname_[256];
 
   // Test memory for accessing check.
   int* test_memory_ = nullptr;
