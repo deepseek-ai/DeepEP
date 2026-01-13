@@ -61,7 +61,7 @@ class HybridEPBuffer:
         if env_value is not None:
             self.num_of_hybrid_ep_ranks_per_nvlink_domain = int(env_value)
             if self.num_of_hybrid_ep_ranks_per_nvlink_domain != detected_ranks:
-                print(
+                warnings.warn(
                     f"[Warning] NUM_OF_HYBRID_EP_RANKS_PER_NVLINK_DOMAIN={self.num_of_hybrid_ep_ranks_per_nvlink_domain} "
                     f"differs from detected value {detected_ranks}. Using environment variable."
                 )
@@ -475,10 +475,12 @@ class HybridEPBuffer:
                     num_dispatched_tokens_tensor,
                     local_expert_routing_map,
                     row_id_map,
-                    num_of_tokens_per_rank,
+                    num_of_tokens_per_rank_in_handle,
                     config,
                     overflow_flag,
                 ) = handle
+                if num_of_tokens_per_rank_in_handle != num_of_tokens_per_rank:
+                    warnings.warn("This handle could be invalid.")
 
             # Dispatch phase
             (
@@ -557,7 +559,7 @@ class HybridEPBuffer:
                 row_id_map,
                 num_of_tokens_per_rank,
                 config,
-                overflow_flag,
+                _,
             ) = handle
 
             combined_token, combined_probs = self.runtime.combine_with_unpermute(
