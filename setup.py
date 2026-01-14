@@ -47,6 +47,7 @@ if __name__ == '__main__':
     if disable_nvshmem:
         cxx_flags.append('-DDISABLE_NVSHMEM')
         nvcc_flags.append('-DDISABLE_NVSHMEM')
+        nvcc_dlink.extend(["-dlink"])
     else:
         sources.extend(['csrc/kernels/internode.cu', 'csrc/kernels/internode_ll.cu'])
         include_dirs.extend([f'{nvshmem_dir}/include'])
