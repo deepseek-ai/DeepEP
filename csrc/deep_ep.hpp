@@ -61,7 +61,7 @@ private:
 
     // NVLink Buffer
     int64_t num_nvl_bytes;
-    void* buffer_ptrs[NUM_MAX_NVL_PEERS] = {nullptr};
+    void** buffer_ptrs = nullptr;
     void** buffer_ptrs_gpu = nullptr;
 
     // NVSHMEM Buffer
@@ -70,6 +70,7 @@ private:
 
     // Shrink mode buffer
     bool enable_shrink = false;
+    bool normal_mnnvl = false;
     int* mask_buffer_ptr = nullptr;
     int* sync_buffer_ptr = nullptr;
 
@@ -78,7 +79,7 @@ private:
     int num_device_sms;
     int rank, rdma_rank, nvl_rank;
     int num_ranks, num_rdma_ranks, num_nvl_ranks;
-    shared_memory::MemHandle ipc_handles[NUM_MAX_NVL_PEERS];
+    shared_memory::MemHandle *ipc_handles = nullptr;
 
     // Stream for communication
     at::cuda::CUDAStream comm_stream;
@@ -92,7 +93,7 @@ private:
     bool destroyed = false;
 
     // Barrier signals
-    int* barrier_signal_ptrs[NUM_MAX_NVL_PEERS] = {nullptr};
+    int** barrier_signal_ptrs = nullptr;
     int** barrier_signal_ptrs_gpu = nullptr;
 
     // Workspace
@@ -120,7 +121,7 @@ public:
            bool low_latency_mode,
            bool explicitly_destroy,
            bool enable_shrink,
-           bool use_fabric);
+           bool normal_mnnvl);
 
     ~Buffer() noexcept(false);
 

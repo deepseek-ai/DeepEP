@@ -132,7 +132,7 @@ Buffer::Buffer(int rank,
                bool low_latency_mode,
                bool explicitly_destroy,
                bool enable_shrink,
-               bool use_fabric)
+               bool normal_mnnvl)
     : rank(rank),
       num_ranks(num_ranks),
       num_nvl_bytes(num_nvl_bytes),
@@ -141,12 +141,9 @@ Buffer::Buffer(int rank,
       low_latency_mode(low_latency_mode),
       explicitly_destroy(explicitly_destroy),
       comm_stream(at::cuda::getStreamFromPool(true)),
-      shared_memory_allocator(use_fabric) {
+      shared_memory_allocator(normal_mnnvl),
+      normal_mnnvl(normal_mnnvl) {
     // Metadata memory
-    int64_t barrier_signal_bytes = NUM_MAX_NVL_PEERS * sizeof(int);
-    int64_t buffer_ptr_bytes = NUM_MAX_NVL_PEERS * sizeof(void*);
-    int64_t barrier_signal_ptr_bytes = NUM_MAX_NVL_PEERS * sizeof(int*);
-
     // Common checks
     EP_STATIC_ASSERT(NUM_BUFFER_ALIGNMENT_BYTES % sizeof(int4) == 0, "Invalid alignment");
     EP_HOST_ASSERT(num_nvl_bytes % NUM_BUFFER_ALIGNMENT_BYTES == 0 and
@@ -156,17 +153,33 @@ Buffer::Buffer(int rank,
     EP_HOST_ASSERT(num_nvl_bytes / sizeof(int4) < std::numeric_limits<int>::max());
     EP_HOST_ASSERT(num_rdma_bytes / sizeof(int4) < std::numeric_limits<int>::max());
     EP_HOST_ASSERT(0 <= rank and rank < num_ranks and (num_ranks <= NUM_MAX_NVL_PEERS * NUM_MAX_RDMA_PEERS or low_latency_mode));
-    EP_HOST_ASSERT(num_ranks < NUM_MAX_NVL_PEERS or num_ranks % NUM_MAX_NVL_PEERS == 0);
     if (num_rdma_bytes > 0)
         EP_HOST_ASSERT(num_ranks > NUM_MAX_NVL_PEERS or low_latency_mode);
 
     // Get ranks
     CUDA_CHECK(cudaGetDevice(&device_id));
-    rdma_rank = rank / NUM_MAX_NVL_PEERS, nvl_rank = rank % NUM_MAX_NVL_PEERS;
-    num_rdma_ranks = std::max(1, num_ranks / NUM_MAX_NVL_PEERS), num_nvl_ranks = std::min(num_ranks, NUM_MAX_NVL_PEERS);
+
+    rdma_rank = rank / NUM_MAX_NVL_PEERS;
+
+    if (normal_mnnvl) {
+        EP_HOST_ASSERT(!low_latency_mode);
+
+        nvl_rank = rank;
+        num_nvl_ranks = num_ranks;
+        num_rdma_ranks = 1;
+
+    } else {
+        nvl_rank = rank % NUM_MAX_NVL_PEERS;
+        num_rdma_ranks = std::max(1, num_ranks / NUM_MAX_NVL_PEERS), num_nvl_ranks = std::min(num_ranks, NUM_MAX_NVL_PEERS);
 #ifdef DISABLE_NVSHMEM
-    EP_HOST_ASSERT(num_rdma_ranks == 1 and not low_latency_mode and "NVSHMEM is disabled during compilation");
+        EP_HOST_ASSERT(num_rdma_ranks == 1 and not low_latency_mode and "NVSHMEM is disabled during compilation");
 #endif
+        EP_HOST_ASSERT(num_ranks < NUM_MAX_NVL_PEERS or num_ranks % NUM_MAX_NVL_PEERS == 0);
+    }
+
+    int64_t barrier_signal_bytes = num_nvl_ranks * sizeof(int);
+    int64_t buffer_ptr_bytes = num_nvl_ranks * sizeof(void*);
+    int64_t barrier_signal_ptr_bytes = num_nvl_ranks * sizeof(int*);
 
     // Get device info
     cudaDeviceProp device_prop = {};
@@ -178,6 +191,23 @@ Buffer::Buffer(int rank,
     EP_HOST_ASSERT(ceil_div<int64_t>(num_rdma_bytes, num_device_sms / 2) < std::numeric_limits<int>::max());
 
     if (num_nvl_bytes > 0) {
+        int size;
+
+        size = num_nvl_ranks * sizeof(void *);
+        buffer_ptrs = (void **)malloc(size);
+        EP_HOST_ASSERT(buffer_ptrs);
+        memset(buffer_ptrs, 0, size);
+
+        size = num_nvl_ranks * sizeof(*ipc_handles);
+        ipc_handles = (shared_memory::MemHandle *)malloc(size);
+        EP_HOST_ASSERT(ipc_handles);
+        memset(ipc_handles, 0, size);
+
+        size = num_nvl_ranks * sizeof(*barrier_signal_ptrs);
+        barrier_signal_ptrs = (int **)malloc(size);
+        EP_HOST_ASSERT(barrier_signal_ptrs);
+        memset(barrier_signal_ptrs, 0, size);
+
         // Local IPC: alloc local memory and set local IPC handles
         shared_memory_allocator.malloc(&buffer_ptrs[nvl_rank],
                                        num_nvl_bytes + barrier_signal_bytes + buffer_ptr_bytes + barrier_signal_ptr_bytes);
@@ -230,6 +260,9 @@ bool Buffer::is_available() const {
 }
 
 bool Buffer::is_internode_available() const {
+    if (normal_mnnvl)
+        return false;
+
     return is_available() and num_ranks > NUM_MAX_NVL_PEERS;
 }
 
@@ -296,6 +329,13 @@ void Buffer::destroy() {
 
         // Free local buffer and error flag
         shared_memory_allocator.free(buffer_ptrs[nvl_rank]);
+
+        free(buffer_ptrs);
+        free(ipc_handles);
+        free(barrier_signal_ptrs);
+        buffer_ptrs = nullptr;
+        ipc_handles = nullptr;
+        barrier_signal_ptrs = nullptr;
     }
 
     // Free NVSHMEM
@@ -332,7 +372,10 @@ void Buffer::sync(const std::vector<int>& device_ids,
     if (num_nvl_bytes > 0) {
         EP_HOST_ASSERT(num_ranks == device_ids.size());
         EP_HOST_ASSERT(device_ids.size() == all_gathered_handles.size());
-        for (int i = 0, offset = rdma_rank * num_nvl_ranks; i < num_nvl_ranks; ++i) {
+
+        int offset = normal_mnnvl ? 0 : rdma_rank * num_nvl_ranks;
+
+        for (int i = 0; i < num_nvl_ranks; ++i) {
             EP_HOST_ASSERT(all_gathered_handles[offset + i].has_value());
             auto handle_str = std::string(all_gathered_handles[offset + i].value());
             EP_HOST_ASSERT(handle_str.size() == shared_memory::HANDLE_SIZE);
@@ -346,8 +389,8 @@ void Buffer::sync(const std::vector<int>& device_ids,
         }
 
         // Copy all buffer and barrier signal pointers to GPU
-        CUDA_CHECK(cudaMemcpy(buffer_ptrs_gpu, buffer_ptrs, sizeof(void*) * NUM_MAX_NVL_PEERS, cudaMemcpyHostToDevice));
-        CUDA_CHECK(cudaMemcpy(barrier_signal_ptrs_gpu, barrier_signal_ptrs, sizeof(int*) * NUM_MAX_NVL_PEERS, cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpy(buffer_ptrs_gpu, buffer_ptrs, sizeof(void*) * num_nvl_ranks, cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpy(barrier_signal_ptrs_gpu, barrier_signal_ptrs, sizeof(int*) * num_nvl_ranks, cudaMemcpyHostToDevice));
         CUDA_CHECK(cudaDeviceSynchronize());
     }
 
