@@ -29,7 +29,7 @@
 // Define __CUDACC_RDC__ to ensure proper extern declarations for NVSHMEM device symbols
 #ifndef DISABLE_NVSHMEM
 #ifndef __CUDACC_RDC__
-#define __CUDACC_RDC__     // NOLINT(*-reserved-identifier)
+#define __CUDACC_RDC__  // NOLINT(*-reserved-identifier)
 #endif
 #endif
 

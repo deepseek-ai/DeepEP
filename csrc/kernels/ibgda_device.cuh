@@ -8,6 +8,7 @@
 #pragma once
 
 #include <type_traits>
+
 #include "configs.cuh"
 #include "exception.cuh"
 #include "utils.cuh"
@@ -82,12 +83,10 @@ __device__ static __forceinline__ nvshmemi_ibgda_device_qp_t* ibgda_get_rc_impl(
     if constexpr (std::is_same_v<StateType, nvshmemi_ibgda_device_state_v1>) {
         // v1 implementation
         return &state->globalmem
-                    .rcs[pe * num_rc_per_pe * state->num_devices_initialized +
-                         id % (num_rc_per_pe * state->num_devices_initialized)];
+                    .rcs[pe * num_rc_per_pe * state->num_devices_initialized + id % (num_rc_per_pe * state->num_devices_initialized)];
     } else {
         // v2 implementation (or any other type)
-        return &state->globalmem
-                    .rcs[pe + nvshmemi_device_state_d.npes * id];
+        return &state->globalmem.rcs[pe + nvshmemi_device_state_d.npes * id];
     }
 }
 
