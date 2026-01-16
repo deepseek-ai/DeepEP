@@ -7,6 +7,8 @@
 //  - nvshmem/src/include/non_abi/device/pt-to-pt/ibgda_device.cuh
 #pragma once
 
+#include <type_traits>
+
 #include "configs.cuh"
 #include "exception.cuh"
 #include "utils.cuh"
@@ -73,11 +75,24 @@ __device__ static __forceinline__ nvshmemi_ibgda_device_state_t* ibgda_get_state
     return &nvshmemi_ibgda_device_state_d;
 }
 
+// Template helper to get RC - uses compile-time type checking with if constexpr (C++17)
+template <typename StateType>
+__device__ static __forceinline__ nvshmemi_ibgda_device_qp_t* ibgda_get_rc_impl(StateType* state, int pe, int id) {
+    const auto num_rc_per_pe = state->num_rc_per_pe;
+
+    if constexpr (std::is_same_v<StateType, nvshmemi_ibgda_device_state_v1>) {
+        // v1 implementation
+        return &state->globalmem
+                    .rcs[pe * num_rc_per_pe * state->num_devices_initialized + id % (num_rc_per_pe * state->num_devices_initialized)];
+    } else {
+        // v2 implementation (or any other type)
+        return &state->globalmem.rcs[pe + nvshmemi_device_state_d.npes * id];
+    }
+}
+
 __device__ static __forceinline__ nvshmemi_ibgda_device_qp_t* ibgda_get_rc(int pe, int id) {
     auto state = ibgda_get_state();
-    const auto num_rc_per_pe = ibgda_get_state()->num_rc_per_pe;
-    return &state->globalmem
-                .rcs[pe * num_rc_per_pe * state->num_devices_initialized + id % (num_rc_per_pe * state->num_devices_initialized)];
+    return ibgda_get_rc_impl(state, pe, id);
 }
 
 __device__ static __forceinline__ void ibgda_lock_acquire(int* lock) {
