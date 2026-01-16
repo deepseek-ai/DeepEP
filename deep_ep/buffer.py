@@ -37,7 +37,6 @@ class Buffer:
                  num_qps_per_rank: int = 24,
                  allow_nvlink_for_low_latency_mode: bool = True,
                  allow_mnnvl: bool = False,
-                 use_fabric: bool = False,
                  explicitly_destroy: bool = False,
                  enable_shrink: bool = False,
                  comm: Optional["mpi4py.MPI.Comm"] = None) -> None:  # noqa: F821
@@ -56,7 +55,6 @@ class Buffer:
                 Warning: PCIe connections may lead to errors due to memory ordering issues,
                 please make sure all connections are via NVLink.
             allow_mnnvl: whether to allow MNNVL
-            use_fabric: whether to use fabric API for memory buffers.
             enable_shrink: whether to enable shrink mode. The enable mode allocates a mask buffer to support masking ranks dynamically.
             explicitly_destroy: If this flag is set to True, you need to explicitly call `destroy()` to release resources;
                 otherwise, the resources will be released by the destructor.
@@ -84,14 +82,21 @@ class Buffer:
                 return comm.allgather(obj)
         else:
             raise ValueError("Either 'group' or 'comm' must be provided.")
+
+        normal_mnnvl = False
+        if os.environ.get("DEEP_EP_NORMAL_MNNVL") == '1':
+            normal_mnnvl = True
+            num_rdma_bytes = 0
+            if low_latency_mode:
+                raise ValueError("DEEP_EP_NORMAL_MNNVL can not work with low latency mode")
+
         self.num_nvl_bytes = num_nvl_bytes
         self.num_rdma_bytes = num_rdma_bytes
         self.low_latency_mode = low_latency_mode
         self.explicitly_destroy = explicitly_destroy
         self.enable_shrink = enable_shrink
         self.runtime = deep_ep_cpp.Buffer(self.rank, self.group_size, num_nvl_bytes, num_rdma_bytes, low_latency_mode, explicitly_destroy,
-                                          enable_shrink, use_fabric)
-
+                                          enable_shrink, normal_mnnvl)
         # Synchronize device IDs
         local_device_id = self.runtime.get_local_device_id()
         device_ids = all_gather_object(local_device_id)
@@ -246,6 +251,7 @@ class Buffer:
             2: Config(Buffer.num_sms, 24, 256, 6, 128),
             4: Config(Buffer.num_sms, 6, 256, 6, 128),
             8: Config(Buffer.num_sms, 6, 256, 6, 128),
+            12: Config(Buffer.num_sms, 6, 256, 6, 128),
             16: Config(Buffer.num_sms, 36, 288, 20, 128),
             24: Config(Buffer.num_sms, 32, 288, 8, 128),
             32: Config(Buffer.num_sms, 32, 288, 8, 128),
@@ -276,6 +282,7 @@ class Buffer:
             2: Config(Buffer.num_sms, 10, 256, 6, 128),
             4: Config(Buffer.num_sms, 9, 256, 6, 128),
             8: Config(Buffer.num_sms, 4, 256, 6, 128),
+            12: Config(Buffer.num_sms, 4, 256, 6, 128),
             16: Config(Buffer.num_sms, 4, 288, 12, 128),
             24: Config(Buffer.num_sms, 1, 288, 8, 128),
             32: Config(Buffer.num_sms, 1, 288, 8, 128),
