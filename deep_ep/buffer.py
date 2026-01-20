@@ -135,7 +135,7 @@ class Buffer:
         self.runtime.sync(device_ids, ipc_handles, root_unique_id)
         assert self.runtime.is_available()
 
-    def destroy(self):
+    def destroy(self) -> None:
         """
         Destroy the cpp runtime and release resources.
 
@@ -147,7 +147,7 @@ class Buffer:
         self.runtime = None
 
     @staticmethod
-    def is_sm90_compiled():
+    def is_sm90_compiled() -> bool:
         return deep_ep_cpp.is_sm90_compiled()
 
     @staticmethod
@@ -220,7 +220,7 @@ class Buffer:
         return tensor[:size.numel()].view(size)
 
     @staticmethod
-    def _unpack_bias(bias: Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]):
+    def _unpack_bias(bias: Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
         bias_0, bias_1 = None, None
         if isinstance(bias, torch.Tensor):
             bias_0 = bias
@@ -660,7 +660,7 @@ class Buffer:
         tensors_to_record = (x, topk_idx, topk_weights, src_info, layout_range, combined_x)
         return combined_x, EventOverlap(event, tensors_to_record if async_finish else None), hook
 
-    def low_latency_update_mask_buffer(self, rank_to_mask: int, mask: bool = False):
+    def low_latency_update_mask_buffer(self, rank_to_mask: int, mask: bool = False) -> None:
         """
         Mask (unmask) a rank during communication (dispatch, combine, and clean)
 
@@ -671,7 +671,7 @@ class Buffer:
         """
         self.runtime.low_latency_update_mask_buffer(rank_to_mask, mask)
 
-    def low_latency_query_mask_buffer(self, mask_status: torch.Tensor):
+    def low_latency_query_mask_buffer(self, mask_status: torch.Tensor) -> None:
         """
         Query the mask status of all ranks
 
@@ -681,14 +681,14 @@ class Buffer:
         """
         self.runtime.low_latency_query_mask_buffer(mask_status)
 
-    def low_latency_clean_mask_buffer(self):
+    def low_latency_clean_mask_buffer(self) -> None:
         """
         Clean the mask buffer
 
         """
         self.runtime.low_latency_clean_mask_buffer()
 
-    def get_next_low_latency_combine_buffer(self, handle: object):
+    def get_next_low_latency_combine_buffer(self, handle: object) -> torch.Tensor:
         """
         Get the raw registered RDMA buffer tensor for next low-latency combine, so that the next combine kernel can skip the copying.
 
