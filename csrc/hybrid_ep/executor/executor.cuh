@@ -10,10 +10,11 @@
 #include "hybrid_ep_backend.cuh"
 #include "jit/compiler.cuh"
 #include "extension/permute.cuh"
+#include "extension/allgather.cuh"
 
 class Executor {
 public:
-    Executor(int local_rank, int node_rank, std::string base_path, bool load_cached_kernels);
+    Executor(int local_rank, int node_rank, std::string base_path, std::string comm_id, bool load_cached_kernels, bool enable_custom_allgather);
 
     struct DispatchArgs {
         // Input tensors
@@ -65,15 +66,23 @@ public:
         cudaStream_t stream;
     };
 
+    torch::Tensor allgather_routing_map(
+        CustomAllgather &allgather_obj,
+        HybridEpConfigInstance config,
+        torch::Tensor local_routing_map,
+        py::object process_group
+    );
+
     std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
     metadata_preprocess_core(
         HybridEpConfigInstance config,
         hybrid_ep::tmp_state_t *preprocessing_tmp,
         torch::Tensor global_routing_map,
-        int num_of_tokens_per_rank
+        int num_of_tokens_per_rank,
+        bool non_blocking
     );
 
-    std::tuple<torch::Tensor, torch::Tensor> 
+    std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> 
     dispatch_preprocess(
         HybridEpConfigInstance config, DispatchBuffers& dispatch_buffers, DispatchArgs& args);
     template<typename DType> 
@@ -95,5 +104,6 @@ private:
     HybridEpConfigInstance config;
     int local_rank;
     int node_rank;
+    bool enable_custom_allgather;
 };
 

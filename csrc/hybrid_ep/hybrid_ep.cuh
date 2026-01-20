@@ -6,6 +6,7 @@
 #include "allocator/allocator.cuh"
 #include "utils.cuh"
 #include "executor/executor.cuh"
+#include "extension/allgather.cuh"
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/util/Optional.h>
 #include <torch/torch.h>
@@ -19,7 +20,7 @@
 
 class HybridEPBuffer {
 public:
-  HybridEPBuffer(pybind11::object process_group, BufferConfig config, int local_rank, int node_rank, int group_size, std::string base_path, bool load_cached_kernels, bool use_shared_buffer, bool use_mnnvl);
+  HybridEPBuffer(pybind11::object process_group, BufferConfig config, int local_rank, int node_rank, int group_size, std::string base_path, bool load_cached_kernels, bool use_shared_buffer, bool enable_custom_allgather);
   ~HybridEPBuffer();
   bool update_buffer(HybridEpConfigInstance config); // True means the buffer is reallocated.
 
@@ -28,7 +29,7 @@ public:
 
   std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor,
              torch::Tensor>
-  metadata_preprocessing(HybridEpConfigInstance config, torch::Tensor global_routing_map, int64_t num_of_tokens_per_rank);
+  metadata_preprocessing(HybridEpConfigInstance config, torch::Tensor global_routing_map, int64_t num_of_tokens_per_rank, bool non_blocking);
 
   std::tuple<torch::Tensor, c10::optional<torch::Tensor>, c10::optional<torch::Tensor>>
   dispatch(HybridEpConfigInstance config, 
@@ -46,7 +47,7 @@ public:
           torch::Tensor attn_to_rdma_map, int64_t num_of_tokens_per_rank,
           bool with_probs);
   
-  std::tuple<torch::Tensor, c10::optional<torch::Tensor>, c10::optional<torch::Tensor>, torch::Tensor, torch::Tensor>
+  std::tuple<torch::Tensor, c10::optional<torch::Tensor>, c10::optional<torch::Tensor>, torch::Tensor, torch::Tensor, torch::Tensor>
   dispatch_with_permute(
             HybridEpConfigInstance config, 
             torch::Tensor hidden, c10::optional<torch::Tensor> probs,
@@ -76,14 +77,13 @@ public:
 private:
 #ifdef HYBRID_EP_BUILD_MULTINODE_ENABLE
   std::vector<std::string> ib_dev_name_list;
+  RDMACoordinator rdma_coordinator;
 #endif
   ExtendedMemoryAllocator remote_allocator;
   BufferConfig buffer_config;
   Executor executor;
   pybind11::object process_group;
-#ifdef HYBRID_EP_BUILD_MULTINODE_ENABLE
-  RDMACoordinator rdma_coordinator;
-#endif
+  CustomAllgather allgather_obj;
 
   void allocate_buffer();
   void allocate_buffer_for_preprocessing();

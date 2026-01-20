@@ -5,6 +5,7 @@
 #include <pybind11/functional.h>
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
+#include "allocator/allocator.cuh"
 #include "hybrid_ep.cuh"
 #include "utils.cuh"
 #include "config.cuh"
@@ -14,6 +15,10 @@ namespace py = pybind11;
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.doc() = "HybridEP, efficiently enable the expert-parallel communication in "
               "the Hopper+ architectures";
+    
+    pybind11::class_<ExtendedMemoryAllocator>(m, "ExtendedMemoryAllocator")
+        .def(py::init<>())
+        .def("detect_accessible_ranks", &ExtendedMemoryAllocator::detect_accessible_ranks, py::arg("process_group"));
       
     pybind11::enum_<APP_TOKEN_DATA_TYPE>(m, "APP_TOKEN_DATA_TYPE")
         .value("UINT16", APP_TOKEN_DATA_TYPE::UINT16)
@@ -125,10 +130,10 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
             py::arg("base_path"),
             py::arg("load_cached_kernels") = false,
             py::arg("use_shared_buffer") = true,
-            py::arg("use_mnnvl") = false)
+            py::arg("enable_custom_allgather") = true)
         .def("update_buffer", &HybridEPBuffer::update_buffer, py::arg("config"))
         .def("metadata_preprocessing", &HybridEPBuffer::metadata_preprocessing,
-             py::kw_only(), py::arg("config"), py::arg("routing_map"), py::arg("num_of_tokens_per_rank"))
+             py::kw_only(), py::arg("config"), py::arg("routing_map"), py::arg("num_of_tokens_per_rank"), py::arg("non_blocking") = false)
         .def("dispatch", &HybridEPBuffer::dispatch, py::kw_only(), 
              py::arg("config"), py::arg("hidden"),
              py::arg("probs") = c10::nullopt,

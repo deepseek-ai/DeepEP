@@ -37,7 +37,8 @@ enum memory_type {
 };
 
 constexpr int32_t CONNECTION_TYPE = RC;
-constexpr int32_t DEF_HOP_LIMIT = 64;
+constexpr int32_t DEF_HOP_LIMIT = 255;
+constexpr int32_t DEF_IB_TC = 0;
 constexpr int32_t DEF_RX_RDMA = 128;
 constexpr int32_t DEF_TX_BW = 512;
 constexpr int32_t EQ_NUM = 0;
@@ -139,7 +140,7 @@ class RDMACoordinator {
 public:
     RDMACoordinator() = default;
     ~RDMACoordinator();
-    void init(pybind11::object process_group, int node_rank, int local_rank, bool use_mnnvl, BufferConfig config);
+    void init(pybind11::object process_group, int node_rank, int local_rank, BufferConfig config);
     void update_config(BufferConfig config);
     void destroy();
     void allocate_dispatch_rdma_buffers(DispatchBuffers &dispatch_buffers);

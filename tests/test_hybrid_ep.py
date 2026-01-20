@@ -14,11 +14,8 @@ MAX_NUM_OF_TOKENS_PER_RANK = int(os.environ.get("MAX_NUM_OF_TOKENS_PER_RANK", 40
 # NUM_TOKENS_PER_RANK should equal or less than MAX_NUM_OF_TOKENS_PER_RANK
 NUM_TOKENS_PER_RANK = int(os.environ.get("NUM_TOKENS_PER_RANK", 4096))
 NUM_LOCAL_EXPERTS = int(os.environ.get("NUM_LOCAL_EXPERTS", 8))
-NUM_OF_RANKS_PER_NODE = int(os.environ.get("NUM_OF_RANKS_PER_NODE", 4))
-NUM_OF_NODES = int(os.environ.get("NUM_OF_NODES", 1))
 TOPK = int(os.environ.get("TOPK", 8))
 PAD_MULTIPLE = int(os.environ.get("PAD_MULTIPLE", 32))
-NUM_OF_EXPERTS = NUM_LOCAL_EXPERTS * NUM_OF_RANKS_PER_NODE * NUM_OF_NODES
 ITERATIONS = int(os.environ.get("ITERATIONS", 100))
 SEED = int(os.environ.get("SEED", 42))
 USE_MNNVL = os.environ.get("USE_MNNVL", "0").strip().lower() in {"1", "true", "t", "yes", "y", "on"}
@@ -27,6 +24,10 @@ torch.cuda.manual_seed(SEED)
 torch.cuda.manual_seed_all(SEED)
 torch.backends.cudnn.deterministic = True
 torch.backends.cudnn.benchmark = False
+# Will be set after the process group is initialized
+NUM_OF_RANKS_PER_NODE = None
+NUM_OF_NODES = None
+NUM_OF_EXPERTS = None
 
 def print_in_order(msg: str):
     """Print message in order by rank to avoid interleaved output"""
@@ -165,7 +166,7 @@ def test_hybrid_ep_correctness(buffer: deep_ep.HybridEPBuffer, ref: TorchRef, us
             scaling_factor=scaling_factor,
             pad_multiple=PAD_MULTIPLE,
         )
-        _, _, _, num_dispatched_tokens_tensor, local_expert_routing_map, _, _, _ = (
+        _, _, _, num_dispatched_tokens_tensor, local_expert_routing_map, _, _, _, _ = (
             handle
         )
         num_dispatched_tokens_tensor = num_dispatched_tokens_tensor.cpu()
@@ -329,7 +330,8 @@ def test_hybrid_ep_benchmark(buffer: deep_ep.HybridEPBuffer, group: dist.Process
             print_in_order(f'[rank {rank}] HybridEP dispatch kernel(IB) ({"FP8" if hidden.dtype == torch.uint8 else "BF16"}): {rdma_send_bytes / 1e9 / dispatch_t:.2f} GB/s, avg_t={dispatch_t * 1e6:.2f} us | '
                   f'HybridEP combine kernel(IB): {combine_bf16_rdma_recv_bytes / 1e9 / combine_t:.2f} GB/s, avg_t={combine_t * 1e6:.2f} us')
     else:
-        torch.cuda.profiler.start()
+        if torch.distributed.get_rank() == 0:
+            torch.cuda.profiler.start()
         with torch.cuda.nvtx.range(f"hybrid-ep dispatch ({"FP8" if hidden.dtype == torch.uint8 else "BF16"})"):
             if rank == 0:
                 print(f"profile hybrid-ep dispatch ({"FP8" if hidden.dtype == torch.uint8 else "BF16"})", flush=True)
@@ -351,30 +353,43 @@ def test_hybrid_ep_benchmark(buffer: deep_ep.HybridEPBuffer, group: dist.Process
             combine_with_unpermute_args = {'hidden': dispatched_hidden_bf16_with_permute, 'probs': dispatched_probs_with_permute, 'handle': handle_with_permute, 'pad_multiple': PAD_MULTIPLE}
             bench(lambda: buffer.combine_with_unpermute(**combine_with_unpermute_args))
         time.sleep(1)
-        torch.cuda.profiler.stop()
+        if torch.distributed.get_rank() == 0:
+            torch.cuda.profiler.stop()
 
 
 def test_main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
     _, _, group = init_dist(local_rank, num_local_ranks)
-    for use_fp8 in [False, True]:
-        buffer = deep_ep.HybridEPBuffer(
-            group=group,
-            hidden_dim=HIDDEN_DIM,
-            max_num_of_tokens_per_rank=MAX_NUM_OF_TOKENS_PER_RANK,
-            num_local_experts=NUM_LOCAL_EXPERTS,
-            num_of_hybrid_ep_ranks_per_nvlink_domain=NUM_OF_RANKS_PER_NODE,
-            use_mnnvl=USE_MNNVL,
-            use_fp8=use_fp8
-        )
-        
-        ref = TorchRef(
-            ep_group=group,
-            num_of_experts=NUM_OF_EXPERTS,
-            num_of_ranks_per_node=NUM_OF_RANKS_PER_NODE,
-        )
 
-        test_hybrid_ep_correctness(buffer, ref, use_fp8)
-        test_hybrid_ep_benchmark(buffer, group, use_fp8, args.nsys_profile)
+    # Set missing global vars
+    global NUM_OF_RANKS_PER_NODE, NUM_OF_NODES, NUM_OF_EXPERTS
+    if USE_MNNVL:
+        NUM_OF_RANKS_PER_NODE = group.size()
+        NUM_OF_NODES = 1
+        NUM_OF_EXPERTS = NUM_LOCAL_EXPERTS * NUM_OF_RANKS_PER_NODE * NUM_OF_NODES
+    else:
+        NUM_OF_RANKS_PER_NODE = args.num_processes
+        NUM_OF_NODES = group.size() // NUM_OF_RANKS_PER_NODE
+        NUM_OF_EXPERTS = NUM_LOCAL_EXPERTS * NUM_OF_RANKS_PER_NODE * NUM_OF_NODES
+
+    stream = torch.cuda.Stream()
+    with torch.cuda.stream(stream):
+        for use_fp8 in [False, True]:
+            buffer = deep_ep.HybridEPBuffer(
+                group=group,
+                hidden_dim=HIDDEN_DIM,
+                max_num_of_tokens_per_rank=MAX_NUM_OF_TOKENS_PER_RANK,
+                num_local_experts=NUM_LOCAL_EXPERTS,
+                use_fp8=use_fp8
+            )
+            
+            ref = TorchRef(
+                ep_group=group,
+                num_of_experts=NUM_OF_EXPERTS,
+                num_of_ranks_per_node=NUM_OF_RANKS_PER_NODE,
+            )
+
+            test_hybrid_ep_correctness(buffer, ref, use_fp8)
+            test_hybrid_ep_benchmark(buffer, group, use_fp8, args.nsys_profile)
     dist.barrier()
     dist.destroy_process_group()
 

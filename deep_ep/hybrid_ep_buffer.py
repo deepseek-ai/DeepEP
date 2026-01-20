@@ -44,7 +44,7 @@ class HybridEPBuffer:
         num_sms_dispatch_api: int = None,
         num_sms_combine_api: int = None,
         num_sms_preprocessing_api: int = None,
-        # Rank-based setting
+        # Deprecated parameters
         num_of_hybrid_ep_ranks_per_nvlink_domain: int = None,
         use_mnnvl: bool = None
     ):
@@ -55,19 +55,22 @@ class HybridEPBuffer:
             self.group_size > 1
         ), f"The hybrid-ep kernel should be used with at least 2 ranks, but got {self.group_size}."
 
-        # Number of ranks in the first nvlink domain.
-        if use_mnnvl is None:
-            use_mnnvl = os.getenv("USE_MNNVL", "0").strip().lower() in {"1", "true", "t", "yes", "y", "on"}
-        if num_of_hybrid_ep_ranks_per_nvlink_domain is None:
-            num_of_hybrid_ep_ranks_per_nvlink_domain = int(os.getenv("NUM_OF_HYBRID_EP_RANKS_PER_NVLINK_DOMAIN", "8"))
-        if num_of_hybrid_ep_ranks_per_nvlink_domain > 8: 
-            use_mnnvl = True
+        allocator = hybrid_ep_cpp.ExtendedMemoryAllocator()
+        detected_ranks = allocator.detect_accessible_ranks(self.group)
+        env_value = os.getenv("NUM_OF_HYBRID_EP_RANKS_PER_NVLINK_DOMAIN")
+        if env_value is not None:
+            self.num_of_hybrid_ep_ranks_per_nvlink_domain = int(env_value)
+            if self.num_of_hybrid_ep_ranks_per_nvlink_domain != detected_ranks:
+                warnings.warn(
+                    f"[Warning] NUM_OF_HYBRID_EP_RANKS_PER_NVLINK_DOMAIN={self.num_of_hybrid_ep_ranks_per_nvlink_domain} "
+                    f"differs from detected value {detected_ranks}. Using environment variable."
+                )
+        else:
+            self.num_of_hybrid_ep_ranks_per_nvlink_domain = detected_ranks
         
         assert (
-            self.group_size % num_of_hybrid_ep_ranks_per_nvlink_domain == 0
-        ), "The number of ranks should be divisible by the number of ranks per node."
-        self.rank = self.group.rank()
-        self.num_of_hybrid_ep_ranks_per_nvlink_domain = num_of_hybrid_ep_ranks_per_nvlink_domain
+            self.group_size % self.num_of_hybrid_ep_ranks_per_nvlink_domain == 0
+        ), f"The number of ranks {self.group_size} should be divisible by the number of ranks per node {self.num_of_hybrid_ep_ranks_per_nvlink_domain} at rank={self.rank}."
 
         # Local rank: the active rank in the nvlink domain.
         self.local_rank = self.rank % self.num_of_hybrid_ep_ranks_per_nvlink_domain
@@ -120,9 +123,11 @@ class HybridEPBuffer:
         self.config.num_of_tokens_per_chunk_combine_api = int(
             os.getenv("NUM_OF_TOKENS_PER_CHUNK_COMBINE_API", "128")
         )
-
-        assert self.config.is_valid(), "The buffer config is not valid."
-
+        # assert self.config.is_valid(), "The buffer config is not valid."
+        if not self.config.is_valid():
+            print(f"The buffer config is not valid. hidden_dim={hidden_dim}, max_num_of_tokens_per_rank={max_num_of_tokens_per_rank}, num_local_experts={num_local_experts}, self.config.num_of_ranks_per_node={self.config.num_of_ranks_per_node}, self.config.num_of_nodes={self.config.num_of_nodes}, use_fp8={use_fp8}")
+            raise ValueError("The buffer config is not valid.")
+      
         # Create C++ buffer - this will allocate all buffers during construction
         self.runtime = hybrid_ep_cpp.HybridEPBuffer(
             self.group, 
@@ -131,9 +136,9 @@ class HybridEPBuffer:
             self.node_rank, 
             self.group_size, 
             os.path.dirname(os.path.abspath(__file__)), 
-            load_cached_kernels = False, 
-            use_shared_buffer = True,
-            use_mnnvl = use_mnnvl, # If use_mnnvl is True, the fabric memory handle will be used.
+            load_cached_kernels = False,   # whether to load the cached kernels in disk
+            use_shared_buffer = True,      # whether to use the shared buffer for dispatch and combine
+            enable_custom_allgather = True  # whether to use the custom allgather for intra-node communication
         )
 
     def empty_jit_cache(self):
@@ -147,7 +152,7 @@ class HybridEPBuffer:
     def update_template_config(
         self,
         hidden_dim: int = None,
-        max_num_of_tokens_per_rank: int = None,
+        num_of_tokens_per_rank: int = None,
         num_local_experts: int = None,
         use_fp8: bool = None,
     ):
@@ -162,13 +167,12 @@ class HybridEPBuffer:
         config.hidden_dim = (
             hidden_dim if hidden_dim is not None else self.config.hidden_dim
         )
-        if max_num_of_tokens_per_rank is None:
-            max_num_of_tokens_per_rank = self.config.max_num_of_tokens_per_rank
-        else:
-            config.max_num_of_tokens_per_rank = max(
-                max_num_of_tokens_per_rank, self.config.max_num_of_tokens_per_rank
-            )
-            self.config.max_num_of_tokens_per_rank = config.max_num_of_tokens_per_rank
+        if num_of_tokens_per_rank is None:
+            num_of_tokens_per_rank = self.config.max_num_of_tokens_per_rank
+        config.max_num_of_tokens_per_rank = max(
+            num_of_tokens_per_rank, self.config.max_num_of_tokens_per_rank
+        )
+        self.config.max_num_of_tokens_per_rank = config.max_num_of_tokens_per_rank
         
         config.num_of_experts_per_rank = (
             num_local_experts
@@ -279,17 +283,7 @@ class HybridEPBuffer:
         if handle is None:
             config = self.update_template_config(
                 hidden_dim=hidden_dim,
-                max_num_of_tokens_per_rank=num_of_tokens,
-            )
-            # The hybrid-ep kernel requires the routing info from all ranks.
-            global_routing_map = torch.empty(
-                num_of_tokens * self.group_size,
-                num_of_experts,
-                device="cuda",
-                dtype=torch.bool,
-            )
-            torch.distributed.all_gather_into_tensor(
-                global_routing_map, routing_map, self.group
+                num_of_tokens_per_rank=num_of_tokens,
             )
             # Run the metadata preprocessing kernel.
             (
@@ -300,7 +294,7 @@ class HybridEPBuffer:
                 local_expert_routing_map,
             ) = self.runtime.metadata_preprocessing(
                 config=config,
-                routing_map=global_routing_map,
+                routing_map=routing_map,
                 num_of_tokens_per_rank=num_of_tokens,
             )
             # Create the handle using the data generated by the preprocessing kernel.
@@ -414,9 +408,8 @@ class HybridEPBuffer:
         # There are 2 tensors are put on the CPU pinned memory
         # 1. num_dispatched_tokens in handle
         # 2. tokens_per_expert
-        # If non_blocking is True, no stream synchronization will be used, so we can not promise the data in pinned 
-        # memory is ready for using in CPU. The CPU value of num_permuted_tokens required for this mode
-        # Otherwise, the stream synchronization will be used to wait for the data in pinned memory.
+        # If non_blocking is True, no stream synchronization will be used, the all output are on the GPU.
+        # Otherwise, num_dispatched_tokens_tensor and tokens_per_expert are on the CPU pinned memory, the stream synchronization will be used to wait for the data in pinned memory.
         non_blocking: bool = False,
         # Deprecated parameters
         num_dispatched_tokens: int = None,
@@ -456,19 +449,9 @@ class HybridEPBuffer:
                 # Update the template config.
                 config = self.update_template_config(
                     hidden_dim=hidden_dim,
-                    max_num_of_tokens_per_rank=num_of_tokens_per_rank,
+                    num_of_tokens_per_rank=num_of_tokens_per_rank,
                     num_local_experts=num_of_experts_per_rank,
                     use_fp8=use_fp8,
-                )
-                # Global routing map: the routing map for all tokens to all experts.
-                global_routing_map = torch.empty(
-                    num_of_tokens_per_rank * self.group_size,
-                    num_of_experts,
-                    device="cuda",
-                    dtype=torch.bool,
-                )
-                torch.distributed.all_gather_into_tensor(
-                    global_routing_map, routing_map, self.group
                 )
                 # Run the metadata preprocessing kernel.
                 row_id_map = None
@@ -480,8 +463,9 @@ class HybridEPBuffer:
                     local_expert_routing_map,
                 ) = self.runtime.metadata_preprocessing(
                     config=config,
-                    routing_map=global_routing_map,
+                    routing_map=routing_map,
                     num_of_tokens_per_rank=num_of_tokens_per_rank,
+                    non_blocking=non_blocking,
                 )
             else:
                 (
@@ -491,15 +475,19 @@ class HybridEPBuffer:
                     num_dispatched_tokens_tensor,
                     local_expert_routing_map,
                     row_id_map,
-                    num_of_tokens_per_rank,
+                    num_of_tokens_per_rank_in_handle,
                     config,
+                    overflow_flag,
                 ) = handle
+                if num_of_tokens_per_rank_in_handle != num_of_tokens_per_rank:
+                    warnings.warn("This handle could be invalid.")
 
             # Dispatch phase
             (
                 dispatched_token,
                 dispatched_probs,
                 dispatched_scaling_factor,
+                overflow_flag,
                 row_id_map,
                 tokens_per_expert,
             ) = self.runtime.dispatch_with_permute(
@@ -529,6 +517,7 @@ class HybridEPBuffer:
                 row_id_map,
                 num_of_tokens_per_rank,
                 config,
+                overflow_flag,
             )
         
         return (
@@ -570,6 +559,7 @@ class HybridEPBuffer:
                 row_id_map,
                 num_of_tokens_per_rank,
                 config,
+                _,
             ) = handle
 
             combined_token, combined_probs = self.runtime.combine_with_unpermute(
