@@ -1,3 +1,4 @@
+import os
 import argparse
 import random
 import torch
@@ -44,7 +45,8 @@ def test_main(num_tokens: int,
               buffer: deep_ep.Buffer,
               use_logfmt: bool = False,
               shrink_test: bool = False,
-              seed: int = 0):
+              seed: int = 0,
+              sm80_mode: bool = False):
     torch.manual_seed(seed + rank)
     random.seed(seed + rank)
 
@@ -84,9 +86,12 @@ def test_main(num_tokens: int,
     # Check dispatch correctness
     do_check = True
     hash_value, num_times = 0, 0
+    if rank == 0:
+        print(f"[info] Running in {'SM80' if sm80_mode else 'SM90'} mode")
+    test_dispatch_list = [False] if sm80_mode else [False, True]
     for current_x in x_list:
         for return_recv_hook in (False, True):
-            for dispatch_use_fp8 in (False, True):
+            for dispatch_use_fp8 in test_dispatch_list:
                 for round_scale in (False, True) if dispatch_use_fp8 else (False, ):
                     for use_ue8m0 in (False, True) if round_scale else (False, ):
                         if shrink_test and simulate_failure_and_skip(rank, "dispatch", expected_masked_ranks):
@@ -276,7 +281,8 @@ def test_loop(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
               buffer,
               use_logfmt=args.use_logfmt,
               shrink_test=args.shrink_test,
-              seed=1)
+              seed=1,
+              sm80_mode=args.disable_sm90_features)
 
     do_pressure_test = args.pressure_test
     for seed in range(int(1e9) if do_pressure_test else 0):
@@ -291,7 +297,9 @@ def test_loop(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
                              group,
                              buffer,
                              use_logfmt=args.use_logfmt,
-                             seed=seed)
+                             shrink_test=args.shrink_test,
+                             seed=seed,
+                             sm80_mode=args.disable_sm90_features)
         for _ in range(20):
             assert test_main(num_tokens,
                              hidden,
@@ -302,7 +310,9 @@ def test_loop(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
                              group,
                              buffer,
                              use_logfmt=args.use_logfmt,
-                             seed=seed) == ref_hash, f'Error: seed={seed}'
+                             shrink_test=args.shrink_test,
+                             seed=seed,
+                             sm80_mode=args.disable_sm90_features) == ref_hash, f'Error: seed={seed}'
 
     # Destroy the buffer runtime and communication group
     buffer.destroy()
@@ -324,6 +334,7 @@ if __name__ == '__main__':
     parser.add_argument('--use-logfmt', action='store_true', help='Whether to test LogFMT combine')
     parser.add_argument("--pressure-test", action='store_true', help='Whether to do pressure test')
     parser.add_argument("--shrink-test", action='store_true', help='Whether to simulate failure and test shrink mode')
+    parser.add_argument('--disable-sm90-features', action='store_true', help='Enable SM80 (A100) compatibility mode, disable FP8 features')
     args = parser.parse_args()
 
     num_processes = args.num_processes
