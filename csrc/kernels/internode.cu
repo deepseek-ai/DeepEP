@@ -2083,21 +2083,43 @@ __global__ void __launch_bounds__((kNumForwarders + 1) * 32, 1) combine(int4* co
                                                                      hidden_bytes + sizeof(SourceMeta)) +
                                             topk_idx);
                     };
-                    combine_token<NUM_MAX_NVL_PEERS, false, dtype_t, NUM_MAX_NVL_PEERS, true, kNumStages, kNumTMALoadBytes>(
-                        expected_head >= 0,
-                        expected_head,
-                        lane_id,
-                        hidden_int4,
-                        num_topk,
-                        static_cast<int4*>(shifted),
-                        reinterpret_cast<float*>(static_cast<int8_t*>(shifted) + hidden_bytes + sizeof(SourceMeta)),
-                        nullptr,
-                        nullptr,
-                        num_max_nvl_chunked_recv_tokens_per_rdma,
-                        get_addr_fn,
-                        recv_tw_fn,
-                        smem_ptr,
-                        tma_phase);
+                    // Use TMA only when hidden_int4 is divisible by 32 (TMA requirement)
+                    if (hidden_int4 % 32 == 0) {
+                        combine_token<NUM_MAX_NVL_PEERS, false, dtype_t, NUM_MAX_NVL_PEERS, true, kNumStages, kNumTMALoadBytes>(
+                            expected_head >= 0,
+                            expected_head,
+                            lane_id,
+                            hidden_int4,
+                            num_topk,
+                            static_cast<int4*>(shifted),
+                            reinterpret_cast<float*>(static_cast<int8_t*>(shifted) + hidden_bytes + sizeof(SourceMeta)),
+                            nullptr,
+                            nullptr,
+                            num_max_nvl_chunked_recv_tokens_per_rdma,
+                            get_addr_fn,
+                            recv_tw_fn,
+                            smem_ptr,
+                            tma_phase);
+                    } else {
+                        // Fallback to non-TMA path for hidden sizes not divisible by 32
+                        // (e.g., hidden=2880 where hidden_int4=180)
+                        uint32_t dummy_tma_phases[kNumStages];
+                        combine_token<NUM_MAX_NVL_PEERS, false, dtype_t, NUM_MAX_NVL_PEERS, false, kNumStages>(
+                            expected_head >= 0,
+                            expected_head,
+                            lane_id,
+                            hidden_int4,
+                            num_topk,
+                            static_cast<int4*>(shifted),
+                            reinterpret_cast<float*>(static_cast<int8_t*>(shifted) + hidden_bytes + sizeof(SourceMeta)),
+                            nullptr,
+                            nullptr,
+                            num_max_nvl_chunked_recv_tokens_per_rdma,
+                            get_addr_fn,
+                            recv_tw_fn,
+                            nullptr,
+                            dummy_tma_phases);
+                    }
 
                     // Update head
                     if (lane_id < NUM_MAX_NVL_PEERS)
