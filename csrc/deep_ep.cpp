@@ -294,6 +294,12 @@ void Buffer::destroy() {
                     shared_memory_allocator.close_mem_handle(buffer_ptrs[i]);
         }
 
+        // Barrier to ensure all ranks have closed remote handles before freeing local buffer
+        // This prevents undefined behavior where one rank frees its buffer while another
+        // rank is still closing the IPC handle to that buffer (see CUDA docs for cudaIpcOpenMemHandle)
+        intranode::barrier(barrier_signal_ptrs_gpu, nvl_rank, num_nvl_ranks, comm_stream);
+        CUDA_CHECK(cudaDeviceSynchronize());
+
         // Free local buffer and error flag
         shared_memory_allocator.free(buffer_ptrs[nvl_rank]);
     }
