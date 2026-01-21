@@ -177,6 +177,28 @@ def bench_kineto(fn,
                  trace_path: Optional[str] = None,
                  barrier_comm_profiling: bool = False,
                  num_kernels_per_period: int = 1):
+    # Skip kineto profiling when DEEPEP_SKIP_KINETO=1 is set
+    # This allows using external profilers like `nsys profile` without conflicts
+    if os.environ.get('DEEPEP_SKIP_KINETO', '0') == '1':
+        # Use simple CUDA event timing instead of kineto
+        torch.cuda.synchronize()
+        for _ in range(10):  # warmup
+            fn()
+        torch.cuda.synchronize()
+
+        start_event = torch.cuda.Event(enable_timing=True)
+        end_event = torch.cuda.Event(enable_timing=True)
+        start_event.record()
+        for _ in range(num_tests):
+            fn()
+        end_event.record()
+        torch.cuda.synchronize()
+
+        avg_time = start_event.elapsed_time(end_event) / num_tests / 1000.0  # convert to seconds
+        kernel_names = (kernel_names,) if isinstance(kernel_names, str) else kernel_names
+        # Return same duration for all requested kernels (best effort without profiler)
+        return (avg_time,) * len(kernel_names) if len(kernel_names) > 1 else avg_time
+
     # Profile
     suppress = suppress_stdout_stderr if suppress_kineto_output else empty_suppress
     with suppress():
