@@ -63,10 +63,9 @@ class Buffer:
                 Note: Releasing resources in the destructor may cause Python's exception handling process to hang.
             comm: the `mpi4py.MPI.Comm` communicator to use in case the group parameter is absent.
         """
-        check_nvlink_connections(group)
-
         # Initialize the CPP runtime
         if group is not None:
+            check_nvlink_connections(group)
             self.rank = group.rank()
             self.group = group
             self.group_size = group.size()
