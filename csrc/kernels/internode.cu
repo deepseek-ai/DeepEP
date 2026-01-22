@@ -813,9 +813,15 @@ __global__ void __launch_bounds__(((kNumDispatchRDMASenderWarps + 1 + NUM_MAX_NV
                         reinterpret_cast<uint64_t>(rdma_channel_data.recv_buffer(rdma_rank) + dst_slot_idx * num_bytes_per_token);
                     const auto src_ptr =
                         reinterpret_cast<uint64_t>(rdma_channel_data.send_buffer(dst_rdma_rank) + dst_slot_idx * num_bytes_per_token);
-                    nvshmemx_qp_char_put_nbi_warp(reinterpret_cast<char*>(dst_ptr),
+                    if (lane_id == 0) {
+                        nvshmem_fence();
+                    }
+                    nvshmemx_qp_char_put_signal_nbi_warp(reinterpret_cast<char*>(dst_ptr),
                                                   reinterpret_cast<const char*>(src_ptr),
                                                   num_bytes_per_msg,
+                                                  reinterpret_cast<uint64_t*>(rdma_channel_tail.buffer(rdma_rank)),
+                                                  num_tokens_to_issue,
+                                                  NVSHMEM_SIGNAL_ADD,
                                                   translate_dst_rdma_rank<kLowLatencyMode>(dst_rdma_rank, nvl_rank),
                                                   qp_handle[channel_id]);
                 } else {
@@ -830,12 +836,6 @@ __global__ void __launch_bounds__(((kNumDispatchRDMASenderWarps + 1 + NUM_MAX_NV
                     num_tokens_to_send -= num_tokens_to_issue;
                     if (dst_rdma_rank == rdma_rank) {
                         atomicAdd(rdma_channel_tail.buffer(rdma_rank), num_tokens_to_issue);
-                    } else {
-                        nvshmemx_qp_signal_op(reinterpret_cast<uint64_t*>(rdma_channel_tail.buffer(rdma_rank)),
-                                              num_tokens_to_issue,
-                                              NVSHMEM_SIGNAL_ADD,
-                                              translate_dst_rdma_rank<kLowLatencyMode>(dst_rdma_rank, nvl_rank),
-                                              qp_handle[channel_id]);
                     }
                 }
                 __syncwarp();
@@ -2114,9 +2114,15 @@ __global__ void __launch_bounds__((kNumForwarders + 1) * 32, 1) combine(int4* co
                             reinterpret_cast<uint64_t>(rdma_channel_data.recv_buffer(rdma_rank) + rdma_slot_idx * num_bytes_per_token);
                         const auto src_ptr =
                             reinterpret_cast<uint64_t>(rdma_channel_data.send_buffer(dst_rdma_rank) + rdma_slot_idx * num_bytes_per_token);
-                        nvshmemx_qp_char_put_nbi_warp(reinterpret_cast<char*>(dst_ptr),
+                        if (lane_id == 0) {
+                            nvshmem_fence();
+                        }
+                        nvshmemx_qp_char_put_signal_nbi_warp(reinterpret_cast<char*>(dst_ptr),
                                                       reinterpret_cast<const char*>(src_ptr),
                                                       num_bytes_per_msg,
+                                                      reinterpret_cast<uint64_t*>(rdma_channel_tail.buffer(rdma_rank)),
+                                                      num_chunked_tokens,
+                                                      NVSHMEM_SIGNAL_ADD,
                                                       translate_dst_rdma_rank<kLowLatencyMode>(dst_rdma_rank, nvl_rank),
                                                       qp_handle[channel_id]);
                     } else {
@@ -2128,12 +2134,6 @@ __global__ void __launch_bounds__((kNumForwarders + 1) * 32, 1) combine(int4* co
                     if (elect_one_sync()) {
                         if (dst_rdma_rank == rdma_rank) {
                             atomicAdd(reinterpret_cast<unsigned long long int*>(rdma_channel_tail.buffer(rdma_rank)), static_cast<unsigned long long int>(num_chunked_tokens));
-                        } else {
-                            nvshmemx_qp_signal_op(reinterpret_cast<uint64_t*>(rdma_channel_tail.buffer(rdma_rank)),
-                                                  num_chunked_tokens,
-                                                  NVSHMEM_SIGNAL_ADD,
-                                                  translate_dst_rdma_rank<kLowLatencyMode>(dst_rdma_rank, nvl_rank),
-                                                  qp_handle[channel_id]);
                         }
                     }
                 }
