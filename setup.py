@@ -43,6 +43,9 @@ if __name__ == '__main__':
     nvcc_dlink = []
     extra_link_args = ['-lcuda']
 
+    if (extra_nvcc_flags := os.environ.get("DEEPEP_EXTRA_NVCC_FLAGS")) is not None:
+        nvcc_flags += extra_nvcc_flags.split(" ")
+
     # NVSHMEM flags
     if disable_nvshmem:
         cxx_flags.append('-DDISABLE_NVSHMEM')
