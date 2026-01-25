@@ -91,7 +91,14 @@ def test_main(args: argparse.Namespace,
     assert torch.allclose(ref_num_tokens_per_rdma_rank, num_tokens_per_rdma_rank)
     assert torch.allclose(ref_num_tokens_per_expert, num_tokens_per_expert)
     assert torch.allclose(ref_is_token_in_rank, is_token_in_rank)
-    t = bench(lambda: buffer.get_dispatch_layout(topk_idx, num_experts))[0]
+
+    shuffle_fn = None
+    if args.shuffle_expert_columns:
+        def shuffle_fn():
+            buffer.shuffle_expert_columns(topk_idx, num_experts, num_ranks, seed=args.shuffle_seed)
+
+    t = bench(lambda: buffer.get_dispatch_layout(topk_idx, num_experts), pre_iteration_fn=shuffle_fn)[0]
+
     if local_rank == 0:
         print(f'[layout] Kernel performance: {t * 1000:.3f} ms', flush=True)
         print('', flush=True)
@@ -246,7 +253,8 @@ def test_main(args: argparse.Namespace,
                 t, notify_t = bench_kineto(
                     lambda: buffer.dispatch(**tune_args),  # noqa: B023
                     ('dispatch', 'notify'),
-                    suppress_kineto_output=True)
+                    suppress_kineto_output=True,
+                    pre_iteration_fn=shuffle_fn)
                 if t < best_time:
                     best_time, best_results = t, (num_sms, nvl_chunk_size, rdma_chunk_size, notify_t)
                 if local_rank == 0:
@@ -375,6 +383,8 @@ if __name__ == '__main__':
     parser.add_argument('--hidden', type=int, default=7168, help='Hidden dimension size (default: 7168)')
     parser.add_argument('--num-topk-groups', type=int, default=None, help='Number of top-k groups (default: `min(num_nodes, 4)`)')
     parser.add_argument('--num-topk', type=int, default=8, help='Number of top-k experts (default: 8)')
+    parser.add_argument('--shuffle-expert-columns', type=bool, default=False, help='whether to shuffle expert columns')
+    parser.add_argument('--shuffle-seed', type=int, default=1, help='seed for shuffling expert columns')
     parser.add_argument(
         '--pressure-test-mode',
         type=int,
