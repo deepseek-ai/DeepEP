@@ -44,6 +44,10 @@ class HybridEPBuffer:
         num_sms_dispatch_api: int = None,
         num_sms_combine_api: int = None,
         num_sms_preprocessing_api: int = None,
+        # Features parameters
+        load_cached_kernels: bool = False,
+        use_shared_buffer: bool = True,
+        enable_custom_allgather: bool = True,
         # Deprecated parameters
         num_of_hybrid_ep_ranks_per_nvlink_domain: int = None,
         use_mnnvl: bool = None
@@ -136,9 +140,9 @@ class HybridEPBuffer:
             self.node_rank, 
             self.group_size, 
             os.path.dirname(os.path.abspath(__file__)), 
-            load_cached_kernels = False,   # whether to load the cached kernels in disk
-            use_shared_buffer = True,      # whether to use the shared buffer for dispatch and combine
-            enable_custom_allgather = True  # whether to use the custom allgather for intra-node communication
+            load_cached_kernels = load_cached_kernels,   # whether to load the cached kernels in disk
+            use_shared_buffer = use_shared_buffer,      # whether to use the shared buffer for dispatch and combine
+            enable_custom_allgather = enable_custom_allgather  # whether to use the custom allgather for intra-node communication
         )
 
     def empty_jit_cache(self):
