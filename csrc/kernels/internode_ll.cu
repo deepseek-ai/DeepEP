@@ -154,7 +154,8 @@ __global__ __launch_bounds__(1024, 1) void dispatch(void* packed_recv_x,
                                                     int num_warps_per_group,
                                                     bool round_scale,
                                                     int phases,
-                                                    nvshmemx_qp_handle_t* qp_handle) {
+                                                    nvshmemx_qp_handle_t* qp_handle,
+                                                    bool is_unordered_transport) {
     const auto sm_id = static_cast<int>(blockIdx.x);
     const auto thread_id = static_cast<int>(threadIdx.x);
     const auto warp_id = thread_id / 32, lane_id = get_lane_id();
@@ -334,7 +335,9 @@ __global__ __launch_bounds__(1024, 1) void dispatch(void* packed_recv_x,
         auto dst_p2p_ptr = reinterpret_cast<uint64_t *>(nvshmem_ptr(reinterpret_cast<void *>(dst_ptr), dst_rank));
         if (not is_rank_masked(mask_buffer_ptr, dst_rank)) {
             if (dst_p2p_ptr == 0) {
-                nvshmem_fence();
+                if (is_unordered_transport) {
+                    nvshmem_fence();
+                }
                 nvshmemx_qp_signal_op(dst_ptr, num_tokens_sent_64, NVSHMEM_SIGNAL_ADD, dst_rank, qp_handle[dst_expert_local_idx]);
             } else {
                 st_release_sys_global(dst_p2p_ptr, num_tokens_sent_64);
@@ -493,7 +496,8 @@ void dispatch(void* packed_recv_x,
               void* workspace,
               int num_device_sms,
               cudaStream_t stream,
-              int phases) {
+              int phases,
+              bool is_unordered_transport) {
     constexpr int kNumMaxTopK = 11;
     const int num_warp_groups = ceil_div(num_experts, num_device_sms);
     const int num_warps_per_group = 32 / num_warp_groups;
@@ -549,7 +553,8 @@ void dispatch(void* packed_recv_x,
                       num_warps_per_group,                   \
                       round_scale,                           \
                       phases,                                \
-                      qp_handle_device);                     \
+                      qp_handle_device,                      \
+                      is_unordered_transport);               \
     }                                                        \
     break
 
@@ -742,7 +747,8 @@ __global__ __launch_bounds__(1024, 1) void combine(void* combined_x,
                                                    int num_warps_per_group,
                                                    int phases,
                                                    bool zero_copy,
-                                                   nvshmemx_qp_handle_t* qp_handle) {
+                                                   nvshmemx_qp_handle_t* qp_handle,
+                                                   bool is_unordered_transport) {
     const auto sm_id = __shfl_sync(0xffffffff, static_cast<int>(blockIdx.x), 0);
     const auto num_sms = __shfl_sync(0xffffffff, static_cast<int>(gridDim.x), 0);
     const auto thread_id = static_cast<int>(threadIdx.x);
@@ -928,7 +934,9 @@ __global__ __launch_bounds__(1024, 1) void combine(void* combined_x,
             auto dst_p2p_ptr = reinterpret_cast<uint64_t *>(nvshmem_ptr(reinterpret_cast<void *>(dst_ptr), dst_rank));
             if (not is_rank_masked(mask_buffer_ptr, dst_rank)) {
                 if (dst_p2p_ptr == 0) {
-                    nvshmem_fence();
+                    if (is_unordered_transport) {
+                        nvshmem_fence();
+                    }
                     nvshmemx_qp_signal_op(dst_ptr, 1, NVSHMEM_SIGNAL_ADD, dst_rank, qp_handle[local_expert_idx]);
                 } else {
                     st_release_sys_global(dst_p2p_ptr, 1);
@@ -1169,7 +1177,8 @@ void combine(void* combined_x,
              int num_device_sms,
              cudaStream_t stream,
              int phases,
-             bool zero_copy) {
+             bool zero_copy,
+             bool is_unordered_transport) {
     constexpr int kNumMaxTopk = 11;
     const int num_warp_groups = ceil_div(num_experts, num_device_sms);
     const int num_warps_per_group = 32 / num_warp_groups;
@@ -1236,7 +1245,8 @@ void combine(void* combined_x,
                       num_warps_per_group,                                                                                         \
                       phases,                                                                                                      \
                       zero_copy,                                                                                                   \
-                      qp_handle_device);                                                                                           \
+                      qp_handle_device,                                                                                            \
+                      is_unordered_transport);                                                                                     \
     }                                                                                                                              \
     break
 

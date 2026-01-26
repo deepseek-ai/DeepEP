@@ -479,7 +479,8 @@ __global__ void __launch_bounds__(((kNumDispatchRDMASenderWarps + 1 + NUM_MAX_NV
              int num_max_nvl_chunked_recv_tokens,
              int rank,
              int num_ranks,
-             nvshmemx_qp_handle_t* qp_handle) {
+             nvshmemx_qp_handle_t* qp_handle,
+             bool is_unordered_transport) {
     enum class WarpRole { kRDMASender, kRDMASenderCoordinator, kRDMAAndNVLForwarder, kForwarderCoordinator, kNVLReceivers };
 
     const auto num_sms = static_cast<int>(gridDim.x);
@@ -813,8 +814,10 @@ __global__ void __launch_bounds__(((kNumDispatchRDMASenderWarps + 1 + NUM_MAX_NV
                         reinterpret_cast<uint64_t>(rdma_channel_data.recv_buffer(rdma_rank) + dst_slot_idx * num_bytes_per_token);
                     const auto src_ptr =
                         reinterpret_cast<uint64_t>(rdma_channel_data.send_buffer(dst_rdma_rank) + dst_slot_idx * num_bytes_per_token);
-                    if (lane_id == 0) {
-                        nvshmem_fence();
+                    if (is_unordered_transport) {
+                        if (lane_id == 0) {
+                            nvshmem_fence();
+                        }
                     }
                     nvshmemx_qp_char_put_signal_nbi_warp(reinterpret_cast<char*>(dst_ptr),
                                                   reinterpret_cast<const char*>(src_ptr),
@@ -1248,7 +1251,8 @@ void dispatch(void* recv_x,
               bool is_cached_dispatch,
               cudaStream_t stream,
               int num_channels,
-              bool low_latency_mode) {
+              bool low_latency_mode,
+              bool is_unordered_transport) {
     constexpr int kNumDispatchRDMASenderWarps = 7;
     constexpr int kNumTMABytesPerWarp = 16384;
     constexpr int smem_size = kNumTMABytesPerWarp * NUM_MAX_NVL_PEERS;
@@ -1300,7 +1304,8 @@ void dispatch(void* recv_x,
                       num_max_nvl_chunked_recv_tokens,                                                                         \
                       rank,                                                                                                    \
                       num_ranks,                                                                                               \
-                      qp_handle_device);                                                                                       \
+                      qp_handle_device,                                                                                        \
+                      is_unordered_transport);                                                                                 \
     }                                                                                                                          \
     break
 
@@ -1736,7 +1741,8 @@ __global__ void __launch_bounds__((kNumForwarders + 1) * 32, 1) combine(int4* co
                                                                         int num_max_nvl_chunked_recv_tokens,
                                                                         int rank,
                                                                         int num_ranks,
-                                                                        nvshmemx_qp_handle_t* qp_handle) {
+                                                                        nvshmemx_qp_handle_t* qp_handle,
+                                                                        bool is_unordered_transport) {
     enum class WarpRole { kNVLSender, kNVLAndRDMAForwarder, kRDMAReceiver, kCoordinator };
 
     const auto sm_id = static_cast<int>(blockIdx.x);
@@ -2114,9 +2120,11 @@ __global__ void __launch_bounds__((kNumForwarders + 1) * 32, 1) combine(int4* co
                             reinterpret_cast<uint64_t>(rdma_channel_data.recv_buffer(rdma_rank) + rdma_slot_idx * num_bytes_per_token);
                         const auto src_ptr =
                             reinterpret_cast<uint64_t>(rdma_channel_data.send_buffer(dst_rdma_rank) + rdma_slot_idx * num_bytes_per_token);
-                        if (lane_id == 0) {
-                            nvshmem_fence();
-                        }
+                            if (is_unordered_transport) {
+                                if (lane_id == 0) {
+                                    nvshmem_fence();
+                                }
+                            }
                         nvshmemx_qp_char_put_signal_nbi_warp(reinterpret_cast<char*>(dst_ptr),
                                                       reinterpret_cast<const char*>(src_ptr),
                                                       num_bytes_per_msg,
@@ -2308,7 +2316,8 @@ void combine(cudaDataType_t type,
              int num_ranks,
              cudaStream_t stream,
              int num_channels,
-             bool low_latency_mode) {
+             bool low_latency_mode,
+             bool is_unordered_transport) {
     constexpr int kNumCombineForwarderWarps = 24;
     constexpr int kNumTMABytesPerSenderWarp = 16384;
     constexpr int kNumTMABytesPerForwarderWarp = 9248;
@@ -2357,7 +2366,8 @@ void combine(cudaDataType_t type,
                       num_max_nvl_chunked_recv_tokens,                                \
                       rank,                                                           \
                       num_ranks,                                                      \
-                      qp_handle_device);                                              \
+                      qp_handle_device,                                               \
+                      is_unordered_transport);                                        \
     }                                                                                 \
     break
 

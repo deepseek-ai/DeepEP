@@ -212,7 +212,8 @@ void dispatch(void* recv_x,
               bool is_cached_dispatch,
               cudaStream_t stream,
               int num_channels,
-              bool low_latency_mode);
+              bool low_latency_mode,
+              bool is_unordered_transport);
 
 void cached_notify(int hidden_int4,
                    int num_scales,
@@ -265,7 +266,8 @@ void combine(cudaDataType_t type,
              int num_ranks,
              cudaStream_t stream,
              int num_channels,
-             bool low_latency_mode);
+             bool low_latency_mode,
+             bool is_unordered_transport);
 
 }  // namespace internode
 
@@ -310,7 +312,8 @@ void dispatch(void* packed_recv_x,
               void* workspace,
               int num_device_sms,
               cudaStream_t stream,
-              int phases);
+              int phases,
+              bool is_unordered_transport);
 
 void combine(void* combined_x,
              void* rdma_recv_x,
@@ -337,7 +340,8 @@ void combine(void* combined_x,
              int num_device_sms,
              cudaStream_t stream,
              int phases,
-             bool zero_copy);
+             bool zero_copy,
+             bool is_unordered_transport);
 
 void query_mask_buffer(int* mask_buffer_ptr, int num_ranks, int* output_mask_tensor, cudaStream_t stream);
 
