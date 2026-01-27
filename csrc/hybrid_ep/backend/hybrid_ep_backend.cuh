@@ -597,9 +597,9 @@ inline __device__ void N2N_warp_group_device_function(const int node_rank,
           doca_gpu_dev_verbs_wqe_prepare_write(qp, token_wqe_ptr, my_wqe_idx,
                                                     DOCA_GPUNETIO_IB_MLX5_OPCODE_RDMA_WRITE,
                                                     DOCA_GPUNETIO_IB_MLX5_WQE_CTRL_CQ_UPDATE, 0,
-                                                    smem_mr_info_ptr[remote_idx].token_raddr + token_idx * HIDDEN_DIM * sizeof(TOKEN_DATA_TYPE),
+                                                    smem_mr_info_ptr[remote_idx].token_raddr + token_idx * static_cast<int64_t>(HIDDEN_DIM) * sizeof(TOKEN_DATA_TYPE),
                                                     smem_mr_info_ptr[remote_idx].token_rkey,
-                                                    smem_mr_info_ptr[remote_idx].token_laddr + token_idx * HIDDEN_DIM * sizeof(TOKEN_DATA_TYPE),
+                                                    smem_mr_info_ptr[remote_idx].token_laddr + token_idx * static_cast<int64_t>(HIDDEN_DIM) * sizeof(TOKEN_DATA_TYPE),
                                                     smem_mr_info_ptr[remote_idx].token_lkey,
                                                     HIDDEN_DIM * sizeof(TOKEN_DATA_TYPE));
           // Constructing wqes for probs.
@@ -756,7 +756,7 @@ inline __device__ void G2S_warp_group_device_function(const int node_rank,
         // For this node's attn token and properties, read from attn input buffers.
         if(node_id != node_rank){
           int chunk_first_token_id = rdma_buffer_tile_id * MAX_NUM_OF_TOKENS_PER_RANK + i * NUM_OF_TOKENS_PER_CHUNK;
-          token_load_base_addr = rdma_inter_node_group_token + chunk_first_token_id * HIDDEN_DIM;
+          token_load_base_addr = rdma_inter_node_group_token + chunk_first_token_id * static_cast<int64_t>(HIDDEN_DIM);
           if constexpr(FORWARD_DISPATCH){
             prob_load_base_addr = rdma_inter_node_group_prob + chunk_first_token_id * (NUM_OF_EXPERTS_PER_RANK * NUM_OF_RANKS_PER_NODE);
           }
@@ -765,7 +765,7 @@ inline __device__ void G2S_warp_group_device_function(const int node_rank,
           }
         }else{
           int chunk_first_token_id = i * NUM_OF_TOKENS_PER_CHUNK;
-          token_load_base_addr = attn_input_token + chunk_first_token_id * HIDDEN_DIM;
+          token_load_base_addr = attn_input_token + chunk_first_token_id * static_cast<int64_t>(HIDDEN_DIM);
           if constexpr(FORWARD_DISPATCH){
             prob_load_base_addr = attn_input_prob + chunk_first_token_id * (NUM_OF_EXPERTS_PER_RANK * NUM_OF_RANKS_PER_NODE * NUM_OF_NODES);
           }
@@ -794,7 +794,7 @@ inline __device__ void G2S_warp_group_device_function(const int node_rank,
               cuda::ptx::cp_async_bulk(cuda::ptx::space_shared,
                                        cuda::ptx::space_global,
                                        reinterpret_cast<void*>(&smem_buffer_ptr->intra_node_token_buffer[stage][0]),
-                                       reinterpret_cast<const void*>(token_load_base_addr + (current_token_id * HIDDEN_DIM)),
+                                       reinterpret_cast<const void*>(token_load_base_addr + (current_token_id * static_cast<int64_t>(HIDDEN_DIM))),
                                        (uint32_t)(HIDDEN_DIM * sizeof(TOKEN_DATA_TYPE)),
                                        &smem_buffer_ptr->intra_node_mbarrier_buffer[stage][0]);
 
@@ -1041,7 +1041,7 @@ inline __device__ void S2G_warp_group_device_function(const int local_rank,
                   if(output_buffer_index != -1){
                     int remote_rank_id = m * NUM_OF_OUTPUT_TOKENS_PER_LOAD_ITER + t;
                     // Store the token from shared to remote global.
-                    TOKEN_DATA_TYPE* remote_token_addr = remote_expert_output_token[remote_rank_id] + (output_buffer_index * HIDDEN_DIM);
+                    TOKEN_DATA_TYPE* remote_token_addr = remote_expert_output_token[remote_rank_id] + (output_buffer_index * static_cast<int64_t>(HIDDEN_DIM));
                     cuda::ptx::cp_async_bulk(cuda::ptx::space_global,
                                              cuda::ptx::space_shared,
                                              reinterpret_cast<void*>(remote_token_addr),
@@ -1228,7 +1228,7 @@ inline __device__ void intra_node_G2S_warp_group_device_function(const int node_
                   cuda::ptx::cp_async_bulk(cuda::ptx::space_shared,
                                            cuda::ptx::space_global,
                                            reinterpret_cast<void*>(&smem_buffer_ptr->intra_node_token_G2S_buffer[token_stage][0]),
-                                           reinterpret_cast<const void*>(remote_expert_input_token[current_src_token_id] + (sparse_to_dense_map_value * HIDDEN_DIM)),
+                                           reinterpret_cast<const void*>(remote_expert_input_token[current_src_token_id] + (sparse_to_dense_map_value * static_cast<int64_t>(HIDDEN_DIM))),
                                            (uint32_t)(HIDDEN_DIM * sizeof(uint16_t)),
                                            &smem_buffer_ptr->intra_node_mbarrier_G2S_buffer[token_stage][0]);
 
@@ -1369,7 +1369,7 @@ inline __device__ void intra_node_red_warp_group_device_function(const int node_
     const rdma_to_attn_map_load_t* rdma_to_attn_map_load_base_addr = reinterpret_cast<const rdma_to_attn_map_load_t*>(rdma_to_attn_map + 
                                                                       (node_id * rdma_to_attn_map_size_per_node + chunk_id * NUM_OF_TOKENS_PER_CHUNK));
 
-    uint16_t* rdma_intra_node_red_token_base_ptr = rdma_intra_node_red_token + rdma_intra_node_red_id * HIDDEN_DIM;
+    uint16_t* rdma_intra_node_red_token_base_ptr = rdma_intra_node_red_token + rdma_intra_node_red_id * static_cast<int64_t>(HIDDEN_DIM);
     float* rdma_intra_node_red_prob_base_ptr;
     if constexpr(BACKWARD_COMBINE){
       rdma_intra_node_red_prob_base_ptr = rdma_intra_node_red_prob + rdma_intra_node_red_id * (NUM_OF_EXPERTS_PER_RANK * NUM_OF_RANKS_PER_NODE);
@@ -1531,7 +1531,7 @@ inline __device__ void intra_node_red_warp_group_device_function(const int node_
           // Let the TMA thread to issue S2G TMA operations for current token entry.
           if(INTRA_NODE_RED_GROUP::warp_rank() == 0){
             if(elect_sync(~0)){
-              uint16_t* current_token_addr = rdma_intra_node_red_token_base_ptr + (j * NUM_OF_TOKENS_PER_RDMA_TO_ATTN_LOAD_ITER + k) * HIDDEN_DIM;
+              uint16_t* current_token_addr = rdma_intra_node_red_token_base_ptr + (j * NUM_OF_TOKENS_PER_RDMA_TO_ATTN_LOAD_ITER + k) * static_cast<int64_t>(HIDDEN_DIM);
               // Store the token from shared to global.
               cuda::ptx::cp_async_bulk(cuda::ptx::space_global,
                                        cuda::ptx::space_shared,
@@ -1713,9 +1713,9 @@ inline __device__ void inter_node_N2N_warp_group_device_function(const int node_
         doca_gpu_dev_verbs_wqe_prepare_write(qp, token_wqe_ptr, my_wqe_idx,
                                                   DOCA_GPUNETIO_IB_MLX5_OPCODE_RDMA_WRITE,
                                                   DOCA_GPUNETIO_IB_MLX5_WQE_CTRL_CQ_UPDATE, 0,
-                                                  smem_mr_info_ptr[rdma_remote_node_id].token_raddr + token_idx * HIDDEN_DIM * sizeof(uint16_t),
+                                                  smem_mr_info_ptr[rdma_remote_node_id].token_raddr + token_idx * static_cast<int64_t>(HIDDEN_DIM) * sizeof(uint16_t),
                                                   smem_mr_info_ptr[rdma_remote_node_id].token_rkey,
-                                                  smem_mr_info_ptr[rdma_remote_node_id].token_laddr + local_token_idx * HIDDEN_DIM * sizeof(uint16_t),                                  smem_mr_info_ptr[rdma_remote_node_id].token_lkey,
+                                                  smem_mr_info_ptr[rdma_remote_node_id].token_laddr + local_token_idx * static_cast<int64_t>(HIDDEN_DIM) * sizeof(uint16_t),                                  smem_mr_info_ptr[rdma_remote_node_id].token_lkey,
                                                   HIDDEN_DIM * sizeof(uint16_t));
         if constexpr(BACKWARD_COMBINE) {
           my_wqe_idx += write_cnt;
@@ -1911,7 +1911,7 @@ inline __device__ void inter_node_G2S_warp_group_device_function(const int node_
                   cuda::ptx::cp_async_bulk(cuda::ptx::space_shared,
                                            cuda::ptx::space_global,
                                            reinterpret_cast<void*>(&smem_buffer_ptr->inter_node_token_G2S_buffer[token_stage][0]),
-                                           reinterpret_cast<const void*>(remote_expert_input_token[current_src_token_id] + (sparse_to_dense_map_value * HIDDEN_DIM)),
+                                           reinterpret_cast<const void*>(remote_expert_input_token[current_src_token_id] + (sparse_to_dense_map_value * static_cast<int64_t>(HIDDEN_DIM))),
                                            (uint32_t)(HIDDEN_DIM * sizeof(uint16_t)),
                                            &smem_buffer_ptr->inter_node_mbarrier_G2S_buffer[token_stage][0]);
 
@@ -1985,7 +1985,7 @@ inline __device__ void inter_node_G2S_warp_group_device_function(const int node_
               const uint16_t* rdma_inter_node_group_token_load_addr = rdma_inter_node_group_token + 
                                                                       (rdma_buffer_tile_id * MAX_NUM_OF_TOKENS_PER_RANK + 
                                                                       i * NUM_OF_TOKENS_PER_CHUNK + 
-                                                                      j * NUM_OF_TOKENS_PER_GROUP + k) * HIDDEN_DIM;
+                                                                      j * NUM_OF_TOKENS_PER_GROUP + k) * static_cast<int64_t>(HIDDEN_DIM);
               cuda::ptx::cp_async_bulk(cuda::ptx::space_shared,
                                        cuda::ptx::space_global,
                                        reinterpret_cast<void*>(&smem_buffer_ptr->inter_node_token_G2S_buffer[token_stage][0]),
@@ -2140,7 +2140,7 @@ inline __device__ void inter_node_red_warp_group_device_function(const int node_
 
     const bool* rdma_to_attn_map_load_base_addr = rdma_to_attn_map + (node_rank * rdma_to_attn_map_size_per_node + i * NUM_OF_TOKENS_PER_CHUNK);
     const bool* attn_to_rdma_map_load_base_addr = attn_to_rdma_map + (i * NUM_OF_TOKENS_PER_CHUNK) * (NUM_OF_NODES - 1);
-    uint16_t* attn_output_token_base_ptr = attn_output_token + (i * NUM_OF_TOKENS_PER_CHUNK) * HIDDEN_DIM;
+    uint16_t* attn_output_token_base_ptr = attn_output_token + (i * NUM_OF_TOKENS_PER_CHUNK) * static_cast<int64_t>(HIDDEN_DIM);
     float* attn_output_prob_base_ptr;
     if constexpr(BACKWARD_COMBINE){
       attn_output_prob_base_ptr = attn_output_prob + (i * NUM_OF_TOKENS_PER_CHUNK) * (NUM_OF_EXPERTS_PER_RANK * NUM_OF_RANKS_PER_NODE * NUM_OF_NODES);
@@ -2366,7 +2366,7 @@ inline __device__ void inter_node_red_warp_group_device_function(const int node_
         // Select the TMA thread within the pipeline to issue S2G TMA operations for current token entry.
         if(warp_rank_within_pipeline == 0){
           if(elect_sync(~0)){
-            uint16_t* current_token_addr = attn_output_token_base_ptr + (j * NUM_OF_TOKENS_PER_GROUP + k) * HIDDEN_DIM;
+            uint16_t* current_token_addr = attn_output_token_base_ptr + (j * NUM_OF_TOKENS_PER_GROUP + k) * static_cast<int64_t>(HIDDEN_DIM);
             // Store the token from shared to global output.
             cuda::ptx::cp_async_bulk(cuda::ptx::space_global,
                                      cuda::ptx::space_shared,

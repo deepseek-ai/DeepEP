@@ -587,7 +587,7 @@ class TorchRef:
             )
 
             if pad_multiple > 0:
-                token_per_expert = local_expert_routing_map.sum(dim=0)
+                token_per_expert = local_expert_routing_map.sum(dim=0, dtype=torch.int64)
                 padd_m_split = [
                     (i + pad_multiple - 1) // pad_multiple * pad_multiple
                     for i in token_per_expert

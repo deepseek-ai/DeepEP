@@ -263,14 +263,14 @@ Executor::dispatch_postprocess(HybridEpConfigInstance config, DispatchBuffers& d
             {num_dispatched_tokens, config.hidden_dim}, 
             torch::dtype(args.hidden.dtype()).device(torch::kCUDA)
         );
-        auto res_sz = num_dispatched_tokens * config.hidden_dim * sizeof_token_data_type;
+        auto res_sz = static_cast<size_t>(num_dispatched_tokens) * config.hidden_dim * sizeof_token_data_type;
         CUDA_CHECK(cudaMemcpyAsync(dispatched_tokens.data_ptr(), dispatch_buffers.expert_output_token, res_sz, cudaMemcpyDeviceToDevice, args.stream));
 
         if(config.forward_dispatch_api) {
             dispatched_probs = torch::empty({num_dispatched_tokens,
                 config.num_of_experts_per_rank * config.num_of_ranks_per_node},
                             torch::dtype(torch::kFloat32).device(torch::kCUDA));
-            auto probs_sz = num_dispatched_tokens * config.num_of_experts_per_rank * config.num_of_ranks_per_node * sizeof(float);
+            auto probs_sz = static_cast<size_t>(num_dispatched_tokens) * config.num_of_experts_per_rank * config.num_of_ranks_per_node * sizeof(float);
             CUDA_CHECK(cudaMemcpyAsync(dispatched_probs.value().data_ptr<float>(),
                                         dispatch_buffers.expert_output_prob,
                                         probs_sz, cudaMemcpyDeviceToDevice, args.stream));
@@ -281,7 +281,7 @@ Executor::dispatch_postprocess(HybridEpConfigInstance config, DispatchBuffers& d
                     num_dispatched_tokens, 
                     config.hidden_dim / 128}, 
                     torch::dtype(torch::kFloat32).device(torch::kCUDA));
-            auto scaling_factor_sz = num_dispatched_tokens * config.hidden_dim / 128 * sizeof(float);
+            auto scaling_factor_sz = static_cast<size_t>(num_dispatched_tokens) * config.hidden_dim / 128 * sizeof(float);
             CUDA_CHECK(cudaMemcpyAsync(dispatched_scaling_factor.value().data_ptr<float>(),
                                         dispatch_buffers.expert_output_scaling_factor,
                                         scaling_factor_sz, cudaMemcpyDeviceToDevice, args.stream));
