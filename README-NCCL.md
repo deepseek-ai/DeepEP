@@ -8,7 +8,7 @@ For system requirements and dependencies, please refer to the main [README.md](R
 
 This guide requires NCCL with the Device API support including, in particular, GPU-Initiated Networking (GIN). The recommended supported version is:
 
-- **NCCL 2.28.9** or later
+- **NCCL 2.29.2** or later
 - Repository: [https://github.com/NVIDIA/nccl](https://github.com/NVIDIA/nccl)
 
 ## Step 1: Setup the environment and compile NCCL
@@ -38,7 +38,7 @@ export ENABLE_NCCL=1; python3 setup.py build_ext --inplace; pip install --no-bui
 
 ### Example 1: Run LL kernels with NCCL backend
 ```bash
-DEEP_EP_BACKEND=nccl NCCL_GIN_TYPE=3 NCCL_NET_PLUGIN=none TORCH_DISTRIBUTED_BACKEND=gloo python3 tests/test_low_latency.py --num-processes 4 --disable-nvlink
+DEEP_EP_BACKEND=nccl NCCL_GIN_TYPE=3 NCCL_NET_PLUGIN=none TORCH_DISTRIBUTED_BACKEND=nccl python3 tests/test_low_latency.py --num-processes 4 --disable-nvlink
 ```
 
 ### Enable NVSHMEM compilation
@@ -69,7 +69,7 @@ export ENABLE_NCCL=1; python3 setup.py build_ext --inplace; pip install --no-bui
 
 ### Example 1: Run HT kernels with NCCL backend
 ```bash
-DEEP_EP_BACKEND=nccl NCCL_GIN_TYPE=3 NCCL_NET_PLUGIN=none TORCH_DISTRIBUTED_BACKEND=gloo python tests/test_internode.py;
+DEEP_EP_BACKEND=nccl NCCL_GIN_TYPE=3 NCCL_NET_PLUGIN=none TORCH_DISTRIBUTED_BACKEND=nccl python tests/test_internode.py;
 ```
 
 ### Enable NVSHMEM compilation
