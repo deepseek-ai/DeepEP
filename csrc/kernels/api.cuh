@@ -18,7 +18,7 @@ namespace internode {
 
 std::vector<uint8_t> get_unique_id();
 
-int init(const std::vector<uint8_t>& root_unique_id_val, int rank, int num_ranks, bool low_latency_mode);
+int init(const std::vector<uint8_t>& root_unique_id_val, int rank, int num_ranks, bool low_latency_mode, int num_qps_per_rank);
 
 void* alloc(size_t size, size_t alignment);
 
@@ -212,7 +212,8 @@ void dispatch(void* recv_x,
               bool is_cached_dispatch,
               cudaStream_t stream,
               int num_channels,
-              bool low_latency_mode);
+              bool low_latency_mode,
+              bool is_unordered_transport);
 
 void cached_notify(int hidden_int4,
                    int num_scales,
@@ -265,16 +266,17 @@ void combine(cudaDataType_t type,
              int num_ranks,
              cudaStream_t stream,
              int num_channels,
-             bool low_latency_mode);
+             bool low_latency_mode,
+             bool is_unordered_transport);
 
 }  // namespace internode
 
 // Internode low-latency kernels
 namespace internode_ll {
 
-void clean_low_latency_buffer(int* clean_0,
+void clean_low_latency_buffer(uint64_t* clean_0,
                               int num_clean_int_0,
-                              int* clean_1,
+                              uint64_t* clean_1,
                               int num_clean_int_1,
                               int rank,
                               int num_ranks,
@@ -291,11 +293,11 @@ void dispatch(void* packed_recv_x,
               int* cumulative_local_expert_recv_stats,
               int64_t* dispatch_wait_recv_cost_stats,
               void* rdma_recv_x,
-              int* rdma_recv_count,
+              uint64_t* rdma_recv_count,
               void* rdma_x,
               const void* x,
               const topk_idx_t* topk_idx,
-              int* next_clean,
+              uint64_t* next_clean,
               int num_next_clean_int,
               int num_tokens,
               int hidden,
@@ -310,11 +312,12 @@ void dispatch(void* packed_recv_x,
               void* workspace,
               int num_device_sms,
               cudaStream_t stream,
-              int phases);
+              int phases,
+              bool is_unordered_transport);
 
 void combine(void* combined_x,
              void* rdma_recv_x,
-             int* rdma_recv_flag,
+             uint64_t* rdma_recv_flag,
              void* rdma_send_x,
              const void* x,
              const topk_idx_t* topk_idx,
@@ -323,7 +326,7 @@ void combine(void* combined_x,
              const int64_t* layout_range,
              int* mask_buffer,
              int64_t* combine_wait_recv_cost_stats,
-             int* next_clean,
+             uint64_t* next_clean,
              int num_next_clean_int,
              int num_combined_tokens,
              int hidden,
@@ -337,7 +340,8 @@ void combine(void* combined_x,
              int num_device_sms,
              cudaStream_t stream,
              int phases,
-             bool zero_copy);
+             bool zero_copy,
+             bool is_unordered_transport);
 
 void query_mask_buffer(int* mask_buffer_ptr, int num_ranks, int* output_mask_tensor, cudaStream_t stream);
 

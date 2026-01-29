@@ -105,22 +105,22 @@ struct Config {
 };
 
 struct LowLatencyBuffer {
-    int num_clean_int = 0;
+    uint64_t num_clean_uint64 = 0;
 
     void* dispatch_rdma_send_buffer = nullptr;
     void* dispatch_rdma_recv_data_buffer = nullptr;
-    int* dispatch_rdma_recv_count_buffer = nullptr;
+    uint64_t* dispatch_rdma_recv_count_buffer = nullptr;
 
     void* combine_rdma_send_buffer = nullptr;
     void* combine_rdma_recv_data_buffer = nullptr;
-    int* combine_rdma_recv_flag_buffer = nullptr;
+    uint64_t* combine_rdma_recv_flag_buffer = nullptr;
 
     void* combine_rdma_send_buffer_data_start = nullptr;
     size_t num_bytes_per_combine_msg = 0;
 
-    std::pair<int*, int> clean_meta() {
+    std::pair<uint64_t*, uint64_t> clean_meta() {
         EP_HOST_ASSERT(dispatch_rdma_recv_count_buffer == combine_rdma_recv_flag_buffer);
-        return {dispatch_rdma_recv_count_buffer, num_clean_int};
+        return {dispatch_rdma_recv_count_buffer, num_clean_uint64};
     }
 };
 
@@ -164,7 +164,7 @@ struct LowLatencyLayout {
         total_bytes += recv_buffer_bytes * 2;
 
         // Symmetric signaling buffers
-        size_t dispatch_recv_count_buffer_bytes = num_experts * sizeof(int);
+        size_t dispatch_recv_count_buffer_bytes = num_experts * sizeof(uint64_t);
         size_t combine_recv_flag_buffer_bytes = dispatch_recv_count_buffer_bytes;
         size_t signaling_buffer_bytes = std::max(dispatch_recv_count_buffer_bytes, combine_recv_flag_buffer_bytes);
         size_t signaling_buffer_bytes_aligned = align_up<size_t>(signaling_buffer_bytes, 128);
@@ -174,13 +174,13 @@ struct LowLatencyLayout {
         // NOTES: we still leave some space for distinguishing dispatch/combine buffer,
         // so you may see some parameters are duplicated
         for (int i = 0; i < 2; ++i) {
-            buffers[i] = {static_cast<int>(signaling_buffer_bytes / sizeof(int)),
+            buffers[i] = {static_cast<uint64_t>(signaling_buffer_bytes / sizeof(uint64_t)),
                           advance(rdma_buffer, signaling_buffer_bytes_aligned * 2 + send_buffer_bytes * i),
                           advance(rdma_buffer, signaling_buffer_bytes_aligned * 2 + send_buffer_bytes * 2 + recv_buffer_bytes * i),
-                          advance<int*>(rdma_buffer, signaling_buffer_bytes_aligned * i),
+                          advance<uint64_t*>(rdma_buffer, signaling_buffer_bytes_aligned * i),
                           advance(rdma_buffer, signaling_buffer_bytes_aligned * 2 + send_buffer_bytes * i),
                           advance(rdma_buffer, signaling_buffer_bytes_aligned * 2 + send_buffer_bytes * 2 + recv_buffer_bytes * i),
-                          advance<int*>(rdma_buffer, signaling_buffer_bytes_aligned * i),
+                          advance<uint64_t*>(rdma_buffer, signaling_buffer_bytes_aligned * i),
                           advance(rdma_buffer, signaling_buffer_bytes_aligned * 2 + send_buffer_bytes * i),
                           num_bytes_per_combine_msg};
         }
