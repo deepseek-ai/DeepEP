@@ -362,7 +362,8 @@ void Buffer::sync(const std::vector<int>& device_ids,
         std::memcpy(root_unique_id.data(), root_unique_id_str.c_str(), root_unique_id_opt->size());
         auto nvshmem_rank = low_latency_mode ? rank : rdma_rank;
         auto num_nvshmem_ranks = low_latency_mode ? num_ranks : num_rdma_ranks;
-        EP_HOST_ASSERT(nvshmem_rank == internode::init(root_unique_id, nvshmem_rank, num_nvshmem_ranks, low_latency_mode, num_qps_per_rank));
+        EP_HOST_ASSERT(nvshmem_rank ==
+                       internode::init(root_unique_id, nvshmem_rank, num_nvshmem_ranks, low_latency_mode, num_qps_per_rank));
         internode::barrier();
 
         // Allocate

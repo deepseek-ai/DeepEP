@@ -26,7 +26,8 @@ __forceinline__ __device__ bool is_rank_masked(int* mask_buffer_ptr, int rank) {
 }
 
 template <int kNumThreads>
-__forceinline__ __device__ void barrier(int thread_id, int rank, int num_ranks, int* mask_buffer_ptr, int* sync_buffer_ptr, nvshmemx_qp_handle_t* qp_handle) {
+__forceinline__ __device__ void barrier(
+    int thread_id, int rank, int num_ranks, int* mask_buffer_ptr, int* sync_buffer_ptr, nvshmemx_qp_handle_t* qp_handle) {
     EP_DEVICE_ASSERT(kNumThreads >= num_ranks);
 
     nvshmemx_qp_quiet_block(NVSHMEMX_PE_ALL, NULL, NVSHMEMX_QP_ALL);
@@ -136,7 +137,7 @@ __global__ __launch_bounds__(1024, 1) void dispatch(void* packed_recv_x,
                                                     int* cumulative_local_expert_recv_stats,
                                                     int64_t* dispatch_wait_recv_cost_stats,
                                                     void* rdma_recv_x,
-                                                    uint64_t *rdma_recv_count,
+                                                    uint64_t* rdma_recv_count,
                                                     void* rdma_x,
                                                     const void* x,
                                                     const topk_idx_t* topk_idx,
@@ -266,7 +267,11 @@ __global__ __launch_bounds__(1024, 1) void dispatch(void* packed_recv_x,
                 const auto dst_p2p_ptr = nvshmem_ptr(reinterpret_cast<void*>(dst_ptr), dst_rank);
                 if (not is_rank_masked<true>(mask_buffer_ptr, dst_rank)) {
                     if (dst_p2p_ptr == nullptr) {
-                        nvshmemx_qp_char_put_nbi_warp(reinterpret_cast<char*>(dst_ptr), reinterpret_cast<const char*>(src_ptr), num_bytes_per_msg, dst_rank, qp_handle[dst_expert_local_idx]);
+                        nvshmemx_qp_char_put_nbi_warp(reinterpret_cast<char*>(dst_ptr),
+                                                      reinterpret_cast<const char*>(src_ptr),
+                                                      num_bytes_per_msg,
+                                                      dst_rank,
+                                                      qp_handle[dst_expert_local_idx]);
                     } else {
                         // NOTES: only 2 load iterations for 7K hidden with 8 unrolls
                         const auto* src_int4_ptr = reinterpret_cast<const int4*>(src_ptr);
@@ -283,7 +288,6 @@ __global__ __launch_bounds__(1024, 1) void dispatch(void* packed_recv_x,
     } else if (warp_id == num_warps - 1) {
         EP_DEVICE_ASSERT(num_sms > 1);
         if (sm_id == 0) {
-
             // The first SM is also responsible for cleaning the next buffer
             #pragma unroll
             for (int i = lane_id; i < num_next_clean_int; i += 32)
@@ -332,7 +336,7 @@ __global__ __launch_bounds__(1024, 1) void dispatch(void* packed_recv_x,
         while (ld_acquire_global(atomic_finish_counter_per_expert + responsible_expert_idx) != FINISHED_SUM_TAG * 2)
             ;
         auto dst_ptr = rdma_recv_count + dst_expert_local_idx * num_ranks + rank;
-        auto dst_p2p_ptr = reinterpret_cast<uint64_t *>(nvshmem_ptr(reinterpret_cast<void *>(dst_ptr), dst_rank));
+        auto dst_p2p_ptr = reinterpret_cast<uint64_t*>(nvshmem_ptr(reinterpret_cast<void*>(dst_ptr), dst_rank));
         if (not is_rank_masked(mask_buffer_ptr, dst_rank)) {
             if (dst_p2p_ptr == 0) {
                 if (is_unordered_transport) {
@@ -477,7 +481,7 @@ void dispatch(void* packed_recv_x,
               int* cumulative_local_expert_recv_stats,
               int64_t* dispatch_wait_recv_cost_stats,
               void* rdma_recv_x,
-              uint64_t *rdma_recv_count,
+              uint64_t* rdma_recv_count,
               void* rdma_x,
               const void* x,
               const topk_idx_t* topk_idx,
@@ -724,7 +728,7 @@ __forceinline__ __device__ void decode_and_accumulate(
 template <bool kUseLogFMT, int kHidden, int kNumMaxTopk, int kNumMaxUnrolls>
 __global__ __launch_bounds__(1024, 1) void combine(void* combined_x,
                                                    void* rdma_recv_x,
-                                                   uint64_t *rdma_recv_flag,
+                                                   uint64_t* rdma_recv_flag,
                                                    void* rdma_send_x,
                                                    const void* x,
                                                    const topk_idx_t* topk_idx,
@@ -855,7 +859,7 @@ __global__ __launch_bounds__(1024, 1) void combine(void* combined_x,
                 const auto buf_ptr = reinterpret_cast<int64_t>(rdma_send_x_vec_row);
                 const auto dst_ptr = reinterpret_cast<uint64_t>(rdma_recv_x) +
                     (global_expert_idx * num_max_dispatch_tokens_per_rank + src_idx) * num_bytes_per_slot;
-                const auto dst_p2p_ptr = nvshmem_ptr(reinterpret_cast<void *>(dst_ptr), dst_rank);
+                const auto dst_p2p_ptr = nvshmem_ptr(reinterpret_cast<void*>(dst_ptr), dst_rank);
                 int num_send_bytes = hidden * sizeof(nv_bfloat16);
 
                 if (not zero_copy or dst_p2p_ptr != 0) {
@@ -920,7 +924,11 @@ __global__ __launch_bounds__(1024, 1) void combine(void* combined_x,
                 // Issue RDMA
                 // NOTES: for zero-copy mode, we assume the data is already in the send buffer
                 if (dst_p2p_ptr == 0)
-                    nvshmemx_qp_char_put_nbi_warp(reinterpret_cast<char*>(dst_ptr), reinterpret_cast<const char*>(buf_ptr), num_send_bytes, dst_rank, qp_handle[local_expert_idx]);
+                    nvshmemx_qp_char_put_nbi_warp(reinterpret_cast<char*>(dst_ptr),
+                                                  reinterpret_cast<const char*>(buf_ptr),
+                                                  num_send_bytes,
+                                                  dst_rank,
+                                                  qp_handle[local_expert_idx]);
             }
         }
 
@@ -931,7 +939,7 @@ __global__ __launch_bounds__(1024, 1) void combine(void* combined_x,
             while (ld_acquire_global(atomic_clean_flag) == 0)
                 ;
             auto dst_ptr = rdma_recv_flag + global_expert_idx;
-            auto dst_p2p_ptr = reinterpret_cast<uint64_t *>(nvshmem_ptr(reinterpret_cast<void *>(dst_ptr), dst_rank));
+            auto dst_p2p_ptr = reinterpret_cast<uint64_t*>(nvshmem_ptr(reinterpret_cast<void*>(dst_ptr), dst_rank));
             if (not is_rank_masked(mask_buffer_ptr, dst_rank)) {
                 if (dst_p2p_ptr == 0) {
                     if (is_unordered_transport) {
@@ -1154,7 +1162,7 @@ LOW_LATENCY_COMBINE_RECV:
 
 void combine(void* combined_x,
              void* rdma_recv_x,
-             uint64_t *rdma_recv_flag,
+             uint64_t* rdma_recv_flag,
              void* rdma_send_x,
              const void* x,
              const topk_idx_t* topk_idx,

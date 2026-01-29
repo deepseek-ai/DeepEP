@@ -13,7 +13,7 @@
 namespace deep_ep {
 
 #ifndef DISABLE_NVSHMEM
-nvshmemx_qp_handle_t *qp_handle_device;
+nvshmemx_qp_handle_t* qp_handle_device;
 #endif
 
 namespace intranode {
@@ -40,7 +40,7 @@ namespace internode {
 #ifndef DISABLE_NVSHMEM
 nvshmem_team_t cpu_rdma_team = NVSHMEM_TEAM_INVALID;
 nvshmem_team_config_t cpu_rdma_team_config;
-nvshmemx_qp_handle_t *qp_handle_host;
+nvshmemx_qp_handle_t* qp_handle_host;
 
 std::vector<uint8_t> get_unique_id() {
     nvshmemx_uniqueid_t unique_id;
@@ -98,7 +98,7 @@ void finalize() {
         nvshmem_team_destroy(cpu_rdma_team);
         cpu_rdma_team = NVSHMEM_TEAM_INVALID;
     }
-    //free(qp_handle_host);
+    // free(qp_handle_host);
     CUDA_CHECK(cudaFree(qp_handle_device));
     nvshmem_finalize();
 }

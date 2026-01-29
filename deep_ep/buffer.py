@@ -484,8 +484,9 @@ class Buffer:
             num_rdma_recv_tokens = send_nvl_head.size(0)
             recv_x, recv_x_scales, _, _, _, _, _, _, _, _, _, _, _, _, event = self.runtime.internode_dispatch(
                 x, x_scales, topk_idx, topk_weights, None, None, is_token_in_rank, None, num_recv_tokens, num_rdma_recv_tokens,
-                rdma_channel_prefix_matrix, recv_rdma_rank_prefix_sum, gbl_channel_prefix_matrix, recv_gbl_rank_prefix_sum,
-                expert_alignment, num_worst_tokens, config, getattr(previous_event, 'event', None), async_finish, allocate_on_comm_stream, self.is_unordered_transport)
+                rdma_channel_prefix_matrix, recv_rdma_rank_prefix_sum,
+                gbl_channel_prefix_matrix, recv_gbl_rank_prefix_sum, expert_alignment, num_worst_tokens, config,
+                getattr(previous_event, 'event', None), async_finish, allocate_on_comm_stream, self.is_unordered_transport)
             return (recv_x, recv_x_scales) if x_scales is not None else recv_x, None, None, None, None, EventOverlap(event)
         else:
             assert num_tokens_per_rank is not None and is_token_in_rank is not None and num_tokens_per_expert is not None
@@ -532,8 +533,8 @@ class Buffer:
                                                                                   is_combined_token_in_rank, rdma_channel_prefix_matrix,
                                                                                   rdma_rank_prefix_sum, gbl_channel_prefix_matrix,
                                                                                   send_rdma_head, send_nvl_head, config,
-                                                                                  getattr(previous_event, 'event',
-                                                                                          None), async_finish, allocate_on_comm_stream, self.is_unordered_transport)
+                                                                                  getattr(previous_event, 'event', None), async_finish,
+                                                                                  allocate_on_comm_stream, self.is_unordered_transport)
         return combined_x, combined_topk_weights, EventOverlap(event)
 
     def clean_low_latency_buffer(self, num_max_dispatch_tokens_per_rank: int, hidden: int, num_experts: int) -> None:
@@ -662,7 +663,8 @@ class Buffer:
         assert self.nvshmem_qp_depth >= (num_max_dispatch_tokens_per_rank + 1) * 2
         combined_x, event, hook = self.runtime.low_latency_combine(x, topk_idx, topk_weights, src_info, layout_range,
                                                                    combine_wait_recv_cost_stats, num_max_dispatch_tokens_per_rank,
-                                                                   num_experts, use_logfmt, zero_copy, async_finish, return_recv_hook, out, self.is_unordered_transport)
+                                                                   num_experts, use_logfmt, zero_copy, async_finish, return_recv_hook, out,
+                                                                   self.is_unordered_transport)
         tensors_to_record = (x, topk_idx, topk_weights, src_info, layout_range, combined_x)
         return combined_x, EventOverlap(event, tensors_to_record if async_finish else None), hook
 
