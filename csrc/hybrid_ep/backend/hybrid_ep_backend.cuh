@@ -3221,10 +3221,19 @@ public:
     update_expected_value_kernel<NUM_OF_NODES, NUM_OF_RANKS_PER_NODE, DEVICE_SIDE_SYNC>
     <<<1, 1, 0, stream>>>(param.expected_rdma_flag_value, param.expected_intra_node_flag_value);
 
+    // Launch device sync kernel if needed.
+    if constexpr(DEVICE_SIDE_SYNC){
+      device_sync_kernel<<<1, 1, 0, stream>>>(param.intra_node_write_completion_flags, param.expected_intra_node_flag_value);
+    }
+
     // Launch dispatch kernel.
     constexpr int BLOCK_DIM = INTER_NODE_GROUP::size() + INTRA_NODE_G2S_GROUP::size() + INTRA_NODE_S2G_GROUP::size();
     dispatch_kernel_ptr<<<NUM_OF_BLOCKS, BLOCK_DIM, SMEM_SIZE, stream>>>(param);
 
+    // Launch update_expected_value_kernel to update expected flag value.
+    update_expected_value_kernel<NUM_OF_NODES, NUM_OF_RANKS_PER_NODE, DEVICE_SIDE_SYNC>
+    <<<1, 1, 0, stream>>>(param.expected_rdma_flag_value, param.expected_intra_node_flag_value);
+    
     // Launch device sync kernel if needed.
     if constexpr(DEVICE_SIDE_SYNC){
       device_sync_kernel<<<1, 1, 0, stream>>>(param.intra_node_write_completion_flags, param.expected_intra_node_flag_value);
@@ -3303,6 +3312,14 @@ public:
     constexpr int BLOCK_DIM = INTRA_NODE_RED_GROUP::size() + INTER_NODE_RED_GROUP::size() + INTRA_NODE_G2S_GROUP::size() + INTER_NODE_G2S_GROUP::size() + INTER_NODE_RDMA_GROUP::size();
     combine_kernel_ptr<<<NUM_OF_BLOCKS, BLOCK_DIM, SMEM_SIZE, stream>>>(param);
 
+    // Launch update_expected_value_kernel to update expected flag value.
+    update_expected_value_kernel<NUM_OF_NODES, NUM_OF_RANKS_PER_NODE, DEVICE_SIDE_SYNC>
+    <<<1, 1, 0, stream>>>(param.expected_rdma_flag_value, param.expected_intra_node_flag_value);
+
+    // Launch device sync kernel if needed.
+    if constexpr(DEVICE_SIDE_SYNC){
+      device_sync_kernel<<<1, 1, 0, stream>>>(param.intra_node_write_completion_flags, param.expected_intra_node_flag_value);
+    }
     // Check if there is any CUDA error.
     CUDA_CHECK(cudaGetLastError());
   }
