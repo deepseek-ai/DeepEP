@@ -9,6 +9,9 @@
 #define FINISHED_SUM_TAG 1024
 #define NUM_WAIT_NANOSECONDS 500
 
+// Internode buffer index for NCCL signal allocation
+#define INTERNODE_BUFFER_IDX 2
+
 #ifndef ENABLE_FAST_DEBUG
 #define NUM_CPU_TIMEOUT_SECS 100
 #define NUM_TIMEOUT_CYCLES 200000000000ull  // 200G cycles ~= 100s
@@ -80,11 +83,15 @@ typedef INT_BITS_T(TOPK_IDX_BITS) topk_idx_t;  // int32_t or int64_t
 
 }  // namespace deep_ep
 
-#ifndef DISABLE_NVSHMEM
+#ifndef DISABLE_NVSHMEM_AND_NCCL
+
+#ifdef ENABLE_NVSHMEM
 #include <device_host_transport/nvshmem_common_ibgda.h>
 #include <infiniband/mlx5dv.h>
 #include <nvshmem.h>
 #include <nvshmemx.h>
 
 #include <non_abi/device/threadgroup/nvshmemi_common_device_defines.cuh>
+#endif
+
 #endif

@@ -6,7 +6,7 @@ import torch.distributed as dist
 
 # noinspection PyUnresolvedReferences
 import deep_ep
-from utils import init_dist, bench, bench_kineto, calc_diff, create_grouped_scores, inplace_unique, per_token_cast_to_fp8, per_token_cast_back, hash_tensor
+from utils import init_dist, bench, bench_kineto, calc_diff, create_grouped_scores, inplace_unique, per_token_cast_to_fp8, per_token_cast_back, hash_tensor, backend_aware_all_reduce, backend_aware_all_gather
 
 # Test compatibility with low latency functions
 import test_low_latency
@@ -65,7 +65,7 @@ def test_main(args: argparse.Namespace,
     for i in range(num_experts):
         num_tokens_per_expert[i] = (topk_idx == i).sum()
     gbl_num_tokens_per_expert = num_tokens_per_expert.clone()
-    dist.all_reduce(gbl_num_tokens_per_expert, group=group)
+    backend_aware_all_reduce(gbl_num_tokens_per_expert, group=group)
 
     # Rank layout meta
     num_tokens_per_rank = torch.empty((num_ranks, ), dtype=torch.int, device='cuda')
@@ -83,7 +83,7 @@ def test_main(args: argparse.Namespace,
     token_idx_in_rank = token_idx_in_rank.T.contiguous().to(torch.int)
     is_token_in_rank = token_idx_in_rank >= 0
     gbl_num_tokens_per_rank = num_tokens_per_rank.clone()
-    dist.all_reduce(gbl_num_tokens_per_rank, group=group)
+    backend_aware_all_reduce(gbl_num_tokens_per_rank, group=group)
 
     ref_num_tokens_per_rank, ref_num_tokens_per_rdma_rank, ref_num_tokens_per_expert, ref_is_token_in_rank, _ = \
         buffer.get_dispatch_layout(topk_idx, num_experts)
@@ -267,7 +267,7 @@ def test_main(args: argparse.Namespace,
             # Gather FP8 the best config from rank 0
             best_dispatch_results = torch.tensor([best_results[0], best_results[1], best_results[2]], dtype=torch.int32, device='cuda')
             all_best_fp8_results_list = [torch.zeros_like(best_dispatch_results) for _ in range(torch.distributed.get_world_size())]
-            dist.all_gather(all_best_fp8_results_list, best_dispatch_results, group=group)
+            backend_aware_all_gather(all_best_fp8_results_list, best_dispatch_results, group=group)
             best_dispatch_results = all_best_fp8_results_list[0].tolist()
     dispatch_config = deep_ep.Config(best_dispatch_results[0], best_dispatch_results[1], nvl_buffer_size, best_dispatch_results[2],
                                      rdma_buffer_size)
@@ -314,7 +314,20 @@ def test_main(args: argparse.Namespace,
 
 # noinspection PyUnboundLocalVariable,PyShadowingNames
 def test_loop(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
-    num_nodes = int(os.getenv('WORLD_SIZE', 1))
+    if 'SLURM_NNODES' in os.environ:
+        num_nodes = int(os.environ['SLURM_NNODES'])
+    elif 'OMPI_COMM_WORLD_SIZE' in os.environ and 'OMPI_COMM_WORLD_LOCAL_SIZE' in os.environ:
+        # OpenMPI: calculate num_nodes from world_size and local_size
+        num_nodes = int(os.environ['OMPI_COMM_WORLD_SIZE']) // int(os.environ['OMPI_COMM_WORLD_LOCAL_SIZE'])
+    elif 'PMI_SIZE' in os.environ:
+        # Intel MPI: calculate num_nodes
+        num_nodes = int(os.environ['PMI_SIZE']) // num_local_ranks
+    elif 'MV2_COMM_WORLD_SIZE' in os.environ and 'MV2_COMM_WORLD_LOCAL_SIZE' in os.environ:
+        # MVAPICH2: calculate num_nodes from world_size and local_size
+        num_nodes = int(os.environ['MV2_COMM_WORLD_SIZE']) // int(os.environ['MV2_COMM_WORLD_LOCAL_SIZE'])
+    else:
+        num_nodes = int(os.getenv('WORLD_SIZE', 1))
+
     rank, num_ranks, group = init_dist(local_rank, num_local_ranks)
     if args.test_ll_compatibility:
         ll_num_tokens, ll_hidden, ll_num_experts, ll_num_topk = 16, 5120, 256, 9
@@ -381,13 +394,52 @@ if __name__ == '__main__':
         default=0,
         help='Pressure test mode. 0: don\'t do pressure test, 1: do pressure test without benchmarks, 2: do pressure test with benchmarks')
     parser.add_argument('--num-experts', type=int, default=256, help='Number of experts (default: 256')
-    parser.add_argument('--test-ll-compatibility', action='store_true', help='whether to test compatibility with low-latency kernels')
+    parser.add_argument('--test-ll-compatibility',
+                        action='store_true',
+                        default=True,
+                        help='whether to test compatibility with low-latency kernels')
     args = parser.parse_args()
 
     # Set default `num_topk_groups` if not provided
     if args.num_topk_groups is None:
-        num_nodes = int(os.getenv('WORLD_SIZE', 1))
+        if 'SLURM_NNODES' in os.environ:
+            num_nodes = int(os.environ['SLURM_NNODES'])
+        elif 'OMPI_COMM_WORLD_SIZE' in os.environ and 'OMPI_COMM_WORLD_LOCAL_SIZE' in os.environ:
+            # OpenMPI: calculate num_nodes from world_size and local_size
+            num_nodes = int(os.environ['OMPI_COMM_WORLD_SIZE']) // int(os.environ['OMPI_COMM_WORLD_LOCAL_SIZE'])
+        elif 'PMI_SIZE' in os.environ:
+            # Intel MPI: calculate num_nodes (assume 8 processes per node as default)
+            num_nodes = int(os.environ['PMI_SIZE']) // 8
+        elif 'MV2_COMM_WORLD_SIZE' in os.environ and 'MV2_COMM_WORLD_LOCAL_SIZE' in os.environ:
+            # MVAPICH2: calculate num_nodes from world_size and local_size
+            num_nodes = int(os.environ['MV2_COMM_WORLD_SIZE']) // int(os.environ['MV2_COMM_WORLD_LOCAL_SIZE'])
+        else:
+            num_nodes = int(os.getenv('WORLD_SIZE', 1))
         args.num_topk_groups = min(num_nodes, 4)
 
-    num_processes = args.num_processes
-    torch.multiprocessing.spawn(test_loop, args=(num_processes, args), nprocs=num_processes)
+    if 'SLURM_PROCID' in os.environ and 'SLURM_NTASKS_PER_NODE' in os.environ:
+        local_rank = int(os.environ['SLURM_LOCALID'])
+        num_local_ranks = int(os.environ['SLURM_NTASKS_PER_NODE'])
+        test_loop(local_rank, num_local_ranks, args)
+    elif 'OMPI_COMM_WORLD_RANK' in os.environ or 'PMI_RANK' in os.environ or 'MV2_COMM_WORLD_RANK' in os.environ:
+        # MPI environment detected (OpenMPI, Intel MPI, or MVAPICH2)
+        if 'OMPI_COMM_WORLD_LOCAL_RANK' in os.environ:
+            # OpenMPI
+            local_rank = int(os.environ['OMPI_COMM_WORLD_LOCAL_RANK'])
+            num_local_ranks = int(os.environ['OMPI_COMM_WORLD_LOCAL_SIZE'])
+        elif 'MPI_LOCALRANKID' in os.environ:
+            # Intel MPI
+            local_rank = int(os.environ['MPI_LOCALRANKID'])
+            num_local_ranks = int(os.environ.get('MPI_LOCALNRANKS', args.num_processes))
+        elif 'MV2_COMM_WORLD_LOCAL_RANK' in os.environ:
+            # MVAPICH2
+            local_rank = int(os.environ['MV2_COMM_WORLD_LOCAL_RANK'])
+            num_local_ranks = int(os.environ['MV2_COMM_WORLD_LOCAL_SIZE'])
+        else:
+            # Fallback: try to infer from global rank
+            local_rank = 0
+            num_local_ranks = args.num_processes
+        test_loop(local_rank, num_local_ranks, args)
+    else:
+        num_processes = args.num_processes
+        torch.multiprocessing.spawn(test_loop, args=(num_processes, args), nprocs=num_processes)

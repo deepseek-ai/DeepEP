@@ -15,15 +15,44 @@ def init_dist(local_rank: int, num_local_ranks: int):
     # NOTES: you may rewrite this function with your own cluster settings
     ip = os.getenv('MASTER_ADDR', '127.0.0.1')
     port = int(os.getenv('MASTER_PORT', '8361'))
-    num_nodes = int(os.getenv('WORLD_SIZE', 1))
-    node_rank = int(os.getenv('RANK', 0))
+
+    # SLURM-aware environment detection
+    if 'SLURM_NNODES' in os.environ and 'SLURM_NTASKS_PER_NODE' in os.environ:
+        # SLURM environment
+        num_nodes = int(os.environ['SLURM_NNODES'])
+        world_size = int(os.environ['SLURM_NTASKS'])
+        rank = int(os.environ['SLURM_PROCID'])
+        node_rank = rank // int(os.environ['SLURM_NTASKS_PER_NODE'])
+    elif 'OMPI_COMM_WORLD_RANK' in os.environ:
+        # OpenMPI environment
+        world_size = int(os.environ['OMPI_COMM_WORLD_SIZE'])
+        rank = int(os.environ['OMPI_COMM_WORLD_RANK'])
+        node_rank = rank // num_local_ranks  # Approximate node rank
+    elif 'PMI_RANK' in os.environ:
+        # Intel MPI environment
+        world_size = int(os.environ['PMI_SIZE'])
+        rank = int(os.environ['PMI_RANK'])
+        node_rank = rank // num_local_ranks  # Approximate node rank
+    elif 'MV2_COMM_WORLD_RANK' in os.environ:
+        # MVAPICH2 environment
+        world_size = int(os.environ['MV2_COMM_WORLD_SIZE'])
+        rank = int(os.environ['MV2_COMM_WORLD_RANK'])
+        node_rank = rank // num_local_ranks  # Approximate node rank
+    else:
+        # Non-SLURM environment
+        num_nodes = int(os.getenv('WORLD_SIZE', 1))
+        world_size = num_nodes * num_local_ranks
+        node_rank = int(os.getenv('RANK', 0))
+        rank = node_rank * num_local_ranks + local_rank
 
     sig = inspect.signature(dist.init_process_group)
+    # Allow backend to be configured via environment variable
+    backend = os.getenv('TORCH_DISTRIBUTED_BACKEND', 'nccl')
     params = {
-        'backend': 'nccl',
+        'backend': backend,
         'init_method': f'tcp://{ip}:{port}',
-        'world_size': num_nodes * num_local_ranks,
-        'rank': node_rank * num_local_ranks + local_rank,
+        'world_size': world_size,
+        'rank': rank,
     }
     if 'device_id' in sig.parameters:
         # noinspection PyTypeChecker
@@ -33,7 +62,60 @@ def init_dist(local_rank: int, num_local_ranks: int):
     torch.set_default_device('cuda')
     torch.cuda.set_device(local_rank)
 
-    return dist.get_rank(), dist.get_world_size(), dist.new_group(list(range(num_local_ranks * num_nodes)))
+    return dist.get_rank(), dist.get_world_size(), dist.new_group(list(range(world_size)))
+
+
+def backend_aware_all_gather_into_tensor(output_tensor: torch.Tensor, input_tensor: torch.Tensor, group: dist.ProcessGroup):
+    """
+    Backend-aware wrapper for all_gather_into_tensor that handles shape requirements.
+
+    Args:
+        output_tensor: Output tensor with shape (world_size, *input_shape)
+        input_tensor: Input tensor to gather
+        group: Process group for communication
+    """
+    if dist.get_backend(group) == 'gloo':
+        # Gloo requires explicit flattening for all_gather_into_tensor
+        input_flat = input_tensor.flatten()
+        output_flat = output_tensor.flatten()
+        dist.all_gather_into_tensor(output_flat, input_flat, group=group)
+        # output_tensor is modified in-place, so no need to return
+    else:
+        # NCCL and other backends handle multi-dimensional tensors directly
+        dist.all_gather_into_tensor(output_tensor, input_tensor, group=group)
+
+
+def backend_aware_all_reduce(tensor: torch.Tensor, op=dist.ReduceOp.SUM, group: dist.ProcessGroup = None):
+    """
+    Backend-aware wrapper for all_reduce that ensures compatibility.
+
+    Args:
+        tensor: Tensor to reduce (modified in-place)
+        op: Reduction operation
+        group: Process group for communication
+    """
+    # Most backends handle all_reduce similarly, but we can add specific handling if needed
+    dist.all_reduce(tensor, op=op, group=group)
+
+
+def backend_aware_all_gather(tensor_list: list, tensor: torch.Tensor, group: dist.ProcessGroup = None):
+    """
+    Backend-aware wrapper for all_gather that handles backend differences.
+
+    Args:
+        tensor_list: List of tensors to store gathered results
+        tensor: Input tensor to gather
+        group: Process group for communication
+    """
+    if dist.get_backend(group) == 'gloo':
+        # Gloo might be more sensitive to tensor device placement
+        # Ensure all tensors are on the same device
+        device = tensor.device
+        for i, t in enumerate(tensor_list):
+            if t.device != device:
+                tensor_list[i] = t.to(device)
+
+    dist.all_gather(tensor_list, tensor, group=group)
 
 
 def calc_diff(x: torch.Tensor, y: torch.Tensor):
@@ -121,7 +203,7 @@ def bench(fn, num_warmups: int = 50, num_tests: int = 50, post_fn=None):
             post_fn()
     torch.cuda.synchronize()
 
-    times = np.array([s.elapsed_time(e) / 1e3 for s, e in zip(start_events, end_events)])[1:]
+    times = np.array([s.elapsed_time(e) / 1e3 for s, e in zip(start_events, end_events, strict=True)])[1:]
     return np.average(times), np.min(times), np.max(times)
 
 
