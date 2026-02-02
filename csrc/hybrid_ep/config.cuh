@@ -36,8 +36,11 @@ struct BufferConfig {
     }
     valid &= ((num_of_experts_per_rank * num_of_ranks_per_node) % 4 == 0);
     valid &= (num_of_ranks_per_node % 2 == 0);
+    // TMA requires (num_of_tokens_per_chunk * num_of_ranks_per_node * 4) % 16 == 0
+    valid &= ((num_of_tokens_per_chunk_dispatch_api * num_of_ranks_per_node) % 4 == 0);
     if(!valid){
-      fprintf(stderr, "[Error] Invalid BufferConfig: hidden_dim=%d, num_of_experts_per_rank=%d, num_of_ranks_per_node=%d\n", hidden_dim, num_of_experts_per_rank, num_of_ranks_per_node);
+      fprintf(stderr, "[Error] Invalid BufferConfig: hidden_dim=%d, num_of_experts_per_rank=%d, num_of_ranks_per_node=%d, num_of_tokens_per_chunk_dispatch_api=%d\n", 
+              hidden_dim, num_of_experts_per_rank, num_of_ranks_per_node, num_of_tokens_per_chunk_dispatch_api);
       fflush(stderr);
     }
     return valid;
@@ -97,8 +100,11 @@ struct HybridEpConfigInstance {
     }
     valid &= ((num_of_experts_per_rank * num_of_ranks_per_node) % 4 == 0);
     valid &= (num_of_ranks_per_node % 2 == 0);
+    // TMA requires (num_of_tokens_per_chunk * num_of_ranks_per_node * 4) % 16 == 0
+    valid &= ((num_of_tokens_per_chunk_dispatch_api * num_of_ranks_per_node) % 4 == 0);
     if(!valid){
-      fprintf(stderr, "[Error] Invalid HybridEpConfigInstance: hidden_dim=%d, num_of_experts_per_rank=%d, num_of_ranks_per_node=%d\n", hidden_dim, num_of_experts_per_rank, num_of_ranks_per_node);
+      fprintf(stderr, "[Error] Invalid HybridEpConfigInstance: hidden_dim=%d, num_of_experts_per_rank=%d, num_of_ranks_per_node=%d, num_of_tokens_per_chunk_dispatch_api=%d\n", 
+              hidden_dim, num_of_experts_per_rank, num_of_ranks_per_node, num_of_tokens_per_chunk_dispatch_api);
       fflush(stderr);
     }
     return valid;

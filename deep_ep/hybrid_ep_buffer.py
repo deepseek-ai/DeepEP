@@ -173,6 +173,8 @@ class HybridEPBuffer:
         )
         if num_of_tokens_per_rank is None:
             num_of_tokens_per_rank = self.config.max_num_of_tokens_per_rank
+        # Align num_of_tokens_per_rank up to the nearest multiple of 16.
+        num_of_tokens_per_rank = (num_of_tokens_per_rank + 15) // 16 * 16
         config.max_num_of_tokens_per_rank = max(
             num_of_tokens_per_rank, self.config.max_num_of_tokens_per_rank
         )

@@ -51,6 +51,19 @@ Executor::metadata_preprocess_core(
     bool non_blocking
 ) {
   nvtxRangePushA("metadata_preprocess_core in hybrid-ep");
+
+  // TMA requires (remainder_chunk_size * num_of_ranks_per_node * 4) % 16 == 0
+  const int remainder_chunk_size = num_of_tokens_per_rank % config.num_of_tokens_per_chunk_dispatch_api;
+  if (remainder_chunk_size != 0) {
+    const int tma_load_size = remainder_chunk_size * config.num_of_ranks_per_node * sizeof(int32_t);
+    TORCH_CHECK(
+        tma_load_size % 16 == 0,
+        "TMA 16B alignment error: tma_load_size = remainder_chunk(", remainder_chunk_size,
+        ") * ranks_per_node(", config.num_of_ranks_per_node, ") * 4 = ", tma_load_size, 
+        "B, must be multiple of 16B."
+    );
+  }
+
   // padding for the routing map
   const int rdma_to_attn_map_size_per_node = (((num_of_tokens_per_rank - 1) / 16) + 1) * 16;
 
