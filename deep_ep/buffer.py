@@ -89,6 +89,11 @@ class Buffer:
         self.low_latency_mode = low_latency_mode
         self.explicitly_destroy = explicitly_destroy
         self.enable_shrink = enable_shrink
+
+        if os.environ.get('NVSHMEM_REMOTE_TRANSPORT') == "libfabric" and os.environ.get('NVSHMEM_LIBFABRIC_PROVIDER') == "efa":
+            self.is_unordered_transport = True
+        else:
+            self.is_unordered_transport = False
         self.runtime = deep_ep_cpp.Buffer(self.rank, self.group_size, num_nvl_bytes, num_rdma_bytes, low_latency_mode, explicitly_destroy,
                                           enable_shrink, use_fabric)
 
@@ -106,8 +111,9 @@ class Buffer:
             # Enable IBGDA
             assert num_qps_per_rank > 0
             os.environ['NVSHMEM_DISABLE_P2P'] = '0' if allow_nvlink_for_low_latency_mode else '1'
-            os.environ['NVSHMEM_IB_ENABLE_IBGDA'] = '1'
-            os.environ['NVSHMEM_IBGDA_NUM_RC_PER_PE'] = f'{num_qps_per_rank}'
+            # unless the transport layer is explicitly set, enable IBGDA.
+            if os.environ.get('NVSHMEM_REMOTE_TRANSPORT') is None:
+                os.environ['NVSHMEM_IB_ENABLE_IBGDA'] = '1'
 
             # Make sure QP depth is always larger than the number of on-flight WRs, so that we can skip WQ slot check
             self.nvshmem_qp_depth = int(os.environ.get('NVSHMEM_QP_DEPTH', '1024'))
@@ -132,7 +138,7 @@ class Buffer:
             root_unique_id = nvshmem_unique_ids[0 if low_latency_mode else self.runtime.get_root_rdma_rank(True)]
 
         # Make CPP runtime available
-        self.runtime.sync(device_ids, ipc_handles, root_unique_id)
+        self.runtime.sync(device_ids, ipc_handles, root_unique_id, num_qps_per_rank)
         assert self.runtime.is_available()
 
     def destroy(self):
@@ -478,8 +484,9 @@ class Buffer:
             num_rdma_recv_tokens = send_nvl_head.size(0)
             recv_x, recv_x_scales, _, _, _, _, _, _, _, _, _, _, _, _, event = self.runtime.internode_dispatch(
                 x, x_scales, topk_idx, topk_weights, None, None, is_token_in_rank, None, num_recv_tokens, num_rdma_recv_tokens,
-                rdma_channel_prefix_matrix, recv_rdma_rank_prefix_sum, gbl_channel_prefix_matrix, recv_gbl_rank_prefix_sum,
-                expert_alignment, num_worst_tokens, config, getattr(previous_event, 'event', None), async_finish, allocate_on_comm_stream)
+                rdma_channel_prefix_matrix, recv_rdma_rank_prefix_sum,
+                gbl_channel_prefix_matrix, recv_gbl_rank_prefix_sum, expert_alignment, num_worst_tokens, config,
+                getattr(previous_event, 'event', None), async_finish, allocate_on_comm_stream, self.is_unordered_transport)
             return (recv_x, recv_x_scales) if x_scales is not None else recv_x, None, None, None, None, EventOverlap(event)
         else:
             assert num_tokens_per_rank is not None and is_token_in_rank is not None and num_tokens_per_expert is not None
@@ -491,7 +498,7 @@ class Buffer:
                 x, x_scales, topk_idx, topk_weights,
                 num_tokens_per_rank, num_tokens_per_rdma_rank, is_token_in_rank, num_tokens_per_expert,
                 0, 0, None, None, None, None,
-                expert_alignment, num_worst_tokens, config, getattr(previous_event, 'event', None), async_finish, allocate_on_comm_stream)
+                expert_alignment, num_worst_tokens, config, getattr(previous_event, 'event', None), async_finish, allocate_on_comm_stream, self.is_unordered_transport)
             handle = (is_token_in_rank, rdma_channel_prefix_matrix, gbl_channel_prefix_matrix, recv_rdma_channel_prefix_matrix,
                       recv_rdma_rank_prefix_sum, recv_gbl_channel_prefix_matrix, recv_gbl_rank_prefix_sum, recv_src_meta, send_rdma_head,
                       send_nvl_head)
@@ -526,8 +533,8 @@ class Buffer:
                                                                                   is_combined_token_in_rank, rdma_channel_prefix_matrix,
                                                                                   rdma_rank_prefix_sum, gbl_channel_prefix_matrix,
                                                                                   send_rdma_head, send_nvl_head, config,
-                                                                                  getattr(previous_event, 'event',
-                                                                                          None), async_finish, allocate_on_comm_stream)
+                                                                                  getattr(previous_event, 'event', None), async_finish,
+                                                                                  allocate_on_comm_stream, self.is_unordered_transport)
         return combined_x, combined_topk_weights, EventOverlap(event)
 
     def clean_low_latency_buffer(self, num_max_dispatch_tokens_per_rank: int, hidden: int, num_experts: int) -> None:
@@ -606,7 +613,7 @@ class Buffer:
                                               dispatch_wait_recv_cost_stats,
                                               num_max_dispatch_tokens_per_rank, num_experts,
                                               use_fp8, round_scale, use_ue8m0,
-                                              async_finish, return_recv_hook)
+                                              async_finish, return_recv_hook, self.is_unordered_transport)
         handle = (packed_recv_src_info, packed_recv_layout_range, num_max_dispatch_tokens_per_rank, x.size(1), num_experts)
         tensors_to_record = (x, topk_idx, packed_recv_x, packed_recv_x_scales, packed_recv_count, packed_recv_src_info,
                              packed_recv_layout_range, cumulative_local_expert_recv_stats)
@@ -656,7 +663,8 @@ class Buffer:
         assert self.nvshmem_qp_depth >= (num_max_dispatch_tokens_per_rank + 1) * 2
         combined_x, event, hook = self.runtime.low_latency_combine(x, topk_idx, topk_weights, src_info, layout_range,
                                                                    combine_wait_recv_cost_stats, num_max_dispatch_tokens_per_rank,
-                                                                   num_experts, use_logfmt, zero_copy, async_finish, return_recv_hook, out)
+                                                                   num_experts, use_logfmt, zero_copy, async_finish, return_recv_hook, out,
+                                                                   self.is_unordered_transport)
         tensors_to_record = (x, topk_idx, topk_weights, src_info, layout_range, combined_x)
         return combined_x, EventOverlap(event, tensors_to_record if async_finish else None), hook
 

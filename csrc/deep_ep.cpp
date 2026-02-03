@@ -325,7 +325,8 @@ void Buffer::destroy() {
 
 void Buffer::sync(const std::vector<int>& device_ids,
                   const std::vector<std::optional<pybind11::bytearray>>& all_gathered_handles,
-                  const std::optional<pybind11::bytearray>& root_unique_id_opt) {
+                  const std::optional<pybind11::bytearray>& root_unique_id_opt,
+                  int num_qps_per_rank) {
     EP_HOST_ASSERT(not is_available());
 
     // Sync IPC handles
@@ -361,7 +362,8 @@ void Buffer::sync(const std::vector<int>& device_ids,
         std::memcpy(root_unique_id.data(), root_unique_id_str.c_str(), root_unique_id_opt->size());
         auto nvshmem_rank = low_latency_mode ? rank : rdma_rank;
         auto num_nvshmem_ranks = low_latency_mode ? num_ranks : num_rdma_ranks;
-        EP_HOST_ASSERT(nvshmem_rank == internode::init(root_unique_id, nvshmem_rank, num_nvshmem_ranks, low_latency_mode));
+        EP_HOST_ASSERT(nvshmem_rank ==
+                       internode::init(root_unique_id, nvshmem_rank, num_nvshmem_ranks, low_latency_mode, num_qps_per_rank));
         internode::barrier();
 
         // Allocate
@@ -944,7 +946,8 @@ Buffer::internode_dispatch(const torch::Tensor& x,
                            const Config& config,
                            std::optional<EventHandle>& previous_event,
                            bool async,
-                           bool allocate_on_comm_stream) {
+                           bool allocate_on_comm_stream,
+                           bool is_unordered_transport) {
 #ifndef DISABLE_NVSHMEM
     // In dispatch, CPU will busy-wait until GPU receive tensor size metadata from other ranks, which can be quite long.
     // If users of DeepEP need to execute other Python code on other threads, such as KV transfer, their code will get stuck due to GIL
@@ -1238,7 +1241,8 @@ Buffer::internode_dispatch(const torch::Tensor& x,
                         cached_mode,
                         comm_stream,
                         num_channels,
-                        low_latency_mode);
+                        low_latency_mode,
+                        is_unordered_transport);
 
     // Wait streams
     std::optional<EventHandle> event;
@@ -1322,7 +1326,8 @@ std::tuple<torch::Tensor, std::optional<torch::Tensor>, std::optional<EventHandl
     const Config& config,
     std::optional<EventHandle>& previous_event,
     bool async,
-    bool allocate_on_comm_stream) {
+    bool allocate_on_comm_stream,
+    bool is_unordered_transport) {
 #ifndef DISABLE_NVSHMEM
     const int num_channels = config.num_sms / 2;
     EP_HOST_ASSERT(config.num_sms % 2 == 0);
@@ -1455,7 +1460,8 @@ std::tuple<torch::Tensor, std::optional<torch::Tensor>, std::optional<EventHandl
                        num_ranks,
                        comm_stream,
                        num_channels,
-                       low_latency_mode);
+                       low_latency_mode,
+                       is_unordered_transport);
 
     // Wait streams
     std::optional<EventHandle> event;
@@ -1507,8 +1513,8 @@ void Buffer::clean_low_latency_buffer(int num_max_dispatch_tokens_per_rank, int 
         auto offset = reinterpret_cast<int64_t>(ptr) - reinterpret_cast<int64_t>(rdma_buffer_ptr);
         EP_HOST_ASSERT(0 <= offset and offset + num_bytes <= num_rdma_bytes);
     };
-    check_boundary(clean_meta_0.first, clean_meta_0.second * sizeof(int));
-    check_boundary(clean_meta_1.first, clean_meta_1.second * sizeof(int));
+    check_boundary(clean_meta_0.first, clean_meta_0.second * sizeof(uint64_t));
+    check_boundary(clean_meta_1.first, clean_meta_1.second * sizeof(uint64_t));
 
     internode_ll::clean_low_latency_buffer(clean_meta_0.first,
                                            clean_meta_0.second,
@@ -1541,7 +1547,8 @@ Buffer::low_latency_dispatch(const torch::Tensor& x,
                              bool round_scale,
                              bool use_ue8m0,
                              bool async,
-                             bool return_recv_hook) {
+                             bool return_recv_hook,
+                             bool is_unordered_transport) {
 #ifndef DISABLE_NVSHMEM
     EP_HOST_ASSERT(low_latency_mode);
 
@@ -1644,7 +1651,8 @@ Buffer::low_latency_dispatch(const torch::Tensor& x,
             workspace,
             num_device_sms,
             launch_stream,
-            phases);
+            phases,
+            is_unordered_transport);
     };
     launcher(return_recv_hook ? LOW_LATENCY_SEND_PHASE : (LOW_LATENCY_SEND_PHASE | LOW_LATENCY_RECV_PHASE));
 
@@ -1684,7 +1692,8 @@ std::tuple<torch::Tensor, std::optional<EventHandle>, std::optional<std::functio
     bool zero_copy,
     bool async,
     bool return_recv_hook,
-    const std::optional<torch::Tensor>& out) {
+    const std::optional<torch::Tensor>& out,
+    bool is_unordered_transport) {
 #ifndef DISABLE_NVSHMEM
     EP_HOST_ASSERT(low_latency_mode);
 
@@ -1768,7 +1777,8 @@ std::tuple<torch::Tensor, std::optional<EventHandle>, std::optional<std::functio
                               num_device_sms,
                               launch_stream,
                               phases,
-                              zero_copy);
+                              zero_copy,
+                              is_unordered_transport);
     };
     launcher(return_recv_hook ? LOW_LATENCY_SEND_PHASE : (LOW_LATENCY_SEND_PHASE | LOW_LATENCY_RECV_PHASE));
 

@@ -85,6 +85,10 @@ __device__ __forceinline__ void st_release_sys_global(const int* ptr, int val) {
     asm volatile("st.release.sys.global.s32 [%0], %1;" ::"l"(ptr), "r"(val) : "memory");
 }
 
+__device__ __forceinline__ void st_release_sys_global(const uint64_t* ptr, uint64_t val) {
+    asm volatile("st.release.sys.global.u64 [%0], %1;" ::"l"(ptr), "l"(val) : "memory");
+}
+
 __device__ __forceinline__ void st_release_cta(const int* ptr, int val) {
     asm volatile("st.release.cta.s32 [%0], %1;" ::"l"(ptr), "r"(val) : "memory");
 }

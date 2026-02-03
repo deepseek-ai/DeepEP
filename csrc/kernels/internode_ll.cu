@@ -1,9 +1,15 @@
 #include "configs.cuh"
 #include "exception.cuh"
-#include "ibgda_device.cuh"
 #include "launch.cuh"
+#include "nvshmem.h"
+#include "nvshmemx.h"
+#include "utils.cuh"
 
 namespace deep_ep {
+
+#ifndef DISABLE_NVSHMEM
+extern nvshmemx_qp_handle_t* qp_handle_device;
+#endif
 
 namespace internode_ll {
 
@@ -20,17 +26,11 @@ __forceinline__ __device__ bool is_rank_masked(int* mask_buffer_ptr, int rank) {
 }
 
 template <int kNumThreads>
-__forceinline__ __device__ void barrier(int thread_id, int rank, int num_ranks, int* mask_buffer_ptr, int* sync_buffer_ptr) {
+__forceinline__ __device__ void barrier(
+    int thread_id, int rank, int num_ranks, int* mask_buffer_ptr, int* sync_buffer_ptr, nvshmemx_qp_handle_t* qp_handle) {
     EP_DEVICE_ASSERT(kNumThreads >= num_ranks);
 
-    // Quiet all QPs
-    auto qps_per_rank = ibgda_get_state()->num_rc_per_pe * ibgda_get_state()->num_devices_initialized;
-
-    for (int i = thread_id; i < qps_per_rank * (num_ranks - 1); i += kNumThreads) {
-        auto dst_rank = (rank + 1 + i / qps_per_rank) % num_ranks;
-        auto qp_id = i % qps_per_rank;
-        nvshmemi_ibgda_quiet(dst_rank, qp_id);
-    }
+    nvshmemx_qp_quiet_block(NVSHMEMX_PE_ALL, NULL, NVSHMEMX_QP_ALL);
 
     // Update local counter
     if (thread_id == 0)
@@ -41,12 +41,11 @@ __forceinline__ __device__ void barrier(int thread_id, int rank, int num_ranks, 
     // Update remote counter and wait for local counter to be updated
     if (thread_id < num_ranks && thread_id != rank) {
         const auto dst_rank = thread_id;
-        const auto dst_ptr = reinterpret_cast<uint64_t>(sync_buffer_ptr + rank);
-        const auto dst_p2p_ptr = nvshmemi_get_p2p_ptr(dst_ptr, rank, dst_rank);
+        const auto dst_p2p_ptr = nvshmem_ptr(sync_buffer_ptr + rank, dst_rank);
 
         if (not is_rank_masked(mask_buffer_ptr, dst_rank)) {
-            if (dst_p2p_ptr == 0) {
-                nvshmemi_ibgda_rma_p(reinterpret_cast<int*>(dst_ptr), cnt, dst_rank, 0);
+            if (dst_p2p_ptr == nullptr) {
+                nvshmemx_qp_int_p(sync_buffer_ptr + rank, cnt, dst_rank, qp_handle[0]);
             } else {
                 st_release_sys_global(reinterpret_cast<int*>(dst_p2p_ptr), cnt);
             }
@@ -70,21 +69,22 @@ __forceinline__ __device__ void barrier(int thread_id, int rank, int num_ranks, 
 }
 
 template <int kNumThreads>
-__launch_bounds__(kNumThreads, 1) __global__ void clean_low_latency_buffer(int* clean_0,
+__launch_bounds__(kNumThreads, 1) __global__ void clean_low_latency_buffer(uint64_t* clean_0,
                                                                            int num_clean_int_0,
-                                                                           int* clean_1,
+                                                                           uint64_t* clean_1,
                                                                            int num_clean_int_1,
                                                                            int rank,
                                                                            int num_ranks,
                                                                            int* mask_buffer_ptr,
-                                                                           int* sync_buffer_ptr) {
+                                                                           int* sync_buffer_ptr,
+                                                                           nvshmemx_qp_handle_t* qp_handle) {
     auto thread_id = static_cast<int>(threadIdx.x);
 
     // Barrier before cleaning (in case of unfinished chunked EP)
     if (sync_buffer_ptr == nullptr)
         nvshmemx_barrier_all_block();
     else
-        barrier<kNumThreads>(thread_id, rank, num_ranks, mask_buffer_ptr, sync_buffer_ptr);
+        barrier<kNumThreads>(thread_id, rank, num_ranks, mask_buffer_ptr, sync_buffer_ptr, qp_handle);
 
     // Clean
     #pragma unroll
@@ -98,12 +98,12 @@ __launch_bounds__(kNumThreads, 1) __global__ void clean_low_latency_buffer(int* 
     if (sync_buffer_ptr == nullptr)
         nvshmemx_barrier_all_block();
     else
-        barrier<kNumThreads>(thread_id, rank, num_ranks, mask_buffer_ptr, sync_buffer_ptr);
+        barrier<kNumThreads>(thread_id, rank, num_ranks, mask_buffer_ptr, sync_buffer_ptr, qp_handle);
 }
 
-void clean_low_latency_buffer(int* clean_0,
+void clean_low_latency_buffer(uint64_t* clean_0,
                               int num_clean_int_0,
-                              int* clean_1,
+                              uint64_t* clean_1,
                               int num_clean_int_1,
                               int rank,
                               int num_ranks,
@@ -123,7 +123,8 @@ void clean_low_latency_buffer(int* clean_0,
                   rank,
                   num_ranks,
                   mask_buffer_ptr,
-                  sync_buffer_ptr);
+                  sync_buffer_ptr,
+                  qp_handle_device);
 }
 
 template <bool kUseFP8, bool kUseUE8M0, int kHidden>
@@ -136,13 +137,13 @@ __global__ __launch_bounds__(1024, 1) void dispatch(void* packed_recv_x,
                                                     int* cumulative_local_expert_recv_stats,
                                                     int64_t* dispatch_wait_recv_cost_stats,
                                                     void* rdma_recv_x,
-                                                    int* rdma_recv_count,
+                                                    uint64_t* rdma_recv_count,
                                                     void* rdma_x,
                                                     const void* x,
                                                     const topk_idx_t* topk_idx,
                                                     int* atomic_counter_per_expert,
                                                     int* atomic_finish_counter_per_expert,
-                                                    int* next_clean,
+                                                    uint64_t* next_clean,
                                                     int num_next_clean_int,
                                                     int num_tokens,
                                                     int num_max_dispatch_tokens_per_rank,
@@ -153,7 +154,9 @@ __global__ __launch_bounds__(1024, 1) void dispatch(void* packed_recv_x,
                                                     int num_warp_groups,
                                                     int num_warps_per_group,
                                                     bool round_scale,
-                                                    int phases) {
+                                                    int phases,
+                                                    nvshmemx_qp_handle_t* qp_handle,
+                                                    bool is_unordered_transport) {
     const auto sm_id = static_cast<int>(blockIdx.x);
     const auto thread_id = static_cast<int>(threadIdx.x);
     const auto warp_id = thread_id / 32, lane_id = get_lane_id();
@@ -261,10 +264,14 @@ __global__ __launch_bounds__(1024, 1) void dispatch(void* packed_recv_x,
                 const auto dst_ptr = reinterpret_cast<uint64_t>(rdma_recv_x) +
                     dst_expert_local_idx * num_ranks * num_max_dispatch_tokens_per_rank * num_bytes_per_msg +
                     rank * num_max_dispatch_tokens_per_rank * num_bytes_per_msg + slot_idx * num_bytes_per_msg;
-                const auto dst_p2p_ptr = nvshmemi_get_p2p_ptr(dst_ptr, rank, dst_rank);
+                const auto dst_p2p_ptr = nvshmem_ptr(reinterpret_cast<void*>(dst_ptr), dst_rank);
                 if (not is_rank_masked<true>(mask_buffer_ptr, dst_rank)) {
-                    if (dst_p2p_ptr == 0) {
-                        nvshmemi_ibgda_put_nbi_warp(dst_ptr, src_ptr, num_bytes_per_msg, dst_rank, dst_expert_local_idx, lane_id, slot_idx);
+                    if (dst_p2p_ptr == nullptr) {
+                        nvshmemx_qp_char_put_nbi_warp(reinterpret_cast<char*>(dst_ptr),
+                                                      reinterpret_cast<const char*>(src_ptr),
+                                                      num_bytes_per_msg,
+                                                      dst_rank,
+                                                      qp_handle[dst_expert_local_idx]);
                     } else {
                         // NOTES: only 2 load iterations for 7K hidden with 8 unrolls
                         const auto* src_int4_ptr = reinterpret_cast<const int4*>(src_ptr);
@@ -281,9 +288,6 @@ __global__ __launch_bounds__(1024, 1) void dispatch(void* packed_recv_x,
     } else if (warp_id == num_warps - 1) {
         EP_DEVICE_ASSERT(num_sms > 1);
         if (sm_id == 0) {
-            // The first SM is also responsible for checking QPs
-            EP_DEVICE_ASSERT(ibgda_get_state()->num_rc_per_pe >= num_local_experts);
-
             // The first SM is also responsible for cleaning the next buffer
             #pragma unroll
             for (int i = lane_id; i < num_next_clean_int; i += 32)
@@ -326,17 +330,21 @@ __global__ __launch_bounds__(1024, 1) void dispatch(void* packed_recv_x,
         const auto dst_rank = responsible_expert_idx / num_local_experts;
         const auto dst_expert_local_idx = responsible_expert_idx % num_local_experts;
         const auto num_tokens_sent = shared_num_tokens_sent_per_expert[responsible_expert_idx - sm_id * num_warp_groups];
+        uint64_t num_tokens_sent_64 = static_cast<uint64_t>(-num_tokens_sent - 1);
 
         // Wait local sends issued and send expert counts
         while (ld_acquire_global(atomic_finish_counter_per_expert + responsible_expert_idx) != FINISHED_SUM_TAG * 2)
             ;
-        auto dst_ptr = reinterpret_cast<uint64_t>(rdma_recv_count + dst_expert_local_idx * num_ranks + rank);
-        auto dst_p2p_ptr = nvshmemi_get_p2p_ptr(dst_ptr, rank, dst_rank);
+        auto dst_ptr = rdma_recv_count + dst_expert_local_idx * num_ranks + rank;
+        auto dst_p2p_ptr = reinterpret_cast<uint64_t*>(nvshmem_ptr(reinterpret_cast<void*>(dst_ptr), dst_rank));
         if (not is_rank_masked(mask_buffer_ptr, dst_rank)) {
             if (dst_p2p_ptr == 0) {
-                nvshmemi_ibgda_amo_nonfetch_add(reinterpret_cast<int*>(dst_ptr), -num_tokens_sent - 1, dst_rank, dst_expert_local_idx);
+                if (is_unordered_transport) {
+                    nvshmem_fence();
+                }
+                nvshmemx_qp_signal_op(dst_ptr, num_tokens_sent_64, NVSHMEM_SIGNAL_ADD, dst_rank, qp_handle[dst_expert_local_idx]);
             } else {
-                st_release_sys_global(reinterpret_cast<int*>(dst_p2p_ptr), -num_tokens_sent - 1);
+                st_release_sys_global(dst_p2p_ptr, num_tokens_sent_64);
             }
         }
 
@@ -379,7 +387,9 @@ LOW_LATENCY_DISPATCH_RECV:
 
         // Wait tokens to arrive
         // NOTES: using sub-warp 1 to overlap with sub-warp 0
-        int num_recv_tokens = 0, recv_token_begin_idx;
+        uint64_t num_recv_tokens = 0;
+        int num_recv_tokens_32 = 0;
+        int recv_token_begin_idx;
         EP_DEVICE_ASSERT(num_warps_per_group > 1 and num_warp_groups < 15);
         if (sub_warp_id == 1 and lane_id == 0) {
             auto start_time = clock64();
@@ -393,7 +403,7 @@ LOW_LATENCY_DISPATCH_RECV:
             }
             // Do not receive tokens if rank timeout or masked
             if (num_recv_tokens == 0)
-                num_recv_tokens = -1;
+                num_recv_tokens = UINT64_MAX;
             // Mask rank if timeout
             if (wait_recv_cost > NUM_TIMEOUT_CYCLES) {
                 printf("Warning: DeepEP timeout for dispatch receive, rank %d, local_expert_idx %d, src_rank %d\n",
@@ -405,25 +415,25 @@ LOW_LATENCY_DISPATCH_RECV:
                 atomicExch(mask_buffer_ptr + src_rank, 1);
             }
 
-            num_recv_tokens = -num_recv_tokens - 1;
-            recv_token_begin_idx = atomicAdd(packed_recv_count + local_expert_idx, num_recv_tokens);
-            shared_num_recv_tokens[warp_group_id] = num_recv_tokens;
+            num_recv_tokens_32 = -static_cast<int>(num_recv_tokens & 0xFFFFFFFFu) - 1;
+            recv_token_begin_idx = atomicAdd(packed_recv_count + local_expert_idx, num_recv_tokens_32);
+            shared_num_recv_tokens[warp_group_id] = num_recv_tokens_32;
             shared_recv_token_begin_idx[warp_group_id] = recv_token_begin_idx;
-            recv_range[src_rank] = pack2<int, int64_t>(num_recv_tokens, recv_token_begin_idx);
+            recv_range[src_rank] = pack2<int, int64_t>(num_recv_tokens_32, recv_token_begin_idx);
 
             // Add stats for diagnosis
             if (cumulative_local_expert_recv_stats != nullptr)
-                atomicAdd(cumulative_local_expert_recv_stats + local_expert_idx, num_recv_tokens);
+                atomicAdd(cumulative_local_expert_recv_stats + local_expert_idx, num_recv_tokens_32);
             if (dispatch_wait_recv_cost_stats != nullptr)
                 atomicAdd(reinterpret_cast<unsigned long long*>(dispatch_wait_recv_cost_stats + src_rank), wait_recv_cost);
         }
         asm volatile("bar.sync %0, %1;" ::"r"(warp_group_id + 2), "r"(num_warps_per_group * 32));
-        num_recv_tokens = shared_num_recv_tokens[warp_group_id];
+        num_recv_tokens_32 = shared_num_recv_tokens[warp_group_id];
         recv_token_begin_idx = shared_recv_token_begin_idx[warp_group_id];
 
         // Copy tokens
         EP_DEVICE_ASSERT(num_scales <= 64);
-        for (int i = sub_warp_id; i < num_recv_tokens; i += num_warps_per_group) {
+        for (int i = sub_warp_id; i < num_recv_tokens_32; i += num_warps_per_group) {
             // Copy source info
             const auto src_src_idx = reinterpret_cast<int*>(rdma_recv_x_uint8 + i * num_bytes_per_msg);
             if (lane_id == 0)
@@ -471,11 +481,11 @@ void dispatch(void* packed_recv_x,
               int* cumulative_local_expert_recv_stats,
               int64_t* dispatch_wait_recv_cost_stats,
               void* rdma_recv_x,
-              int* rdma_recv_count,
+              uint64_t* rdma_recv_count,
               void* rdma_x,
               const void* x,
               const topk_idx_t* topk_idx,
-              int* next_clean,
+              uint64_t* next_clean,
               int num_next_clean_int,
               int num_tokens,
               int hidden,
@@ -490,7 +500,8 @@ void dispatch(void* packed_recv_x,
               void* workspace,
               int num_device_sms,
               cudaStream_t stream,
-              int phases) {
+              int phases,
+              bool is_unordered_transport) {
     constexpr int kNumMaxTopK = 11;
     const int num_warp_groups = ceil_div(num_experts, num_device_sms);
     const int num_warps_per_group = 32 / num_warp_groups;
@@ -545,7 +556,9 @@ void dispatch(void* packed_recv_x,
                       num_warp_groups,                       \
                       num_warps_per_group,                   \
                       round_scale,                           \
-                      phases);                               \
+                      phases,                                \
+                      qp_handle_device,                      \
+                      is_unordered_transport);               \
     }                                                        \
     break
 
@@ -715,7 +728,7 @@ __forceinline__ __device__ void decode_and_accumulate(
 template <bool kUseLogFMT, int kHidden, int kNumMaxTopk, int kNumMaxUnrolls>
 __global__ __launch_bounds__(1024, 1) void combine(void* combined_x,
                                                    void* rdma_recv_x,
-                                                   int* rdma_recv_flag,
+                                                   uint64_t* rdma_recv_flag,
                                                    void* rdma_send_x,
                                                    const void* x,
                                                    const topk_idx_t* topk_idx,
@@ -724,7 +737,7 @@ __global__ __launch_bounds__(1024, 1) void combine(void* combined_x,
                                                    const int64_t* layout_range,
                                                    int* mask_buffer_ptr,
                                                    int64_t* combine_wait_recv_cost_stats,
-                                                   int* next_clean,
+                                                   uint64_t* next_clean,
                                                    int num_next_clean_int,
                                                    int* atomic_clean_flag,
                                                    int num_combined_tokens,
@@ -737,7 +750,9 @@ __global__ __launch_bounds__(1024, 1) void combine(void* combined_x,
                                                    int num_warp_groups,
                                                    int num_warps_per_group,
                                                    int phases,
-                                                   bool zero_copy) {
+                                                   bool zero_copy,
+                                                   nvshmemx_qp_handle_t* qp_handle,
+                                                   bool is_unordered_transport) {
     const auto sm_id = __shfl_sync(0xffffffff, static_cast<int>(blockIdx.x), 0);
     const auto num_sms = __shfl_sync(0xffffffff, static_cast<int>(gridDim.x), 0);
     const auto thread_id = static_cast<int>(threadIdx.x);
@@ -844,7 +859,7 @@ __global__ __launch_bounds__(1024, 1) void combine(void* combined_x,
                 const auto buf_ptr = reinterpret_cast<int64_t>(rdma_send_x_vec_row);
                 const auto dst_ptr = reinterpret_cast<uint64_t>(rdma_recv_x) +
                     (global_expert_idx * num_max_dispatch_tokens_per_rank + src_idx) * num_bytes_per_slot;
-                const auto dst_p2p_ptr = nvshmemi_get_p2p_ptr(dst_ptr, rank, dst_rank);
+                const auto dst_p2p_ptr = nvshmem_ptr(reinterpret_cast<void*>(dst_ptr), dst_rank);
                 int num_send_bytes = hidden * sizeof(nv_bfloat16);
 
                 if (not zero_copy or dst_p2p_ptr != 0) {
@@ -909,7 +924,11 @@ __global__ __launch_bounds__(1024, 1) void combine(void* combined_x,
                 // Issue RDMA
                 // NOTES: for zero-copy mode, we assume the data is already in the send buffer
                 if (dst_p2p_ptr == 0)
-                    nvshmemi_ibgda_put_nbi_warp(dst_ptr, buf_ptr, num_send_bytes, dst_rank, local_expert_idx, lane_id, token_idx - offset);
+                    nvshmemx_qp_char_put_nbi_warp(reinterpret_cast<char*>(dst_ptr),
+                                                  reinterpret_cast<const char*>(buf_ptr),
+                                                  num_send_bytes,
+                                                  dst_rank,
+                                                  qp_handle[local_expert_idx]);
             }
         }
 
@@ -919,13 +938,16 @@ __global__ __launch_bounds__(1024, 1) void combine(void* combined_x,
         if (sub_warp_id == 1 and lane_id == 0) {
             while (ld_acquire_global(atomic_clean_flag) == 0)
                 ;
-            auto dst_ptr = reinterpret_cast<uint64_t>(rdma_recv_flag + global_expert_idx);
-            auto dst_p2p_ptr = nvshmemi_get_p2p_ptr(dst_ptr, rank, dst_rank);
+            auto dst_ptr = rdma_recv_flag + global_expert_idx;
+            auto dst_p2p_ptr = reinterpret_cast<uint64_t*>(nvshmem_ptr(reinterpret_cast<void*>(dst_ptr), dst_rank));
             if (not is_rank_masked(mask_buffer_ptr, dst_rank)) {
                 if (dst_p2p_ptr == 0) {
-                    nvshmemi_ibgda_amo_nonfetch_add(reinterpret_cast<int*>(dst_ptr), 1, dst_rank, local_expert_idx);
+                    if (is_unordered_transport) {
+                        nvshmem_fence();
+                    }
+                    nvshmemx_qp_signal_op(dst_ptr, 1, NVSHMEM_SIGNAL_ADD, dst_rank, qp_handle[local_expert_idx]);
                 } else {
-                    st_release_sys_global(reinterpret_cast<int*>(dst_p2p_ptr), 1);
+                    st_release_sys_global(dst_p2p_ptr, 1);
                 }
             }
             atomic_add_release_global(atomic_clean_flag, -1);
@@ -1140,7 +1162,7 @@ LOW_LATENCY_COMBINE_RECV:
 
 void combine(void* combined_x,
              void* rdma_recv_x,
-             int* rdma_recv_flag,
+             uint64_t* rdma_recv_flag,
              void* rdma_send_x,
              const void* x,
              const topk_idx_t* topk_idx,
@@ -1149,7 +1171,7 @@ void combine(void* combined_x,
              const int64_t* layout_range,
              int* mask_buffer_ptr,
              int64_t* combine_wait_recv_cost_stats,
-             int* next_clean,
+             uint64_t* next_clean,
              int num_next_clean_int,
              int num_combined_tokens,
              int hidden,
@@ -1163,7 +1185,8 @@ void combine(void* combined_x,
              int num_device_sms,
              cudaStream_t stream,
              int phases,
-             bool zero_copy) {
+             bool zero_copy,
+             bool is_unordered_transport) {
     constexpr int kNumMaxTopk = 11;
     const int num_warp_groups = ceil_div(num_experts, num_device_sms);
     const int num_warps_per_group = 32 / num_warp_groups;
@@ -1229,7 +1252,9 @@ void combine(void* combined_x,
                       num_warp_groups,                                                                                             \
                       num_warps_per_group,                                                                                         \
                       phases,                                                                                                      \
-                      zero_copy);                                                                                                  \
+                      zero_copy,                                                                                                   \
+                      qp_handle_device,                                                                                            \
+                      is_unordered_transport);                                                                                     \
     }                                                                                                                              \
     break
 
