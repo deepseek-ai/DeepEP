@@ -1846,7 +1846,7 @@ void Buffer::low_latency_clean_mask_buffer() {
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.doc() = "DeepEP: an efficient expert-parallel communication library";
 
-    pybind11::class_<deep_ep::Config>(m, "Config")
+    pybind11::class_<deep_ep::Config>(m, "Config", py::module_local())
         .def(pybind11::init<int, int, int, int, int>(),
              py::arg("num_sms") = 20,
              py::arg("num_max_nvl_chunked_send_tokens") = 6,
@@ -1857,11 +1857,11 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         .def("get_rdma_buffer_size_hint", &deep_ep::Config::get_rdma_buffer_size_hint);
     m.def("get_low_latency_rdma_size_hint", &deep_ep::get_low_latency_rdma_size_hint);
 
-    pybind11::class_<deep_ep::EventHandle>(m, "EventHandle")
+    pybind11::class_<deep_ep::EventHandle>(m, "EventHandle", py::module_local())
         .def(pybind11::init<>())
         .def("current_stream_wait", &deep_ep::EventHandle::current_stream_wait);
 
-    pybind11::class_<deep_ep::Buffer>(m, "Buffer")
+    pybind11::class_<deep_ep::Buffer>(m, "Buffer", py::module_local())
         .def(pybind11::init<int, int, int64_t, int64_t, bool, bool, bool, bool>())
         .def("is_available", &deep_ep::Buffer::is_available)
         .def("get_num_rdma_ranks", &deep_ep::Buffer::get_num_rdma_ranks)
