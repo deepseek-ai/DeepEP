@@ -44,7 +44,7 @@ __host__ __device__ __forceinline__ int get_num_bytes_per_token(int hidden_int4,
                                          num_topk_idx * sizeof(int) + num_topk_weights * sizeof(float),
                                      sizeof(int4)));
 }
-
+#ifndef DISABLE_SM90_FEATURES
 __host__ __device__ __forceinline__ std::pair<int, int> get_rdma_clean_meta(int hidden_int4,
                                                                             int num_scales,
                                                                             int num_topk_idx,
@@ -78,6 +78,26 @@ __host__ __device__ __forceinline__ std::pair<int, int> get_nvl_clean_meta(int h
         num_nvl_ranks * (2 * num_rdma_ranks + 2) * num_channels,
     };
 }
+#else
+__host__ __device__ __forceinline__
+std::pair<int, int> get_rdma_clean_meta(int hidden_int4, int num_scales, int num_topk_idx, int num_topk_weights, int num_rdma_ranks, int num_rdma_recv_buffer_tokens, int num_sms) {
+    // Return `int32_t` offset and count to clean
+    return {
+        (get_num_bytes_per_token(hidden_int4, num_scales, num_topk_idx, num_topk_weights) * num_rdma_recv_buffer_tokens * num_rdma_ranks * 2 * num_sms) / sizeof(int),
+        (NUM_MAX_NVL_PEERS * 2 + 4) * num_rdma_ranks * 2 * num_sms
+    };
+}
+
+__host__ __device__ __forceinline__
+std::pair<int, int> get_nvl_clean_meta(int hidden_int4, int num_scales, int num_topk_idx, int num_topk_weights, int num_rdma_ranks, int num_nvl_ranks, int num_nvl_recv_buffer_tokens, int num_sms, bool is_dispatch) {
+    // Return `int32_t` offset and to clean
+    EP_STATIC_ASSERT(sizeof(SourceMeta) % sizeof(int) == 0, "Invalid size of `SourceMeta`");
+    return {
+        (num_nvl_recv_buffer_tokens * (hidden_int4 * sizeof(int4) + num_scales * sizeof(float) + num_topk_idx * sizeof(int) + num_topk_weights * sizeof(float) + sizeof(SourceMeta)) * num_nvl_ranks * num_sms) / sizeof(int),
+        num_nvl_ranks * (2 * num_rdma_ranks + 2) * num_sms,
+    };
+}
+#endif
 
 template <bool kLowLatencyMode>
 __forceinline__ __device__ int translate_dst_rdma_rank(const int dst_rdma_rank, const int nvl_rank) {
@@ -516,7 +536,9 @@ __global__ void __launch_bounds__(((kNumDispatchRDMASenderWarps + 1 + NUM_MAX_NV
     // RDMA symmetric layout
     EP_STATIC_ASSERT(NUM_MAX_NVL_PEERS * sizeof(bool) == sizeof(uint64_t), "Invalid number of NVL peers");
     auto hidden_bytes = hidden_int4 * sizeof(int4);
+#ifndef DISABLE_SM90_FEATURES
     auto scale_bytes = num_scales * sizeof(float);
+#endif
     auto num_bytes_per_token = get_num_bytes_per_token(hidden_int4, num_scales, num_topk, num_topk);
     auto rdma_channel_data = SymBuffer<uint8_t>(
         rdma_buffer_ptr, num_max_rdma_chunked_recv_tokens * num_bytes_per_token, kNumRDMARanks, channel_id, num_channels);
@@ -537,6 +559,7 @@ __global__ void __launch_bounds__(((kNumDispatchRDMASenderWarps + 1 + NUM_MAX_NV
         ws_rr_rank = nvl_rank;
 
     // Allocate buffers
+#ifndef DISABLE_SM90_FEATURES
     auto nvl_channel_x = AsymBuffer<uint8_t>(ws_rr_buffer_ptr,
                                              num_max_nvl_chunked_recv_tokens * num_bytes_per_token,
                                              NUM_MAX_NVL_PEERS,
@@ -544,6 +567,27 @@ __global__ void __launch_bounds__(((kNumDispatchRDMASenderWarps + 1 + NUM_MAX_NV
                                              num_channels,
                                              rs_wr_rank)
                              .advance_also(rs_wr_buffer_ptr);
+#else
+    auto nvl_channel_x =
+        AsymBuffer<int4>(
+            ws_rr_buffer_ptr, num_max_nvl_chunked_recv_tokens * hidden_int4, NUM_MAX_NVL_PEERS, channel_id, num_channels, rs_wr_rank)
+            .advance_also(rs_wr_buffer_ptr);
+    auto nvl_channel_src_meta =
+        AsymBuffer<SourceMeta>(ws_rr_buffer_ptr, num_max_nvl_chunked_recv_tokens, NUM_MAX_NVL_PEERS, channel_id, num_channels, rs_wr_rank)
+            .advance_also(rs_wr_buffer_ptr);
+    auto nvl_channel_x_scales =
+        AsymBuffer<float>(
+            ws_rr_buffer_ptr, num_max_nvl_chunked_recv_tokens * num_scales, NUM_MAX_NVL_PEERS, channel_id, num_channels, rs_wr_rank)
+            .advance_also(rs_wr_buffer_ptr);
+    auto nvl_channel_topk_idx =
+        AsymBuffer<int>(
+            ws_rr_buffer_ptr, num_max_nvl_chunked_recv_tokens * num_topk, NUM_MAX_NVL_PEERS, channel_id, num_channels, rs_wr_rank)
+            .advance_also(rs_wr_buffer_ptr);
+    auto nvl_channel_topk_weights =
+        AsymBuffer<float>(
+            ws_rr_buffer_ptr, num_max_nvl_chunked_recv_tokens * num_topk, NUM_MAX_NVL_PEERS, channel_id, num_channels, rs_wr_rank)
+            .advance_also(rs_wr_buffer_ptr);
+#endif
     auto nvl_channel_prefix_start =
         AsymBuffer<int>(ws_rr_buffer_ptr, kNumRDMARanks, NUM_MAX_NVL_PEERS, channel_id, num_channels, rs_wr_rank)
             .advance_also(rs_wr_buffer_ptr);
@@ -562,6 +606,7 @@ __global__ void __launch_bounds__(((kNumDispatchRDMASenderWarps + 1 + NUM_MAX_NV
     __shared__ uint32_t rdma_send_channel_window[kNumRDMARanks];
     auto sync_rdma_sender_smem = []() { asm volatile("barrier.sync 0, %0;" ::"r"((kNumDispatchRDMASenderWarps + 1) * 32)); };
 
+#ifndef DISABLE_SM90_FEATURES
     // TMA stuffs
     extern __shared__ __align__(1024) uint8_t smem_tma_buffer[];
     auto tma_buffer = smem_tma_buffer + target_rank * kNumTMABytesPerWarp;
@@ -573,6 +618,7 @@ __global__ void __launch_bounds__(((kNumDispatchRDMASenderWarps + 1 + NUM_MAX_NV
         EP_DEVICE_ASSERT(num_bytes_per_token + sizeof(uint64_t) <= kNumTMABytesPerWarp);
     }
     __syncwarp();
+#endif
 
     // Forward warp synchronization
     __shared__ volatile int forward_channel_head[NUM_MAX_NVL_PEERS][kNumRDMARanks];
@@ -844,6 +890,11 @@ __global__ void __launch_bounds__(((kNumDispatchRDMASenderWarps + 1 + NUM_MAX_NV
     } else if (warp_role == WarpRole::kRDMAAndNVLForwarder) {
         // RDMA consumers and NVL producers
         const auto dst_nvl_rank = target_rank;
+#ifdef DISABLE_SM90_FEATURES
+        const auto dst_rank = rdma_rank * NUM_MAX_NVL_PEERS + dst_nvl_rank;
+        const auto dst_rank_expert_begin = dst_rank * (num_experts / num_ranks);
+        const auto dst_rank_expert_end = dst_rank_expert_begin + (num_experts / num_ranks);
+#endif
 
         // Wait counters to arrive
         int num_tokens_to_recv_from_rdma = 0, src_rdma_channel_prefix = 0;
@@ -960,8 +1011,13 @@ __global__ void __launch_bounds__(((kNumDispatchRDMASenderWarps + 1 + NUM_MAX_NV
             // Iterate over every token from the RDMA buffer
             for (int i = src_rdma_head, num_tokens_sent = 0; i < src_rdma_tail; ++i) {
                 auto rdma_slot_idx = i % num_max_rdma_chunked_recv_tokens;
+#ifndef DISABLE_SM90_FEATURES
                 auto shifted = rdma_channel_data.recv_buffer(src_rdma_rank) + rdma_slot_idx * num_bytes_per_token;
                 auto src_meta = ld_nc_global(reinterpret_cast<SourceMeta*>(shifted + hidden_bytes + scale_bytes));
+#else
+                void* shifted = rdma_channel_data.recv_buffer(src_rdma_rank) + rdma_slot_idx * num_bytes_per_token;
+                auto src_meta = ld_nc_global(reinterpret_cast<SourceMeta*>(static_cast<int8_t*>(shifted) + hidden_bytes));
+#endif
                 lane_id == src_rdma_rank ? (num_tokens_to_recv_from_rdma -= 1) : 0;
                 bool is_in_dst_nvl_rank = src_meta.is_token_in_nvl_rank(dst_nvl_rank);
                 if (lane_id == src_rdma_rank) {
@@ -975,6 +1031,7 @@ __global__ void __launch_bounds__(((kNumDispatchRDMASenderWarps + 1 + NUM_MAX_NV
 
                 // Get an empty slot
                 int dst_slot_idx = (cached_nvl_channel_tail++) % num_max_nvl_chunked_recv_tokens;
+#ifndef DISABLE_SM90_FEATURES
                 auto dst_shifted = nvl_channel_x.buffer() + dst_slot_idx * num_bytes_per_token;
 
                 // Copy data
@@ -995,8 +1052,53 @@ __global__ void __launch_bounds__(((kNumDispatchRDMASenderWarps + 1 + NUM_MAX_NV
                 // Wait TMA to be finished
                 tma_store_wait<0>();
                 __syncwarp();
-            }
+#else
+                // Copy data
+                UNROLLED_WARP_COPY(5,
+                                   lane_id,
+                                   hidden_int4,
+                                   nvl_channel_x.buffer() + dst_slot_idx * hidden_int4,
+                                   reinterpret_cast<int4*>(shifted),
+                                   ld_nc_global,
+                                   st_na_global);
+                shifted = static_cast<int4*>(shifted) + hidden_int4;
 
+                // Copy source meta
+                if (lane_id == 0)
+                    st_na_global(nvl_channel_src_meta.buffer() + dst_slot_idx, src_meta);
+                shifted = static_cast<SourceMeta*>(shifted) + 1;
+
+                // Copy `x_scales`
+                UNROLLED_WARP_COPY(1,
+                                   lane_id,
+                                   num_scales,
+                                   nvl_channel_x_scales.buffer() + dst_slot_idx * num_scales,
+                                   reinterpret_cast<float*>(shifted),
+                                   ld_nc_global,
+                                   st_na_global);
+                shifted = static_cast<float*>(shifted) + num_scales;
+
+                // Copy `topk_idx` and `topk_weights`
+                // NOTES: do not use `shifted` after this `if`, because only several lanes are shifted
+                if (lane_id < num_topk) {
+                    // Read
+                    auto idx_value = ld_nc_global(static_cast<int*>(shifted) + lane_id);
+                    shifted = static_cast<int*>(shifted) + num_topk;
+                    auto weight_value = ld_nc_global(static_cast<float*>(shifted) + lane_id);
+
+                    // Transform and write
+                    idx_value =
+                        (idx_value >= dst_rank_expert_begin and idx_value < dst_rank_expert_end) ? idx_value - dst_rank_expert_begin : -1;
+                    st_na_global(nvl_channel_topk_idx.buffer() + dst_slot_idx * num_topk + lane_id, idx_value);
+                    weight_value = idx_value >= 0 ? weight_value : 0.0f;
+                    st_na_global(nvl_channel_topk_weights.buffer() + dst_slot_idx * num_topk + lane_id, weight_value);
+                }
+
+                // In case of insufficient NVL buffers, early stopping
+                if ((++num_tokens_sent) == num_max_nvl_chunked_send_tokens)
+                    src_rdma_tail = i + 1;
+#endif
+            }
             // Sync head index
             if (lane_id == src_rdma_rank)
                 forward_channel_head[dst_nvl_rank][src_rdma_rank] = (cached_rdma_channel_head = src_rdma_tail);
@@ -1057,8 +1159,10 @@ __global__ void __launch_bounds__(((kNumDispatchRDMASenderWarps + 1 + NUM_MAX_NV
         // NVL consumers
         // Retrieve rank offset from barrier results (each lane's register stores an RDMA rank)
         int src_nvl_rank = target_rank, total_offset = 0;
+#ifndef DISABLE_SM90_FEATURES
         const int local_expert_begin = rank * (num_experts / num_ranks);
         const int local_expert_end = local_expert_begin + (num_experts / num_ranks);
+#endif
 
         EP_STATIC_ASSERT(kNumRDMARanks <= 32, "Invalid number of RDMA peers");
         if (lane_id < kNumRDMARanks and lane_id * NUM_MAX_NVL_PEERS + src_nvl_rank > 0)
@@ -1124,11 +1228,15 @@ __global__ void __launch_bounds__(((kNumDispatchRDMASenderWarps + 1 + NUM_MAX_NV
             int num_recv_tokens = cached_channel_tail_idx - cached_channel_head_idx;
             for (int chunk_idx = 0; chunk_idx < num_recv_tokens; ++chunk_idx, --num_tokens_to_recv) {
                 int token_idx_in_buffer = (cached_channel_head_idx++) % num_max_nvl_chunked_recv_tokens;
+#ifndef DISABLE_SM90_FEATURES
                 auto shifted = nvl_channel_x.buffer() + token_idx_in_buffer * num_bytes_per_token;
                 auto meta = ld_nc_global(reinterpret_cast<SourceMeta*>(shifted + hidden_bytes + scale_bytes));
+#else
+                auto meta = ld_nc_global(nvl_channel_src_meta.buffer() + token_idx_in_buffer);
+#endif
                 int64_t recv_token_idx = __shfl_sync(0xffffffff, total_offset, meta.src_rdma_rank);
                 (lane_id == meta.src_rdma_rank) ? (total_offset += 1) : 0;
-
+#ifndef DISABLE_SM90_FEATURES
                 bool scale_aligned = (scale_bytes % 16 == 0);
                 auto tma_load_bytes = hidden_bytes + (scale_aligned ? scale_bytes : 0);
 
@@ -1182,8 +1290,41 @@ __global__ void __launch_bounds__(((kNumDispatchRDMASenderWarps + 1 + NUM_MAX_NV
                 // Wait TMA to be finished
                 tma_store_wait<0>();
                 __syncwarp();
-            }
+#else
+                // Copy data
+                UNROLLED_WARP_COPY(5,
+                                   lane_id,
+                                   hidden_int4,
+                                   recv_x + recv_token_idx * hidden_int4,
+                                   nvl_channel_x.buffer() + token_idx_in_buffer * hidden_int4,
+                                   ld_nc_global,
+                                   st_na_global);
 
+                // Copy source meta
+                if (lane_id == 0 and not kCachedMode)
+                    st_na_global(recv_src_meta + recv_token_idx, meta);
+
+                // Copy scales
+                UNROLLED_WARP_COPY(1,
+                                   lane_id,
+                                   num_scales,
+                                   recv_x_scales + recv_token_idx * num_scales,
+                                   nvl_channel_x_scales.buffer() + token_idx_in_buffer * num_scales,
+                                   ld_nc_global,
+                                   st_na_global);
+
+                // Copy `topk_idx` and `topk_weights`
+                if (lane_id < num_topk) {
+                    auto recv_idx = recv_token_idx * num_topk + lane_id;
+                    auto buffer_idx = token_idx_in_buffer * num_topk + lane_id;
+                    st_na_global(recv_topk_idx + recv_idx, static_cast<int64_t>(ld_nc_global(nvl_channel_topk_idx.buffer() + buffer_idx)));
+                    st_na_global(recv_topk_weights + recv_idx, ld_nc_global(nvl_channel_topk_weights.buffer() + buffer_idx));
+                }
+#endif
+            }
+#ifdef DISABLE_SM90_FEATURES
+            __syncwarp();
+#endif
             // Move queue
             if (elect_one_sync())
                 st_relaxed_sys_global(nvl_channel_head.buffer(), cached_channel_head_idx);
@@ -1402,6 +1543,7 @@ __global__ void cached_notify(const int rdma_clean_offset,
         EP_STATIC_ASSERT(NUM_MAX_NVL_PEERS <= 32, "Too many NVL peers");
 
         if (warp_id < num_channels) {
+#ifndef DISABLE_SM90_FEATURES
             constexpr int tma_batch_size = kNumTMABytesPerWarp - sizeof(uint64_t);
             constexpr int num_bytes_per_token = sizeof(int) * NUM_MAX_NVL_PEERS;
             constexpr int num_tokens_per_batch = tma_batch_size / num_bytes_per_token;
@@ -1417,6 +1559,7 @@ __global__ void cached_notify(const int rdma_clean_offset,
                 fence_barrier_init();
             }
             __syncwarp();
+#endif
 
             for (int dst_rdma_rank = sm_id - 2; dst_rdma_rank < num_rdma_ranks; dst_rdma_rank += num_channels * 2 - 2) {
                 // Iterate in reverse order
@@ -1427,6 +1570,7 @@ __global__ void cached_notify(const int rdma_clean_offset,
 
                 // NOTES: `1 << 25` is a heuristic large number
                 int last_head = 1 << 25;
+#ifndef DISABLE_SM90_FEATURES
                 for (int batch_end_idx = token_end_idx; batch_end_idx > token_start_idx; batch_end_idx -= num_tokens_per_batch) {
                     auto batch_start_idx = max(token_start_idx, batch_end_idx - num_tokens_per_batch);
 
@@ -1462,6 +1606,19 @@ __global__ void cached_notify(const int rdma_clean_offset,
                     tma_store_wait<0>();
                     __syncwarp();
                 }
+#else
+                #pragma unroll
+                for (int token_idx = token_end_idx - 1; token_idx >= token_start_idx; --token_idx) {
+                    if (lane_id < NUM_MAX_NVL_PEERS) {
+                        auto current_head = __ldg(combined_nvl_head + token_idx * NUM_MAX_NVL_PEERS + lane_id);
+                        if (current_head < 0) {
+                            combined_nvl_head[token_idx * NUM_MAX_NVL_PEERS + lane_id] = -last_head - 1;
+                        } else {
+                            last_head = current_head;
+                        }
+                    }
+                }
+#endif
             }
         }
     }
@@ -1579,6 +1736,7 @@ __device__ int combine_token(bool is_token_in_rank,
 
     // Reduce data
     if constexpr (kUseTMA) {
+#ifndef DISABLE_SM90_FEATURES
         constexpr int kNumTMABufferBytesPerStage = kNumTMALoadBytes * (NUM_MAX_NVL_PEERS + 1) + 16;
         EP_DEVICE_ASSERT(hidden_int4 % 32 == 0);
 
@@ -1642,6 +1800,7 @@ __device__ int combine_token(bool is_token_in_rank,
 
         // Flush all writes
         tma_store_wait<0>();
+#endif
     } else {
         #pragma unroll
         for (int i = lane_id; i < hidden_int4; i += 32) {
@@ -1671,22 +1830,42 @@ __device__ int combine_token(bool is_token_in_rank,
                     values[j] = static_cast<float>(bias_0_values[j]) + static_cast<float>(bias_1_values[j]);
             }
 
-            // Reduce all-to-all results
-            #pragma unroll
-            for (int j = 0; j < num_topk_ranks; ++j) {
-                auto recv_value_dtypes = reinterpret_cast<const dtype_t*>(&recv_value_int4[j]);
-                #pragma unroll
-                for (int k = 0; k < kDtypePerInt4; ++k)
-                    values[k] += static_cast<float>(recv_value_dtypes[k]);
-            }
+                    // Reduce all-to-all results
+                    #pragma unroll
+                    for (int j = 0; j < num_topk_ranks; ++j) {
+                        auto recv_value_dtypes = reinterpret_cast<const dtype_t*>(&recv_value_int4[j]);
+                        #pragma unroll
+                        for (int k = 0; k < kDtypePerInt4; ++k) {
+                            float value = static_cast<float>(recv_value_dtypes[k]);
+                            // SM80: Check for NaN/Inf before accumulation
+                            #ifdef DISABLE_SM90_FEATURES
+                            if (!isfinite(value)) {
+                                // If NaN/Inf detected, use 0 to avoid polluting results
+                                printf("SM80 Warning: Non-finite value detected in rank %d, slot %d, lane %d: %f\n", 
+                                       j, slot_indices[j], lane_id, value);
+                                value = 0.0f;
+                            }
+                            #endif
+                            values[k] += value;
+                        }
+                    }
 
-            // Cast back to `dtype_t` and write
-            int4 out_int4;
-            auto out_dtypes = reinterpret_cast<dtype_t*>(&out_int4);
-            #pragma unroll
-            for (int j = 0; j < kDtypePerInt4; ++j)
-                out_dtypes[j] = static_cast<dtype_t>(values[j]);
-            st_na_global(combined_row + i, out_int4);
+                    // Cast back to `dtype_t` and write
+                    int4 out_int4;
+                    auto out_dtypes = reinterpret_cast<dtype_t*>(&out_int4);
+                    #pragma unroll
+                    for (int j = 0; j < kDtypePerInt4; ++j) {
+                        // SM80: Final sanity check on output
+                        #ifdef DISABLE_SM90_FEATURES
+                        if (!isfinite(values[j])) {
+                            printf("SM80 Critical: Final value NaN in topk_weights reduction at lane %d: %f\n", 
+                                   lane_id, values[j]);
+                            values[j] = 0.0f;  // Replace with safe value
+                        }
+                        #endif
+                        out_dtypes[j] = static_cast<dtype_t>(values[j]);
+                    }
+                    st_na_global(combined_row + i, out_int4);
         }
     }
 
@@ -1788,6 +1967,7 @@ __global__ void __launch_bounds__((kNumForwarders + 1) * 32, 1) combine(int4* co
         // NVL layouts
         // NOTES: to avoid deadlocks, we use separate NVL buffers for different RDMA sources
         auto dst_buffer_ptr = buffer_ptrs[dst_nvl_rank], local_buffer_ptr = buffer_ptrs[nvl_rank];
+#ifndef DISABLE_SM90_FEATURES
         auto nvl_channel_x = AsymBuffer<uint8_t>(dst_buffer_ptr,
                                                  num_max_nvl_chunked_recv_tokens * num_bytes_per_token,
                                                  NUM_MAX_NVL_PEERS,
@@ -1795,11 +1975,17 @@ __global__ void __launch_bounds__((kNumForwarders + 1) * 32, 1) combine(int4* co
                                                  num_channels,
                                                  nvl_rank)
                                  .advance_also(local_buffer_ptr);
+#else
+        auto nvl_channel_x = AsymBuffer<int4>(dst_buffer_ptr, num_max_nvl_chunked_recv_tokens * hidden_int4, NUM_MAX_NVL_PEERS, channel_id, num_channels, nvl_rank).advance_also(local_buffer_ptr);
+        auto nvl_channel_src_meta = AsymBuffer<SourceMeta>(dst_buffer_ptr, num_max_nvl_chunked_recv_tokens, NUM_MAX_NVL_PEERS, channel_id, num_channels, nvl_rank).advance_also(local_buffer_ptr);
+        auto nvl_channel_topk_weights = AsymBuffer<float>(dst_buffer_ptr, num_max_nvl_chunked_recv_tokens * num_topk, NUM_MAX_NVL_PEERS, channel_id, num_channels, nvl_rank).advance_also(local_buffer_ptr);
+#endif
         auto nvl_channel_head = AsymBuffer<int>(local_buffer_ptr, kNumRDMARanks, NUM_MAX_NVL_PEERS, channel_id, num_channels, dst_nvl_rank)
                                     .advance_also(dst_buffer_ptr);
         auto nvl_channel_tail = AsymBuffer<int>(dst_buffer_ptr, kNumRDMARanks, NUM_MAX_NVL_PEERS, channel_id, num_channels, nvl_rank)
                                     .advance_also(local_buffer_ptr);
 
+#ifndef DISABLE_SM90_FEATURES
         // TMA stuffs
         extern __shared__ __align__(1024) uint8_t smem_tma_buffer[];
         auto tma_buffer = smem_tma_buffer + dst_nvl_rank * kNumTMABytesPerSenderWarp;
@@ -1811,6 +1997,7 @@ __global__ void __launch_bounds__((kNumForwarders + 1) * 32, 1) combine(int4* co
             EP_DEVICE_ASSERT(num_bytes_per_token + sizeof(uint64_t) <= kNumTMABytesPerSenderWarp);
         }
         __syncwarp();
+#endif
 
         // Get tasks for each RDMA lane
         int token_start_idx = 0, token_end_idx = 0;
@@ -1884,7 +2071,7 @@ __global__ void __launch_bounds__((kNumForwarders + 1) * 32, 1) combine(int4* co
                         dst_slot_idx = current_rdma_idx * num_max_nvl_chunked_recv_tokens_per_rdma + dst_slot_idx;
                     }
                     dst_slot_idx = __shfl_sync(0xffffffff, dst_slot_idx, current_rdma_idx);
-
+#ifndef DISABLE_SM90_FEATURES
                     // Load data
                     auto shifted_x_buffers = nvl_channel_x.buffer() + dst_slot_idx * num_bytes_per_token;
                     auto shifted_x = x + token_idx * hidden_int4;
@@ -1910,12 +2097,26 @@ __global__ void __launch_bounds__((kNumForwarders + 1) * 32, 1) combine(int4* co
                     __syncwarp();
                     if (elect_one_sync())
                         tma_store_1d(tma_buffer, shifted_x_buffers, num_bytes_per_token, false);
+#else
+                    // Copy data
+                    auto shifted_x_buffers = nvl_channel_x.buffer() + dst_slot_idx * hidden_int4;
+                    auto shifted_x = x + token_idx * hidden_int4;
+                    UNROLLED_WARP_COPY(5, lane_id, hidden_int4, shifted_x_buffers, shifted_x, ld_nc_global, st_na_global);
+                    // Copy source meta
+                    if (lane_id == 0)
+                        st_na_global(nvl_channel_src_meta.buffer() + dst_slot_idx, ld_nc_global(src_meta + token_idx));
+                    // Copy `topk_weights`
+                    if (lane_id < num_topk)
+                        st_na_global(nvl_channel_topk_weights.buffer() + dst_slot_idx * num_topk + lane_id, ld_nc_global(topk_weights + token_idx * num_topk + lane_id));
+#endif
                 }
                 lane_id == current_rdma_idx ? (token_start_idx = static_cast<int>(token_idx)) : 0;
             }
 
             // Move queue tail
+#ifndef DISABLE_SM90_FEATURES
             tma_store_wait<0>();
+#endif
             __syncwarp();
             if (lane_id < kNumRDMARanks and is_lane_ready)
                 st_release_sys_global(nvl_channel_tail.buffer() + lane_id, cached_channel_tail_idx);
@@ -1934,10 +2135,17 @@ __global__ void __launch_bounds__((kNumForwarders + 1) * 32, 1) combine(int4* co
         #pragma unroll
         for (int i = 0; i < NUM_MAX_NVL_PEERS; ++i)
             nvl_buffers[i] = buffer_ptrs[i];
+#ifndef DISABLE_SM90_FEATURES
         auto nvl_channel_x =
             AsymBuffer<uint8_t>(
                 local_nvl_buffer, num_max_nvl_chunked_recv_tokens * num_bytes_per_token, NUM_MAX_NVL_PEERS, channel_id, num_channels)
                 .advance_also<NUM_MAX_NVL_PEERS>(nvl_buffers);
+#else
+        // SM80: Use separate buffers matching NVL sender layout
+        auto nvl_channel_x = AsymBuffer<int4>(local_nvl_buffer, num_max_nvl_chunked_recv_tokens * hidden_int4, NUM_MAX_NVL_PEERS, channel_id, num_channels).advance_also<NUM_MAX_NVL_PEERS>(nvl_buffers);
+        auto nvl_channel_src_meta = AsymBuffer<SourceMeta>(local_nvl_buffer, num_max_nvl_chunked_recv_tokens, NUM_MAX_NVL_PEERS, channel_id, num_channels).advance_also<NUM_MAX_NVL_PEERS>(nvl_buffers);
+        auto nvl_channel_topk_weights = AsymBuffer<float>(local_nvl_buffer, num_max_nvl_chunked_recv_tokens * num_topk, NUM_MAX_NVL_PEERS, channel_id, num_channels).advance_also<NUM_MAX_NVL_PEERS>(nvl_buffers);
+#endif
         auto nvl_channel_head =
             AsymBuffer<int, NUM_MAX_NVL_PEERS>(nvl_buffers, kNumRDMARanks, NUM_MAX_NVL_PEERS, channel_id, num_channels, nvl_rank)
                 .advance_also(local_nvl_buffer);
@@ -1967,7 +2175,7 @@ __global__ void __launch_bounds__((kNumForwarders + 1) * 32, 1) combine(int4* co
                 }
             };
             EP_STATIC_ASSERT(kNumWarpsPerForwarder == 1 or kNumRDMARanks + 2 <= 16, "Barriers are not enough");
-
+#ifndef DISABLE_SM90_FEATURES
             // TMA stuffs
             constexpr int kNumStages = 2;
             constexpr int kNumTMALoadBytes = sizeof(int4) * 32;
@@ -1985,9 +2193,16 @@ __global__ void __launch_bounds__((kNumForwarders + 1) * 32, 1) combine(int4* co
                 fence_barrier_init();
             }
             __syncwarp();
+#endif
 
             // Advance to the corresponding NVL buffer
+#ifndef DISABLE_SM90_FEATURES
             nvl_channel_x.advance(dst_rdma_rank * num_max_nvl_chunked_recv_tokens_per_rdma * num_bytes_per_token);
+#else
+            nvl_channel_x.advance(dst_rdma_rank * num_max_nvl_chunked_recv_tokens_per_rdma * hidden_int4);
+            nvl_channel_src_meta.advance(dst_rdma_rank * num_max_nvl_chunked_recv_tokens_per_rdma);
+            nvl_channel_topk_weights.advance(dst_rdma_rank * num_max_nvl_chunked_recv_tokens_per_rdma * num_topk);
+#endif
             nvl_channel_head.advance(dst_rdma_rank);
             nvl_channel_tail.advance(dst_rdma_rank);
 
@@ -2074,6 +2289,7 @@ __global__ void __launch_bounds__((kNumForwarders + 1) * 32, 1) combine(int4* co
                     // Combine current token
                     auto rdma_slot_idx = token_idx % num_max_rdma_chunked_recv_tokens;
                     void* shifted = send_buffer + rdma_slot_idx * num_bytes_per_token;
+#ifndef DISABLE_SM90_FEATURES
                     auto get_addr_fn = [&](int src_nvl_rank, int slot_idx, int hidden_int4_idx) -> int4* {
                         return reinterpret_cast<int4*>(nvl_channel_x.buffer(src_nvl_rank) + slot_idx * num_bytes_per_token) +
                             hidden_int4_idx;
@@ -2083,6 +2299,12 @@ __global__ void __launch_bounds__((kNumForwarders + 1) * 32, 1) combine(int4* co
                                                                      hidden_bytes + sizeof(SourceMeta)) +
                                             topk_idx);
                     };
+#else
+                    // SM80: Read from separate buffers
+                    auto get_addr_fn = [&](int src_nvl_rank, int slot_idx, int hidden_int4_idx) -> int4* { return nvl_channel_x.buffer(src_nvl_rank) + slot_idx * hidden_int4 + hidden_int4_idx; };
+                    auto recv_tw_fn = [&](int src_nvl_rank, int slot_idx, int topk_idx) -> float { return ld_nc_global(nvl_channel_topk_weights.buffer(src_nvl_rank) + slot_idx * num_topk + topk_idx); };
+#endif
+#ifndef DISABLE_SM90_FEATURES
                     combine_token<NUM_MAX_NVL_PEERS, false, dtype_t, NUM_MAX_NVL_PEERS, true, kNumStages, kNumTMALoadBytes>(
                         expected_head >= 0,
                         expected_head,
@@ -2098,6 +2320,24 @@ __global__ void __launch_bounds__((kNumForwarders + 1) * 32, 1) combine(int4* co
                         recv_tw_fn,
                         smem_ptr,
                         tma_phase);
+#else
+                    uint32_t dummy_tma_phases[2] = {0, 0};
+                    combine_token<NUM_MAX_NVL_PEERS, false, dtype_t, NUM_MAX_NVL_PEERS, false, 2>(
+                        expected_head >= 0,
+                        expected_head,
+                        lane_id,
+                        hidden_int4,
+                        num_topk,
+                        static_cast<int4*>(shifted),
+                        reinterpret_cast<float*>(static_cast<int8_t*>(shifted) + hidden_bytes + sizeof(SourceMeta)),
+                        nullptr,
+                        nullptr,
+                        num_max_nvl_chunked_recv_tokens_per_rdma,
+                        get_addr_fn,
+                        recv_tw_fn,
+                        nullptr,
+                        dummy_tma_phases);
+#endif
 
                     // Update head
                     if (lane_id < NUM_MAX_NVL_PEERS)
