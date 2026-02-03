@@ -6,13 +6,13 @@ To align with the group-limited gating algorithm proposed in the [DeepSeek-V3](h
 
 For latency-sensitive inference decoding, DeepEP includes a set of low-latency kernels with pure RDMA to minimize delays. The library also introduces a hook-based communication-computation overlapping method that does not occupy any SM resource.
 
-Notice: the implementation in this library may have some slight differences from the [DeepSeek-V3](https://github.com/deepseek-ai/DeepSeek-V3) paper.
+Notice: this implementation in this library may differ slightly from the [DeepSeek-V3](https://github.com/deepseek-ai/DeepSeek-V3) paper.
 
 ## Performance
 
 ### Normal kernels with NVLink and RDMA forwarding
 
-We test normal kernels on H800 (~160 GB/s NVLink maximum bandwidth), with each connected to a CX7 InfiniBand 400 Gb/s RDMA network card (~50 GB/s maximum bandwidth). And we follow the DeepSeek-V3/R1 pretraining setting (4096 tokens per batch, 7168 hidden, top-4 groups, top-8 experts, FP8 dispatching and BF16 combining).
+We tested normal kernels on H800 (~160 GB/s NVLink maximum bandwidth), with each node connected to a CX7 InfiniBand 400 Gb/s RDMA network card (~50 GB/s maximum bandwidth). And we follow the DeepSeek-V3/R1 pretraining setting (4096 tokens per batch, 7168 hidden, top-4 groups, top-8 experts, FP8 dispatching and BF16 combining).
 
 |   Type    | Dispatch #EP | Bottleneck bandwidth | Combine #EP | Bottleneck bandwidth |
 |:---------:|:------------:|:--------------------:|:-----------:|:--------------------:|
@@ -21,7 +21,7 @@ We test normal kernels on H800 (~160 GB/s NVLink maximum bandwidth), with each c
 | Internode |      32      |    58 GB/s (RDMA)    |     32      |    57 GB/s (RDMA)    |
 | Internode |      64      |    51 GB/s (RDMA)    |     64      |    50 GB/s (RDMA)    |
 
-**News (2025.04.22)**: with optimizations from Tencent Network Platform Department, performance was enhanced by up to 30%, see [#130](https://github.com/deepseek-ai/DeepEP/pull/130) for more details. Thanks for the contribution!
+**News (2025-04-22)**: with optimizations from Tencent Network Platform Department, performance was enhanced by up to 30%, see [#130](https://github.com/deepseek-ai/DeepEP/pull/130) for more details. Thanks for the contribution!
 
 ### Low-latency kernels with pure RDMA
 
@@ -60,7 +60,7 @@ DeepEP also depends on NVSHMEM. Please refer to our [NVSHMEM Installation Guide]
 ```bash
 # Build and make symbolic links for SO files
 NVSHMEM_DIR=/path/to/installed/nvshmem python setup.py build
-# You may modify the specific SO names according to your own platform
+# Note: You may modify the specific SO names according to your own platform
 ln -s build/lib.linux-x86_64-cpython-38/deep_ep_cpp.cpython-38-x86_64-linux-gnu.so
 
 # Run test cases
@@ -92,7 +92,7 @@ DeepEP is fully tested with InfiniBand networks. However, it is theoretically co
 
 ### Traffic isolation
 
-Traffic isolation is supported by InfiniBand through Virtual Lanes (VL).
+Traffic isolation via InfiniBand Virtual Lanes (VL) is supported.
 
 To prevent interference between different types of traffic, we recommend segregating workloads across different virtual lanes as follows:
 
@@ -309,7 +309,7 @@ For two-micro-batch overlapping, you can refer to the following figure. With our
 
 #### Easier potential overall design
 
-The current DeepEP implementation uses queues for communication buffers which save memory but introduce complexity and potential deadlocks. If you're implementing your own version based on DeepEP, consider using fixed-size buffers allocated to maximum capacity for simplicity and better performance. For a detailed discussion of this alternative approach, see https://github.com/deepseek-ai/DeepEP/issues/39.
+The current DeepEP implementation uses queues for communication buffers which save memory but introduce complexity and potential deadlocks. If you're implementing your own version based on DeepEP, consider using fixed-size buffers allocated to maximum capacity for simplicity and better performance. For a detailed discussion of this alternative approach, see <https://github.com/deepseek-ai/DeepEP/issues/39>.
 
 #### Undefined-behavior PTX usage
 
