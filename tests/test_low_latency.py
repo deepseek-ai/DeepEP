@@ -326,5 +326,14 @@ if __name__ == '__main__':
     parser.add_argument("--shrink-test", action='store_true', help='Whether to simulate failure and test shrink mode')
     args = parser.parse_args()
 
+    # Warn about known bug with num_tokens=512
+    if args.num_tokens == 512:
+        import warnings
+        warnings.warn(
+            "num_tokens=512 has a known bug and may produce incorrect results. "
+            "Consider using a different value (e.g., 128, 256, or 1024).",
+            RuntimeWarning
+        )
+
     num_processes = args.num_processes
     torch.multiprocessing.spawn(test_loop, args=(num_processes, args), nprocs=num_processes)

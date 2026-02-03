@@ -1823,22 +1823,34 @@ bool is_sm90_compiled() {
 }
 
 void Buffer::low_latency_update_mask_buffer(int rank_to_mask, bool mask) {
+#ifndef DISABLE_NVSHMEM
     EP_HOST_ASSERT(mask_buffer_ptr != nullptr and "Shrink mode must be enabled");
     EP_HOST_ASSERT(rank_to_mask >= 0 and rank_to_mask < num_ranks);
     internode_ll::update_mask_buffer(mask_buffer_ptr, rank_to_mask, mask, at::cuda::getCurrentCUDAStream());
+#else
+    EP_HOST_ASSERT(false and "NVSHMEM is disabled during compilation");
+#endif
 }
 
 void Buffer::low_latency_query_mask_buffer(const torch::Tensor& mask_status) {
+#ifndef DISABLE_NVSHMEM
     EP_HOST_ASSERT(mask_buffer_ptr != nullptr and "Shrink mode must be enabled");
     EP_HOST_ASSERT(mask_status.numel() == num_ranks && mask_status.scalar_type() == torch::kInt32);
 
     internode_ll::query_mask_buffer(
         mask_buffer_ptr, num_ranks, reinterpret_cast<int*>(mask_status.data_ptr()), at::cuda::getCurrentCUDAStream());
+#else
+    EP_HOST_ASSERT(false and "NVSHMEM is disabled during compilation");
+#endif
 }
 
 void Buffer::low_latency_clean_mask_buffer() {
+#ifndef DISABLE_NVSHMEM
     EP_HOST_ASSERT(mask_buffer_ptr != nullptr and "Shrink mode must be enabled");
     internode_ll::clean_mask_buffer(mask_buffer_ptr, num_ranks, at::cuda::getCurrentCUDAStream());
+#else
+    EP_HOST_ASSERT(false and "NVSHMEM is disabled during compilation");
+#endif
 }
 
 }  // namespace deep_ep
