@@ -11,6 +11,10 @@
 #include "jit/compiler.cuh"
 #include "extension/permute.cuh"
 #include "extension/allgather.cuh"
+#include "buffer/intranode.cuh"
+#ifdef HYBRID_EP_BUILD_MULTINODE_ENABLE
+#include "buffer/internode.cuh"
+#endif
 
 class Executor {
 public:
@@ -84,26 +88,39 @@ public:
 
     std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> 
     dispatch_preprocess(
-        HybridEpConfigInstance config, DispatchBuffers& dispatch_buffers, DispatchArgs& args);
+        HybridEpConfigInstance config, DispatchArgs& args);
     template<typename DType> 
     void dispatch_core(
-        HybridEpConfigInstance config, DispatchBuffers& dispatch_buffers, DispatchArgs& args);
+        HybridEpConfigInstance config, DispatchArgs& args);
     std::tuple<torch::Tensor, c10::optional<torch::Tensor>, c10::optional<torch::Tensor> > 
     dispatch_postprocess(
-        HybridEpConfigInstance config, DispatchBuffers& dispatch_buffers, DispatchArgs& args); 
+        HybridEpConfigInstance config, DispatchArgs& args); 
 
     void combine_preprocess(
-        HybridEpConfigInstance config, CombineBuffers& combine_buffers, CombineArgs& args);
+        HybridEpConfigInstance config, CombineArgs& args);
     void combine_core(
-        HybridEpConfigInstance config, CombineBuffers& combine_buffers, CombineArgs& args);
+        HybridEpConfigInstance config, CombineArgs& args);
     void combine_postprocess(
-        HybridEpConfigInstance config, CombineBuffers& combine_buffers, CombineArgs& args); 
+        HybridEpConfigInstance config, CombineArgs& args); 
+
+    void set_intra_node_buffers(IntraNodeDispatchBuffers *intra_node_dispatch_buffers, IntraNodeCombineBuffers *intra_node_combine_buffers);
+#ifdef HYBRID_EP_BUILD_MULTINODE_ENABLE
+    void set_inter_node_buffers(InterNodeDispatchBuffers *inter_node_dispatch_buffers, InterNodeCombineBuffers *inter_node_combine_buffers);
+#endif
 
 private:
     KernelCache kernel_cache;
-    HybridEpConfigInstance config;
     int local_rank;
     int node_rank;
     bool enable_custom_allgather;
+
+    // Buffers for intra-node communication
+    IntraNodeDispatchBuffers *intra_node_dispatch_buffers = nullptr;
+    IntraNodeCombineBuffers *intra_node_combine_buffers = nullptr;
+#ifdef HYBRID_EP_BUILD_MULTINODE_ENABLE
+    // Buffers for inter-node communication
+    InterNodeDispatchBuffers *inter_node_dispatch_buffers = nullptr;
+    InterNodeCombineBuffers *inter_node_combine_buffers = nullptr;
+#endif
 };
 

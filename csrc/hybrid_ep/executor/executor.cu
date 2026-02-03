@@ -7,6 +7,18 @@
 
 Executor::Executor(int local_rank, int node_rank, std::string base_path, std::string comm_id, bool load_cached_kernels, bool enable_custom_allgather) : local_rank(local_rank), node_rank(node_rank), kernel_cache(node_rank, local_rank, base_path, comm_id, load_cached_kernels), enable_custom_allgather(enable_custom_allgather) {}  
 
+void Executor::set_intra_node_buffers(IntraNodeDispatchBuffers *intra_node_dispatch_buffers, IntraNodeCombineBuffers *intra_node_combine_buffers) {
+    this->intra_node_dispatch_buffers = intra_node_dispatch_buffers;
+    this->intra_node_combine_buffers = intra_node_combine_buffers;
+}
+
+#ifdef HYBRID_EP_BUILD_MULTINODE_ENABLE
+void Executor::set_inter_node_buffers(InterNodeDispatchBuffers *inter_node_dispatch_buffers, InterNodeCombineBuffers *inter_node_combine_buffers) {
+    this->inter_node_dispatch_buffers = inter_node_dispatch_buffers;
+    this->inter_node_combine_buffers = inter_node_combine_buffers;
+}
+#endif
+
 torch::Tensor Executor::allgather_routing_map(
     CustomAllgather &allgather_obj,
     HybridEpConfigInstance config,
@@ -103,27 +115,22 @@ Executor::metadata_preprocess_core(
 }
 
 std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> 
-Executor::dispatch_preprocess(HybridEpConfigInstance config, DispatchBuffers& dispatch_buffers, DispatchArgs& args) {
+Executor::dispatch_preprocess(HybridEpConfigInstance config, DispatchArgs& args) {
     nvtxRangePushA("dispatch_preprocess in hybrid-ep");
     if(config.num_of_nodes > 1) {
 #ifdef HYBRID_EP_BUILD_MULTINODE_ENABLE
         auto sizeof_token_data_type = get_token_data_type_size(config.token_data_type);
-        CUDA_CHECK(cudaMemcpyAsync(dispatch_buffers.attn_input_token, args.hidden.data_ptr(), args.hidden.numel() * sizeof_token_data_type, cudaMemcpyDeviceToDevice, args.stream));
+        CUDA_CHECK(cudaMemcpyAsync(inter_node_dispatch_buffers->attn_input_token, args.hidden.data_ptr(), args.hidden.numel() * sizeof_token_data_type, cudaMemcpyDeviceToDevice, args.stream));
         if(config.forward_dispatch_api) {
-            CUDA_CHECK(cudaMemcpyAsync(dispatch_buffers.attn_input_prob, args.probs.data_ptr(), args.probs.numel() * sizeof(float), cudaMemcpyDeviceToDevice, args.stream));
+            CUDA_CHECK(cudaMemcpyAsync(inter_node_dispatch_buffers->attn_input_prob, args.probs.data_ptr(), args.probs.numel() * sizeof(float), cudaMemcpyDeviceToDevice, args.stream));
         }
         if(config.token_data_type == APP_TOKEN_DATA_TYPE::UINT8) {
-            CUDA_CHECK(cudaMemcpyAsync(dispatch_buffers.attn_input_scaling_factor, args.scaling_factor.data_ptr(), args.scaling_factor.numel() * sizeof(float), cudaMemcpyDeviceToDevice, args.stream));
+            CUDA_CHECK(cudaMemcpyAsync(inter_node_dispatch_buffers->attn_input_scaling_factor, args.scaling_factor.data_ptr(), args.scaling_factor.numel() * sizeof(float), cudaMemcpyDeviceToDevice, args.stream));
         }
 #else
         throw std::runtime_error("Multi-node support is not enabled in this build.");
 #endif
-    } else {
-        // Set the tensor pointers to the dispatch buffers.
-        dispatch_buffers.attn_input_token = args.hidden.data_ptr();
-        dispatch_buffers.attn_input_prob = (config.forward_dispatch_api) ? args.probs.data_ptr() : nullptr;
-        dispatch_buffers.attn_input_scaling_factor = (config.token_data_type == APP_TOKEN_DATA_TYPE::UINT8) ? args.scaling_factor.data_ptr() : nullptr;
-    }
+    } 
 
     torch::Tensor row_id_map;
     torch::Tensor tokens_per_expert;
@@ -167,37 +174,51 @@ Executor::dispatch_preprocess(HybridEpConfigInstance config, DispatchBuffers& di
     return std::make_tuple(row_id_map, tokens_per_expert, overflow_flag);
 }
 
-template void Executor::dispatch_core<uint8_t>(HybridEpConfigInstance config, DispatchBuffers& dispatch_buffers, DispatchArgs& args);
-template void Executor::dispatch_core<uint16_t>(HybridEpConfigInstance config, DispatchBuffers& dispatch_buffers, DispatchArgs& args);
+template void Executor::dispatch_core<uint8_t>(HybridEpConfigInstance config, DispatchArgs& args);
+template void Executor::dispatch_core<uint16_t>(HybridEpConfigInstance config, DispatchArgs& args);
 
 template<typename DType>
-void Executor::dispatch_core(HybridEpConfigInstance config, DispatchBuffers& dispatch_buffers, DispatchArgs& args) {
+void Executor::dispatch_core(HybridEpConfigInstance config, DispatchArgs& args) {
     nvtxRangePushA("dispatch_core in hybrid-ep");
 
     hybrid_ep::dispatch_kernel_param_t<DType> param;
     // Setup input pointers
-    param.attn_input_token = reinterpret_cast<DType*>(dispatch_buffers.attn_input_token);
-    param.attn_input_prob = reinterpret_cast<float*>(dispatch_buffers.attn_input_prob);
-    param.attn_input_token_scaling_factor = reinterpret_cast<float*>(dispatch_buffers.attn_input_scaling_factor);
+    if(config.num_of_nodes > 1) {
+#ifdef HYBRID_EP_BUILD_MULTINODE_ENABLE
+        param.attn_input_token = reinterpret_cast<DType*>(inter_node_dispatch_buffers->attn_input_token);
+        param.attn_input_prob = reinterpret_cast<float*>(inter_node_dispatch_buffers->attn_input_prob);
+        param.attn_input_token_scaling_factor = reinterpret_cast<float*>(inter_node_dispatch_buffers->attn_input_scaling_factor);
+#else
+        throw std::runtime_error("Multi-node support is not enabled in this build.");
+#endif
+    } else {
+        param.attn_input_token = reinterpret_cast<DType*>(args.hidden.data_ptr());
+        param.attn_input_prob = (config.forward_dispatch_api) ? 
+            reinterpret_cast<float*>(args.probs.data_ptr()) : nullptr;
+        param.attn_input_token_scaling_factor = (config.token_data_type == APP_TOKEN_DATA_TYPE::UINT8) ? 
+            reinterpret_cast<float*>(args.scaling_factor.data_ptr()) : nullptr;
+    }
     
     // Setup output pointers
     for (int i = 0; i < config.num_of_ranks_per_node; i++) {
       param.expert_output_token[i] = reinterpret_cast<DType*>(
-          dispatch_buffers.expert_output_token_all_ranks[i]);
-      param.expert_output_prob[i] = dispatch_buffers.expert_output_prob_all_ranks[i];
+          intra_node_dispatch_buffers->expert_output_token_all_ranks[i]);
+      param.expert_output_prob[i] = intra_node_dispatch_buffers->expert_output_prob_all_ranks[i];
       param.expert_output_scaling_factor[i] = 
-          dispatch_buffers.expert_output_scaling_factor_all_ranks[i];
+          intra_node_dispatch_buffers->expert_output_scaling_factor_all_ranks[i];
     }
     
     // Setup local buffer pointers
+#ifdef HYBRID_EP_BUILD_MULTINODE_ENABLE
     param.rdma_inter_node_group_token = reinterpret_cast<DType*>(
-        dispatch_buffers.rdma_inter_node_group_token);
-    param.rdma_inter_node_group_prob = dispatch_buffers.rdma_inter_node_group_prob;
+        inter_node_dispatch_buffers->rdma_inter_node_group_token);
+    param.rdma_inter_node_group_prob = inter_node_dispatch_buffers->rdma_inter_node_group_prob;
     param.rdma_inter_node_group_scaling_factor = 
-        dispatch_buffers.rdma_inter_node_group_scaling_factor;
-    param.rdma_inter_node_group_flags = dispatch_buffers.rdma_inter_node_group_flags;
+        inter_node_dispatch_buffers->rdma_inter_node_group_scaling_factor;
+    param.rdma_inter_node_group_flags = inter_node_dispatch_buffers->rdma_inter_node_group_flags;
+#endif
     param.intra_node_write_completion_flags = 
-        dispatch_buffers.intra_node_write_completion_flags;
+        intra_node_dispatch_buffers->intra_node_write_completion_flags;
     param.rdma_to_attn_map = args.rdma_to_attn_map.data_ptr<bool>();
     param.attn_to_rdma_map = args.attn_to_rdma_map.data_ptr<bool>();
     param.sparse_to_dense_map = args.sparse_to_dense_map.data_ptr<int32_t>();
@@ -206,11 +227,11 @@ void Executor::dispatch_core(HybridEpConfigInstance config, DispatchBuffers& dis
     param.local_rank = local_rank;
     param.node_rank = node_rank;
     param.num_of_tokens_per_rank = args.num_of_tokens_per_rank;
-    param.expected_rdma_flag_value = dispatch_buffers.expected_rdma_flag_value;
-    param.expected_intra_node_flag_value = dispatch_buffers.expected_intra_node_flag_value;
+    param.expected_rdma_flag_value = intra_node_dispatch_buffers->expected_rdma_flag_value;
+    param.expected_intra_node_flag_value = intra_node_dispatch_buffers->expected_intra_node_flag_value;
 #ifdef HYBRID_EP_BUILD_MULTINODE_ENABLE
-    param.d_qps_gpu = reinterpret_cast<void **>(dispatch_buffers.d_qps_gpu);
-    param.mr_info = reinterpret_cast<void*>(dispatch_buffers.mr_info);
+    param.d_qps_gpu = reinterpret_cast<void **>(inter_node_dispatch_buffers->d_qps_gpu);
+    param.mr_info = reinterpret_cast<void*>(inter_node_dispatch_buffers->mr_info);
 #endif
     
     // Launch kernel
@@ -219,7 +240,7 @@ void Executor::dispatch_core(HybridEpConfigInstance config, DispatchBuffers& dis
 }
 
 std::tuple<torch::Tensor, c10::optional<torch::Tensor>, c10::optional<torch::Tensor> >
-Executor::dispatch_postprocess(HybridEpConfigInstance config, DispatchBuffers& dispatch_buffers, DispatchArgs& args) {
+Executor::dispatch_postprocess(HybridEpConfigInstance config, DispatchArgs& args) {
     nvtxRangePushA("dispatch_postprocess in hybrid-ep");
 
     // Create and return output tensors
@@ -236,9 +257,9 @@ Executor::dispatch_postprocess(HybridEpConfigInstance config, DispatchBuffers& d
     
         // Prepare the arguments for the permute kernel
         PermuteArgs permute_args;
-        permute_args.tokens_ptr = reinterpret_cast<void*>(dispatch_buffers.expert_output_token);
-        permute_args.probs_ptr = reinterpret_cast<float*>(dispatch_buffers.expert_output_prob);
-        permute_args.scaling_factor_ptr = reinterpret_cast<float*>(dispatch_buffers.expert_output_scaling_factor);
+        permute_args.tokens_ptr = reinterpret_cast<void*>(intra_node_dispatch_buffers->expert_output_token);
+        permute_args.probs_ptr = reinterpret_cast<float*>(intra_node_dispatch_buffers->expert_output_prob);
+        permute_args.scaling_factor_ptr = reinterpret_cast<float*>(intra_node_dispatch_buffers->expert_output_scaling_factor);
         permute_args.row_id_map = args.row_id_map.value();
         permute_args.hidden_size = config.hidden_dim;
         permute_args.scales_per_token = config.hidden_dim / 128;
@@ -271,13 +292,13 @@ Executor::dispatch_postprocess(HybridEpConfigInstance config, DispatchBuffers& d
         } else {
           num_dispatched_tokens = args.num_dispatched_tokens_tensor.value().item<int>();
         }
-        size_t sizeof_token_data_type = get_token_data_type_size(dispatch_buffers.data_type);
+        size_t sizeof_token_data_type = get_token_data_type_size(intra_node_dispatch_buffers->data_type);
         dispatched_tokens = torch::empty(
             {num_dispatched_tokens, config.hidden_dim}, 
             torch::dtype(args.hidden.dtype()).device(torch::kCUDA)
         );
         auto res_sz = static_cast<size_t>(num_dispatched_tokens) * config.hidden_dim * sizeof_token_data_type;
-        CUDA_CHECK(cudaMemcpyAsync(dispatched_tokens.data_ptr(), dispatch_buffers.expert_output_token, res_sz, cudaMemcpyDeviceToDevice, args.stream));
+        CUDA_CHECK(cudaMemcpyAsync(dispatched_tokens.data_ptr(), intra_node_dispatch_buffers->expert_output_token, res_sz, cudaMemcpyDeviceToDevice, args.stream));
 
         if(config.forward_dispatch_api) {
             dispatched_probs = torch::empty({num_dispatched_tokens,
@@ -285,8 +306,8 @@ Executor::dispatch_postprocess(HybridEpConfigInstance config, DispatchBuffers& d
                             torch::dtype(torch::kFloat32).device(torch::kCUDA));
             auto probs_sz = static_cast<size_t>(num_dispatched_tokens) * config.num_of_experts_per_rank * config.num_of_ranks_per_node * sizeof(float);
             CUDA_CHECK(cudaMemcpyAsync(dispatched_probs.value().data_ptr<float>(),
-                                        dispatch_buffers.expert_output_prob,
-                                        probs_sz, cudaMemcpyDeviceToDevice, args.stream));
+                intra_node_dispatch_buffers->expert_output_prob,
+                probs_sz, cudaMemcpyDeviceToDevice, args.stream));
         }
 
         if(config.token_data_type == APP_TOKEN_DATA_TYPE::UINT8) {
@@ -296,8 +317,8 @@ Executor::dispatch_postprocess(HybridEpConfigInstance config, DispatchBuffers& d
                     torch::dtype(torch::kFloat32).device(torch::kCUDA));
             auto scaling_factor_sz = static_cast<size_t>(num_dispatched_tokens) * config.hidden_dim / 128 * sizeof(float);
             CUDA_CHECK(cudaMemcpyAsync(dispatched_scaling_factor.value().data_ptr<float>(),
-                                        dispatch_buffers.expert_output_scaling_factor,
-                                        scaling_factor_sz, cudaMemcpyDeviceToDevice, args.stream));
+                intra_node_dispatch_buffers->expert_output_scaling_factor,
+                scaling_factor_sz, cudaMemcpyDeviceToDevice, args.stream));
         }
     }
 
@@ -305,7 +326,7 @@ Executor::dispatch_postprocess(HybridEpConfigInstance config, DispatchBuffers& d
     return std::make_tuple(dispatched_tokens, dispatched_probs, dispatched_scaling_factor);
 }
 
-void Executor::combine_preprocess(HybridEpConfigInstance config, CombineBuffers& combine_buffers, CombineArgs& args) {
+void Executor::combine_preprocess(HybridEpConfigInstance config, CombineArgs& args) {
     nvtxRangePushA("combine_preprocess in hybrid-ep");
 
     if(args.enable_unpermute) {
@@ -318,8 +339,8 @@ void Executor::combine_preprocess(HybridEpConfigInstance config, CombineBuffers&
         UnpermuteArgs unpermute_args;
         unpermute_args.permuted_tokens = args.hidden;
         unpermute_args.permuted_probs = args.probs;
-        unpermute_args.tokens_ptr = reinterpret_cast<uint16_t*>(combine_buffers.expert_input_token);
-        unpermute_args.probs_ptr = reinterpret_cast<float*>(combine_buffers.expert_input_prob);
+        unpermute_args.tokens_ptr = reinterpret_cast<uint16_t*>(intra_node_combine_buffers->expert_input_token);
+        unpermute_args.probs_ptr = reinterpret_cast<float*>(intra_node_combine_buffers->expert_input_prob);
         unpermute_args.row_id_map = args.row_id_map.value();
         unpermute_args.num_of_local_experts = config.num_of_experts_per_rank;
         unpermute_args.num_dispatched_tokens_tensor = num_dispatched_tokens_tensor;
@@ -337,30 +358,30 @@ void Executor::combine_preprocess(HybridEpConfigInstance config, CombineBuffers&
         // Copy the input tensor to the input buffer
         auto input_sz = args.hidden.numel() * sizeof(uint16_t);
         CUDA_CHECK(
-            cudaMemcpyAsync(combine_buffers.expert_input_token,
+            cudaMemcpyAsync(intra_node_combine_buffers->expert_input_token,
                             reinterpret_cast<uint16_t *>(args.hidden.data_ptr()), input_sz,
                             cudaMemcpyDeviceToDevice, args.stream));
         if (config.backward_combine_api) {
             auto probs_sz = args.probs.numel() * sizeof(float);
-            CUDA_CHECK(cudaMemcpyAsync(combine_buffers.expert_input_prob,
-                                                reinterpret_cast<float*>(args.probs.data_ptr()), probs_sz,
-                                                cudaMemcpyDeviceToDevice, args.stream));
+            CUDA_CHECK(cudaMemcpyAsync(intra_node_combine_buffers->expert_input_prob,
+                                       reinterpret_cast<float*>(args.probs.data_ptr()), probs_sz,
+                                       cudaMemcpyDeviceToDevice, args.stream));
         }
     }
 
     nvtxRangePop();  // End of combine_preprocess nvtx range
 }
 
-void Executor::combine_core(HybridEpConfigInstance config, CombineBuffers& combine_buffers, CombineArgs& args) {
+void Executor::combine_core(HybridEpConfigInstance config, CombineArgs& args) {
     nvtxRangePushA("combine_core in hybrid-ep");
     hybrid_ep::combine_kernel_param_t param;
     
     // Setup input pointers
     for (int i = 0; i < config.num_of_ranks_per_node; i++) {
         param.expert_input_token[i] =
-            combine_buffers.expert_input_token_all_ranks[i];
+            intra_node_combine_buffers->expert_input_token_all_ranks[i];
         param.expert_input_prob[i] =
-            combine_buffers.expert_input_prob_all_ranks[i];
+            intra_node_combine_buffers->expert_input_prob_all_ranks[i];
     }
 
     // Setup output pointers
@@ -368,17 +389,19 @@ void Executor::combine_core(HybridEpConfigInstance config, CombineBuffers& combi
     param.attn_output_prob = (config.backward_combine_api) ? reinterpret_cast<float*>(args.combined_probs) : nullptr;
 
     // Setup local buffer pointers
+#ifdef HYBRID_EP_BUILD_MULTINODE_ENABLE
     param.rdma_intra_node_red_token =
-        combine_buffers.rdma_intra_node_red_token;
-    param.rdma_intra_node_red_prob = combine_buffers.rdma_intra_node_red_prob;
+        inter_node_combine_buffers->rdma_intra_node_red_token;
+    param.rdma_intra_node_red_prob = inter_node_combine_buffers->rdma_intra_node_red_prob;
     param.rdma_inter_node_group_token =
-        combine_buffers.rdma_inter_node_group_token;
+        inter_node_combine_buffers->rdma_inter_node_group_token;
     param.rdma_inter_node_group_prob =
-        combine_buffers.rdma_inter_node_group_prob;
+        inter_node_combine_buffers->rdma_inter_node_group_prob;
     param.rdma_inter_node_group_flags =
-        combine_buffers.rdma_inter_node_group_flags;
+        inter_node_combine_buffers->rdma_inter_node_group_flags;
+#endif
     param.intra_node_write_completion_flags =
-        combine_buffers.intra_node_write_completion_flags;
+        intra_node_combine_buffers->intra_node_write_completion_flags;
     param.rdma_to_attn_map = args.rdma_to_attn_map.data_ptr<bool>();
     param.attn_to_rdma_map = args.attn_to_rdma_map.data_ptr<bool>();
     param.sparse_to_dense_map = args.sparse_to_dense_map.data_ptr<int32_t>();
@@ -386,12 +409,12 @@ void Executor::combine_core(HybridEpConfigInstance config, CombineBuffers& combi
     // Misc
     param.node_rank = this->node_rank;
     param.num_of_tokens_per_rank = args.num_of_tokens_per_rank;
-    param.expected_rdma_flag_value = combine_buffers.expected_rdma_flag_value;
+    param.expected_rdma_flag_value = intra_node_combine_buffers->expected_rdma_flag_value;
     param.expected_intra_node_flag_value =
-        combine_buffers.expected_intra_node_flag_value;
+        intra_node_combine_buffers->expected_intra_node_flag_value;
 #ifdef HYBRID_EP_BUILD_MULTINODE_ENABLE
-    param.d_qps_gpu = reinterpret_cast<void **>(combine_buffers.d_qps_gpu);
-    param.mr_info = reinterpret_cast<void*>(combine_buffers.mr_info);
+    param.d_qps_gpu = reinterpret_cast<void **>(inter_node_combine_buffers->d_qps_gpu);
+    param.mr_info = reinterpret_cast<void*>(inter_node_combine_buffers->mr_info);
 #endif
 
     // Launch kernel
@@ -400,7 +423,7 @@ void Executor::combine_core(HybridEpConfigInstance config, CombineBuffers& combi
     nvtxRangePop();  // End of combine_core nvtx range
 }
 
-void Executor::combine_postprocess(HybridEpConfigInstance config, CombineBuffers& combine_buffers, CombineArgs& args) {
+void Executor::combine_postprocess(HybridEpConfigInstance config, CombineArgs& args) {
     nvtxRangePushA("combine_postprocess in hybrid-ep");
     // No postprocess is needed for the combine kernel now.
     nvtxRangePop();  // End of combine_postprocess nvtx range

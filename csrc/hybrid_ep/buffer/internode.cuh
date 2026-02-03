@@ -9,11 +9,11 @@
 #include <torch/torch.h>
 #include <iostream>
 #include <dlfcn.h>
-#include "backend/hybrid_ep_backend.cuh"
-#include "backend/utils.cuh"
 #include "backend/topo_detection.cuh"
+#include "backend/hybrid_ep_backend.cuh"
 #include "backend/ibvcore.h"
 #include "config.cuh"
+#include "utils.cuh"
 
 #define RC  (0)
 #define UC  (1)
@@ -135,7 +135,38 @@ static int setup_qp_attr_and_set_qp(struct gverbs_context *g_ctx,
                                     struct doca_verbs_qp_attr *qp_attr,
                                     int num_of_blocks, int num_of_nodes,
                                     int node_rank, uint32_t qp_cnt);
-                                    
+
+struct InterNodeDispatchBuffers {
+    APP_TOKEN_DATA_TYPE data_type;
+    // Input buffers from attn, only used in inter-node case
+    void *        attn_input_token = nullptr;
+    void *        attn_input_prob = nullptr;
+    void *        attn_input_flags = nullptr;
+    void *        attn_input_scaling_factor = nullptr;
+    // RDMA buffers for dispatch kernel.
+    void *        rdma_inter_node_group_token = nullptr;
+    float *       rdma_inter_node_group_prob = nullptr;
+    float *       rdma_inter_node_group_scaling_factor = nullptr;
+    uint64_t *    rdma_inter_node_group_flags = nullptr;
+    // qp info and mr info
+    struct doca_gpu_dev_verbs_qp ** d_qps_gpu = nullptr;
+    struct dispatch_memory_region_info_t * mr_info = nullptr;
+};
+
+struct InterNodeCombineBuffers {
+    // Output buffers to attn, only used in inter-node case
+    void *        attn_output_flags = nullptr;
+    // RDMA buffers for combine kernel.
+    uint16_t *    rdma_intra_node_red_token = nullptr;
+    float *       rdma_intra_node_red_prob = nullptr;
+    uint16_t *    rdma_inter_node_group_token = nullptr;
+    float *       rdma_inter_node_group_prob = nullptr;
+    uint64_t *    rdma_inter_node_group_flags = nullptr;
+    // qp info and mr info
+    struct doca_gpu_dev_verbs_qp ** d_qps_gpu = nullptr;
+    struct combine_memory_region_info_t * mr_info = nullptr;
+};
+
 class RDMACoordinator {
 public:
     RDMACoordinator() = default;
@@ -143,16 +174,18 @@ public:
     void init(pybind11::object process_group, int node_rank, int local_rank, BufferConfig config);
     void update_config(BufferConfig config);
     void destroy();
-    void allocate_dispatch_rdma_buffers(DispatchBuffers &dispatch_buffers);
-    void allocate_combine_rdma_buffers(CombineBuffers &combine_buffers);
-
+    void allocate_dispatch_buffers();
+    void allocate_combine_buffers();
+    
+    InterNodeDispatchBuffers dispatch_buffers;
+    InterNodeCombineBuffers combine_buffers;
 private:
     int gid_index = 0;
     int node_rank = -1;
     int local_rank = -1;
     BufferConfig buffer_config;
     pybind11::object process_group;
-    
+
     // IB basic resources
     struct ibv_context *ib_context = nullptr;
     struct ibv_pd *ib_pd = nullptr;

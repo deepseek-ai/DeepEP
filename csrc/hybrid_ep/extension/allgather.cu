@@ -109,12 +109,12 @@ void CustomAllgather::launch(torch::Tensor src, int ag_sms, cudaStream_t stream)
     );
 }
 
-void CustomAllgather::init(int rank_idx, int num_of_ranks_per_node, int num_of_experts_per_rank, int num_of_tokens_per_rank, int num_of_nodes, ExtendedMemoryAllocator* allocator, pybind11::object process_group) {
+void CustomAllgather::init(pybind11::object process_group, int rank_idx, BufferConfig buffer_config, ExtendedMemoryAllocator* allocator) {
     this->rank_idx = rank_idx;
-    this->num_of_ranks_per_node = num_of_ranks_per_node;
-    this->num_of_experts_per_rank = num_of_experts_per_rank;
-    this->num_of_tokens_per_rank = num_of_tokens_per_rank;
-    this->num_of_nodes = num_of_nodes;
+    this->num_of_ranks_per_node = buffer_config.num_of_ranks_per_node;
+    this->num_of_experts_per_rank = buffer_config.num_of_experts_per_rank;
+    this->num_of_tokens_per_rank = buffer_config.max_num_of_tokens_per_rank;
+    this->num_of_nodes = buffer_config.num_of_nodes;
     this->allocator = allocator;
     this->process_group = process_group;
 }

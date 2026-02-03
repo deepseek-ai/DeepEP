@@ -14,8 +14,9 @@
 #include <algorithm>
 #include <string>
 
+#include "buffer/intranode.cuh"
 #ifdef HYBRID_EP_BUILD_MULTINODE_ENABLE
-#include "internode.cuh"
+#include "buffer/internode.cuh"
 #endif
 
 class HybridEPBuffer {
@@ -23,9 +24,6 @@ public:
   HybridEPBuffer(pybind11::object process_group, BufferConfig config, int local_rank, int node_rank, int group_size, std::string base_path, bool load_cached_kernels, bool use_shared_buffer, bool enable_custom_allgather);
   ~HybridEPBuffer();
   bool update_buffer(HybridEpConfigInstance config); // True means the buffer is reallocated.
-
-  // Exchange IPC addresses using C++ distributed communication
-  void exchange_remote_handle();
 
   std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor,
              torch::Tensor>
@@ -76,9 +74,9 @@ public:
 
 private:
 #ifdef HYBRID_EP_BUILD_MULTINODE_ENABLE
-  std::vector<std::string> ib_dev_name_list;
   RDMACoordinator rdma_coordinator;
 #endif
+  NVLCoordinator nvl_coordinator;
   ExtendedMemoryAllocator remote_allocator;
   BufferConfig buffer_config;
   Executor executor;
@@ -86,30 +84,5 @@ private:
   CustomAllgather allgather_obj;
 
   void allocate_buffer();
-  void allocate_buffer_for_preprocessing();
-  void allocate_buffer_for_dispatch();
-  void allocate_buffer_for_combine();
   void release_buffer();
-  void open_handles_from_other_ranks(std::vector<torch::Tensor> dispatch_handles,
-                                     std::vector<torch::Tensor> combine_handles);
-
-  // Meta data of communication group.
-  int local_rank;
-  int node_rank;
-  int group_size;
-  // Maximum number of tokens for experts.
-  int64_t max_num_of_tokens; 
-  // Only valid on intra-node communication. In this case, the dispatch/combine can share same buffers.
-  bool use_shared_buffer;
-
-  hybrid_ep::tmp_state_t *preprocessing_tmp;
-
-  // Buffers for dispatch
-  DispatchBuffers dispatch_buffers;
-  torch::Tensor dispatch_memory_handles; 
-
-  // Buffers for combine
-  CombineBuffers combine_buffers;
-  torch::Tensor combine_memory_handles;
-
 };

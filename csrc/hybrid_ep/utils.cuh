@@ -75,61 +75,6 @@ struct combine_memory_region_info_t {
 } __attribute__((__aligned__(8)));
 #endif
 
-struct DispatchBuffers {
-  APP_TOKEN_DATA_TYPE data_type;
-  // Input buffers from attn, only used in inter-node case
-  void *        attn_input_token = nullptr;
-  void *        attn_input_prob = nullptr;
-  void *        attn_input_flags = nullptr;
-  void *        attn_input_scaling_factor = nullptr;
-  // Output buffers to experts
-  void *        expert_output_token = nullptr;
-  void **       expert_output_token_all_ranks = nullptr;
-  float *       expert_output_prob = nullptr;
-  float **      expert_output_prob_all_ranks = nullptr;
-  float *       expert_output_scaling_factor = nullptr;
-  float **      expert_output_scaling_factor_all_ranks = nullptr;
-  // RDMA buffers for dispatch kernel.
-  void *        rdma_inter_node_group_token = nullptr;
-  float *       rdma_inter_node_group_prob = nullptr;
-  float *       rdma_inter_node_group_scaling_factor = nullptr;
-  uint64_t *    rdma_inter_node_group_flags = nullptr;
-  // Misc flags
-  uint32_t *    intra_node_write_completion_flags = nullptr;
-  uint64_t *    expected_rdma_flag_value = nullptr;
-  uint32_t *    expected_intra_node_flag_value = nullptr;
-#ifdef HYBRID_EP_BUILD_MULTINODE_ENABLE
-  // qp info and mr info
-  struct doca_gpu_dev_verbs_qp ** d_qps_gpu = nullptr;
-  struct dispatch_memory_region_info_t * mr_info = nullptr;
-#endif
-};
-
-struct CombineBuffers {
-  // Input buffers from experts
-  uint16_t *    expert_input_token = nullptr;
-  uint16_t **   expert_input_token_all_ranks = nullptr;
-  float *       expert_input_prob = nullptr;
-  float **      expert_input_prob_all_ranks = nullptr;
-  // Output buffers to attn, only used in inter-node case
-  void *        attn_output_flags = nullptr;
-  // RDMA buffers for combine kernel.
-  uint16_t *    rdma_intra_node_red_token = nullptr;
-  float *       rdma_intra_node_red_prob = nullptr;
-  uint16_t *    rdma_inter_node_group_token = nullptr;
-  float *       rdma_inter_node_group_prob = nullptr;
-  uint64_t *    rdma_inter_node_group_flags = nullptr;
-  // Misc flags
-  uint32_t *    intra_node_write_completion_flags = nullptr;
-  uint64_t *    expected_rdma_flag_value = nullptr;
-  uint32_t *    expected_intra_node_flag_value = nullptr;
-#ifdef HYBRID_EP_BUILD_MULTINODE_ENABLE
-  // qp info and mr info
-  struct doca_gpu_dev_verbs_qp ** d_qps_gpu = nullptr;
-  struct combine_memory_region_info_t * mr_info = nullptr;
-#endif
-};
-
 __device__ __forceinline__ bool elect_sync(uint32_t membermask) {
     uint32_t is_elected;
     asm volatile("{\n\t"
