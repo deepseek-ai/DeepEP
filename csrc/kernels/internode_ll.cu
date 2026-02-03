@@ -7,6 +7,34 @@ namespace deep_ep {
 
 namespace internode_ll {
 
+__device__ __forceinline__
+std::pair<int, int> convert_physical_to_expert_id_in_round(
+    int num_local_experts, int num_local_experts_per_round, int physical_expert_id) {    
+    auto rank_id = physical_expert_id / num_local_experts;
+    auto local_expert_id = physical_expert_id % num_local_experts;
+    auto round_id = local_expert_id / num_local_experts_per_round;
+    auto expert_in_round = rank_id * num_local_experts_per_round + physical_expert_id % num_local_experts_per_round;
+    return std::make_pair(round_id, expert_in_round);
+}
+
+__device__ __forceinline__
+int convert_expert_id_in_round_to_physical(
+    int num_local_experts, int num_local_experts_per_round,
+    int round_id, int expert_in_round) {
+    auto rank_id = expert_in_round / num_local_experts_per_round;
+    auto local_expert_id = round_id * num_local_experts_per_round + expert_in_round % num_local_experts_per_round;
+    auto physical_expert_id = num_local_experts * rank_id + local_expert_id;
+    return physical_expert_id;
+}
+
+__device__ __forceinline__
+std::pair<int, int> convert_expert_id_in_round_to_sm(
+    int num_experts_per_sm_per_round, int expert_in_round) {    
+    auto actual_sm_id = expert_in_round / num_experts_per_sm_per_round;
+    auto expert_id_in_sm = expert_in_round % num_experts_per_sm_per_round;
+    return std::make_pair(actual_sm_id, expert_id_in_sm);
+}
+
 template <bool use_warp_sync = false>
 __forceinline__ __device__ bool is_rank_masked(int* mask_buffer_ptr, int rank) {
     if (mask_buffer_ptr == nullptr) {
@@ -153,7 +181,10 @@ __global__ __launch_bounds__(1024, 1) void dispatch(void* packed_recv_x,
                                                     int num_warp_groups,
                                                     int num_warps_per_group,
                                                     bool round_scale,
-                                                    int phases) {
+                                                    int phases,
+                                                    bool use_expert_overlap,
+                                                    int num_rounds,
+                                                    int round_id) {
     const auto sm_id = static_cast<int>(blockIdx.x);
     const auto thread_id = static_cast<int>(threadIdx.x);
     const auto warp_id = thread_id / 32, lane_id = get_lane_id();
@@ -162,7 +193,8 @@ __global__ __launch_bounds__(1024, 1) void dispatch(void* packed_recv_x,
     const auto num_local_experts = num_experts / num_ranks;
     const auto warp_group_id = warp_id / num_warps_per_group;
     const auto sub_warp_id = warp_id % num_warps_per_group;
-    const auto responsible_expert_idx = sm_id * num_warp_groups + warp_group_id;
+    auto responsible_expert_idx = sm_id * num_warp_groups + warp_group_id;
+    auto expert_id_in_round = sm_id * num_warp_groups + warp_group_id;
 
     // May extract UE8M0 from the scales
     using scale_t = std::conditional_t<kUseUE8M0, uint8_t, float>;
@@ -185,6 +217,18 @@ __global__ __launch_bounds__(1024, 1) void dispatch(void* packed_recv_x,
     // Expert counts
     constexpr int kNumMaxWarpGroups = 32;
     __shared__ int shared_num_tokens_sent_per_expert[kNumMaxWarpGroups];
+
+    if (use_expert_overlap) {
+        EP_DEVICE_ASSERT (num_rounds >= 1 && num_local_experts % num_rounds == 0 && round_id >= 0 && round_id < num_rounds);
+    } else {
+        round_id = 0;
+        num_rounds = 1;
+    }
+    
+    auto num_experts_per_round = num_experts / num_rounds;
+    auto num_experts_per_sm_per_round = (num_experts_per_round + num_sms - 1) / num_sms;
+    EP_DEVICE_ASSERT(num_experts_per_sm_per_round == num_warp_groups);
+    auto num_local_experts_per_round = num_local_experts / num_rounds;
 
     // Sending phase
     if ((phases & LOW_LATENCY_SEND_PHASE) == 0)
@@ -211,52 +255,56 @@ __global__ __launch_bounds__(1024, 1) void dispatch(void* packed_recv_x,
             thread_id == 0 ? (*rdma_x_src_idx = token_idx) : 0;
 
             // FP8 cast
-            EP_STATIC_ASSERT(hidden_bf16_int4 % 32 == 0, "Must use the full warp to reduce");
-            #pragma unroll
-            for (int i = thread_id; i < hidden_bf16_int4; i += num_threads) {
-                // Read
-                auto int4_value = __ldg(x_int4 + i);
+            if (round_id == 0) {
+                EP_STATIC_ASSERT(hidden_bf16_int4 % 32 == 0, "Must use the full warp to reduce");
+                #pragma unroll
+                for (int i = thread_id; i < hidden_bf16_int4; i += num_threads) {
+                    // Read
+                    auto int4_value = __ldg(x_int4 + i);
 
-                if constexpr (kUseFP8) {
-                    // Calculate local amax
-                    auto bf16_values = reinterpret_cast<nv_bfloat16*>(&int4_value);
-                    float fp32_values[kNumElemsPerRead];
-                    float amax = kFP8Margin, scale, scale_inv;
-                    #pragma unroll
-                    for (int j = 0; j < kNumElemsPerRead; ++j) {
-                        fp32_values[j] = static_cast<float>(bf16_values[j]);
-                        amax = fmaxf(amax, fabsf(fp32_values[j]));
+                    if constexpr (kUseFP8) {
+                        // Calculate local amax
+                        auto bf16_values = reinterpret_cast<nv_bfloat16*>(&int4_value);
+                        float fp32_values[kNumElemsPerRead];
+                        float amax = kFP8Margin, scale, scale_inv;
+                        #pragma unroll
+                        for (int j = 0; j < kNumElemsPerRead; ++j) {
+                            fp32_values[j] = static_cast<float>(bf16_values[j]);
+                            amax = fmaxf(amax, fabsf(fp32_values[j]));
+                        }
+
+                        // Reduce amax and scale
+                        EP_STATIC_ASSERT(kNumElemsPerRead * 32 / kNumPerChannels == 2, "Invalid vectorization");
+                        amax = warp_reduce_max<16>(amax);
+                        calculate_fp8_scales(amax, scale, scale_inv, round_scale);
+                        if (lane_id == 0 or lane_id == 16)
+                            rdma_x_scales[i * kNumElemsPerRead / 128] = scale_inv;
+
+                        // Cast into send buffer
+                        vec_t int2_value;
+                        auto fp8x2_values = reinterpret_cast<__nv_fp8x2_storage_t*>(&int2_value);
+                        #pragma unroll
+                        for (int j = 0; j < kNumElemsPerRead; j += 2) {
+                            float2 fp32x2 = {fp32_values[j] * scale, fp32_values[j + 1] * scale};
+                            fp8x2_values[j / 2] = __nv_cvt_float2_to_fp8x2(fp32x2, __NV_SATFINITE, __NV_E4M3);
+                        }
+                        rdma_x_vec[i] = int2_value;
+                    } else {
+                        // Reinterpret-cast is for C++14 compatibility
+                        rdma_x_vec[i] = *reinterpret_cast<vec_t*>(&int4_value);
                     }
-
-                    // Reduce amax and scale
-                    EP_STATIC_ASSERT(kNumElemsPerRead * 32 / kNumPerChannels == 2, "Invalid vectorization");
-                    amax = warp_reduce_max<16>(amax);
-                    calculate_fp8_scales(amax, scale, scale_inv, round_scale);
-                    if (lane_id == 0 or lane_id == 16)
-                        rdma_x_scales[i * kNumElemsPerRead / 128] = scale_inv;
-
-                    // Cast into send buffer
-                    vec_t int2_value;
-                    auto fp8x2_values = reinterpret_cast<__nv_fp8x2_storage_t*>(&int2_value);
-                    #pragma unroll
-                    for (int j = 0; j < kNumElemsPerRead; j += 2) {
-                        float2 fp32x2 = {fp32_values[j] * scale, fp32_values[j + 1] * scale};
-                        fp8x2_values[j / 2] = __nv_cvt_float2_to_fp8x2(fp32x2, __NV_SATFINITE, __NV_E4M3);
-                    }
-                    rdma_x_vec[i] = int2_value;
-                } else {
-                    // Reinterpret-cast is for C++14 compatibility
-                    rdma_x_vec[i] = *reinterpret_cast<vec_t*>(&int4_value);
                 }
             }
             asm volatile("bar.sync 1, %0;" ::"r"(num_threads));
 
             // Issue IBGDA sends
             if (dst_expert_idx >= 0) {
-                int slot_idx = lane_id == 0 ? atomicAdd(atomic_counter_per_expert + dst_expert_idx, 1) : 0;
-                slot_idx = __shfl_sync(0xffffffff, slot_idx, 0);
                 const auto dst_rank = dst_expert_idx / num_local_experts;
                 const auto dst_expert_local_idx = dst_expert_idx % num_local_experts;
+                if (use_expert_overlap and round_id != dst_expert_local_idx / num_local_experts_per_round)
+                    continue;
+                int slot_idx = lane_id == 0 ? atomicAdd(atomic_counter_per_expert + dst_expert_idx, 1) : 0;
+                slot_idx = __shfl_sync(0xffffffff, slot_idx, 0);
                 const auto src_ptr = reinterpret_cast<uint64_t>(rdma_x_src_idx);
                 const auto dst_ptr = reinterpret_cast<uint64_t>(rdma_recv_x) +
                     dst_expert_local_idx * num_ranks * num_max_dispatch_tokens_per_rank * num_bytes_per_msg +
@@ -285,15 +333,19 @@ __global__ __launch_bounds__(1024, 1) void dispatch(void* packed_recv_x,
             EP_DEVICE_ASSERT(ibgda_get_state()->num_rc_per_pe >= num_local_experts);
 
             // The first SM is also responsible for cleaning the next buffer
-            #pragma unroll
-            for (int i = lane_id; i < num_next_clean_int; i += 32)
-                next_clean[i] = 0;
+            if (round_id == (num_rounds - 1)) {
+                #pragma unroll
+                for (int i = lane_id; i < num_next_clean_int; i += 32)
+                    next_clean[i] = 0;
+            }
 
             // Notify before executing `int_p`
             __syncwarp();
             #pragma unroll
-            for (int i = lane_id; i < num_experts; i += 32)
-                atomic_add_release_global(atomic_finish_counter_per_expert + i, FINISHED_SUM_TAG);
+            for (int i = lane_id; i < num_experts_per_round; i += 32) {
+                auto expert_id = convert_expert_id_in_round_to_physical(num_local_experts, num_local_experts_per_round, round_id, i);
+                atomic_add_release_global(atomic_finish_counter_per_expert + expert_id, FINISHED_SUM_TAG);
+            }
         }
 
         // This SM should be responsible for some destination experts, read `topk_idx` for them
@@ -305,27 +357,60 @@ __global__ __launch_bounds__(1024, 1) void dispatch(void* packed_recv_x,
         #pragma unroll 8
         for (int i = lane_id; i < num_tokens * num_topk; i += 32) {
             auto idx = static_cast<int>(__ldg(topk_idx + i));
-            if (idx >= expert_begin_idx and idx < expert_end_idx)
-                expert_count[idx - expert_begin_idx]++;
+            if (use_expert_overlap) {
+                auto [send_round_id, expert_in_round] = convert_physical_to_expert_id_in_round(num_local_experts, num_local_experts_per_round, idx);
+                auto [actual_sm_id, expert_id_in_sm] = convert_expert_id_in_round_to_sm(num_experts_per_sm_per_round, expert_in_round);
+                if (actual_sm_id == sm_id && send_round_id == round_id) {
+                    expert_count[expert_id_in_sm] ++;
+                }
+            } else {
+                if (idx >= expert_begin_idx and idx < expert_end_idx)
+                    expert_count[idx - expert_begin_idx]++;
+            }
         }
 
         // Warp reduce
-        #pragma unroll
-        for (int i = expert_begin_idx; i < expert_end_idx; ++i) {
-            auto sum = warp_reduce_sum(expert_count[i - expert_begin_idx]);
-            if (lane_id == 0) {
-                shared_num_tokens_sent_per_expert[i - expert_begin_idx] = sum;
-                atomic_add_release_global(atomic_finish_counter_per_expert + i, FINISHED_SUM_TAG - sum);
+        if (use_expert_overlap) {
+            #pragma unroll
+            for (int j = 0; j < num_experts_per_sm_per_round; j++) {
+                auto expert_in_round = sm_id * num_experts_per_sm_per_round + j;
+                auto [actual_sm_id, expert_id_in_sm] = convert_expert_id_in_round_to_sm(num_experts_per_sm_per_round, expert_in_round);
+                if (actual_sm_id != sm_id) continue;
+                auto physical_expert_id = convert_expert_id_in_round_to_physical(num_local_experts, num_local_experts_per_round, round_id, expert_in_round);
+                auto sum = warp_reduce_sum(expert_count[expert_id_in_sm]);
+                if (lane_id == 0) {
+                    shared_num_tokens_sent_per_expert[expert_id_in_sm] = sum;
+                    atomic_add_release_global(atomic_finish_counter_per_expert + physical_expert_id, FINISHED_SUM_TAG - sum);
+                }
+            }
+        } else {
+            #pragma unroll
+            for (int i = expert_begin_idx; i < expert_end_idx; ++i) {
+                auto sum = warp_reduce_sum(expert_count[i - expert_begin_idx]);
+                if (lane_id == 0) {
+                    shared_num_tokens_sent_per_expert[i - expert_begin_idx] = sum;
+                    atomic_add_release_global(atomic_finish_counter_per_expert + i, FINISHED_SUM_TAG - sum);
+                }
             }
         }
     }
     __syncthreads();
 
     // Issue count sends
-    if (responsible_expert_idx < num_experts and sub_warp_id == 0 and lane_id == 0) {
+    if (use_expert_overlap) {
+        responsible_expert_idx = convert_expert_id_in_round_to_physical(num_local_experts, num_local_experts_per_round, round_id, expert_id_in_round);
+    }
+    if (expert_id_in_round < num_experts_per_round and responsible_expert_idx < num_experts and sub_warp_id == 0 and lane_id == 0) {
         const auto dst_rank = responsible_expert_idx / num_local_experts;
         const auto dst_expert_local_idx = responsible_expert_idx % num_local_experts;
-        const auto num_tokens_sent = shared_num_tokens_sent_per_expert[responsible_expert_idx - sm_id * num_warp_groups];
+        int num_tokens_sent;
+        if (use_expert_overlap) {
+            auto [actual_sm_id, expert_id_in_sm] = convert_expert_id_in_round_to_sm(num_experts_per_sm_per_round, expert_id_in_round);
+            if (actual_sm_id != sm_id) goto SKIP_WARP;
+            num_tokens_sent = shared_num_tokens_sent_per_expert[expert_id_in_sm];
+        } else {
+            num_tokens_sent = shared_num_tokens_sent_per_expert[responsible_expert_idx - sm_id * num_warp_groups];
+        }
 
         // Wait local sends issued and send expert counts
         while (ld_acquire_global(atomic_finish_counter_per_expert + responsible_expert_idx) != FINISHED_SUM_TAG * 2)
@@ -348,6 +433,7 @@ __global__ __launch_bounds__(1024, 1) void dispatch(void* packed_recv_x,
         if (dst_rank == 0)
             packed_recv_count[dst_expert_local_idx] = 0;
     }
+    SKIP_WARP:
     __syncwarp();
 
 // Receiving phase
@@ -360,7 +446,10 @@ LOW_LATENCY_DISPATCH_RECV:
         cg::this_grid().sync();
 
     // Receiving and packing
-    if (responsible_expert_idx < num_experts) {
+    if (use_expert_overlap) {
+        responsible_expert_idx = convert_expert_id_in_round_to_physical(num_local_experts, num_local_experts_per_round, round_id, expert_id_in_round);
+    }
+    if (expert_id_in_round < num_experts_per_round and responsible_expert_idx < num_experts) {
         const auto src_rank = responsible_expert_idx / num_local_experts;
         const auto local_expert_idx = responsible_expert_idx % num_local_experts;
         const auto rdma_recv_x_uint8 = static_cast<uint8_t*>(rdma_recv_x) +
@@ -490,15 +579,21 @@ void dispatch(void* packed_recv_x,
               void* workspace,
               int num_device_sms,
               cudaStream_t stream,
-              int phases) {
+              int phases,
+              bool use_expert_overlap,
+              int num_rounds,
+              int round_id) {
     constexpr int kNumMaxTopK = 11;
-    const int num_warp_groups = ceil_div(num_experts, num_device_sms);
+    if (not use_expert_overlap) {
+        num_rounds = 1;
+    }
+    int num_warp_groups = ceil_div(num_experts / num_rounds, num_device_sms);
     const int num_warps_per_group = 32 / num_warp_groups;
     EP_HOST_ASSERT(num_warp_groups > 0 and num_warps_per_group > 0);
     EP_HOST_ASSERT(kNumMaxTopK + 1 <= num_warp_groups * num_warps_per_group);
 
     const auto num_warps = num_warp_groups * num_warps_per_group;
-    const auto num_sms = ceil_div(num_experts, num_warp_groups);
+    const auto num_sms = ceil_div(num_experts / num_rounds, num_warp_groups);
     EP_HOST_ASSERT(num_topk <= kNumMaxTopK);
 
     // Workspace checks
@@ -545,7 +640,10 @@ void dispatch(void* packed_recv_x,
                       num_warp_groups,                       \
                       num_warps_per_group,                   \
                       round_scale,                           \
-                      phases);                               \
+                      phases,                                \
+                      use_expert_overlap,                    \
+                      num_rounds,                            \
+                      round_id);                             \
     }                                                        \
     break
 
@@ -737,7 +835,11 @@ __global__ __launch_bounds__(1024, 1) void combine(void* combined_x,
                                                    int num_warp_groups,
                                                    int num_warps_per_group,
                                                    int phases,
-                                                   bool zero_copy) {
+                                                   bool zero_copy,
+                                                   bool use_expert_overlap,
+                                                   int num_rounds,
+                                                   int send_round_id,
+                                                   bool is_x_in_round) {
     const auto sm_id = __shfl_sync(0xffffffff, static_cast<int>(blockIdx.x), 0);
     const auto num_sms = __shfl_sync(0xffffffff, static_cast<int>(gridDim.x), 0);
     const auto thread_id = static_cast<int>(threadIdx.x);
@@ -746,7 +848,8 @@ __global__ __launch_bounds__(1024, 1) void combine(void* combined_x,
     const auto num_local_experts = num_experts / num_ranks;
     const auto warp_group_id = warp_id / num_warps_per_group;
     const auto sub_warp_id = warp_id % num_warps_per_group;
-    const auto responsible_expert_idx = sm_id * num_warp_groups + warp_group_id;
+    auto responsible_expert_idx = sm_id * num_warp_groups + warp_group_id;
+    auto expert_id_in_round = sm_id * num_warp_groups + warp_group_id;
 
     extern __shared__ __align__(1024) uint8_t smem_buffer[];
 
@@ -770,30 +873,46 @@ __global__ __launch_bounds__(1024, 1) void combine(void* combined_x,
     constexpr size_t num_bytes_per_slot = kHidden * sizeof(nv_bfloat16) + kNumMetaBytes;
     EP_STATIC_ASSERT(num_bytes_per_slot % sizeof(int4) == 0, "Invalid vectorization");
 
+    if (use_expert_overlap) {
+        EP_DEVICE_ASSERT(num_local_experts % num_rounds == 0 && num_rounds >= 1 && send_round_id >= 0 && send_round_id < num_rounds);
+    } else {
+        num_rounds = 1;
+        send_round_id = 0;
+    }
+
+    auto num_experts_per_round = num_experts / num_rounds;
+    auto num_local_experts_per_round = num_local_experts / num_rounds;
+
     // Sending phase
     if ((phases & LOW_LATENCY_SEND_PHASE) == 0)
         goto LOW_LATENCY_COMBINE_RECV;
 
     // Clean up next buffer
     if (sm_id == 0 and warp_group_id == 0 and sub_warp_id == 0) {
-        #pragma unroll
-        for (int i = lane_id; i < num_next_clean_int; i += 32)
-            next_clean[i] = 0;
+        if (send_round_id == 0) {
+            #pragma unroll
+            for (int i = lane_id; i < num_next_clean_int; i += 32)
+                next_clean[i] = 0;
+        }
 
         // Notify before executing `int_p`
         __syncwarp();
         if (lane_id == 0)
-            atomic_add_release_global(atomic_clean_flag, num_experts);
+            atomic_add_release_global(atomic_clean_flag, num_experts_per_round);
     }
 
     // Issue IBGDA sends
-    if (responsible_expert_idx < num_experts) {
+    if (use_expert_overlap) {
+        responsible_expert_idx = convert_expert_id_in_round_to_physical(num_local_experts, num_local_experts_per_round, send_round_id, responsible_expert_idx);
+    }
+    if (expert_id_in_round < num_experts_per_round and responsible_expert_idx < num_experts) {
         const auto dst_rank = responsible_expert_idx / num_local_experts;
         const auto local_expert_idx = responsible_expert_idx % num_local_experts;
         const auto global_expert_idx = rank * num_local_experts + local_expert_idx;
         const auto layout = __ldg(layout_range + local_expert_idx * num_ranks + dst_rank);
-        const auto local_x =
-            static_cast<const int4*>(x) + local_expert_idx * num_ranks * num_max_dispatch_tokens_per_rank * hidden_bf16_int4;
+        int local_expert_idx_per_round = is_x_in_round ? local_expert_idx % num_local_experts_per_round : local_expert_idx;
+        const auto local_x = static_cast<const int4*>(x) +
+                (is_x_in_round ? local_expert_idx_per_round : local_expert_idx) * num_ranks * num_max_dispatch_tokens_per_rank * hidden_bf16_int4;
         const auto local_src_info = src_info + local_expert_idx * num_ranks * num_max_dispatch_tokens_per_rank;
         const auto rdma_send_x_vec =
             static_cast<uint8_t*>(rdma_send_x) + local_expert_idx * num_ranks * num_max_dispatch_tokens_per_rank * num_bytes_per_slot;
@@ -1163,16 +1282,23 @@ void combine(void* combined_x,
              int num_device_sms,
              cudaStream_t stream,
              int phases,
-             bool zero_copy) {
+             bool zero_copy,
+             bool use_expert_overlap,
+             int num_rounds,
+             int send_round_id,
+             bool is_x_in_round) {
     constexpr int kNumMaxTopk = 11;
-    const int num_warp_groups = ceil_div(num_experts, num_device_sms);
+    if (not use_expert_overlap) {
+        num_rounds = 1;
+    }
+    int num_warp_groups = ceil_div(num_experts / num_rounds, num_device_sms);
     const int num_warps_per_group = 32 / num_warp_groups;
     const int num_recv_per_sm = ceil_div(num_combined_tokens, num_device_sms);
     EP_HOST_ASSERT(num_warp_groups > 0 and num_warps_per_group > 0 and num_recv_per_sm >= 0);
 
     const auto num_warps = num_warp_groups * num_warps_per_group;
     const auto num_sms =
-        max(ceil_div(num_experts, num_warp_groups), num_recv_per_sm == 0 ? 1 : ceil_div(num_combined_tokens, num_recv_per_sm));
+        max(ceil_div(num_experts / num_rounds, num_warp_groups), num_recv_per_sm == 0 ? 1 : ceil_div(num_combined_tokens, num_recv_per_sm));
 
     // Check workspace
     auto atomic_clean_flag = static_cast<int*>(workspace);
@@ -1229,7 +1355,11 @@ void combine(void* combined_x,
                       num_warp_groups,                                                                                             \
                       num_warps_per_group,                                                                                         \
                       phases,                                                                                                      \
-                      zero_copy);                                                                                                  \
+                      zero_copy,                                                                                                   \
+                      use_expert_overlap,                                                                                          \
+                      num_rounds,                                                                                                  \
+                      send_round_id,                                                                                               \
+                      is_x_in_round);                                                                                              \
     }                                                                                                                              \
     break
 
