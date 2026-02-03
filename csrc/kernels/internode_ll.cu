@@ -70,10 +70,10 @@ __forceinline__ __device__ void barrier(int thread_id, int rank, int num_ranks, 
 }
 
 template <int kNumThreads>
-__launch_bounds__(kNumThreads, 1) __global__ void clean_low_latency_buffer(int* clean_0,
-                                                                           int num_clean_int_0,
-                                                                           int* clean_1,
-                                                                           int num_clean_int_1,
+__launch_bounds__(kNumThreads, 1) __global__ void clean_low_latency_buffer(ll_signal_t* clean_0,
+                                                                           int num_clean_elements_0,
+                                                                           ll_signal_t* clean_1,
+                                                                           int num_clean_elements_1,
                                                                            int rank,
                                                                            int num_ranks,
                                                                            int* mask_buffer_ptr,
@@ -88,10 +88,10 @@ __launch_bounds__(kNumThreads, 1) __global__ void clean_low_latency_buffer(int* 
 
     // Clean
     #pragma unroll
-    for (int i = thread_id; i < num_clean_int_0; i += kNumThreads)
+    for (int i = thread_id; i < num_clean_elements_0; i += kNumThreads)
         clean_0[i] = 0;
     #pragma unroll
-    for (int i = thread_id; i < num_clean_int_1; i += kNumThreads)
+    for (int i = thread_id; i < num_clean_elements_1; i += kNumThreads)
         clean_1[i] = 0;
 
     // Barrier after cleaning (make sure the low-latency mode works fine)
@@ -101,10 +101,10 @@ __launch_bounds__(kNumThreads, 1) __global__ void clean_low_latency_buffer(int* 
         barrier<kNumThreads>(thread_id, rank, num_ranks, mask_buffer_ptr, sync_buffer_ptr);
 }
 
-void clean_low_latency_buffer(int* clean_0,
-                              int num_clean_int_0,
-                              int* clean_1,
-                              int num_clean_int_1,
+void clean_low_latency_buffer(ll_signal_t* clean_0,
+                              int num_clean_elements_0,
+                              ll_signal_t* clean_1,
+                              int num_clean_elements_1,
                               int rank,
                               int num_ranks,
                               int* mask_buffer_ptr,
@@ -117,9 +117,9 @@ void clean_low_latency_buffer(int* clean_0,
     LAUNCH_KERNEL(&cfg,
                   clean_low_latency_buffer<kNumThreads>,
                   clean_0,
-                  num_clean_int_0,
+                  num_clean_elements_0,
                   clean_1,
-                  num_clean_int_1,
+                  num_clean_elements_1,
                   rank,
                   num_ranks,
                   mask_buffer_ptr,
@@ -136,7 +136,7 @@ __global__ __launch_bounds__(1024, 1) void dispatch(void* packed_recv_x,
                                                     int* cumulative_local_expert_recv_stats,
                                                     int64_t* dispatch_wait_recv_cost_stats,
                                                     void* rdma_recv_x,
-                                                    int* rdma_recv_count,
+                                                    ll_signal_t* rdma_recv_count,
                                                     void* rdma_x,
                                                     const void* x,
                                                     const topk_idx_t* topk_idx,
@@ -332,11 +332,16 @@ __global__ __launch_bounds__(1024, 1) void dispatch(void* packed_recv_x,
             ;
         auto dst_ptr = reinterpret_cast<uint64_t>(rdma_recv_count + dst_expert_local_idx * num_ranks + rank);
         auto dst_p2p_ptr = nvshmemi_get_p2p_ptr(dst_ptr, rank, dst_rank);
+        const ll_signal_t signal_value = static_cast<ll_signal_t>(-num_tokens_sent - 1);
         if (not is_rank_masked(mask_buffer_ptr, dst_rank)) {
             if (dst_p2p_ptr == 0) {
-                nvshmemi_ibgda_amo_nonfetch_add(reinterpret_cast<int*>(dst_ptr), -num_tokens_sent - 1, dst_rank, dst_expert_local_idx);
+#if LL_SIGNAL_BITS == 64
+                nvshmemi_ibgda_amo_nonfetch_add(reinterpret_cast<int64_t*>(dst_ptr), signal_value, dst_rank, dst_expert_local_idx);
+#else
+                nvshmemi_ibgda_amo_nonfetch_add(reinterpret_cast<int*>(dst_ptr), signal_value, dst_rank, dst_expert_local_idx);
+#endif
             } else {
-                st_release_sys_global(reinterpret_cast<int*>(dst_p2p_ptr), -num_tokens_sent - 1);
+                st_release_sys_global(reinterpret_cast<ll_signal_t*>(dst_p2p_ptr), signal_value);
             }
         }
 
@@ -384,13 +389,15 @@ LOW_LATENCY_DISPATCH_RECV:
         if (sub_warp_id == 1 and lane_id == 0) {
             auto start_time = clock64();
             uint64_t wait_recv_cost = 0;
+            ll_signal_t signal_recv = 0;
             if (not is_rank_masked(mask_buffer_ptr, src_rank)) {
-                while ((num_recv_tokens = ld_acquire_sys_global(rdma_recv_count + local_expert_idx * num_ranks + src_rank)) ==
+                while ((signal_recv = ld_acquire_sys_global(rdma_recv_count + local_expert_idx * num_ranks + src_rank)) ==
                            0                                                               // data not arrived
                        && (wait_recv_cost = clock64() - start_time) <= NUM_TIMEOUT_CYCLES  // not timeout
                 )
                     ;
             }
+            num_recv_tokens = static_cast<int>(signal_recv);
             // Do not receive tokens if rank timeout or masked
             if (num_recv_tokens == 0)
                 num_recv_tokens = -1;
@@ -471,7 +478,7 @@ void dispatch(void* packed_recv_x,
               int* cumulative_local_expert_recv_stats,
               int64_t* dispatch_wait_recv_cost_stats,
               void* rdma_recv_x,
-              int* rdma_recv_count,
+              ll_signal_t* rdma_recv_count,
               void* rdma_x,
               const void* x,
               const topk_idx_t* topk_idx,
@@ -715,7 +722,7 @@ __forceinline__ __device__ void decode_and_accumulate(
 template <bool kUseLogFMT, int kHidden, int kNumMaxTopk, int kNumMaxUnrolls>
 __global__ __launch_bounds__(1024, 1) void combine(void* combined_x,
                                                    void* rdma_recv_x,
-                                                   int* rdma_recv_flag,
+                                                   ll_signal_t* rdma_recv_flag,
                                                    void* rdma_send_x,
                                                    const void* x,
                                                    const topk_idx_t* topk_idx,
@@ -921,11 +928,16 @@ __global__ __launch_bounds__(1024, 1) void combine(void* combined_x,
                 ;
             auto dst_ptr = reinterpret_cast<uint64_t>(rdma_recv_flag + global_expert_idx);
             auto dst_p2p_ptr = nvshmemi_get_p2p_ptr(dst_ptr, rank, dst_rank);
+            constexpr ll_signal_t flag_value = 1;
             if (not is_rank_masked(mask_buffer_ptr, dst_rank)) {
                 if (dst_p2p_ptr == 0) {
-                    nvshmemi_ibgda_amo_nonfetch_add(reinterpret_cast<int*>(dst_ptr), 1, dst_rank, local_expert_idx);
+#if LL_SIGNAL_BITS == 64
+                    nvshmemi_ibgda_amo_nonfetch_add(reinterpret_cast<int64_t*>(dst_ptr), flag_value, dst_rank, local_expert_idx);
+#else
+                    nvshmemi_ibgda_amo_nonfetch_add(reinterpret_cast<int*>(dst_ptr), flag_value, dst_rank, local_expert_idx);
+#endif
                 } else {
-                    st_release_sys_global(reinterpret_cast<int*>(dst_p2p_ptr), 1);
+                    st_release_sys_global(reinterpret_cast<ll_signal_t*>(dst_p2p_ptr), flag_value);
                 }
             }
             atomic_add_release_global(atomic_clean_flag, -1);
@@ -1140,7 +1152,7 @@ LOW_LATENCY_COMBINE_RECV:
 
 void combine(void* combined_x,
              void* rdma_recv_x,
-             int* rdma_recv_flag,
+             ll_signal_t* rdma_recv_flag,
              void* rdma_send_x,
              const void* x,
              const topk_idx_t* topk_idx,
