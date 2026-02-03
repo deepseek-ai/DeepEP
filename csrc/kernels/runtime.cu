@@ -53,6 +53,9 @@ int init(const std::vector<uint8_t>& root_unique_id_val, int rank, int num_ranks
     nvshmemx_set_attr_uniqueid_args(rank, num_ranks, &root_unique_id, &attr);
     nvshmemx_init_attr(NVSHMEMX_INIT_WITH_UNIQUEID, &attr);
 
+    // Initialize before nvshmem_team_split_strided
+    nvshmem_barrier_all();
+
     // Create sub-RDMA teams
     // NOTES: if `num_ranks <= NUM_MAX_NVL_PEERS` then only low-latency kernels are used
     if (low_latency_mode and num_ranks > NUM_MAX_NVL_PEERS) {
@@ -68,7 +71,6 @@ int init(const std::vector<uint8_t>& root_unique_id_val, int rank, int num_ranks
         EP_HOST_ASSERT(cpu_rdma_team != NVSHMEM_TEAM_INVALID);
     }
 
-    nvshmem_barrier_all();
     return nvshmem_my_pe();
 }
 
