@@ -89,16 +89,24 @@ class Buffer:
         self.low_latency_mode = low_latency_mode
         self.explicitly_destroy = explicitly_destroy
         self.enable_shrink = enable_shrink
+
+        if self.rank == 0:
+            print(
+                f"rank: {self.rank}, group_size: {self.group_size}, num_nvl_bytes: {num_nvl_bytes}, num_rdma_bytes: {num_rdma_bytes}, low_latency_mode: {low_latency_mode}, explicitly_destroy: {explicitly_destroy}, enable_shrink: {enable_shrink}"
+            )
         self.runtime = deep_ep_cpp.Buffer(self.rank, self.group_size, num_nvl_bytes, num_rdma_bytes, low_latency_mode, explicitly_destroy,
-                                          enable_shrink, use_fabric)
+                                          enable_shrink, use_fabric, num_qps_per_rank)
+        #print("runtime initialized")
 
         # Synchronize device IDs
         local_device_id = self.runtime.get_local_device_id()
         device_ids = all_gather_object(local_device_id)
+        #print(f"device_ids: {device_ids}")
 
         # Synchronize IPC handles
         local_ipc_handle = self.runtime.get_local_ipc_handle()
         ipc_handles = all_gather_object(local_ipc_handle)
+        #print(f"ipc_handles: {ipc_handles}")
 
         # Synchronize NVSHMEM unique IDs
         root_unique_id = None
@@ -106,12 +114,17 @@ class Buffer:
             # Enable IBGDA
             assert num_qps_per_rank > 0
             os.environ['NVSHMEM_DISABLE_P2P'] = '0' if allow_nvlink_for_low_latency_mode else '1'
+            os.environ['NCCL_P2P_DISABLE'] = '0' if allow_nvlink_for_low_latency_mode else '1'
+
             os.environ['NVSHMEM_IB_ENABLE_IBGDA'] = '1'
             os.environ['NVSHMEM_IBGDA_NUM_RC_PER_PE'] = f'{num_qps_per_rank}'
 
             # Make sure QP depth is always larger than the number of on-flight WRs, so that we can skip WQ slot check
             self.nvshmem_qp_depth = int(os.environ.get('NVSHMEM_QP_DEPTH', '1024'))
             os.environ['NVSHMEM_QP_DEPTH'] = str(self.nvshmem_qp_depth)
+
+            # NCCL QP depth settings (similar to NVSHMEM_QP_DEPTH)
+            os.environ.setdefault('NCCL_GIN_GDAKI_QP_DEPTH', '1024')
 
             # Reduce gpu memory usage
             # 6 default teams + 1 extra team
@@ -124,12 +137,18 @@ class Buffer:
             if not allow_mnnvl:
                 # Disable multi-node NVLink detection
                 os.environ['NVSHMEM_DISABLE_MNNVL'] = '1'
+            else:
+                os.environ['NCCL_MNNVL_ENABLE'] = '1' # default value is 2 (auto-detect)
 
             # Synchronize using the root ID
             if (low_latency_mode and self.rank == 0) or (not low_latency_mode and self.runtime.get_rdma_rank() == 0):
                 root_unique_id = self.runtime.get_local_nvshmem_unique_id()
+            #print(f"rank: {self.rank}, calling get_local_nvshmem_unique_id()")
             nvshmem_unique_ids = all_gather_object(root_unique_id)
+            #print(f"rank: {self.rank}, called get_local_nvshmem_unique_id()")
             root_unique_id = nvshmem_unique_ids[0 if low_latency_mode else self.runtime.get_root_rdma_rank(True)]
+
+        #print(f"root_unique_id: {root_unique_id}")
 
         # Make CPP runtime available
         self.runtime.sync(device_ids, ipc_handles, root_unique_id)

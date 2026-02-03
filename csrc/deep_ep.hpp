@@ -78,6 +78,7 @@ private:
     int num_device_sms;
     int rank, rdma_rank, nvl_rank;
     int num_ranks, num_rdma_ranks, num_nvl_ranks;
+    int qps_per_rank;
     shared_memory::MemHandle ipc_handles[NUM_MAX_NVL_PEERS];
 
     // Stream for communication
@@ -120,7 +121,8 @@ public:
            bool low_latency_mode,
            bool explicitly_destroy,
            bool enable_shrink,
-           bool use_fabric);
+           bool use_fabric,
+           int qps_per_rank);
 
     ~Buffer() noexcept(false);
 
@@ -290,11 +292,13 @@ public:
 
     torch::Tensor get_next_low_latency_combine_buffer(int num_max_dispatch_tokens_per_rank, int hidden, int num_experts) const;
 
+#ifndef DISABLE_NVSHMEM_AND_NCCL
     void low_latency_update_mask_buffer(int rank_to_mask, bool mask);
 
     void low_latency_query_mask_buffer(const torch::Tensor& mask_status);
 
     void low_latency_clean_mask_buffer();
+#endif
 };
 
 }  // namespace deep_ep

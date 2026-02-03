@@ -7,7 +7,9 @@
 #include <torch/python.h>
 
 #include <chrono>
+#include <cstdlib>
 #include <memory>
+#include <stdexcept>
 
 #include "kernels/api.cuh"
 #include "kernels/configs.cuh"
@@ -132,7 +134,8 @@ Buffer::Buffer(int rank,
                bool low_latency_mode,
                bool explicitly_destroy,
                bool enable_shrink,
-               bool use_fabric)
+               bool use_fabric,
+               int qps_per_rank)
     : rank(rank),
       num_ranks(num_ranks),
       num_nvl_bytes(num_nvl_bytes),
@@ -140,6 +143,7 @@ Buffer::Buffer(int rank,
       enable_shrink(enable_shrink),
       low_latency_mode(low_latency_mode),
       explicitly_destroy(explicitly_destroy),
+      qps_per_rank(qps_per_rank),
       comm_stream(at::cuda::getStreamFromPool(true)),
       shared_memory_allocator(use_fabric) {
     // Metadata memory
@@ -164,7 +168,7 @@ Buffer::Buffer(int rank,
     CUDA_CHECK(cudaGetDevice(&device_id));
     rdma_rank = rank / NUM_MAX_NVL_PEERS, nvl_rank = rank % NUM_MAX_NVL_PEERS;
     num_rdma_ranks = std::max(1, num_ranks / NUM_MAX_NVL_PEERS), num_nvl_ranks = std::min(num_ranks, NUM_MAX_NVL_PEERS);
-#ifdef DISABLE_NVSHMEM
+#ifdef DISABLE_NVSHMEM_AND_NCCL
     EP_HOST_ASSERT(num_rdma_ranks == 1 and not low_latency_mode and "NVSHMEM is disabled during compilation");
 #endif
 
@@ -255,10 +259,16 @@ pybind11::bytearray Buffer::get_local_ipc_handle() const {
 }
 
 pybind11::bytearray Buffer::get_local_nvshmem_unique_id() const {
-#ifndef DISABLE_NVSHMEM
-    EP_HOST_ASSERT(rdma_rank == 0 and "Only RDMA rank 0 can get NVSHMEM unique ID");
-    auto unique_id = internode::get_unique_id();
-    return {reinterpret_cast<const char*>(unique_id.data()), unique_id.size()};
+#ifndef DISABLE_NVSHMEM_AND_NCCL
+    EP_HOST_ASSERT(rdma_rank == 0 and "Only RDMA rank 0 can get unique ID(s)");
+
+    // Pass qps_per_rank to determine how many NCCL communicators are needed
+    // For NVSHMEM: returns 1 unique ID
+    // For NCCL: returns qps_per_rank unique IDs (one per communicator)
+    auto unique_id_vec = internode::get_unique_id(qps_per_rank, num_ranks);
+
+    // Return packed unique IDs as a single bytearray
+    return {reinterpret_cast<const char*>(unique_id_vec.data()), unique_id_vec.size()};
 #else
     EP_HOST_ASSERT(false and "NVSHMEM is disabled during compilation");
 #endif
@@ -299,7 +309,7 @@ void Buffer::destroy() {
     }
 
     // Free NVSHMEM
-#ifndef DISABLE_NVSHMEM
+#ifndef DISABLE_NVSHMEM_AND_NCCL
     if (is_available() and num_rdma_bytes > 0) {
         CUDA_CHECK(cudaDeviceSynchronize());
         internode::barrier();
@@ -352,16 +362,15 @@ void Buffer::sync(const std::vector<int>& device_ids,
     }
 
     // Sync NVSHMEM handles and allocate memory
-#ifndef DISABLE_NVSHMEM
+#ifndef DISABLE_NVSHMEM_AND_NCCL
     if (num_rdma_bytes > 0) {
         // Initialize NVSHMEM
         EP_HOST_ASSERT(root_unique_id_opt.has_value());
         std::vector<uint8_t> root_unique_id(root_unique_id_opt->size());
         auto root_unique_id_str = root_unique_id_opt->cast<std::string>();
         std::memcpy(root_unique_id.data(), root_unique_id_str.c_str(), root_unique_id_opt->size());
-        auto nvshmem_rank = low_latency_mode ? rank : rdma_rank;
-        auto num_nvshmem_ranks = low_latency_mode ? num_ranks : num_rdma_ranks;
-        EP_HOST_ASSERT(nvshmem_rank == internode::init(root_unique_id, nvshmem_rank, num_nvshmem_ranks, low_latency_mode));
+
+        internode::init(root_unique_id, rank, rdma_rank, num_ranks, num_rdma_ranks, low_latency_mode, qps_per_rank);
         internode::barrier();
 
         // Allocate
@@ -369,6 +378,9 @@ void Buffer::sync(const std::vector<int>& device_ids,
 
         // Clean buffer (mainly for low-latency mode)
         CUDA_CHECK(cudaMemset(rdma_buffer_ptr, 0, num_rdma_bytes));
+
+        // Register memory with NCCL communicators (sets up windows for RDMA)
+        internode::register_memory(rdma_buffer_ptr, num_rdma_bytes);
 
         // Allocate and clean shrink buffer
         if (enable_shrink) {
@@ -945,7 +957,7 @@ Buffer::internode_dispatch(const torch::Tensor& x,
                            std::optional<EventHandle>& previous_event,
                            bool async,
                            bool allocate_on_comm_stream) {
-#ifndef DISABLE_NVSHMEM
+#ifndef DISABLE_NVSHMEM_AND_NCCL
     // In dispatch, CPU will busy-wait until GPU receive tensor size metadata from other ranks, which can be quite long.
     // If users of DeepEP need to execute other Python code on other threads, such as KV transfer, their code will get stuck due to GIL
     // unless we release GIL here.
@@ -1323,7 +1335,7 @@ std::tuple<torch::Tensor, std::optional<torch::Tensor>, std::optional<EventHandl
     std::optional<EventHandle>& previous_event,
     bool async,
     bool allocate_on_comm_stream) {
-#ifndef DISABLE_NVSHMEM
+#ifndef DISABLE_NVSHMEM_AND_NCCL
     const int num_channels = config.num_sms / 2;
     EP_HOST_ASSERT(config.num_sms % 2 == 0);
 
@@ -1496,7 +1508,7 @@ std::tuple<torch::Tensor, std::optional<torch::Tensor>, std::optional<EventHandl
 }
 
 void Buffer::clean_low_latency_buffer(int num_max_dispatch_tokens_per_rank, int hidden, int num_experts) {
-#ifndef DISABLE_NVSHMEM
+#ifndef DISABLE_NVSHMEM_AND_NCCL
     EP_HOST_ASSERT(low_latency_mode);
 
     auto layout = LowLatencyLayout(rdma_buffer_ptr, num_max_dispatch_tokens_per_rank, hidden, num_ranks, num_experts);
@@ -1542,7 +1554,7 @@ Buffer::low_latency_dispatch(const torch::Tensor& x,
                              bool use_ue8m0,
                              bool async,
                              bool return_recv_hook) {
-#ifndef DISABLE_NVSHMEM
+#ifndef DISABLE_NVSHMEM_AND_NCCL
     EP_HOST_ASSERT(low_latency_mode);
 
     // Tensor checks
@@ -1627,6 +1639,11 @@ Buffer::low_latency_dispatch(const torch::Tensor& x,
             buffer.dispatch_rdma_recv_data_buffer,
             buffer.dispatch_rdma_recv_count_buffer,
             buffer.dispatch_rdma_send_buffer,
+#ifdef ENABLE_NCCL
+            buffer.dispatch_rdma_recv_data_buffer_offset,
+            buffer.dispatch_rdma_recv_count_buffer_offset,
+            buffer.dispatch_rdma_send_buffer_offset,
+#endif
             x.data_ptr(),
             topk_idx.data_ptr<topk_idx_t>(),
             next_clean_meta.first,
@@ -1644,7 +1661,8 @@ Buffer::low_latency_dispatch(const torch::Tensor& x,
             workspace,
             num_device_sms,
             launch_stream,
-            phases);
+            phases,
+            low_latency_buffer_idx);
     };
     launcher(return_recv_hook ? LOW_LATENCY_SEND_PHASE : (LOW_LATENCY_SEND_PHASE | LOW_LATENCY_RECV_PHASE));
 
@@ -1685,7 +1703,7 @@ std::tuple<torch::Tensor, std::optional<EventHandle>, std::optional<std::functio
     bool async,
     bool return_recv_hook,
     const std::optional<torch::Tensor>& out) {
-#ifndef DISABLE_NVSHMEM
+#ifndef DISABLE_NVSHMEM_AND_NCCL
     EP_HOST_ASSERT(low_latency_mode);
 
     // Tensor checks
@@ -1747,6 +1765,11 @@ std::tuple<torch::Tensor, std::optional<EventHandle>, std::optional<std::functio
                               buffer.combine_rdma_recv_data_buffer,
                               buffer.combine_rdma_recv_flag_buffer,
                               buffer.combine_rdma_send_buffer,
+#ifdef ENABLE_NCCL
+                              buffer.combine_rdma_recv_data_buffer_offset,
+                              buffer.combine_rdma_recv_flag_buffer_offset,
+                              buffer.combine_rdma_send_buffer_offset,
+#endif
                               x.data_ptr(),
                               topk_idx.data_ptr<topk_idx_t>(),
                               topk_weights.data_ptr<float>(),
@@ -1768,7 +1791,8 @@ std::tuple<torch::Tensor, std::optional<EventHandle>, std::optional<std::functio
                               num_device_sms,
                               launch_stream,
                               phases,
-                              zero_copy);
+                              zero_copy,
+                              low_latency_buffer_idx);
     };
     launcher(return_recv_hook ? LOW_LATENCY_SEND_PHASE : (LOW_LATENCY_SEND_PHASE | LOW_LATENCY_RECV_PHASE));
 
@@ -1796,7 +1820,7 @@ std::tuple<torch::Tensor, std::optional<EventHandle>, std::optional<std::functio
 }
 
 torch::Tensor Buffer::get_next_low_latency_combine_buffer(int num_max_dispatch_tokens_per_rank, int hidden, int num_experts) const {
-#ifndef DISABLE_NVSHMEM
+#ifndef DISABLE_NVSHMEM_AND_NCCL
     LowLatencyLayout layout(rdma_buffer_ptr, num_max_dispatch_tokens_per_rank, hidden, num_ranks, num_experts);
 
     auto buffer = layout.buffers[low_latency_buffer_idx];
@@ -1822,6 +1846,7 @@ bool is_sm90_compiled() {
 #endif
 }
 
+#ifndef DISABLE_NVSHMEM_AND_NCCL
 void Buffer::low_latency_update_mask_buffer(int rank_to_mask, bool mask) {
     EP_HOST_ASSERT(mask_buffer_ptr != nullptr and "Shrink mode must be enabled");
     EP_HOST_ASSERT(rank_to_mask >= 0 and rank_to_mask < num_ranks);
@@ -1840,6 +1865,7 @@ void Buffer::low_latency_clean_mask_buffer() {
     EP_HOST_ASSERT(mask_buffer_ptr != nullptr and "Shrink mode must be enabled");
     internode_ll::clean_mask_buffer(mask_buffer_ptr, num_ranks, at::cuda::getCurrentCUDAStream());
 }
+#endif
 
 }  // namespace deep_ep
 
@@ -1862,7 +1888,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         .def("current_stream_wait", &deep_ep::EventHandle::current_stream_wait);
 
     pybind11::class_<deep_ep::Buffer>(m, "Buffer")
-        .def(pybind11::init<int, int, int64_t, int64_t, bool, bool, bool, bool>())
+        .def(pybind11::init<int, int, int64_t, int64_t, bool, bool, bool, bool, int>())
         .def("is_available", &deep_ep::Buffer::is_available)
         .def("get_num_rdma_ranks", &deep_ep::Buffer::get_num_rdma_ranks)
         .def("get_rdma_rank", &deep_ep::Buffer::get_rdma_rank)
@@ -1882,9 +1908,11 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         .def("clean_low_latency_buffer", &deep_ep::Buffer::clean_low_latency_buffer)
         .def("low_latency_dispatch", &deep_ep::Buffer::low_latency_dispatch)
         .def("low_latency_combine", &deep_ep::Buffer::low_latency_combine)
+#ifndef DISABLE_NVSHMEM_AND_NCCL
         .def("low_latency_update_mask_buffer", &deep_ep::Buffer::low_latency_update_mask_buffer)
         .def("low_latency_query_mask_buffer", &deep_ep::Buffer::low_latency_query_mask_buffer)
         .def("low_latency_clean_mask_buffer", &deep_ep::Buffer::low_latency_clean_mask_buffer)
+#endif
         .def("get_next_low_latency_combine_buffer", &deep_ep::Buffer::get_next_low_latency_combine_buffer);
 
     m.def("is_sm90_compiled", deep_ep::is_sm90_compiled);

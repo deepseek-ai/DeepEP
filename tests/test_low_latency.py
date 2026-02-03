@@ -1,4 +1,5 @@
 import argparse
+import os
 import random
 import torch
 import torch.distributed as dist
@@ -6,7 +7,7 @@ from functools import partial
 from typing import Literal, Set
 
 import deep_ep
-from utils import init_dist, bench, bench_kineto, calc_diff, hash_tensor, per_token_cast_back
+from utils import init_dist, bench, bench_kineto, calc_diff, hash_tensor, per_token_cast_back, backend_aware_all_gather_into_tensor
 
 
 def simulate_failure_and_skip(rank: int, api: Literal["dispatch", "combine", "clean"], expected_masked_ranks: Set[int]):
@@ -75,7 +76,7 @@ def test_main(num_tokens: int,
         topk_idx[random.randint(0, num_tokens - 1), random.randint(0, num_topk - 1)] = -1
 
     all_topk_idx = torch.empty((num_ranks, num_tokens, num_topk), dtype=topk_idx.dtype, device='cuda')
-    dist.all_gather_into_tensor(all_topk_idx, topk_idx, group=group)
+    backend_aware_all_gather_into_tensor(all_topk_idx, topk_idx, group)
 
     # For failure simulation and shrink testing
     mask_status = torch.zeros((num_ranks, ), dtype=torch.int, device='cuda')
@@ -304,7 +305,9 @@ def test_loop(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
                              use_logfmt=args.use_logfmt,
                              seed=seed) == ref_hash, f'Error: seed={seed}'
 
-    # Destroy the buffer runtime and communication group
+    #Destroy the buffer runtime and communication group
+    #"""
+
     buffer.destroy()
     dist.barrier()
     dist.destroy_process_group()
@@ -326,5 +329,29 @@ if __name__ == '__main__':
     parser.add_argument("--shrink-test", action='store_true', help='Whether to simulate failure and test shrink mode')
     args = parser.parse_args()
 
-    num_processes = args.num_processes
-    torch.multiprocessing.spawn(test_loop, args=(num_processes, args), nprocs=num_processes)
+    if 'SLURM_PROCID' in os.environ and 'SLURM_NTASKS_PER_NODE' in os.environ:
+        local_rank = int(os.environ['SLURM_LOCALID'])
+        num_local_ranks = int(os.environ['SLURM_NTASKS_PER_NODE'])
+        test_loop(local_rank, num_local_ranks, args)
+    elif 'OMPI_COMM_WORLD_RANK' in os.environ or 'PMI_RANK' in os.environ or 'MV2_COMM_WORLD_RANK' in os.environ:
+        # MPI environment detected (OpenMPI, Intel MPI, or MVAPICH2)
+        if 'OMPI_COMM_WORLD_LOCAL_RANK' in os.environ:
+            # OpenMPI
+            local_rank = int(os.environ['OMPI_COMM_WORLD_LOCAL_RANK'])
+            num_local_ranks = int(os.environ['OMPI_COMM_WORLD_LOCAL_SIZE'])
+        elif 'MPI_LOCALRANKID' in os.environ:
+            # Intel MPI
+            local_rank = int(os.environ['MPI_LOCALRANKID'])
+            num_local_ranks = int(os.environ.get('MPI_LOCALNRANKS', args.num_processes))
+        elif 'MV2_COMM_WORLD_LOCAL_RANK' in os.environ:
+            # MVAPICH2
+            local_rank = int(os.environ['MV2_COMM_WORLD_LOCAL_RANK'])
+            num_local_ranks = int(os.environ['MV2_COMM_WORLD_LOCAL_SIZE'])
+        else:
+            # Fallback: try to infer from global rank
+            local_rank = 0
+            num_local_ranks = args.num_processes
+        test_loop(local_rank, num_local_ranks, args)
+    else:
+        num_processes = args.num_processes
+        torch.multiprocessing.spawn(test_loop, args=(num_processes, args), nprocs=num_processes)

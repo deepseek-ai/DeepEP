@@ -1,7 +1,21 @@
 #include "configs.cuh"
+
+#include <cooperative_groups.h>
 #include "exception.cuh"
-#include "ibgda_device.cuh"
 #include "launch.cuh"
+#include "utils.cuh"
+
+#ifdef ENABLE_NVSHMEM
+#include "ibgda_device.cuh"
+#endif
+
+#ifdef ENABLE_NCCL
+#include "nccl_device/gin/gin_device_api.h"
+#include "nccl_gin_backend.h"
+#endif
+
+using namespace cooperative_groups;
+namespace cg = cooperative_groups;
 
 namespace deep_ep {
 
@@ -19,6 +33,46 @@ __forceinline__ __device__ bool is_rank_masked(int* mask_buffer_ptr, int rank) {
     }
 }
 
+#ifdef ENABLE_NCCL
+// Device constant for P2P/NVLink disabled flag
+// Set to true to force RDMA path, false to allow P2P when available
+// Default is false (P2P enabled), updated from host via CLI option
+__device__ __constant__ bool d_p2p_disabled = false;
+
+// Get peer-to-peer pointer for NCCL
+// Returns dst_ptr if NVLink is available, 0 otherwise
+// offset parameter allows callers to pass a pre-calculated offset for the destination
+__device__ __forceinline__ uint64_t nccl_get_p2p_ptr(const uint64_t& dst_ptr,
+                                                     const size_t& offset,
+                                                     const int& rank,
+                                                     const int& dst_rank,
+                                                     const int& expert_idx,
+                                                     const ncclWindow_t* nccl_windows,
+                                                     ncclDevComm* dcomms) {
+    // Local rank, no need for peer mapping
+    if (rank == dst_rank)
+        return dst_ptr;
+
+    // If P2P is globally disabled, always use RDMA path
+    if (d_p2p_disabled)
+        return 0;
+
+    // P2P/NVLink only works between ranks on the same node (LSA team)
+    // Use NCCL team APIs to check if dst_rank is in the same LSA team
+    auto comm_id = expert_idx / DEEP_EP_NCCL_GIN_CTXS_PER_COMM;
+    ncclTeam lsa = ncclTeamLsa(dcomms[comm_id]);
+    ncclTeam world = ncclTeamWorld(dcomms[comm_id]);
+    if (!ncclTeamRankIsMember(lsa, world, dst_rank))
+        return 0;  // Different nodes (not in same LSA team), must use RDMA
+
+    auto const p2p_ptr =
+        reinterpret_cast<uint64_t>(ncclGetPeerPointer(nccl_windows[comm_id], offset, dst_rank));
+
+    return p2p_ptr ? p2p_ptr : 0;
+}
+#endif
+
+#ifdef ENABLE_NVSHMEM
 template <int kNumThreads>
 __forceinline__ __device__ void barrier(int thread_id, int rank, int num_ranks, int* mask_buffer_ptr, int* sync_buffer_ptr) {
     EP_DEVICE_ASSERT(kNumThreads >= num_ranks);
@@ -68,6 +122,94 @@ __forceinline__ __device__ void barrier(int thread_id, int rank, int num_ranks, 
     }
     __syncthreads();
 }
+#endif
+
+#ifdef ENABLE_NCCL
+// NCCL barrier with per-rank timeout tracking
+template <int kNumThreads>
+__forceinline__ __device__ void nccl_gin_barrier(
+    int thread_id, int rank, ncclDevComm& dcomm, ncclGin& net, int* mask_buffer_ptr, int barrier_index = 0) {
+    EP_DEVICE_ASSERT(kNumThreads >= dcomm.nRanks);
+
+    // If no masking, use simple global barrier (fast path)
+    if (mask_buffer_ptr == nullptr) {
+        ncclBarrierSession<ncclCoopCta> barrier(ncclCoopCta(), ncclTeamTagWorld(), net, barrier_index);
+        barrier.sync(ncclCoopCta(), cuda::memory_order_relaxed, ncclGinFenceLevel::Relaxed);
+        return;
+    }
+
+    // Per-rank barrier with timeout tracking using signal array
+    // Each rank gets its own signal: signals_base + barrier_index * num_ranks + rank
+
+    // Early exit if this rank is masked (no need to participate in barrier)
+    if (is_rank_masked(mask_buffer_ptr, rank)) {
+        return;
+    }
+
+    int num_ranks = dcomm.nRanks;
+    ncclTeam world = ncclTeamWorld(dcomm);
+    unsigned int my_signal_idx = barrier_index * num_ranks + rank;
+
+    // Step 0: Flush all pending operations (equivalent to NVSHMEM's quiet)
+    // This ensures all prior operations complete before starting the barrier
+    net.flush(ncclCoopCta());
+
+    // Step 1: Update local signal counter and read back the value
+    __shared__ uint64_t local_signal_value;
+    if (thread_id == 0) {
+        uint64_t current_generation = net.readSignal(my_signal_idx);
+
+        // Increment my own signal to indicate I've arrived at the barrier
+        net.signal(world, rank, ncclGin_SignalInc{my_signal_idx}, ncclCoopThread(), ncclGin_None(), cuda::thread_scope_system);
+
+        // Calculate expected value for this barrier (current + 1)
+        // All ranks will wait for others to reach this generation
+        local_signal_value = current_generation + 1;
+    }
+    __syncthreads();
+
+    // Step 2a: Signal all other non-masked ranks (send phase)
+    // Each thread handles one destination rank (one-to-one mapping guaranteed by kNumThreads >= nRanks)
+    if (thread_id < num_ranks && thread_id != rank) {
+        const auto dst_rank = thread_id;
+        if (not is_rank_masked(mask_buffer_ptr, dst_rank)) {
+            // Signal the destination rank (send our signal to them)
+            net.signal(world, dst_rank, ncclGin_SignalInc{my_signal_idx}, ncclCoopThread(), ncclGin_None(), cuda::thread_scope_system);
+        }
+    }
+    __syncthreads();
+
+    // Step 2b: Wait for signals from all other non-masked ranks (wait phase)
+    // Each thread handles one destination rank (one-to-one mapping guaranteed by kNumThreads >= nRanks)
+    if (thread_id < num_ranks && thread_id != rank) {
+        const auto dst_rank = thread_id;
+        if (not is_rank_masked(mask_buffer_ptr, dst_rank)) {
+            // Wait for destination rank's signal with timeout
+            auto start_time = clock64();
+            uint64_t wait_recv_cost = 0;
+            unsigned int src_signal_idx = barrier_index * num_ranks + dst_rank;
+            uint64_t expected_signal = local_signal_value;  // We expect dst_rank to reach same counter value
+
+            // Poll with timeout
+            uint64_t cur_value;
+            do {
+                cur_value = net.readSignal(src_signal_idx);
+                wait_recv_cost = clock64() - start_time;
+            } while (cur_value < expected_signal && wait_recv_cost <= NUM_TIMEOUT_CYCLES);
+
+            // Mask rank if timeout
+            if (wait_recv_cost > NUM_TIMEOUT_CYCLES) {
+                printf("Warning: DeepEP timeout for NCCL barrier, rank %d, dst_rank %d, barrier_idx %d\n", rank, dst_rank, barrier_index);
+                atomicExch(mask_buffer_ptr + dst_rank, 1);
+            }
+        }
+    }
+    __syncthreads();
+
+    // Step 3: Ensure all memory operations are visible (flush any pending ops)
+    net.flush(ncclCoopCta());
+}
+#endif
 
 template <int kNumThreads>
 __launch_bounds__(kNumThreads, 1) __global__ void clean_low_latency_buffer(int* clean_0,
@@ -77,15 +219,27 @@ __launch_bounds__(kNumThreads, 1) __global__ void clean_low_latency_buffer(int* 
                                                                            int rank,
                                                                            int num_ranks,
                                                                            int* mask_buffer_ptr,
-                                                                           int* sync_buffer_ptr) {
+                                                                           int* sync_buffer_ptr
+#ifdef ENABLE_NCCL
+                                                                           ,
+                                                                           ncclDevComm* dcomms,
+                                                                           unsigned signals_base
+#endif
+) {
     auto thread_id = static_cast<int>(threadIdx.x);
 
     // Barrier before cleaning (in case of unfinished chunked EP)
+#ifdef ENABLE_NCCL
+    auto dcomm = dcomms[0];
+    ncclGin net(dcomm, 0);
+    nccl_gin_barrier<kNumThreads>(thread_id, rank, dcomm, net, mask_buffer_ptr, signals_base);
+
+#elif defined(ENABLE_NVSHMEM)
     if (sync_buffer_ptr == nullptr)
         nvshmemx_barrier_all_block();
     else
         barrier<kNumThreads>(thread_id, rank, num_ranks, mask_buffer_ptr, sync_buffer_ptr);
-
+#endif
     // Clean
     #pragma unroll
     for (int i = thread_id; i < num_clean_int_0; i += kNumThreads)
@@ -94,11 +248,15 @@ __launch_bounds__(kNumThreads, 1) __global__ void clean_low_latency_buffer(int* 
     for (int i = thread_id; i < num_clean_int_1; i += kNumThreads)
         clean_1[i] = 0;
 
-    // Barrier after cleaning (make sure the low-latency mode works fine)
+        // Barrier after cleaning (make sure the low-latency mode works fine)
+#ifdef ENABLE_NCCL
+    nccl_gin_barrier<kNumThreads>(thread_id, rank, dcomm, net, mask_buffer_ptr, signals_base);
+#elif defined(ENABLE_NVSHMEM)
     if (sync_buffer_ptr == nullptr)
         nvshmemx_barrier_all_block();
     else
         barrier<kNumThreads>(thread_id, rank, num_ranks, mask_buffer_ptr, sync_buffer_ptr);
+#endif
 }
 
 void clean_low_latency_buffer(int* clean_0,
@@ -112,8 +270,32 @@ void clean_low_latency_buffer(int* clean_0,
                               cudaStream_t stream) {
     constexpr int kNumThreads = 256;
 
+#ifdef ENABLE_NCCL
+    auto* backend = dynamic_cast<deep_ep::internode::NCCLGINBackend*>(deep_ep::internode::get_backend());
+    EP_HOST_ASSERT(backend != nullptr);
+    auto dcomms = backend->get_device_communicators();
+    auto signals_base =
+        backend->get_signals_base(INTERNODE_BUFFER_IDX);  // reuse HT signals for this -- we will clear them in the notify phase
+
+    EP_HOST_ASSERT(dcomms != nullptr);
+#endif
+
     SETUP_LAUNCH_CONFIG(1, kNumThreads, stream);
 
+#ifdef ENABLE_NCCL
+    LAUNCH_KERNEL(&cfg,
+                  clean_low_latency_buffer<kNumThreads>,
+                  clean_0,
+                  num_clean_int_0,
+                  clean_1,
+                  num_clean_int_1,
+                  rank,
+                  num_ranks,
+                  mask_buffer_ptr,
+                  sync_buffer_ptr,
+                  dcomms,
+                  signals_base);
+#elif defined(ENABLE_NVSHMEM)
     LAUNCH_KERNEL(&cfg,
                   clean_low_latency_buffer<kNumThreads>,
                   clean_0,
@@ -124,6 +306,7 @@ void clean_low_latency_buffer(int* clean_0,
                   num_ranks,
                   mask_buffer_ptr,
                   sync_buffer_ptr);
+#endif
 }
 
 template <bool kUseFP8, bool kUseUE8M0, int kHidden>
@@ -138,6 +321,11 @@ __global__ __launch_bounds__(1024, 1) void dispatch(void* packed_recv_x,
                                                     void* rdma_recv_x,
                                                     int* rdma_recv_count,
                                                     void* rdma_x,
+#ifdef ENABLE_NCCL
+                                                    size_t rdma_recv_x_offset,
+                                                    size_t rdma_recv_count_offset,
+                                                    size_t rdma_x_offset,
+#endif
                                                     const void* x,
                                                     const topk_idx_t* topk_idx,
                                                     int* atomic_counter_per_expert,
@@ -153,7 +341,16 @@ __global__ __launch_bounds__(1024, 1) void dispatch(void* packed_recv_x,
                                                     int num_warp_groups,
                                                     int num_warps_per_group,
                                                     bool round_scale,
-                                                    int phases) {
+                                                    int phases
+#ifdef ENABLE_NCCL
+                                                    ,
+                                                    int num_gin_comms,
+                                                    void* gin_base_ptr,
+                                                    ncclDevComm* dcomms,
+                                                    const ncclWindow_t* nccl_windows,
+                                                    unsigned signals_base
+#endif
+) {
     const auto sm_id = static_cast<int>(blockIdx.x);
     const auto thread_id = static_cast<int>(threadIdx.x);
     const auto warp_id = thread_id / 32, lane_id = get_lane_id();
@@ -261,6 +458,40 @@ __global__ __launch_bounds__(1024, 1) void dispatch(void* packed_recv_x,
                 const auto dst_ptr = reinterpret_cast<uint64_t>(rdma_recv_x) +
                     dst_expert_local_idx * num_ranks * num_max_dispatch_tokens_per_rank * num_bytes_per_msg +
                     rank * num_max_dispatch_tokens_per_rank * num_bytes_per_msg + slot_idx * num_bytes_per_msg;
+
+#ifdef ENABLE_NCCL
+                size_t expected_dst_offset = rdma_recv_x_offset +
+                    dst_expert_local_idx * num_ranks * num_max_dispatch_tokens_per_rank * num_bytes_per_msg +
+                    rank * num_max_dispatch_tokens_per_rank * num_bytes_per_msg + slot_idx * num_bytes_per_msg;
+                const auto dst_p2p_ptr =
+                    nccl_get_p2p_ptr(dst_ptr, expected_dst_offset, rank, dst_rank, dst_expert_local_idx, nccl_windows, dcomms);
+
+                if (not is_rank_masked<true>(mask_buffer_ptr, dst_rank)) {
+                    if (dst_p2p_ptr == 0) {
+                        size_t expected_src_offset = rdma_x_offset + token_idx * num_bytes_per_msg;
+                        auto comm_id = dst_expert_local_idx / DEEP_EP_NCCL_GIN_CTXS_PER_COMM;
+                        auto ctx_id = dst_expert_local_idx % DEEP_EP_NCCL_GIN_CTXS_PER_COMM;
+                        ncclGin net(dcomms[comm_id], ctx_id);
+                        ncclTeam world = ncclTeamWorld(dcomms[comm_id]);
+                        auto nccl_window = nccl_windows[comm_id];
+                        net.put(world,
+                                dst_rank,
+                                nccl_window,
+                                expected_dst_offset,
+                                nccl_window,
+                                expected_src_offset,
+                                num_bytes_per_msg,
+                                ncclGin_None{},  // no signal
+                                ncclGin_None{},  // no counter
+                                ncclCoopWarp());
+                    } else {
+                        // NOTES: only 2 load iterations for 7K hidden with 8 unrolls
+                        const auto* src_int4_ptr = reinterpret_cast<const int4*>(src_ptr);
+                        const auto* dst_int4_ptr = reinterpret_cast<int4*>(dst_p2p_ptr);
+                        UNROLLED_WARP_COPY(8, lane_id, num_int4_per_msg, dst_int4_ptr, src_int4_ptr, ld_nc_global, st_na_global);
+                    }
+                }
+#elif defined(ENABLE_NVSHMEM)
                 const auto dst_p2p_ptr = nvshmemi_get_p2p_ptr(dst_ptr, rank, dst_rank);
                 if (not is_rank_masked<true>(mask_buffer_ptr, dst_rank)) {
                     if (dst_p2p_ptr == 0) {
@@ -272,6 +503,7 @@ __global__ __launch_bounds__(1024, 1) void dispatch(void* packed_recv_x,
                         UNROLLED_WARP_COPY(8, lane_id, num_int4_per_msg, dst_int4_ptr, src_int4_ptr, ld_nc_global, st_na_global);
                     }
                 }
+#endif
 
                 // Increase counter after finishing
                 __syncwarp();
@@ -281,6 +513,15 @@ __global__ __launch_bounds__(1024, 1) void dispatch(void* packed_recv_x,
     } else if (warp_id == num_warps - 1) {
         EP_DEVICE_ASSERT(num_sms > 1);
         if (sm_id == 0) {
+#ifdef ENABLE_NCCL
+            if(!d_p2p_disabled) {
+                // The first SM is also responsible for cleaning the next buffer
+                #pragma unroll
+                for (int i = lane_id; i < num_next_clean_int; i += 32)
+                    next_clean[i] = 0;
+            }
+#elif defined(ENABLE_NVSHMEM)
+            // NCCL does not require QP assertions, only IBGDA does
             // The first SM is also responsible for checking QPs
             EP_DEVICE_ASSERT(ibgda_get_state()->num_rc_per_pe >= num_local_experts);
 
@@ -288,7 +529,7 @@ __global__ __launch_bounds__(1024, 1) void dispatch(void* packed_recv_x,
             #pragma unroll
             for (int i = lane_id; i < num_next_clean_int; i += 32)
                 next_clean[i] = 0;
-
+#endif
             // Notify before executing `int_p`
             __syncwarp();
             #pragma unroll
@@ -331,6 +572,42 @@ __global__ __launch_bounds__(1024, 1) void dispatch(void* packed_recv_x,
         while (ld_acquire_global(atomic_finish_counter_per_expert + responsible_expert_idx) != FINISHED_SUM_TAG * 2)
             ;
         auto dst_ptr = reinterpret_cast<uint64_t>(rdma_recv_count + dst_expert_local_idx * num_ranks + rank);
+
+#ifdef ENABLE_NCCL
+        size_t dst_offset = rdma_recv_count_offset + (dst_expert_local_idx * num_ranks + rank) * sizeof(int);
+        const auto dst_p2p_ptr = nccl_get_p2p_ptr(dst_ptr, dst_offset, rank, dst_rank, dst_expert_local_idx, nccl_windows, dcomms);
+
+        if (not is_rank_masked(mask_buffer_ptr, dst_rank)) {
+            if (dst_p2p_ptr == 0) {  // if (rank != dst_rank) {
+                auto comm_id = dst_expert_local_idx / DEEP_EP_NCCL_GIN_CTXS_PER_COMM;
+                auto ctx_id = dst_expert_local_idx % DEEP_EP_NCCL_GIN_CTXS_PER_COMM;
+                auto signal_id = signals_base + dst_expert_local_idx * num_ranks + rank;
+                ncclGin net(dcomms[comm_id], ctx_id);
+                ncclTeam world = ncclTeamWorld(dcomms[comm_id]);
+                // NOTE: net.signal() is semantically cleaner but adds latency to Dispatch-Send 
+                //       and Combine-Send compared to net.put() with 0 bytes
+                // net.signal(world,
+                //            dst_rank,
+                //            ncclGin_SignalAdd{signal_id, (uint64_t)num_tokens_sent + 1},
+                //            ncclCoopThread(),
+                //            ncclGin_None(),
+                //            cuda::thread_scope_system);
+                auto nccl_window = nccl_windows[comm_id];
+                net.put(world,
+                        dst_rank,
+                        nccl_window,
+                        dst_offset,
+                        nccl_window,
+                        0,
+                        0,               // 0 bytes transfer
+                        ncclGin_SignalAdd{signal_id, (uint64_t)num_tokens_sent + 1},
+                        ncclGin_None{},  // no counter
+                        ncclCoopThread());
+            } else {
+                st_release_sys_global(reinterpret_cast<int*>(dst_p2p_ptr), -num_tokens_sent - 1);
+            }
+        }
+#elif defined(ENABLE_NVSHMEM)
         auto dst_p2p_ptr = nvshmemi_get_p2p_ptr(dst_ptr, rank, dst_rank);
         if (not is_rank_masked(mask_buffer_ptr, dst_rank)) {
             if (dst_p2p_ptr == 0) {
@@ -339,6 +616,7 @@ __global__ __launch_bounds__(1024, 1) void dispatch(void* packed_recv_x,
                 st_release_sys_global(reinterpret_cast<int*>(dst_p2p_ptr), -num_tokens_sent - 1);
             }
         }
+#endif
 
         // Clean workspace for next use
         atomic_counter_per_expert[responsible_expert_idx] = 0;
@@ -385,11 +663,37 @@ LOW_LATENCY_DISPATCH_RECV:
             auto start_time = clock64();
             uint64_t wait_recv_cost = 0;
             if (not is_rank_masked(mask_buffer_ptr, src_rank)) {
+#ifdef ENABLE_NCCL
+                // int sig_idx_wait2 = local_expert_idx * num_ranks + src_rank;
+                size_t src_offset = rdma_recv_count_offset + (local_expert_idx * num_ranks + src_rank) * sizeof(int);
+                auto src_p2p_ptr = nccl_get_p2p_ptr(0x01, src_offset, rank, src_rank, local_expert_idx, nccl_windows, dcomms);
+                // if (rank != src_rank) {
+                if (src_p2p_ptr == 0) {
+                    auto comm_id = local_expert_idx / DEEP_EP_NCCL_GIN_CTXS_PER_COMM;
+                    auto ctx_id = local_expert_idx % DEEP_EP_NCCL_GIN_CTXS_PER_COMM;
+                    ncclGin net(dcomms[comm_id], ctx_id);
+                    uint64_t cur_value;
+                    do {
+                        cur_value = net.readSignal(signals_base + local_expert_idx * num_ranks + src_rank);
+                    } while (cur_value < 1                                                       // data not arrived
+                             && (wait_recv_cost = clock64() - start_time) <= NUM_TIMEOUT_CYCLES  // not timeout
+                    );
+                    net.resetSignal(signals_base + local_expert_idx * num_ranks + src_rank);
+                    num_recv_tokens = -(int)cur_value;
+                } else {
+                    while ((num_recv_tokens = ld_acquire_sys_global((rdma_recv_count + local_expert_idx * num_ranks + src_rank))) ==
+                               0                                                               // data not arrived
+                           && (wait_recv_cost = clock64() - start_time) <= NUM_TIMEOUT_CYCLES  // not timeout
+                    )
+                        ;
+                }
+#elif defined(ENABLE_NVSHMEM)
                 while ((num_recv_tokens = ld_acquire_sys_global(rdma_recv_count + local_expert_idx * num_ranks + src_rank)) ==
                            0                                                               // data not arrived
                        && (wait_recv_cost = clock64() - start_time) <= NUM_TIMEOUT_CYCLES  // not timeout
                 )
                     ;
+#endif
             }
             // Do not receive tokens if rank timeout or masked
             if (num_recv_tokens == 0)
@@ -473,6 +777,11 @@ void dispatch(void* packed_recv_x,
               void* rdma_recv_x,
               int* rdma_recv_count,
               void* rdma_x,
+#ifdef ENABLE_NCCL
+              size_t rdma_recv_x_offset,
+              size_t rdma_recv_count_offset,
+              size_t rdma_x_offset,
+#endif
               const void* x,
               const topk_idx_t* topk_idx,
               int* next_clean,
@@ -490,7 +799,8 @@ void dispatch(void* packed_recv_x,
               void* workspace,
               int num_device_sms,
               cudaStream_t stream,
-              int phases) {
+              int phases,
+              int ll_buffer_idx) {
     constexpr int kNumMaxTopK = 11;
     const int num_warp_groups = ceil_div(num_experts, num_device_sms);
     const int num_warps_per_group = 32 / num_warp_groups;
@@ -510,6 +820,68 @@ void dispatch(void* packed_recv_x,
     if (use_ue8m0)
         EP_HOST_ASSERT(round_scale and "UE8M0 SF requires `round_scale=True`");
 
+#ifdef ENABLE_NCCL
+    auto* backend = dynamic_cast<deep_ep::internode::NCCLGINBackend*>(deep_ep::internode::get_backend());
+    EP_HOST_ASSERT(backend != nullptr);
+    auto gin_base_ptr = backend->get_gin_base_ptr();
+    int num_gin_comms = backend->get_num_gin_comms();
+    auto dcomms = backend->get_device_communicators();
+    auto nccl_windows = backend->get_device_nccl_windows();
+    auto signals_base = backend->get_signals_base(ll_buffer_idx);
+
+    EP_HOST_ASSERT(dcomms != nullptr);
+    EP_HOST_ASSERT(num_gin_comms >= 1);
+    EP_HOST_ASSERT(nccl_windows != nullptr);
+#endif
+
+#ifdef ENABLE_NCCL
+#define DISPATCH_LAUNCH_CASE(hidden)                         \
+    {                                                        \
+        auto dispatch_func = dispatch<false, false, hidden>; \
+        if (use_fp8 and not use_ue8m0)                       \
+            dispatch_func = dispatch<true, false, hidden>;   \
+        if (use_fp8 and use_ue8m0)                           \
+            dispatch_func = dispatch<true, true, hidden>;    \
+        LAUNCH_KERNEL(&cfg,                                  \
+                      dispatch_func,                         \
+                      packed_recv_x,                         \
+                      packed_recv_x_scales,                  \
+                      packed_recv_src_info,                  \
+                      packed_recv_layout_range,              \
+                      packed_recv_count,                     \
+                      mask_buffer_ptr,                       \
+                      cumulative_local_expert_recv_stats,    \
+                      dispatch_wait_recv_cost_stats,         \
+                      rdma_recv_x,                           \
+                      rdma_recv_count,                       \
+                      rdma_x,                                \
+                      rdma_recv_x_offset,                    \
+                      rdma_recv_count_offset,                \
+                      rdma_x_offset,                         \
+                      x,                                     \
+                      topk_idx,                              \
+                      atomic_counter_per_expert,             \
+                      atomic_finish_counter_per_expert,      \
+                      next_clean,                            \
+                      num_next_clean_int,                    \
+                      num_tokens,                            \
+                      num_max_dispatch_tokens_per_rank,      \
+                      num_topk,                              \
+                      num_experts,                           \
+                      rank,                                  \
+                      num_ranks,                             \
+                      num_warp_groups,                       \
+                      num_warps_per_group,                   \
+                      round_scale,                           \
+                      phases,                                \
+                      num_gin_comms,                         \
+                      gin_base_ptr,                          \
+                      dcomms,                                \
+                      nccl_windows,                          \
+                      signals_base);                         \
+    }                                                        \
+    break
+#elif defined(ENABLE_NVSHMEM)
 #define DISPATCH_LAUNCH_CASE(hidden)                         \
     {                                                        \
         auto dispatch_func = dispatch<false, false, hidden>; \
@@ -548,9 +920,11 @@ void dispatch(void* packed_recv_x,
                       phases);                               \
     }                                                        \
     break
+#endif
 
     SETUP_LAUNCH_CONFIG(num_sms, num_warps * 32, stream);
     SWITCH_HIDDEN(DISPATCH_LAUNCH_CASE);
+    cudaStreamSynchronize(stream);
 #undef DISPATCH_LAUNCH_CASE
 }
 
@@ -717,6 +1091,11 @@ __global__ __launch_bounds__(1024, 1) void combine(void* combined_x,
                                                    void* rdma_recv_x,
                                                    int* rdma_recv_flag,
                                                    void* rdma_send_x,
+#ifdef ENABLE_NCCL
+                                                   size_t rdma_recv_x_offset,
+                                                   size_t rdma_recv_flag_offset,
+                                                   size_t rdma_send_x_offset,
+#endif
                                                    const void* x,
                                                    const topk_idx_t* topk_idx,
                                                    const float* topk_weights,
@@ -737,7 +1116,15 @@ __global__ __launch_bounds__(1024, 1) void combine(void* combined_x,
                                                    int num_warp_groups,
                                                    int num_warps_per_group,
                                                    int phases,
-                                                   bool zero_copy) {
+                                                   bool zero_copy
+#ifdef ENABLE_NCCL
+                                                   ,
+                                                   int num_gin_comms,
+                                                   ncclDevComm* dcomms,
+                                                   const ncclWindow_t* nccl_windows,
+                                                   unsigned signals_base
+#endif
+) {
     const auto sm_id = __shfl_sync(0xffffffff, static_cast<int>(blockIdx.x), 0);
     const auto num_sms = __shfl_sync(0xffffffff, static_cast<int>(gridDim.x), 0);
     const auto thread_id = static_cast<int>(threadIdx.x);
@@ -776,10 +1163,18 @@ __global__ __launch_bounds__(1024, 1) void combine(void* combined_x,
 
     // Clean up next buffer
     if (sm_id == 0 and warp_group_id == 0 and sub_warp_id == 0) {
+
+#ifdef ENABLE_NCCL
+        if(!d_p2p_disabled) {
+            #pragma unroll
+            for (int i = lane_id; i < num_next_clean_int; i += 32)
+                next_clean[i] = 0;
+        }
+#elif defined(ENABLE_NVSHMEM)
         #pragma unroll
         for (int i = lane_id; i < num_next_clean_int; i += 32)
             next_clean[i] = 0;
-
+#endif
         // Notify before executing `int_p`
         __syncwarp();
         if (lane_id == 0)
@@ -844,7 +1239,16 @@ __global__ __launch_bounds__(1024, 1) void combine(void* combined_x,
                 const auto buf_ptr = reinterpret_cast<int64_t>(rdma_send_x_vec_row);
                 const auto dst_ptr = reinterpret_cast<uint64_t>(rdma_recv_x) +
                     (global_expert_idx * num_max_dispatch_tokens_per_rank + src_idx) * num_bytes_per_slot;
+
+#ifdef ENABLE_NCCL
+                const auto expected_dst_offset =
+                    rdma_recv_x_offset + (global_expert_idx * num_max_dispatch_tokens_per_rank + src_idx) * num_bytes_per_slot;
+                const auto dst_p2p_ptr =
+                    nccl_get_p2p_ptr(dst_ptr, expected_dst_offset, rank, dst_rank, local_expert_idx, nccl_windows, dcomms);
+#elif defined(ENABLE_NVSHMEM)
                 const auto dst_p2p_ptr = nvshmemi_get_p2p_ptr(dst_ptr, rank, dst_rank);
+#endif
+
                 int num_send_bytes = hidden * sizeof(nv_bfloat16);
 
                 if (not zero_copy or dst_p2p_ptr != 0) {
@@ -906,10 +1310,38 @@ __global__ __launch_bounds__(1024, 1) void combine(void* combined_x,
                     __syncwarp();
                 }
 
+#ifdef ENABLE_NCCL
                 // Issue RDMA
                 // NOTES: for zero-copy mode, we assume the data is already in the send buffer
-                if (dst_p2p_ptr == 0)
+                if (dst_p2p_ptr == 0) {
+                    const auto expected_buf_offset = rdma_send_x_offset +
+                        (local_expert_idx * num_ranks * num_max_dispatch_tokens_per_rank * num_bytes_per_slot) +
+                        token_idx * num_bytes_per_slot;
+
+                    auto comm_id = local_expert_idx / DEEP_EP_NCCL_GIN_CTXS_PER_COMM;
+                    auto ctx_id = local_expert_idx % DEEP_EP_NCCL_GIN_CTXS_PER_COMM;
+
+                    ncclGin net(dcomms[comm_id], ctx_id);
+                    ncclTeam world = ncclTeamWorld(dcomms[comm_id]);
+                    auto nccl_window = nccl_windows[comm_id];
+                    net.put(world,
+                            dst_rank,
+                            nccl_window,
+                            expected_dst_offset,
+                            nccl_window,
+                            expected_buf_offset,
+                            hidden * sizeof(nv_bfloat16),
+                            ncclGin_None{},  // no signal
+                            ncclGin_None{},  // no counter
+                            ncclCoopWarp());
+                }
+#elif defined(ENABLE_NVSHMEM)
+                // Issue RDMA
+                // NOTES: for zero-copy mode, we assume the data is already in the send buffer
+                if (dst_p2p_ptr == 0) {
                     nvshmemi_ibgda_put_nbi_warp(dst_ptr, buf_ptr, num_send_bytes, dst_rank, local_expert_idx, lane_id, token_idx - offset);
+                }
+#endif
             }
         }
 
@@ -920,10 +1352,48 @@ __global__ __launch_bounds__(1024, 1) void combine(void* combined_x,
             while (ld_acquire_global(atomic_clean_flag) == 0)
                 ;
             auto dst_ptr = reinterpret_cast<uint64_t>(rdma_recv_flag + global_expert_idx);
+#ifdef ENABLE_NCCL
+            size_t dst_offset = rdma_recv_flag_offset + global_expert_idx * sizeof(int);
+
+            auto dst_p2p_ptr = nccl_get_p2p_ptr(
+                dst_ptr, dst_offset, rank, dst_rank, (responsible_expert_idx % num_local_experts), nccl_windows, dcomms);
+#elif defined(ENABLE_NVSHMEM)
             auto dst_p2p_ptr = nvshmemi_get_p2p_ptr(dst_ptr, rank, dst_rank);
+#endif
+
             if (not is_rank_masked(mask_buffer_ptr, dst_rank)) {
                 if (dst_p2p_ptr == 0) {
+#ifdef ENABLE_NCCL
+                    auto signal_id = signals_base + global_expert_idx;
+                    auto local_expert_idx_flag = responsible_expert_idx % num_local_experts;
+                    auto comm_id = local_expert_idx_flag / DEEP_EP_NCCL_GIN_CTXS_PER_COMM;
+                    auto ctx_id = local_expert_idx_flag % DEEP_EP_NCCL_GIN_CTXS_PER_COMM;
+
+                    ncclGin net(dcomms[comm_id], ctx_id);
+                    ncclTeam world = ncclTeamWorld(dcomms[comm_id]);
+                    // NOTE: net.signal() is semantically cleaner but currently slower 
+                    //       for Dispatch-Send and Combine-Send compared to net.put() with 0 bytes
+                    // net.signal(world,
+                    //            dst_rank,
+                    //            ncclGin_SignalAdd{signal_id, 1},
+                    //            ncclCoopThread(),
+                    //            ncclGin_None(),
+                    //            cuda::thread_scope_system);
+                    auto nccl_window = nccl_windows[comm_id];
+                    net.put(world,
+                            dst_rank,
+                            nccl_window,
+                            dst_offset,
+                            nccl_window,
+                            0,
+                            0,  // 0 bytes transfer
+                            ncclGin_SignalAdd{signal_id, 1},
+                            ncclGin_None{},  // no counter
+                            ncclCoopThread());
+#elif defined(ENABLE_NVSHMEM)
                     nvshmemi_ibgda_amo_nonfetch_add(reinterpret_cast<int*>(dst_ptr), 1, dst_rank, local_expert_idx);
+#endif
+
                 } else {
                     st_release_sys_global(reinterpret_cast<int*>(dst_p2p_ptr), 1);
                 }
@@ -952,12 +1422,41 @@ LOW_LATENCY_COMBINE_RECV:
             const auto src_rank = responsible_expert_idx / num_local_experts;
             auto start_time = clock64();
             uint64_t wait_recv_cost = 0;
+
+#ifdef ENABLE_NCCL
+            size_t src_offset = rdma_recv_flag_offset + responsible_expert_idx * sizeof(int);
+            auto src_p2p_ptr = nccl_get_p2p_ptr(
+                0x01, src_offset, rank, src_rank, (responsible_expert_idx % num_local_experts), nccl_windows, dcomms);
+            if (not is_rank_masked(mask_buffer_ptr, src_rank)) {
+                if (src_p2p_ptr == 0) {
+                    uint64_t cur_value;
+                    auto local_expert_idx_wait = responsible_expert_idx % num_local_experts;
+                    auto comm_id_wait = local_expert_idx_wait / DEEP_EP_NCCL_GIN_CTXS_PER_COMM;
+                    auto ctx_id_wait = local_expert_idx_wait % DEEP_EP_NCCL_GIN_CTXS_PER_COMM;
+                    //EP_DEVICE_ASSERT(comm_id_wait >= 0 && comm_id_wait < num_gin_comms);
+                    ncclGin net(dcomms[comm_id_wait], ctx_id_wait);
+                    do {
+                        cur_value = net.readSignal(signals_base + responsible_expert_idx);
+                    } while (cur_value < 1                                                       // signal not arrived
+                             && (wait_recv_cost = clock64() - start_time) <= NUM_TIMEOUT_CYCLES  // not timeout
+                    );
+                    net.resetSignal(signals_base + responsible_expert_idx);
+
+                } else {
+                    while (ld_acquire_sys_global(rdma_recv_flag + responsible_expert_idx) == 0  // recv not ready
+                           && (wait_recv_cost = clock64() - start_time) <= NUM_TIMEOUT_CYCLES   // not timeout
+                    )
+                        ;
+                }
+            }
+#elif defined(ENABLE_NVSHMEM)
             if (not is_rank_masked(mask_buffer_ptr, src_rank)) {
                 while (ld_acquire_sys_global(rdma_recv_flag + responsible_expert_idx) == 0  // recv not ready
                        && (wait_recv_cost = clock64() - start_time) <= NUM_TIMEOUT_CYCLES   // not timeout
                 )
                     ;
             }
+#endif
             // Mask rank if timeout
             if (wait_recv_cost > NUM_TIMEOUT_CYCLES) {
                 printf("Warning: DeepEP timeout for combine receive, rank %d, local_expert_idx %d, src_rank %d\n",
@@ -1142,6 +1641,11 @@ void combine(void* combined_x,
              void* rdma_recv_x,
              int* rdma_recv_flag,
              void* rdma_send_x,
+#ifdef ENABLE_NCCL
+             size_t rdma_recv_x_offset,
+             size_t rdma_recv_flag_offset,
+             size_t rdma_send_x_offset,
+#endif
              const void* x,
              const topk_idx_t* topk_idx,
              const float* topk_weights,
@@ -1163,7 +1667,8 @@ void combine(void* combined_x,
              int num_device_sms,
              cudaStream_t stream,
              int phases,
-             bool zero_copy) {
+             bool zero_copy,
+             int ll_buffer_idx) {
     constexpr int kNumMaxTopk = 11;
     const int num_warp_groups = ceil_div(num_experts, num_device_sms);
     const int num_warps_per_group = 32 / num_warp_groups;
@@ -1198,6 +1703,62 @@ void combine(void* combined_x,
     // Total requirement
     const int smem_size = max(smem_send_size, smem_recv_size);
 
+#ifdef ENABLE_NCCL
+    auto* backend = dynamic_cast<deep_ep::internode::NCCLGINBackend*>(deep_ep::internode::get_backend());
+    EP_HOST_ASSERT(backend != nullptr);
+    // printf("COMBINE: ll_buffer_idx=%d\n", ll_buffer_idx);
+    auto dcomms = backend->get_device_communicators();
+    int num_gin_comms = backend->get_num_gin_comms();
+    auto nccl_windows = backend->get_device_nccl_windows();
+    auto signals_base = backend->get_signals_base(ll_buffer_idx);
+
+    EP_HOST_ASSERT(dcomms != nullptr);
+    EP_HOST_ASSERT(nccl_windows != nullptr);
+#endif
+
+#ifdef ENABLE_NCCL
+#define COMBINE_LAUNCH_CASE(hidden)                                                                                                \
+    {                                                                                                                              \
+        auto combine_func =                                                                                                        \
+            use_logfmt ? combine<true, hidden, kNumMaxTopk, kNumMaxUnrolls> : combine<false, hidden, kNumMaxTopk, kNumMaxUnrolls>; \
+        SET_SHARED_MEMORY_FOR_TMA(combine_func);                                                                                   \
+        LAUNCH_KERNEL(&cfg,                                                                                                        \
+                      combine_func,                                                                                                \
+                      combined_x,                                                                                                  \
+                      rdma_recv_x,                                                                                                 \
+                      rdma_recv_flag,                                                                                              \
+                      rdma_send_x,                                                                                                 \
+                      rdma_recv_x_offset,                                                                                          \
+                      rdma_recv_flag_offset,                                                                                       \
+                      rdma_send_x_offset,                                                                                          \
+                      x,                                                                                                           \
+                      topk_idx,                                                                                                    \
+                      topk_weights,                                                                                                \
+                      src_info,                                                                                                    \
+                      layout_range,                                                                                                \
+                      mask_buffer_ptr,                                                                                             \
+                      combine_wait_recv_cost_stats,                                                                                \
+                      next_clean,                                                                                                  \
+                      num_next_clean_int,                                                                                          \
+                      atomic_clean_flag,                                                                                           \
+                      num_combined_tokens,                                                                                         \
+                      hidden,                                                                                                      \
+                      num_topk,                                                                                                    \
+                      num_max_dispatch_tokens_per_rank,                                                                            \
+                      num_experts,                                                                                                 \
+                      rank,                                                                                                        \
+                      num_ranks,                                                                                                   \
+                      num_warp_groups,                                                                                             \
+                      num_warps_per_group,                                                                                         \
+                      phases,                                                                                                      \
+                      zero_copy,                                                                                                   \
+                      num_gin_comms,                                                                                               \
+                      dcomms,                                                                                                      \
+                      nccl_windows,                                                                                                \
+                      signals_base);                                                                                               \
+    }                                                                                                                              \
+    break
+#elif defined(ENABLE_NVSHMEM)
 #define COMBINE_LAUNCH_CASE(hidden)                                                                                                \
     {                                                                                                                              \
         auto combine_func =                                                                                                        \
@@ -1232,6 +1793,7 @@ void combine(void* combined_x,
                       zero_copy);                                                                                                  \
     }                                                                                                                              \
     break
+#endif
 
     SETUP_LAUNCH_CONFIG(num_sms, num_warps * 32, stream);
     SWITCH_HIDDEN(COMBINE_LAUNCH_CASE);
@@ -1286,6 +1848,16 @@ void clean_mask_buffer(int* mask_buffer_ptr, int num_ranks, cudaStream_t stream)
     SETUP_LAUNCH_CONFIG(num_sms, kNumThreads, stream);
     LAUNCH_KERNEL(&cfg, clean_mask_buffer<kNumThreads>, mask_buffer_ptr, num_ranks);
 }
+
+#ifdef ENABLE_NCCL
+// Set the device constant for P2P disabled flag
+void set_p2p_disabled_flag(bool disabled) {
+    cudaError_t err = cudaMemcpyToSymbol(d_p2p_disabled, &disabled, sizeof(bool), 0, cudaMemcpyHostToDevice);
+    if (err != cudaSuccess) {
+        throw std::runtime_error(std::string("Failed to set d_p2p_disabled: ") + cudaGetErrorString(err));
+    }
+}
+#endif
 
 }  // namespace internode_ll
 
