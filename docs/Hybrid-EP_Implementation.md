@@ -49,8 +49,6 @@ tests/
 
 ## 2. Interface
 
----
-
 ### `__init__`
 
 **Inputs:**
@@ -66,8 +64,6 @@ tests/
 | `load_cached_kernels` | `bool` | Load pre-compiled JIT kernels (default: False) |
 | `use_shared_buffer` | `bool` | Share intra-node buffer between dispatch/combine (default: True) |
 | `enable_custom_allgather` | `bool` | Use optimized intra-node allgather (default: False) |
-
----
 
 ### `dispatch` / `dispatch_with_permute`
 
@@ -97,7 +93,7 @@ Dispatch tokens to target experts. Use `dispatch_with_permute` for integrated pe
 | `num_permuted_tokens` | `int` | Expected output size (for non_blocking) |
 | `non_blocking` | `bool` | Skip sync, use GPU-side metadata (default: False) |
 
-> **Non-blocking Mode:** When `non_blocking=True`, all stream synchronizations are skipped. The output buffer is allocated based on `num_permuted_tokens`. If the actual token count exceeds this size, excess tokens will be dropped and the `overflow_flag` in the handle (stored on device) will be set to `True`.
+> **Non-blocking Mode:** When `non_blocking=True`, stream synchronizations are skipped. Output buffer is sized by `num_permuted_tokens`; overflow sets `overflow_flag=True` and drops excess tokens. In non-blocking mode, `num_dispatched_tokens_tensor` and `tokens_per_expert` are GPU tensors; otherwise they reside in CPU pinned memory.
 
 **Outputs:**
 | Return | `dispatch` | `dispatch_with_permute` |
@@ -107,8 +103,6 @@ Dispatch tokens to target experts. Use `dispatch_with_permute` for integrated pe
 | `dispatched_scaling_factor` | FP8 scaling factors | FP8 scaling factors |
 | `tokens_per_expert` | - | `Tensor[E]`: Token count per expert |
 | `handle` | For `combine` | For `combine_with_unpermute` |
-
----
 
 ### `combine` / `combine_with_unpermute`
 
@@ -128,11 +122,9 @@ Combine tokens from experts back to original positions. Use corresponding method
 | `combined_token` | `Tensor[N, D]` | Combined tokens in original order |
 | `combined_probs` | `Tensor` | Aggregated probabilities |
 
----
-
 ### `empty_jit_cache`
+
 Clear all cached JIT-compiled kernels from disk.
----
 
 ### Handle Structure
 
@@ -231,7 +223,7 @@ TODO
 
 TODO
 1. nvcc jit workflow 
-2. jit cacahe
+2. jit cacahe, cache dir
 
 ---
 
