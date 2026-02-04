@@ -15,7 +15,7 @@
 
 ### Architecture Diagram
 
-![Hybrid-EP Workflow](Hybrid-EP-workflowsvg.svg)
+![Hybrid-EP Workflow](Hybrid-EP-workflow.svg)
 
 ### Code Structure
 ```
