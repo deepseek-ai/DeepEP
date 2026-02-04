@@ -55,7 +55,7 @@ public:
     IntraNodeDispatchBuffers dispatch_buffers;
     IntraNodeCombineBuffers combine_buffers;
     // Buffer for metadata preprocessing
-    hybrid_ep::tmp_state_t *preprocessing_tmp;
+    hybrid_ep::tmp_state_t *preprocessing_tmp = nullptr;
     // Maximum number of tokens for experts (worst case: all tokens to one expert)
     int64_t max_num_of_tokens = -1;
     // On intra-node communication, dispatch/combine can share same buffers.

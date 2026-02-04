@@ -216,29 +216,53 @@ void CustomAllgather::open_ag_handles() {
 
 void CustomAllgather::destroy() {
     if(num_of_nodes == 1) {
-        if(rank_idx == 0) {
-            allocator->free(flag_nvl_ptr);
-        }else{
-            allocator->close_handle(flag_nvl_ptr);
-        }
-        CUDA_CHECK(cudaFree(flag_sm_ptr));
-        CUDA_CHECK(cudaFree(iter_id_ptr));
-    
-        // Close remote memory handles (not locally allocated, just mapped)
-        for(int i = 0; i < num_of_ranks_per_node; i++) {
-            if(i != rank_idx) {
-                allocator->close_handle(dst_buffers_all_ranks[i]);
+        if (flag_nvl_ptr != nullptr) {
+            if(rank_idx == 0) {
+                allocator->free(flag_nvl_ptr);
+            } else {
+                allocator->close_handle(flag_nvl_ptr);
             }
+            flag_nvl_ptr = nullptr;
         }
         
-        // Free the local buffers
-        CUDA_CHECK(cudaFree(dst_buffers_all_ranks_gpu));
-        free(dst_buffers_all_ranks);
+        if (flag_sm_ptr != nullptr) {
+            CUDA_CHECK(cudaFree(flag_sm_ptr));
+            flag_sm_ptr = nullptr;
+        }
+        
+        if (iter_id_ptr != nullptr) {
+            CUDA_CHECK(cudaFree(iter_id_ptr));
+            iter_id_ptr = nullptr;
+        }
+    
+        // Close remote memory handles (not locally allocated, just mapped)
+        if (dst_buffers_all_ranks != nullptr) {
+            for(int i = 0; i < num_of_ranks_per_node; i++) {
+                if(i != rank_idx) {
+                    allocator->close_handle(dst_buffers_all_ranks[i]);
+                }
+            }
+            free(dst_buffers_all_ranks);
+            dst_buffers_all_ranks = nullptr;
+        }
+        
+        // Free the GPU buffer
+        if (dst_buffers_all_ranks_gpu != nullptr) {
+            CUDA_CHECK(cudaFree(dst_buffers_all_ranks_gpu));
+            dst_buffers_all_ranks_gpu = nullptr;
+        }
     }
     
-    allocator->free(dst_buffer);
+    if (dst_buffer != nullptr) {
+        allocator->free(dst_buffer);
+        dst_buffer = nullptr;
+    }
 }
 
 void * CustomAllgather::get_output_buffer() {
     return dst_buffer;
+}
+
+CustomAllgather::~CustomAllgather() {
+    destroy();
 }

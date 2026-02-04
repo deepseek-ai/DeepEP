@@ -70,10 +70,6 @@ HybridEPBuffer::HybridEPBuffer(
     allocate_buffer();
 }
 
-HybridEPBuffer::~HybridEPBuffer() {
-    release_buffer();
-}
-
 void HybridEPBuffer::release_buffer() {
   // Synchronize the device to ensure all operations are completed.
   CUDA_CHECK(cudaDeviceSynchronize());
@@ -97,8 +93,8 @@ void HybridEPBuffer::allocate_buffer() {
   // Buffer allocation for inter-node communication
   #ifdef HYBRID_EP_BUILD_MULTINODE_ENABLE
     if(buffer_config.num_of_nodes > 1) {
-      rdma_coordinator.allocate_dispatch_buffers();
       rdma_coordinator.allocate_combine_buffers();
+      rdma_coordinator.allocate_dispatch_buffers();
     }
   #endif
 

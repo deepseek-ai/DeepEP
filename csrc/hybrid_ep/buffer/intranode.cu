@@ -35,16 +35,21 @@ void NVLCoordinator::destroy() {
     }else{
         remote_allocator->close_handle(dispatch_buffers.intra_node_write_completion_flags);
     }
-    for (int i = 0; i < buffer_config.num_of_ranks_per_node; i++) {
-        if (i != local_rank) {
-            remote_allocator->close_handle(dispatch_buffers.expert_output_token_all_ranks[i]);
-            remote_allocator->close_handle(dispatch_buffers.expert_output_prob_all_ranks[i]);
-            remote_allocator->close_handle(dispatch_buffers.expert_output_scaling_factor_all_ranks[i]);
+    if (dispatch_buffers.expert_output_token_all_ranks != nullptr) {
+        for (int i = 0; i < buffer_config.num_of_ranks_per_node; i++) {
+            if (i != local_rank) {
+                remote_allocator->close_handle(dispatch_buffers.expert_output_token_all_ranks[i]);
+                remote_allocator->close_handle(dispatch_buffers.expert_output_prob_all_ranks[i]);
+                remote_allocator->close_handle(dispatch_buffers.expert_output_scaling_factor_all_ranks[i]);
+            }
         }
+        delete[] dispatch_buffers.expert_output_token_all_ranks;
+        delete[] dispatch_buffers.expert_output_prob_all_ranks;
+        delete[] dispatch_buffers.expert_output_scaling_factor_all_ranks;
+        dispatch_buffers.expert_output_token_all_ranks = nullptr;
+        dispatch_buffers.expert_output_prob_all_ranks = nullptr;
+        dispatch_buffers.expert_output_scaling_factor_all_ranks = nullptr;
     }
-    delete[] dispatch_buffers.expert_output_token_all_ranks;
-    delete[] dispatch_buffers.expert_output_prob_all_ranks;
-    delete[] dispatch_buffers.expert_output_scaling_factor_all_ranks;
 
     // Clean up combine buffers
     free_buffer(combine_buffers.expert_input_token, true);
@@ -56,14 +61,18 @@ void NVLCoordinator::destroy() {
     }else{
         remote_allocator->close_handle(combine_buffers.intra_node_write_completion_flags);
     }
-    for (int i = 0; i < buffer_config.num_of_ranks_per_node; i++) {
-        if (i != local_rank) {
-            remote_allocator->close_handle(combine_buffers.expert_input_token_all_ranks[i]);
-            remote_allocator->close_handle(combine_buffers.expert_input_prob_all_ranks[i]);
+    if (combine_buffers.expert_input_token_all_ranks != nullptr) {
+        for (int i = 0; i < buffer_config.num_of_ranks_per_node; i++) {
+            if (i != local_rank) {
+                remote_allocator->close_handle(combine_buffers.expert_input_token_all_ranks[i]);
+                remote_allocator->close_handle(combine_buffers.expert_input_prob_all_ranks[i]);
+            }
         }
+        delete[] combine_buffers.expert_input_token_all_ranks;
+        delete[] combine_buffers.expert_input_prob_all_ranks;
+        combine_buffers.expert_input_token_all_ranks = nullptr;
+        combine_buffers.expert_input_prob_all_ranks = nullptr;
     }
-    delete[] combine_buffers.expert_input_token_all_ranks;
-    delete[] combine_buffers.expert_input_prob_all_ranks;
 }
 
 void NVLCoordinator::init(
@@ -240,13 +249,13 @@ void NVLCoordinator::exchange_remote_nvl_info() {
 void NVLCoordinator::open_handles_from_other_ranks(
       std::vector<torch::Tensor> dispatch_handles,
       std::vector<torch::Tensor> combine_handles) {
-    // Malloc the pointer arrays used in the dispatch kernel.
+    // Allocate the pointer arrays used in the dispatch kernel.
     dispatch_buffers.expert_output_token_all_ranks =
-        (void **)malloc(buffer_config.num_of_ranks_per_node * sizeof(void *));
+        new void*[buffer_config.num_of_ranks_per_node];
     dispatch_buffers.expert_output_prob_all_ranks =
-        (float **)malloc(buffer_config.num_of_ranks_per_node * sizeof(float *));
+        new float*[buffer_config.num_of_ranks_per_node];
     dispatch_buffers.expert_output_scaling_factor_all_ranks =
-        (float **)malloc(buffer_config.num_of_ranks_per_node * sizeof(float *));
+        new float*[buffer_config.num_of_ranks_per_node];
   
     // Global offset means the position in the multi-node case.
     auto global_offset = node_rank * buffer_config.num_of_ranks_per_node;
@@ -296,11 +305,11 @@ void NVLCoordinator::open_handles_from_other_ranks(
       }
     }
   
-    // Malloc the pointer arrays used in the combine kernel.
+    // Allocate the pointer arrays used in the combine kernel.
     combine_buffers.expert_input_token_all_ranks =
-        (uint16_t **)malloc(buffer_config.num_of_ranks_per_node * sizeof(uint16_t *));
+        new uint16_t*[buffer_config.num_of_ranks_per_node];
     combine_buffers.expert_input_prob_all_ranks =
-        (float **)malloc(buffer_config.num_of_ranks_per_node * sizeof(float *));
+        new float*[buffer_config.num_of_ranks_per_node];
     // Open the combine handles for intra_node_write_completion_flags
     if (local_rank != 0) {
       MemHandle intra_node_write_completion_flags_handle;

@@ -139,6 +139,7 @@ void ExtendedMemoryAllocator::open_handle(void** ptr, MemHandle* mem_handle) {
 }
 
 void ExtendedMemoryAllocator::close_handle(void* ptr) {
+  if (ptr == nullptr) return;
   if (support_fabric_) {
     size_t size = 0;
     CU_CHECK(cuMemGetAddressRange(NULL, &size, (CUdeviceptr)ptr));

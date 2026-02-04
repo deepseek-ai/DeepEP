@@ -22,7 +22,6 @@
 class HybridEPBuffer {
 public:
   HybridEPBuffer(pybind11::object process_group, BufferConfig config, int local_rank, int node_rank, int group_size, std::string base_path, bool load_cached_kernels, bool use_shared_buffer, bool enable_custom_allgather);
-  ~HybridEPBuffer();
   bool update_buffer(HybridEpConfigInstance config); // True means the buffer is reallocated.
 
   std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor,
