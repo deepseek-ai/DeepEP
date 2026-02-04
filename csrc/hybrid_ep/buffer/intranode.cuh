@@ -22,7 +22,6 @@ struct IntraNodeDispatchBuffers {
     float **      expert_output_scaling_factor_all_ranks = nullptr;
     // Misc flags
     uint32_t *    intra_node_write_completion_flags = nullptr;
-    uint64_t *    expected_rdma_flag_value = nullptr;
     uint32_t *    expected_intra_node_flag_value = nullptr;
 };
 
@@ -34,7 +33,6 @@ struct IntraNodeCombineBuffers {
     float **      expert_input_prob_all_ranks = nullptr;
     // Misc flags
     uint32_t *    intra_node_write_completion_flags = nullptr;
-    uint64_t *    expected_rdma_flag_value = nullptr;
     uint32_t *    expected_intra_node_flag_value = nullptr;
 };
   

@@ -227,9 +227,9 @@ void Executor::dispatch_core(HybridEpConfigInstance config, DispatchArgs& args) 
     param.local_rank = local_rank;
     param.node_rank = node_rank;
     param.num_of_tokens_per_rank = args.num_of_tokens_per_rank;
-    param.expected_rdma_flag_value = intra_node_dispatch_buffers->expected_rdma_flag_value;
     param.expected_intra_node_flag_value = intra_node_dispatch_buffers->expected_intra_node_flag_value;
 #ifdef HYBRID_EP_BUILD_MULTINODE_ENABLE
+    param.expected_rdma_flag_value = inter_node_dispatch_buffers->expected_rdma_flag_value;
     param.d_qps_gpu = reinterpret_cast<void **>(inter_node_dispatch_buffers->d_qps_gpu);
     param.mr_info = reinterpret_cast<void*>(inter_node_dispatch_buffers->mr_info);
 #endif
@@ -409,10 +409,10 @@ void Executor::combine_core(HybridEpConfigInstance config, CombineArgs& args) {
     // Misc
     param.node_rank = this->node_rank;
     param.num_of_tokens_per_rank = args.num_of_tokens_per_rank;
-    param.expected_rdma_flag_value = intra_node_combine_buffers->expected_rdma_flag_value;
     param.expected_intra_node_flag_value =
         intra_node_combine_buffers->expected_intra_node_flag_value;
 #ifdef HYBRID_EP_BUILD_MULTINODE_ENABLE
+    param.expected_rdma_flag_value = inter_node_combine_buffers->expected_rdma_flag_value;
     param.d_qps_gpu = reinterpret_cast<void **>(inter_node_combine_buffers->d_qps_gpu);
     param.mr_info = reinterpret_cast<void*>(inter_node_combine_buffers->mr_info);
 #endif

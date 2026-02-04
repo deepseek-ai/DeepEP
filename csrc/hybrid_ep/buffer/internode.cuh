@@ -148,6 +148,7 @@ struct InterNodeDispatchBuffers {
     float *       rdma_inter_node_group_prob = nullptr;
     float *       rdma_inter_node_group_scaling_factor = nullptr;
     uint64_t *    rdma_inter_node_group_flags = nullptr;
+    uint64_t *    expected_rdma_flag_value = nullptr;
     // qp info and mr info
     struct doca_gpu_dev_verbs_qp ** d_qps_gpu = nullptr;
     struct dispatch_memory_region_info_t * mr_info = nullptr;
@@ -162,6 +163,7 @@ struct InterNodeCombineBuffers {
     uint16_t *    rdma_inter_node_group_token = nullptr;
     float *       rdma_inter_node_group_prob = nullptr;
     uint64_t *    rdma_inter_node_group_flags = nullptr;
+    uint64_t *    expected_rdma_flag_value = nullptr;
     // qp info and mr info
     struct doca_gpu_dev_verbs_qp ** d_qps_gpu = nullptr;
     struct combine_memory_region_info_t * mr_info = nullptr;

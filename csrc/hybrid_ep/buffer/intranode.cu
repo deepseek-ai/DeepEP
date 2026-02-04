@@ -28,7 +28,6 @@ void NVLCoordinator::destroy() {
         free_buffer(dispatch_buffers.expert_output_prob, true);
     }
     free_buffer(dispatch_buffers.expert_output_scaling_factor, true);
-    free_buffer(dispatch_buffers.expected_rdma_flag_value, false);
     free_buffer(dispatch_buffers.expected_intra_node_flag_value, false);
     if (local_rank == 0) {
         free_buffer(dispatch_buffers.intra_node_write_completion_flags, true);
@@ -54,7 +53,6 @@ void NVLCoordinator::destroy() {
     // Clean up combine buffers
     free_buffer(combine_buffers.expert_input_token, true);
     free_buffer(combine_buffers.expert_input_prob, true);
-    free_buffer(combine_buffers.expected_rdma_flag_value, false);
     free_buffer(combine_buffers.expected_intra_node_flag_value, false);
     if (local_rank == 0) {
         free_buffer(combine_buffers.intra_node_write_completion_flags, true);
@@ -160,10 +158,6 @@ void NVLCoordinator::allocate_dispatch_buffers() {
                                           torch::dtype(torch::kUInt8).device(torch::kCPU));
     memcpy(dispatch_memory_handles.data_ptr<uint8_t>(), handles, sizeof(handles));
 
-    // Allocate RDMA flags here because it is needed by the device_sync kernel.
-    CUDA_CHECK(cudaMalloc((void**)&dispatch_buffers.expected_rdma_flag_value, sizeof(uint64_t)));
-    CUDA_CHECK(cudaMemset(dispatch_buffers.expected_rdma_flag_value, 0, sizeof(uint64_t)));
-
     // Check possible errors
     CUDA_CHECK(cudaGetLastError());
 }
@@ -199,10 +193,6 @@ void NVLCoordinator::allocate_combine_buffers() {
     combine_memory_handles = torch::empty({static_cast<int64_t>(sizeof(handles))},
                                          torch::dtype(torch::kUInt8).device(torch::kCPU));
     memcpy(combine_memory_handles.data_ptr<uint8_t>(), handles, sizeof(handles));
-
-    // Allocate RDMA flags here because it is needed by the device_sync kernel.
-    CUDA_CHECK(cudaMalloc((void**)&combine_buffers.expected_rdma_flag_value, sizeof(uint64_t)));
-    CUDA_CHECK(cudaMemset(combine_buffers.expected_rdma_flag_value, 0, sizeof(uint64_t)));
 
     // Check possible errors
     CUDA_CHECK(cudaGetLastError());

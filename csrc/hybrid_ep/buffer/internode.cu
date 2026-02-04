@@ -311,6 +311,7 @@ void RDMACoordinator::init(
 }
 
 void RDMACoordinator::allocate_dispatch_buffers(){
+  dispatch_buffers.data_type = buffer_config.token_data_type;
   size_t sizeof_token_data_type = get_token_data_type_size(dispatch_buffers.data_type);
 
   // Calculate rdma buffers sizes
@@ -354,6 +355,10 @@ void RDMACoordinator::allocate_dispatch_buffers(){
                         rdma_inter_node_group_flags_elts * sizeof(uint64_t)));
   CUDA_CHECK(cudaMemset(dispatch_buffers.attn_input_flags, 0, 
                         rdma_inter_node_group_flags_elts * sizeof(uint64_t)));
+
+  // Allocate RDMA flags here because it is needed by the device_sync kernel.
+  CUDA_CHECK(cudaMalloc((void**)&dispatch_buffers.expected_rdma_flag_value, sizeof(uint64_t)));
+  CUDA_CHECK(cudaMemset(dispatch_buffers.expected_rdma_flag_value, 0, sizeof(uint64_t)));
 
   // Allocate memory region
   attn_input_token_mr = ibv_reg_mr(ib_pd, dispatch_buffers.attn_input_token,
@@ -511,6 +516,10 @@ void RDMACoordinator::allocate_combine_buffers(){
                         rdma_inter_node_group_flags_elts * sizeof(uint64_t)));
   CUDA_CHECK(cudaMemset(combine_buffers.attn_output_flags, 0, 
                         rdma_inter_node_group_flags_elts * sizeof(uint64_t)));
+
+  // Allocate RDMA flags here because it is needed by the device_sync kernel.
+  CUDA_CHECK(cudaMalloc((void**)&combine_buffers.expected_rdma_flag_value, sizeof(uint64_t)));
+  CUDA_CHECK(cudaMemset(combine_buffers.expected_rdma_flag_value, 0, sizeof(uint64_t)));
 
   rdma_intra_node_red_token_mr = ibv_reg_mr(ib_pd, combine_buffers.rdma_intra_node_red_token,
                         rdma_intra_node_red_token_elts * sizeof(uint16_t), mr_access_flag);
@@ -677,12 +686,14 @@ void RDMACoordinator::destroy() {
   FREE_CUDA_MEMORY(dispatch_buffers.attn_input_token);
   FREE_CUDA_MEMORY(dispatch_buffers.attn_input_prob);
   FREE_CUDA_MEMORY(dispatch_buffers.attn_input_scaling_factor);
+  FREE_CUDA_MEMORY(dispatch_buffers.expected_rdma_flag_value);
   FREE_CUDA_MEMORY(combine_buffers.rdma_intra_node_red_token);
   FREE_CUDA_MEMORY(combine_buffers.rdma_intra_node_red_prob);
   FREE_CUDA_MEMORY(combine_buffers.rdma_inter_node_group_token);
   FREE_CUDA_MEMORY(combine_buffers.rdma_inter_node_group_prob);
   FREE_CUDA_MEMORY(combine_buffers.rdma_inter_node_group_flags);
   FREE_CUDA_MEMORY(combine_buffers.attn_output_flags);
+  FREE_CUDA_MEMORY(combine_buffers.expected_rdma_flag_value);
 
   // If we use doca_gpu_verbs_destroy_qp_hl and re-allocate RDMA resources, "part or all of the requested memory range is already mapped" occurs. Do not know why now, so just comment it out.
   // int num_of_dispatch_qps = (buffer_config.num_of_nodes - 1) * buffer_config.num_of_blocks_dispatch_api;

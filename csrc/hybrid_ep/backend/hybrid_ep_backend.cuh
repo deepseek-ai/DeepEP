@@ -3190,7 +3190,7 @@ public:
   static void dispatch(dispatch_kernel_param_t<TOKEN_DATA_TYPE> param, cudaStream_t stream)
   {
     // The warp groups data type for dispatch kernel, must match the warp groups layout required by the dispatch kernel.
-#ifdef HYBRID_EP_BUILD_MULTINODE_ENABLE
+    #ifdef HYBRID_EP_BUILD_MULTINODE_ENABLE
     using INTER_NODE_GROUP = warp_group<1, 0>;
     using INTRA_NODE_G2S_GROUP = warp_group<1, 1>;
     using INTRA_NODE_S2G_GROUP = warp_group<2, 2>;
@@ -3200,7 +3200,8 @@ public:
     using INTRA_NODE_S2G_GROUP = warp_group<3, 1>;
 #endif
     // The shared memory needed by the dispatch kernel.
-    using dispatch_kernel_smem_t = dispatch_kernel_dynamic_shared_memory_buffer_t<TOKEN_DATA_TYPE, NUM_OF_STAGES, HIDDEN_DIM, NUM_OF_TOKENS_PER_CHUNK,NUM_OF_EXPERTS_PER_RANK, NUM_OF_RANKS_PER_NODE, NUM_OF_NODES, FORWARD_DISPATCH>;
+    using dispatch_kernel_smem_t = dispatch_kernel_dynamic_shared_memory_buffer_t<TOKEN_DATA_TYPE, NUM_OF_STAGES, HIDDEN_DIM, NUM_OF_TOKENS_PER_CHUNK,
+                                                                                  NUM_OF_EXPERTS_PER_RANK, NUM_OF_RANKS_PER_NODE, NUM_OF_NODES, FORWARD_DISPATCH>;
     // The dispatch kernel to be launched.
     const auto dispatch_kernel_ptr = dispatch_kernel<TOKEN_DATA_TYPE, INTER_NODE_GROUP, INTRA_NODE_G2S_GROUP, INTRA_NODE_S2G_GROUP, NUM_OF_STAGES,
                                                      NUM_OF_IN_FLIGHT_S2G, NUM_OF_TOKENS_PER_CHUNK, HIDDEN_DIM, MAX_NUM_OF_TOKENS_PER_RANK,
@@ -3221,19 +3222,10 @@ public:
     update_expected_value_kernel<NUM_OF_NODES, NUM_OF_RANKS_PER_NODE, DEVICE_SIDE_SYNC>
     <<<1, 1, 0, stream>>>(param.expected_rdma_flag_value, param.expected_intra_node_flag_value);
 
-    // Launch device sync kernel if needed.
-    if constexpr(DEVICE_SIDE_SYNC){
-      device_sync_kernel<<<1, 1, 0, stream>>>(param.intra_node_write_completion_flags, param.expected_intra_node_flag_value);
-    }
-
     // Launch dispatch kernel.
     constexpr int BLOCK_DIM = INTER_NODE_GROUP::size() + INTRA_NODE_G2S_GROUP::size() + INTRA_NODE_S2G_GROUP::size();
     dispatch_kernel_ptr<<<NUM_OF_BLOCKS, BLOCK_DIM, SMEM_SIZE, stream>>>(param);
 
-    // Launch update_expected_value_kernel to update expected flag value.
-    update_expected_value_kernel<NUM_OF_NODES, NUM_OF_RANKS_PER_NODE, DEVICE_SIDE_SYNC>
-    <<<1, 1, 0, stream>>>(param.expected_rdma_flag_value, param.expected_intra_node_flag_value);
-    
     // Launch device sync kernel if needed.
     if constexpr(DEVICE_SIDE_SYNC){
       device_sync_kernel<<<1, 1, 0, stream>>>(param.intra_node_write_completion_flags, param.expected_intra_node_flag_value);
@@ -3263,7 +3255,7 @@ public:
   static void combine(combine_kernel_param_t param, cudaStream_t stream)
   {
     // The warp groups data type for combine kernel, must match the warp groups layout required by the combine kernel.
-#ifdef HYBRID_EP_BUILD_MULTINODE_ENABLE
+    #ifdef HYBRID_EP_BUILD_MULTINODE_ENABLE
     using INTRA_NODE_RED_GROUP = warp_group<4, 0>;
     using INTER_NODE_RED_GROUP = warp_group<4, 4>;
     using INTRA_NODE_G2S_GROUP = warp_group<1, 8>;
@@ -3312,14 +3304,6 @@ public:
     constexpr int BLOCK_DIM = INTRA_NODE_RED_GROUP::size() + INTER_NODE_RED_GROUP::size() + INTRA_NODE_G2S_GROUP::size() + INTER_NODE_G2S_GROUP::size() + INTER_NODE_RDMA_GROUP::size();
     combine_kernel_ptr<<<NUM_OF_BLOCKS, BLOCK_DIM, SMEM_SIZE, stream>>>(param);
 
-    // Launch update_expected_value_kernel to update expected flag value.
-    update_expected_value_kernel<NUM_OF_NODES, NUM_OF_RANKS_PER_NODE, DEVICE_SIDE_SYNC>
-    <<<1, 1, 0, stream>>>(param.expected_rdma_flag_value, param.expected_intra_node_flag_value);
-
-    // Launch device sync kernel if needed.
-    if constexpr(DEVICE_SIDE_SYNC){
-      device_sync_kernel<<<1, 1, 0, stream>>>(param.intra_node_write_completion_flags, param.expected_intra_node_flag_value);
-    }
     // Check if there is any CUDA error.
     CUDA_CHECK(cudaGetLastError());
   }
