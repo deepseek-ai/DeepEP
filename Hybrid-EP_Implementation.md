@@ -1,7 +1,8 @@
-# Hybrid-EP Intra-node Implementation
+# Hybrid-EP Implementation.md
+
 
 ## Overview
-This document introduces the Hybrid Expert Parallel (Hybrid-EP) implementation to the DeepEP library, developed by NVIDIA as an optimized solution for large-scale MoE (Mixture of Experts) model all-to-all communication. This implementation is specifically designed to leverage NVIDIA GPU hardware capabilities, significantly reducing Streaming Multiprocessor (SM) resource usage while dramatically improving communication efficiency and overall throughput.
+This document introduces the Hybrid Expert Parallel (Hybrid-EP) implementation to the DeepEP library, developed by NVIDIA as an optimized solution for large-scale MoE (Mixture of Experts) model all-to-all communication. This implementation is specifically designed to leverage NVIDIA GPU hardware capabilities, significantly reducing Streaming Multiprocessor (SM) resource usage while dramatically improving communication efficiency and overall throughput. This implementation maintains full backward compatibility with DeepEP. Users can seamlessly integrate Hybrid-EP into existing workflows without code modifications.
 
 ## 🎯 Design Goals
 
@@ -19,8 +20,6 @@ This document introduces the Hybrid Expert Parallel (Hybrid-EP) implementation t
 - **Inter-node Communication**: High-performance RDMA-based communication across nodes*
 - **Intra-node Communication**: NVLink-optimized data transfer using Tensor Memory Accelerator (TMA) instructions
 
-*Note: RDMA functionality will be available in upcoming releases.
-
 ## 🔧 Implementation Features
 
 ### Hardware Optimizations
@@ -36,8 +35,6 @@ This document introduces the Hybrid Expert Parallel (Hybrid-EP) implementation t
 - Full CUDA Graph compatibility for reduced launch overhead
 - Zero CPU-GPU synchronization requirements
 - Dynamic block count configuration for optimal resource utilization
-
-*RDMA features are currently under final testing and will be released shortly.
 
 ## 📊 Performance Results
 
@@ -143,34 +140,6 @@ This document introduces the Hybrid Expert Parallel (Hybrid-EP) implementation t
 |       | 32       | 405.04    | 502.84    | 207.10    |
 
 
-## 🏛️ Code Structure
-
-### New Files
-```
-csrc/hybrid_ep/
-├── hybrid_ep.cu                   # Main CUDA implementation
-├── internode.cu                   # Main RDMA CUDA implementation
-├── pybind_hybrid_ep.cu            # PyBind bindings
-├── config.cuh                     # Config definitions required by hybrid-EP kernels
-├── allocator/                     # Allocator for memory accessible by remote ranks
-├── backend/                       # Core Hybrid-EP kernel implementations
-│   ├── hybrid_ep_backend.cuh
-│   └── utils.cuh                  # Utility helpers and macros
-├── executor/                      # Kernel runner
-├── extension/                     # Useful extensions
-└── jit/                           # JIT compiler
-    
-deep_ep/
-├── hybrid_ep_buffer.py            # Python interface
-└── buffer.py                      # Buffer management
-
-tests/
-└── test_hybrid_ep.py              # Hybrid-EP tests
-```
-
-### Build Instructions
-Follow the same build process as the main branch. No additional dependencies required.
-
 ## 🚀 Usage Guide
 
 ### Installation
@@ -179,7 +148,7 @@ Follow the same build process as the main branch. No additional dependencies req
 For intra-node communication and MNNVL support, you can install directly by specifying the GPU architecture:
 
 ```bash
-export TORCH_ARCH_LIST="9.0;10.0"  # Adjust based on your GPU architecture
+export TORCH_CUDA_ARCH_LIST="9.0 10.0"  # Adjust based on your GPU architecture
 pip install .
 ```
 
@@ -189,7 +158,7 @@ For multi-node support with RDMA, additional configuration is required, make sur
 ```bash
 export HYBRID_EP_MULTINODE=1
 export RDMA_CORE_HOME=/path/to/rdma-core  # Path to your RDMA core installation
-export TORCH_ARCH_LIST="9.0;10.0"  # Adjust based on your GPU architecture
+export TORCH_CUDA_ARCH_LIST="9.0;10.0"  # Adjust based on your GPU architecture
 pip install .
 ```
  
@@ -208,6 +177,10 @@ Hybrid EP’s RDMA topology probing relies on `libnvidia-ml.so.1`. During Docker
 
 Example:
 ```bash
+WORKDIR /workspace
+RUN git clone https://github.com/linux-rdma/rdma-core.git && \
+    cd rdma-core && git checkout tags/v60.0 && sh build.sh
+ENV RDMA_CORE_HOME=/workspace/rdma-core/build
 RUN apt-get update && \
     apt-get install -y --no-install-recommends libnvidia-ml-dev
 RUN git clone -b hybrid_ep https://github.com/deepseek-ai/DeepEP.git
@@ -226,67 +199,33 @@ Refer to `tests/test_hybrid_ep.py` for comprehensive usage examples including:
 - Intra-node testing scenarios
 - Inter-node testing scenarios
 - Performance benchmarking setups
-Users can set HYBRID_EP_CACHE_DIR to store jitted files in an appropriate directory.
 
+## 🏛️ Code Structure
 
-### Important Configuration Note
-Here are important parameter settings in `csrc/hybrid_ep/config.cuh`. You can modify these parameters via `HybridEPBuffer.init_config()` or by setting proper environment variables (see `deep_ep/hybrid_ep_buffer.py`) to achieve better performance/usability:
+### Hybrid-EP Files
+```
+csrc/hybrid_ep/
+├── hybrid_ep.*                    # Main HybridEPBuffer class
+├── pybind_hybrid_ep.cu            # PyBind bindings
+├── config.cuh                     # Config definitions
+├── utils.cuh                      # Utility helpers and macros
+├── allocator/                     # MNNVL/IPC memory allocator
+├── backend/                       # Core dispatch/combine kernels
+│   ├── hybrid_ep_backend.cuh      # Kernel implementations
+│   ├── ibvcore.h                  # InfiniBand verbs definitions
+│   └── topo_detection.cuh         # GPU topology detection
+├── buffer/                        # Buffer coordinators
+│   ├── intranode.*                # NVLCoordinator (intra-node communication)
+│   └── internode.*                # RDMACoordinator (inter-node communication)
+├── executor/                      # Kernel execution (dispatch/combine core)
+├── extension/                     # Extensions (allgather, permute)
+└── jit/                           # JIT kernel compiler
+    
+deep_ep/
+├── hybrid_ep_buffer.py            # Python interface
+└── buffer.py                      # Buffer management
 
-- HIDDEN_DIM  
-  Hidden size (must match model hidden dimension).
-
-- MAX_NUM_OF_TOKENS_PER_RANK   
-  The largest sequence length for the input of the dispatch kernel.
-
-- NUM_OF_EXPERTS_PER_RANK  
-  Number of experts hosted by each rank.
-
-- NUM_OF_NODES  
-  **Number of NVLink domains**, not the number of OS nodes / containers.
-
-- NUM_OF_RANKS_PER_NODE  
-  Number of ranks within one NVLink domain.  
-
-- NUM_THREADS_PER_BLOCK_PREPROCESSING_API  
-  Thread-block width for the preprocessing kernel.
-
-- NUM_OF_BLOCKS_PREPROCESSING_API  
-  Grid size for the preprocessing kernel.
-
-- NUM_OF_STAGES_DISPATCH_API  
-  Pipeline depth for dispatch.  
-  Larger → better occupancy, but shared-memory usage grows linearly.  
-  Reduce this if `HIDDEN_DIM` is very large.
-
-- NUM_OF_BLOCKS_DISPATCH_API  
-  Number of CTAs to launch for dispatch; controls how many SMs are used.
-
-- NUM_OF_STAGES_G2S_COMBINE_API  
-  Pipeline depth for global-to-shared (G2S) in combine.  
-  Same shared-memory trade-off as dispatch.
-
-- NUM_OF_STAGES_S2G_COMBINE_API  
-  Pipeline depth for shared-to-global (S2G) in combine.  
-  Same shared-memory trade-off as above.
-
-- NUM_OF_BLOCKS_COMBINE_API  
-  Number of CTAs for combine kernels.
-
----
-
-## 📋 Implementation Status & Roadmap
-
-### ✅ Current Features
-- Full compatibility with existing DeepEP codebase
-- Optimized intra-node communication via NVLink
-- Support for BF16 and FP8 data types
-- CUDA Graph integration
-- Comprehensive performance improvements
-
-### 🚧 Upcoming Features
-- **Low Latency Mode**: Enhanced performance for latency-critical workloads
-- Performance optimization
-
-### 🎯 Migration Notes
-This implementation maintains full backward compatibility with DeepEP. Users can seamlessly integrate Hybrid-EP into existing workflows without code modifications.
-
+tests/
+├── test_hybrid_ep.py              # Functional tests
+└── test_graphed_hybrid_ep.py      # CUDA Graph tests
+```
