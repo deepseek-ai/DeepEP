@@ -1,5 +1,4 @@
-# Hybrid-EP Implementation.md
-
+# Hybrid-EP 
 
 ## Overview
 This document introduces the Hybrid Expert Parallel (Hybrid-EP) implementation to the DeepEP library, developed by NVIDIA as an optimized solution for large-scale MoE (Mixture of Experts) model all-to-all communication. This implementation is specifically designed to leverage NVIDIA GPU hardware capabilities, significantly reducing Streaming Multiprocessor (SM) resource usage while dramatically improving communication efficiency and overall throughput. This implementation maintains full backward compatibility with DeepEP. Users can seamlessly integrate Hybrid-EP into existing workflows without code modifications.
@@ -158,7 +157,7 @@ For multi-node support with RDMA, additional configuration is required, make sur
 ```bash
 export HYBRID_EP_MULTINODE=1
 export RDMA_CORE_HOME=/path/to/rdma-core  # Path to your RDMA core installation
-export TORCH_CUDA_ARCH_LIST="9.0;10.0"  # Adjust based on your GPU architecture
+export TORCH_CUDA_ARCH_LIST="9.0 10.0"  # Adjust based on your GPU architecture
 pip install .
 ```
  
@@ -200,32 +199,5 @@ Refer to `tests/test_hybrid_ep.py` for comprehensive usage examples including:
 - Inter-node testing scenarios
 - Performance benchmarking setups
 
-## 🏛️ Code Structure
+For more information on the design and tuning details, please refer to the [Hybrid-EP Design Document](../csrc/hybrid_ep/hybrid_ep_doc.md).
 
-### Hybrid-EP Files
-```
-csrc/hybrid_ep/
-├── hybrid_ep.*                    # Main HybridEPBuffer class
-├── pybind_hybrid_ep.cu            # PyBind bindings
-├── config.cuh                     # Config definitions
-├── utils.cuh                      # Utility helpers and macros
-├── allocator/                     # MNNVL/IPC memory allocator
-├── backend/                       # Core dispatch/combine kernels
-│   ├── hybrid_ep_backend.cuh      # Kernel implementations
-│   ├── ibvcore.h                  # InfiniBand verbs definitions
-│   └── topo_detection.cuh         # GPU topology detection
-├── buffer/                        # Buffer coordinators
-│   ├── intranode.*                # NVLCoordinator (intra-node communication)
-│   └── internode.*                # RDMACoordinator (inter-node communication)
-├── executor/                      # Kernel execution (dispatch/combine core)
-├── extension/                     # Extensions (allgather, permute)
-└── jit/                           # JIT kernel compiler
-    
-deep_ep/
-├── hybrid_ep_buffer.py            # Python interface
-└── buffer.py                      # Buffer management
-
-tests/
-├── test_hybrid_ep.py              # Functional tests
-└── test_graphed_hybrid_ep.py      # CUDA Graph tests
-```
