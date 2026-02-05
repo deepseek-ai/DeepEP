@@ -235,22 +235,27 @@ max_num_of_tokens = max_num_of_tokens_per_rank × num_of_ranks_per_node × num_o
 
 **Intra-node buffers** (per rank):
 - `token_buffer`: `max_tokens × hidden_dim × sizeof(dtype)`
-- `prob_buffer`: `max_tokens × num_experts_per_node × sizeof(float)`
+- `prob_buffer`: `max_tokens × (num_of_experts_per_rank × num_of_ranks_per_node) × sizeof(float)`
 - `scaling_factor_buffer`: `max_tokens × (hidden_dim / 128) × sizeof(float)` — FP8 only
 
 **Inter-node RDMA buffers** (when `num_of_nodes > 1`, per rank):
 - `rdma_token_buffer`: `max_tokens_per_rank × (num_nodes - 1) × hidden_dim × sizeof(dtype)`
-- `rdma_prob_buffer`: `max_tokens_per_rank × (num_nodes - 1) × num_experts_per_node × sizeof(float)`
+- `rdma_prob_buffer`: `max_tokens_per_rank × (num_nodes - 1) × (num_of_experts_per_rank × num_of_ranks_per_node) × sizeof(float)`
 
-**Example (EP64 = 8 ranks × 8 nodes, BF16, hidden_dim=7168, 4096 tokens/rank):**
+**Example (EP64, 256 experts, BF16, hidden_dim=7168, 4096 tokens/rank):**
 
-| Buffer | Calculation | Size |
-|--------|-------------|------|
-| Intra-node token | 262,144 × 7168 × 2B | ~3.5 GB |
-| Intra-node prob | 262,144 × 64 × 4B | ~64 MB |
-| RDMA token | 4096 × 7 × 7168 × 2B | ~392 MB |
-| RDMA prob | 4096 × 7 × 64 × 4B | ~7 MB |
-| **Total per rank** | | **~4 GB** |
+| Scenario | Buffer | Calculation | Size |
+|----------|--------|-------------|------|
+| **MNNVL** (64 ranks × 1 node) | max_tokens | 4096 × 64 × 1 | 262,144 |
+| | Intra-node token | 262,144 × 7168 × 2B | ~3.5 GB |
+| | Intra-node prob | 262,144 × 256 × 4B | ~256 MB |
+| | **Total per rank** | | **~3.75 GB** |
+| **RDMA** (8 ranks × 8 nodes) | max_tokens | 4096 × 8 × 8 | 262,144 |
+| | Intra-node token | 262,144 × 7168 × 2B | ~3.5 GB |
+| | Intra-node prob | 262,144 × 32 × 4B | ~32 MB |
+| | RDMA token | 4096 × 7 × 7168 × 2B | ~392 MB |
+| | RDMA prob | 4096 × 7 × 32 × 4B | ~3.5 MB |
+| | **Total per rank** | | **~4 GB** |
 
 Because this buffer is globally unique per rank, overall GPU memory usage remains controllable.
 
