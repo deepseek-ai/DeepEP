@@ -129,7 +129,7 @@ Clear all cached JIT-compiled kernels from disk.
 
 ### Handle Structure
 
-The `handle` returned by dispatch methods contains precomputed metadata for the corresponding combine call.
+The `handle` returned by dispatch methods contains precomputed metadata for the corresponding dispatch/combine call.
 
 #### `dispatch` Handle
 
