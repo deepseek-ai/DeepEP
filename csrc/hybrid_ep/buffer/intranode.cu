@@ -138,8 +138,8 @@ void NVLCoordinator::allocate_dispatch_buffers() {
   
     // Allocate and initialize synchronization buffers
     if (local_rank == 0) {
-      remote_allocator->allocate((void**)&dispatch_buffers.intra_node_write_completion_flags, sizeof(uint32_t));
-      CUDA_CHECK(cudaMemset(dispatch_buffers.intra_node_write_completion_flags, 0, sizeof(uint32_t)));
+      remote_allocator->allocate((void**)&dispatch_buffers.intra_node_write_completion_flags, 2 * sizeof(uint32_t));
+      CUDA_CHECK(cudaMemset(dispatch_buffers.intra_node_write_completion_flags, 0, 2 * sizeof(uint32_t)));
     }
     CUDA_CHECK(cudaMalloc((void**)&dispatch_buffers.expected_intra_node_flag_value, sizeof(uint32_t)));
     CUDA_CHECK(cudaMemset(dispatch_buffers.expected_intra_node_flag_value, 0, sizeof(uint32_t)));
@@ -167,15 +167,15 @@ void NVLCoordinator::allocate_combine_buffers() {
     auto expert_input_token_elts = max_num_of_tokens * buffer_config.hidden_dim;
     auto expert_input_prob_elts = max_num_of_tokens *
                                   (buffer_config.num_of_experts_per_rank * buffer_config.num_of_ranks_per_node);
-  
+
     // Allocate main buffers
     remote_allocator->allocate((void**)&combine_buffers.expert_input_token, expert_input_token_elts * sizeof(uint16_t));
     remote_allocator->allocate((void**)&combine_buffers.expert_input_prob, expert_input_prob_elts * sizeof(float));
   
     // Allocate and initialize synchronization buffers
     if (local_rank == 0) {
-      remote_allocator->allocate((void**)&combine_buffers.intra_node_write_completion_flags, sizeof(uint32_t));
-      CUDA_CHECK(cudaMemset(combine_buffers.intra_node_write_completion_flags, 0, sizeof(uint32_t)));
+      remote_allocator->allocate((void**)&combine_buffers.intra_node_write_completion_flags, 2 * sizeof(uint32_t));
+      CUDA_CHECK(cudaMemset(combine_buffers.intra_node_write_completion_flags, 0, 2 * sizeof(uint32_t)));
     }
     
     CUDA_CHECK(cudaMalloc((void**)&combine_buffers.expected_intra_node_flag_value, sizeof(uint32_t)));

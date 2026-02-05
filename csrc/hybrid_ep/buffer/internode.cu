@@ -2,6 +2,9 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES.
 // All rights reserved
 #include "internode.cuh"
+#include <sstream>
+#include <cstdlib>
+#include <unordered_map>
 
 // Functions realted to get RDMA context.
 static ibv_device *ctx_find_dev(const char *ib_devname) {
@@ -24,6 +27,48 @@ static ibv_device *ctx_find_dev(const char *ib_devname) {
     return NULL;
   }
   return ib_dev;
+}
+
+// Get NIC name with optional manual mapping from environment variables.
+// If HYBRID_EP_ENABLE_MANUAL_NIC_MAPPING=1, parse HYBRID_EP_NIC_MAPPING
+// Format: "0:mlx5_0:1,1:mlx5_1:1,..." (gpu_id:nic_name:port)
+static void get_nic_name(const std::vector<int>& gpu_idx_vec, int local_device_idx, const char** net_name) {
+  static thread_local std::string nic_name_storage;
+  
+  const char* manual_mapping_env = std::getenv("HYBRID_EP_ENABLE_MANUAL_NIC_MAPPING");
+  if (manual_mapping_env != nullptr && std::string(manual_mapping_env) == "1") {
+    const char* nic_mapping_env = std::getenv("HYBRID_EP_NIC_MAPPING");
+    if (nic_mapping_env == nullptr) {
+      fprintf(stderr, "[Error] HYBRID_EP_ENABLE_MANUAL_NIC_MAPPING=1 but HYBRID_EP_NIC_MAPPING is not set\n");
+      assert(false);
+    }
+    
+    std::unordered_map<int, std::string> device_mapping;
+    std::string mapping_str(nic_mapping_env);
+    std::stringstream ss(mapping_str);
+    std::string entry;
+    while (std::getline(ss, entry, ',')) {
+      size_t first_colon = entry.find(':');
+      if (first_colon == std::string::npos) {
+        fprintf(stderr, "[Error] Invalid mapping format '%s' in HYBRID_EP_NIC_MAPPING. Expected format: '<device_id>:<nic_name>'\n", entry.c_str());
+        assert(false);
+      }
+      int device_id = std::stoi(entry.substr(0, first_colon));
+      std::string nic_name = entry.substr(first_colon + 1);  // Keep the rest as NIC name (including :1)
+      device_mapping[device_id] = nic_name;
+    }
+    
+    auto it = device_mapping.find(local_device_idx);
+    if (it == device_mapping.end()) {
+      fprintf(stderr, "[Error] Device %d not found in HYBRID_EP_NIC_MAPPING\n", 
+              local_device_idx);
+      assert(false);
+    }
+    nic_name_storage = it->second;
+    *net_name = nic_name_storage.c_str();
+  } else {
+    hybrid_ep::get_nic(gpu_idx_vec, local_device_idx, net_name);
+  }
 }
 
 // Functions related to initialization of gverbs_context.
@@ -287,8 +332,8 @@ void RDMACoordinator::init(
     gpu_idx_vec.push_back(i);
   }
   // Get name of ibv device.
-  const char *net_name;
-  hybrid_ep::get_nic(gpu_idx_vec, local_device_idx, &net_name);
+  const char *net_name = nullptr;
+  get_nic_name(gpu_idx_vec, local_device_idx, &net_name);
   // Find ib device and get ibv_context.
   struct ibv_device *ib_dev = ctx_find_dev(net_name);
 

@@ -9,6 +9,7 @@
 6. [JIT Compiler](#6-jit-compiler)
 7. [Extensions](#7-extensions)
 8. [Hybrid-EP Kernels](#8-hybrid-ep-kernels)
+9. [Allocator](#9-allocator)
 
 ---
 
@@ -225,6 +226,15 @@ Hybrid-EP uses two categories of GPU memory:
 - **Registered Buffer**: GPU memory registered for cross-rank access. For inter-node, memory is registered with RDMA; for intra-node, a CUDA IPC handle is exported.
 - **Normal Buffer**: Standard `cudaMalloc` memory for local computation, not accessible by other ranks.
 
+**GPU-NIC Mapping for RDMA**
+
+For RDMA scenarios, buffer registration requires establishing a GPU-NIC mapping to specify which network interface each GPU uses for communication. The backend supports automatic topology discovery by default. If manual configuration is needed, the following environment variables can be used:
+
+| Environment Variable | Description |
+|---------------------|-------------|
+| `HYBRID_EP_ENABLE_MANUAL_NIC_MAPPING` | Set to `1` to enable manual NIC mapping; otherwise, automatic topology discovery is used |
+| `HYBRID_EP_NIC_MAPPING` | GPU-to-NIC mapping string in the format `<gpu_id>:<nic_name>,...` |
+
 ### 4.2 Buffer Allocation
 
 Hybrid-EP uses a **worst-case preallocation strategy** to handle dynamic token routing. The maximum token count assumes all tokens could be routed to a single expert:
@@ -399,3 +409,29 @@ The combine kernel aggregates expert outputs back to original token positions.
    - *Inter-node*: Writes to intra-node peers' buffers via NVLink
    - *Intra-node* (multi-node only): Writes to RDMA buffer for cross-node transfer
 5. **RDMA Warp Group** (multi-node only): Sends data to peer ranks on other nodes; also receives RDMA data from peers
+
+## 9. Allocator
+
+### 9.1 Memory Allocation
+
+The allocator provides cross-rank accessible memory with these operations: `allocate`, `free`, `get_handle`, `open_handle`, `close_handle`.
+
+- **Fabric mode**: Uses `cuMemCreate`/`cuMemMap` and `cuMemExportToShareableHandle` for MNNVL systems
+- **IPC mode**: Uses `cudaMalloc` and `cudaIpcGetMemHandle` for standard multi-GPU systems
+
+### 9.2 Topology Detection
+
+The allocator detects which ranks share the same NVLink domain via `detect_accessible_ranks()`, which exchanges test memory handles and checks accessibility.
+
+To override automatic detection, set:
+
+```bash
+export NUM_OF_HYBRID_EP_RANKS_PER_NVLINK_DOMAIN=8
+```
+
+This environment variable specifies the number of ranks that can directly access each other's GPU memory within a single NVLink domain. It determines:
+- `local_rank = rank % NUM_OF_HYBRID_EP_RANKS_PER_NVLINK_DOMAIN` — rank index within the NVLink domain
+- `node_rank = rank // NUM_OF_HYBRID_EP_RANKS_PER_NVLINK_DOMAIN` — which NVLink domain this rank belongs to
+- `num_of_nodes = group_size // NUM_OF_HYBRID_EP_RANKS_PER_NVLINK_DOMAIN` — total number of NVLink domains
+
+The value must evenly divide the total number of ranks.
