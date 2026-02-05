@@ -171,7 +171,10 @@ void CustomAllgather::open_ag_handles() {
     // Use Python's torch.distributed APIs through py::object
     auto torch_distributed = py::module_::import("torch.distributed");    
     // Move tensors to CUDA for communication
-    auto ag_handles_cuda = ag_handles.cuda();  
+    // auto ag_handles_cuda = ag_handles.cuda(); 
+    MemHandle handles[2];
+    auto ag_handles_cuda = torch::empty({static_cast<int64_t>(sizeof(handles))},
+                                                torch::dtype(torch::kUInt8).device(torch::kCUDA));
     // Get world size from process group
     int world_size = process_group.attr("size")().cast<int>();
     // Create empty tensors for allgather output

@@ -9,7 +9,8 @@
 #include "extension/allgather.cuh"
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/util/Optional.h>
-#include <torch/torch.h>
+// #include <torch/torch.h>
+#include <torch/python.h>
 #include <vector>
 #include <algorithm>
 #include <string>

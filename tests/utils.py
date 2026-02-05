@@ -12,29 +12,17 @@ import torch.distributed as dist
 from typing import Optional, Tuple, Union
 
 BLOCK_SIZE = 16
-def init_dist(local_rank: int, num_local_ranks: int):
-    # NOTES: you may rewrite this function with your own cluster settings
-    ip = os.getenv('MASTER_ADDR', '127.0.0.1')
-    port = int(os.getenv('MASTER_PORT', '8361'))
-    num_nodes = int(os.getenv('WORLD_SIZE', 1))
-    node_rank = int(os.getenv('RANK', 0))
 
-    sig = inspect.signature(dist.init_process_group)
-    params = {
-        'backend': 'nccl',
-        'init_method': f'tcp://{ip}:{port}',
-        'world_size': num_nodes * num_local_ranks,
-        'rank': node_rank * num_local_ranks + local_rank,
-    }
-    if 'device_id' in sig.parameters:
-        # noinspection PyTypeChecker
-        params['device_id'] = torch.device(f'cuda:{local_rank}')
-    dist.init_process_group(**params)
+import paddle
+
+def init_dist(local_rank: int, num_local_ranks: int):
+    num_nodes = int(os.getenv('WORLD_SIZE', 1))
+    group = paddle.distributed.new_group(list(range(num_local_ranks * num_nodes)))
     torch.set_default_dtype(torch.bfloat16)
     torch.set_default_device('cuda')
     torch.cuda.set_device(local_rank)
 
-    return dist.get_rank(), dist.get_world_size(), dist.new_group(list(range(num_local_ranks * num_nodes)))
+    return dist.get_rank(), dist.get_world_size(), group
 
 
 def calc_diff(x: torch.Tensor, y: torch.Tensor):
@@ -65,7 +53,7 @@ def cast_fp8_to_bf16(x_fp8: torch.Tensor, x_scales: torch.Tensor):
     assert x_fp8.dim() == 2
     m, n = x_fp8.shape
     aligned_n = align_up(n, 128)
-    x_fp8_padded = torch.nn.functional.pad(x_fp8, (0, aligned_n - n), mode='constant', value=0)
+    x_fp8_padded = torch.nn.functional.pad(x_fp8.to(torch.float32), (0, aligned_n - n), mode='constant', value=0)
     if x_scales.dtype == torch.int:
         x_scales = x_scales.view(dtype=torch.uint8).to(torch.int) << 23
         x_scales = x_scales.view(dtype=torch.float)
@@ -263,29 +251,40 @@ def inplace_unique(x: torch.Tensor, num_slots: int):
     assert x.dim() == 2
     mask = x < 0
     x_padded = x.masked_fill(mask, num_slots)
-    bin_count = torch.zeros((x.size(0), num_slots + 1), dtype=x.dtype, device=x.device)
-    bin_count.scatter_add_(1, x_padded, torch.ones_like(x_padded))
+    bin_count = paddle.zeros([x.shape[0], num_slots + 1], dtype=x.dtype).to(
+        x.place
+    )
+    # bin_count.scatter_add_(1, x_padded, paddle.ones_like(x_padded))
+    bin_count.put_along_axis_(
+        axis=1,
+        indices=x_padded,
+        values=paddle.ones_like(x_padded),
+        reduce='add',
+        include_self=True,
+    )
+
     bin_count = bin_count[:, :num_slots]
-    sorted_bin_count, sorted_bin_idx = torch.sort(bin_count, dim=-1, descending=True)
+    sorted_bin_count = paddle.sort(bin_count, axis=-1, descending=True)
+    sorted_bin_idx = paddle.argsort(bin_count, axis=-1, descending=True)
     sorted_bin_idx.masked_fill_(sorted_bin_count == 0, -1)
-    sorted_bin_idx = torch.sort(sorted_bin_idx, descending=True, dim=-1).values
+    sorted_bin_idx = paddle.sort(sorted_bin_idx, descending=True, axis=-1)
     x[:, :].fill_(-1)
-    valid_len = min(num_slots, x.size(1))
+    valid_len = min(num_slots, x.shape[1])
     x[:, :valid_len] = sorted_bin_idx[:, :valid_len]
 
 
 def create_grouped_scores(scores: torch.Tensor, group_idx: torch.Tensor, num_groups: int):
     num_tokens, num_experts = scores.shape
     scores = scores.view(num_tokens, num_groups, -1)
-    mask = torch.zeros((num_tokens, num_groups), dtype=torch.bool, device=scores.device)
-    mask = mask.scatter_(1, group_idx, True).unsqueeze(-1).expand_as(scores)
+    mask = torch.zeros((num_tokens, num_groups), dtype=torch.int32, device=scores.device)
+    mask = mask.scatter_(1, group_idx, 1).unsqueeze(-1).expand_as(scores).to(torch.float32)
     return (scores * mask).view(num_tokens, num_experts)
 
 
 def bench(fn, num_warmups: int = 50, num_tests: int = 50, post_fn=None):
     # Flush L2 cache with 256 MB data
     torch.cuda.synchronize()
-    cache = torch.empty(int(256e6 // 4), dtype=torch.int, device='cuda')
+    cache = torch.empty(int(256e6 // 4), dtype=torch.int).cuda()
 
     # Warmup
     for _ in range(num_warmups):
@@ -364,10 +363,10 @@ def bench_kineto(fn, kernel_names: Union[str, tuple], num_tests: int = 30, suppr
             for i in range(2):
                 # NOTES: use a large kernel and a barrier to eliminate the unbalanced CPU launch overhead
                 if barrier_comm_profiling:
-                    lhs = torch.randn((8192, 8192), dtype=torch.float, device='cuda')
-                    rhs = torch.randn((8192, 8192), dtype=torch.float, device='cuda')
+                    lhs = torch.randn((8192, 8192), dtype=torch.float).cuda()
+                    rhs = torch.randn((8192, 8192), dtype=torch.float).cuda()
                     lhs @ rhs
-                    dist.all_reduce(torch.ones(1, dtype=torch.float, device='cuda'))
+                    dist.all_reduce(torch.ones(1, dtype=torch.float).cuda())
                 for _ in range(num_tests):
                     fn()
                 torch.cuda.synchronize()
@@ -458,7 +457,7 @@ def permute(
 class TorchRef:
     def __init__(
         self,
-        ep_group: torch.distributed.ProcessGroup,
+        ep_group,
         num_of_experts: int,
         num_of_ranks_per_node: int,
     ):

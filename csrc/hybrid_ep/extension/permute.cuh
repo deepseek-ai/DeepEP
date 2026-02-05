@@ -6,7 +6,8 @@
 #include <cooperative_groups.h>
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
-#include <torch/torch.h>
+// #include <torch/torch.h>
+#include <torch/python.h>
 #include <cub/cub.cuh>
 #include <type_traits>
 #include "utils.cuh"

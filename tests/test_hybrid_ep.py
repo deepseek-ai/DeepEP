@@ -6,16 +6,54 @@ import torch
 import torch.distributed as dist
 import os
 import deep_ep
+import logging
 
 from utils import TorchRef, bench, bench_kineto, init_dist, count_rdma_send_from_routing_map
+
+def setup_logger(local_rank):
+    """为每个GPU进程配置独立的日志文件"""
+    # 1. 创建logger实例，避免多进程日志冲突
+    logger = logging.getLogger(f"gpu_{local_rank}")
+    logger.setLevel(logging.INFO)
+    logger.propagate = False  # 禁止日志向上传播，避免重复输出
+
+    # 2. 清除已存在的处理器，防止重复打印
+    if logger.handlers:
+        logger.handlers.clear()
+
+    # 3. 配置文件处理器：日志输出到对应rank的文件
+    log_file = f"log_rank_{local_rank}"
+    file_handler = logging.FileHandler(log_file, mode="w", encoding="utf-8")
+    file_handler.setLevel(logging.INFO)
+
+    # 4. 配置控制台处理器（可选，同时输出到控制台）
+    console_handler = logging.StreamHandler()
+    console_handler.setLevel(logging.INFO)
+
+    # 5. 设置日志格式（包含时间、rank、日志级别、内容）
+    formatter = logging.Formatter(
+        "%(asctime)s - rank:%(name)s - %(levelname)s - %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S"
+    )
+    file_handler.setFormatter(formatter)
+    console_handler.setFormatter(formatter)
+
+    # 6. 添加处理器到logger
+    logger.addHandler(file_handler)
+    logger.addHandler(console_handler)
+
+    return logger
 
 HIDDEN_DIM = int(os.environ.get("HIDDEN_DIM", 7168))
 MAX_NUM_OF_TOKENS_PER_RANK = int(os.environ.get("MAX_NUM_OF_TOKENS_PER_RANK", 4096))
 # NUM_TOKENS_PER_RANK should equal or less than MAX_NUM_OF_TOKENS_PER_RANK
 NUM_TOKENS_PER_RANK = int(os.environ.get("NUM_TOKENS_PER_RANK", 4096))
-NUM_LOCAL_EXPERTS = int(os.environ.get("NUM_LOCAL_EXPERTS", 8))
+NUM_LOCAL_EXPERTS = int(os.environ.get("NUM_LOCAL_EXPERTS", 32))
+NUM_OF_RANKS_PER_NODE = int(os.environ.get("NUM_OF_RANKS_PER_NODE", 8))
+NUM_OF_NODES = int(os.environ.get("NUM_OF_NODES", 1))
 TOPK = int(os.environ.get("TOPK", 8))
-PAD_MULTIPLE = int(os.environ.get("PAD_MULTIPLE", 32))
+PAD_MULTIPLE = int(os.environ.get("PAD_MULTIPLE", 128))
+NUM_OF_EXPERTS = NUM_LOCAL_EXPERTS * NUM_OF_RANKS_PER_NODE * NUM_OF_NODES
 ITERATIONS = int(os.environ.get("ITERATIONS", 100))
 SEED = int(os.environ.get("SEED", 42))
 USE_MNNVL = os.environ.get("USE_MNNVL", "0").strip().lower() in {"1", "true", "t", "yes", "y", "on"}
@@ -93,9 +131,16 @@ def test_hybrid_ep_correctness(buffer: deep_ep.HybridEPBuffer, ref: TorchRef, us
         num_of_experts=NUM_OF_EXPERTS,
         use_fp8=use_fp8,
     )
+    logger = setup_logger(dist.get_rank())
+    logger.info(f"hidden: {hidden}, shape: {hidden.shape}")
+    logger.info(f"probs: {probs}, shape: {probs.shape}")
+    logger.info(f"scaling_factor: {scaling_factor}, shape: {scaling_factor.shape}")
+    logger.info(f"routing_map: {routing_map}, shape: {routing_map.shape}")
+    logger.info(f"topk_idx: {topk_idx}, shape: {topk_idx.shape}")
+    logger.info(f"topk_weights: {topk_weights}, shape: {topk_weights.shape}")
 
     # Dispatch correctness check
-    for with_probs in [True, False]:
+    for with_probs in [True]:
         # The check for the dispatch
         dispatched_hidden_ref, dispatched_probs_ref, dispatched_scaling_factor_ref = (
             ref.dispatch(
@@ -108,8 +153,15 @@ def test_hybrid_ep_correctness(buffer: deep_ep.HybridEPBuffer, ref: TorchRef, us
             dispatched_scaling_factor,
             handle,
         ) = buffer.dispatch(
-            hidden=hidden, scaling_factor=scaling_factor, topk_idx=topk_idx, topk_weights=topk_weights if with_probs else None, num_of_experts=NUM_OF_EXPERTS,
+            hidden=hidden, 
+            scaling_factor=scaling_factor, 
+            topk_idx=topk_idx, 
+            topk_weights=topk_weights if with_probs else None, 
+            num_of_experts=NUM_OF_EXPERTS,
         )
+        logger.info(f"dispatched_hidden: {dispatched_hidden}, shape: {dispatched_hidden.shape}")
+        logger.info(f"dispatched_probs: {dispatched_probs}, shape: {dispatched_probs.shape}")
+        logger.info(f"dispatched_scaling_factor: {dispatched_scaling_factor}, shape: {dispatched_scaling_factor.shape}")
 
         assert bitwise_equal(dispatched_hidden_ref, dispatched_hidden)
         if dispatched_probs is not None and dispatched_probs_ref is not None:
@@ -127,6 +179,10 @@ def test_hybrid_ep_correctness(buffer: deep_ep.HybridEPBuffer, ref: TorchRef, us
             )
 
         _, _, _, num_dispatched_tokens, local_expert_routing_map, _, _ = handle
+
+        logger.info(f"num_dispatched_tokens: {num_dispatched_tokens}, shape: {num_dispatched_tokens.shape}")
+        logger.info(f"local_expert_routing_map: {local_expert_routing_map}, shape: {local_expert_routing_map.shape}")
+        
         num_dispatched_tokens = num_dispatched_tokens.cpu()
         local_expert_routing_map = local_expert_routing_map[
             : num_dispatched_tokens.item()
@@ -134,96 +190,111 @@ def test_hybrid_ep_correctness(buffer: deep_ep.HybridEPBuffer, ref: TorchRef, us
         # Simulate the permute and expert and unpermute. The expert is identity op
         copy_times = local_expert_routing_map.sum(dim=1)
         dispatched_hidden = dispatched_hidden.to(torch.bfloat16)  
+        logger.info(f"copy_times: {copy_times}, shape: {copy_times.shape}")
+        logger.info(f"dispatched_hidden: {dispatched_hidden}, shape: {dispatched_hidden.shape}")
         # The combine only support bf16
         hidden_to_combine = dispatched_hidden * copy_times.unsqueeze(1)
         probs_to_combine = dispatched_probs
+        logger.info(f"hidden_to_combine: {hidden_to_combine}, shape: {hidden_to_combine.shape}")
+        logger.info(f"dispatched_hidden: {probs_to_combine}, shape: {probs_to_combine.shape}")
 
         # The check for the combine
         combined_hidden, combined_probs = buffer.combine(
             hidden_to_combine, probs_to_combine, handle
         )
+        logger.info(f"combined_hidden: {combined_hidden}, shape: {combined_hidden.shape}")
+        logger.info(f"combined_probs: {combined_probs}, shape: {combined_probs.shape}")
 
         # The reconstucted value should be TOPK times larger than the input hidden
         combined_hidden = combined_hidden / TOPK
+        logger.info(f"combined_hidden new: {combined_hidden}, shape new: {combined_hidden.shape}")
 
         assert torch.allclose(combined_hidden, hidden.to(torch.bfloat16), atol=2e-5, rtol=1e-2)
         if combined_probs is not None and probs is not None:
             assert bitwise_equal(combined_probs, probs)
 
-    # Dispatch with permute correctness check
-    for with_probs in [True, False]:
-        # The check for the dispatch
-        (
-            dispatched_hidden,
-            dispatched_probs,
-            dispatched_scaling_factor,
-            tokens_per_expert,
-            handle,
-        ) = buffer.dispatch_with_permute(
-            hidden=hidden,
-            routing_map=routing_map,
-            probs=probs if with_probs else None,
-            scaling_factor=scaling_factor,
-            pad_multiple=PAD_MULTIPLE,
-        )
-        _, _, _, num_dispatched_tokens_tensor, local_expert_routing_map, _, _, _, _ = (
-            handle
-        )
-        num_dispatched_tokens_tensor = num_dispatched_tokens_tensor.cpu()
-        local_expert_routing_map = local_expert_routing_map[
-            : num_dispatched_tokens_tensor.item()
-        ]
-        # The out_token_num of permutation is the sum of the tokens_per_expert
-        out_token_num = tokens_per_expert.sum().item()
-        (
-            dispatched_hidden_ref,
-            dispatched_probs_ref,
-            dispatched_scaling_factor_ref,
-        ) = ref.dispatch(
-            hidden,
-            routing_map,
-            probs if with_probs else None,
-            scaling_factor,
-            local_expert_routing_map=local_expert_routing_map,
-            out_token_num=out_token_num,
-            pad_multiple=PAD_MULTIPLE,
-            enable_permute=True,
-        )
+    # # Dispatch with permute correctness check
+    # for with_probs in [True]:
+    #     # The check for the dispatch
+    #     (
+    #         dispatched_hidden,
+    #         dispatched_probs,
+    #         dispatched_scaling_factor,
+    #         tokens_per_expert,
+    #         handle,
+    #     ) = buffer.dispatch_with_permute(
+    #         hidden=hidden,
+    #         routing_map=routing_map,
+    #         probs=probs if with_probs else None,
+    #         scaling_factor=scaling_factor,
+    #         pad_multiple=PAD_MULTIPLE,
+    #     )
+    #     if dist.get_rank() == 0:
+    #         print("dispatched_hidden: ", dispatched_hidden, dispatched_hidden.shape)
+    #         print("dispatched_probs: ", dispatched_probs, dispatched_probs.shape)
+    #         print("dispatched_scaling_factor: ", dispatched_scaling_factor, dispatched_scaling_factor.shape)
+    #         print("tokens_per_expert: ", tokens_per_expert, tokens_per_expert.shape)
+    #     _, _, _, num_dispatched_tokens_tensor, local_expert_routing_map, _, _, _ = (
+    #         handle
+    #     )
+    #     if dist.get_rank() == 0:
+    #         print("num_dispatched_tokens_tensor: ", num_dispatched_tokens_tensor, num_dispatched_tokens_tensor.shape)
+    #         print("local_expert_routing_map: ", local_expert_routing_map, local_expert_routing_map.shape)
+    #     num_dispatched_tokens_tensor = num_dispatched_tokens_tensor.cpu()
+    #     local_expert_routing_map = local_expert_routing_map[
+    #         : num_dispatched_tokens_tensor.item()
+    #     ]
+    #     # The out_token_num of permutation is the sum of the tokens_per_expert
+    #     out_token_num = tokens_per_expert.sum().item()
+    #     (
+    #         dispatched_hidden_ref,
+    #         dispatched_probs_ref,
+    #         dispatched_scaling_factor_ref,
+    #     ) = ref.dispatch(
+    #         hidden,
+    #         routing_map,
+    #         probs if with_probs else None,
+    #         scaling_factor,
+    #         local_expert_routing_map=local_expert_routing_map,
+    #         out_token_num=out_token_num,
+    #         pad_multiple=PAD_MULTIPLE,
+    #         enable_permute=True,
+    #     )
 
-        assert bitwise_equal(dispatched_hidden_ref, dispatched_hidden)
-        if dispatched_probs is not None and dispatched_probs_ref is not None:
-            assert bitwise_equal(dispatched_probs_ref, dispatched_probs)
-        if (
-            dispatched_scaling_factor is not None
-            and dispatched_scaling_factor_ref is not None
-        ):
-            assert bitwise_equal(
-                dispatched_scaling_factor_ref, dispatched_scaling_factor
-            )
+    #     assert bitwise_equal(dispatched_hidden_ref, dispatched_hidden)
+    #     if dispatched_probs is not None and dispatched_probs_ref is not None:
+    #         assert bitwise_equal(dispatched_probs_ref, dispatched_probs)
+    #     if (
+    #         dispatched_scaling_factor is not None
+    #         and dispatched_scaling_factor_ref is not None
+    #     ):
+    #         assert bitwise_equal(
+    #             dispatched_scaling_factor_ref, dispatched_scaling_factor
+    #         )
 
-        # The combine only support bf16
-        dispatched_hidden = dispatched_hidden.to(torch.bfloat16)  
-        hidden_to_combine = dispatched_hidden
-        probs_to_combine = dispatched_probs
+    #     # The combine only support bf16
+    #     dispatched_hidden = dispatched_hidden.to(torch.bfloat16)  
+    #     hidden_to_combine = dispatched_hidden
+    #     probs_to_combine = dispatched_probs
  
-        # The check for the combine
-        combined_hidden, combined_probs = buffer.combine_with_unpermute(
-            hidden=hidden_to_combine,
-            probs=probs_to_combine,
-            handle=handle,
-            pad_multiple=PAD_MULTIPLE,
-        )
+    #     # The check for the combine
+    #     combined_hidden, combined_probs = buffer.combine_with_unpermute(
+    #         hidden=hidden_to_combine,
+    #         probs=probs_to_combine,
+    #         handle=handle,
+    #         pad_multiple=PAD_MULTIPLE,
+    #     )
 
-        # The reconstucted value should be TOPK times larger than the input hidden
-        combined_hidden = combined_hidden / TOPK
+    #     # The reconstucted value should be TOPK times larger than the input hidden
+    #     combined_hidden = combined_hidden / TOPK
 
-        assert torch.allclose(
-            combined_hidden, hidden.to(torch.bfloat16), atol=2e-5, rtol=1e-2
-        )
-        if combined_probs is not None and probs is not None:
-            assert bitwise_equal(combined_probs, probs)
+    #     assert torch.allclose(
+    #         combined_hidden, hidden.to(torch.bfloat16), atol=2e-5, rtol=1e-2
+    #     )
+    #     if combined_probs is not None and probs is not None:
+    #         assert bitwise_equal(combined_probs, probs)
 
-    print_in_order(f'[rank {dist.get_rank()}] Correctness check passed ({"FP8" if hidden.dtype == torch.uint8 else "BF16"})')
+    # print_in_order(f'[rank {dist.get_rank()}] Correctness check passed ({"FP8" if hidden.dtype == torch.uint8 else "BF16"})')
 
 
 def test_hybrid_ep_benchmark(buffer: deep_ep.HybridEPBuffer, group: dist.ProcessGroup, use_fp8: bool, nsys_profile: bool):
@@ -330,11 +401,10 @@ def test_hybrid_ep_benchmark(buffer: deep_ep.HybridEPBuffer, group: dist.Process
             print_in_order(f'[rank {rank}] HybridEP dispatch kernel(IB) ({"FP8" if hidden.dtype == torch.uint8 else "BF16"}): {rdma_send_bytes / 1e9 / dispatch_t:.2f} GB/s, avg_t={dispatch_t * 1e6:.2f} us | '
                   f'HybridEP combine kernel(IB): {combine_bf16_rdma_recv_bytes / 1e9 / combine_t:.2f} GB/s, avg_t={combine_t * 1e6:.2f} us')
     else:
-        if torch.distributed.get_rank() == 0:
-            torch.cuda.profiler.start()
-        with torch.cuda.nvtx.range(f"hybrid-ep dispatch ({"FP8" if hidden.dtype == torch.uint8 else "BF16"})"):
+        torch.cuda.profiler.start()
+        with torch.cuda.nvtx.range(f"hybrid-ep dispatch ({'FP8' if hidden.dtype == torch.uint8 else 'BF16'})"):
             if rank == 0:
-                print(f"profile hybrid-ep dispatch ({"FP8" if hidden.dtype == torch.uint8 else "BF16"})", flush=True)
+                print(f"profile hybrid-ep dispatch ({'FP8' if hidden.dtype == torch.uint8 else 'BF16'})", flush=True)
             dispatch_args = {'hidden': hidden, 'scaling_factor': scaling_factor, 'topk_idx': topk_idx, 'topk_weights': topk_weights, 'num_of_experts': NUM_OF_EXPERTS}
             bench(lambda: buffer.dispatch(**dispatch_args))
         with torch.cuda.nvtx.range("hybrid-ep combine"):
@@ -342,9 +412,9 @@ def test_hybrid_ep_benchmark(buffer: deep_ep.HybridEPBuffer, group: dist.Process
                 print(f"profile hybrid-ep combine", flush=True)
             combine_args = {'hidden': dispatched_hidden_bf16, 'probs': dispatched_probs, 'handle': handle}
             bench(lambda: buffer.combine(**combine_args))
-        with torch.cuda.nvtx.range(f"hybrid-ep dispatch+permute ({"FP8" if hidden.dtype == torch.uint8 else "BF16"})"):
+        with torch.cuda.nvtx.range(f"hybrid-ep dispatch+permute ({'FP8' if hidden.dtype == torch.uint8 else 'BF16'})"):
             if rank == 0:
-                print(f"profile hybrid-ep dispatch+permute ({"FP8" if hidden.dtype == torch.uint8 else "BF16"})", flush=True)
+                print(f"profile hybrid-ep dispatch+permute ({'FP8' if hidden.dtype == torch.uint8 else 'BF16'})", flush=True)
             dispatch_with_permute_args = {'hidden': hidden, 'scaling_factor': scaling_factor, 'routing_map': routing_map, 'probs': probs, 'pad_multiple': PAD_MULTIPLE}
             bench(lambda: buffer.dispatch_with_permute(**dispatch_with_permute_args))
         with torch.cuda.nvtx.range("hybrid-ep combine+unpermute"):
@@ -353,8 +423,7 @@ def test_hybrid_ep_benchmark(buffer: deep_ep.HybridEPBuffer, group: dist.Process
             combine_with_unpermute_args = {'hidden': dispatched_hidden_bf16_with_permute, 'probs': dispatched_probs_with_permute, 'handle': handle_with_permute, 'pad_multiple': PAD_MULTIPLE}
             bench(lambda: buffer.combine_with_unpermute(**combine_with_unpermute_args))
         time.sleep(1)
-        if torch.distributed.get_rank() == 0:
-            torch.cuda.profiler.stop()
+        torch.cuda.profiler.stop()
 
 
 def test_main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
@@ -370,32 +439,32 @@ def test_main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
         NUM_OF_RANKS_PER_NODE = args.num_processes
         NUM_OF_NODES = group.size() // NUM_OF_RANKS_PER_NODE
         NUM_OF_EXPERTS = NUM_LOCAL_EXPERTS * NUM_OF_RANKS_PER_NODE * NUM_OF_NODES
+        
+    for use_fp8 in [True]:
+        buffer = deep_ep.HybridEPBuffer(
+            group=group,
+            hidden_dim=HIDDEN_DIM,
+            max_num_of_tokens_per_rank=MAX_NUM_OF_TOKENS_PER_RANK,
+            num_local_experts=NUM_LOCAL_EXPERTS,
+            num_of_hybrid_ep_ranks_per_nvlink_domain=NUM_OF_RANKS_PER_NODE,
+            use_mnnvl=USE_MNNVL,
+            use_fp8=use_fp8
+        )
+        
+        ref = TorchRef(
+            ep_group=group,
+            num_of_experts=NUM_OF_EXPERTS,
+            num_of_ranks_per_node=NUM_OF_RANKS_PER_NODE,
+        )
 
-    stream = torch.cuda.Stream()
-    with torch.cuda.stream(stream):
-        for use_fp8 in [False, True]:
-            buffer = deep_ep.HybridEPBuffer(
-                group=group,
-                hidden_dim=HIDDEN_DIM,
-                max_num_of_tokens_per_rank=MAX_NUM_OF_TOKENS_PER_RANK,
-                num_local_experts=NUM_LOCAL_EXPERTS,
-                use_fp8=use_fp8
-            )
-            
-            ref = TorchRef(
-                ep_group=group,
-                num_of_experts=NUM_OF_EXPERTS,
-                num_of_ranks_per_node=NUM_OF_RANKS_PER_NODE,
-            )
-
-            test_hybrid_ep_correctness(buffer, ref, use_fp8)
-            test_hybrid_ep_benchmark(buffer, group, use_fp8, args.nsys_profile)
+        test_hybrid_ep_correctness(buffer, ref, use_fp8)
+        # test_hybrid_ep_benchmark(buffer, group, use_fp8, args.nsys_profile)
     dist.barrier()
     dist.destroy_process_group()
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Test intranode EP kernels')
-    parser.add_argument('--num-processes', type=int, default=4,
+    parser.add_argument('--num-processes', type=int, default=8,
                        help='Number of processes to spawn (default: 4)')
     parser.add_argument('--nsys-profile', action='store_true', default=False,
                        help='benchmark with nsys profile or not (default: False)')

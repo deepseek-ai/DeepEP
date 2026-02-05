@@ -7,8 +7,10 @@ import shutil
 import re
 
 from pathlib import Path
-from torch.utils.cpp_extension import BuildExtension, CUDAExtension
-
+from paddle.utils.cpp_extension import BuildExtension, CUDAExtension, _get_cuda_arch_flags
+from paddle.utils.cpp_extension.extension_utils import (
+    add_compile_flag,
+)
 
 def collect_package_files(package: str, relative_dir: str):
     base_path = Path(package) / relative_dir
@@ -47,7 +49,7 @@ def get_extension_hybrid_ep_cpp():
     enable_multinode = os.getenv("HYBRID_EP_MULTINODE", "0").strip().lower() in {"1", "true", "t", "yes", "y", "on"}
 
     # Default to Blackwell series
-    os.environ['TORCH_CUDA_ARCH_LIST'] = os.getenv('TORCH_CUDA_ARCH_LIST', '10.0')
+    os.environ['PADDLE_CUDA_ARCH_LIST'] = os.getenv('PADDLE_CUDA_ARCH_LIST', '10.0')
 
     # Basic compile arguments
     compile_args = {
@@ -81,7 +83,7 @@ def get_extension_hybrid_ep_cpp():
     extra_link_args = []
 
     # Add dependency for jit
-    compile_args["nvcc"].append(f'-DSM_ARCH="{os.environ["TORCH_CUDA_ARCH_LIST"]}"')
+    compile_args["nvcc"].append(f'-DSM_ARCH="{os.environ["PADDLE_CUDA_ARCH_LIST"]}"')
     # Copy the hybrid backend code to python package for JIT compilation
     shutil.copytree(
         os.path.join(current_dir, "csrc/hybrid_ep/backend/"),
@@ -99,7 +101,7 @@ def get_extension_hybrid_ep_cpp():
 
         subprocess.run(["git", "submodule", "update", "--init", "--recursive"], cwd=current_dir)
         # Generate the inter-node dependency to the python package for JIT compilation
-        subprocess.run(["make", "-j", "src.build", f"NVCC_GENCODE={to_nvcc_gencode(os.environ['TORCH_CUDA_ARCH_LIST'])}"], cwd=nccl_dir, check=True)
+        subprocess.run(["make", "-j", "src.build", f"NVCC_GENCODE={to_nvcc_gencode(os.environ['PADDLE_CUDA_ARCH_LIST'])}"], cwd=nccl_dir, check=True)
         # Add third-party dependency 
         include_dirs.append(os.path.join(nccl_dir, "src/transport/net_ib/gdaki/doca-gpunetio/include"))
         include_dirs.append(os.path.join(rdma_core_dir, "include"))
@@ -146,11 +148,11 @@ def get_extension_hybrid_ep_cpp():
     print(f' > Compilation flags: {compile_args}')
     print(f' > Extra objects: {extra_objects}')
     print(f' > Runtime library dirs: {runtime_library_dirs}')
-    print(f' > Arch list: {os.environ["TORCH_CUDA_ARCH_LIST"]}')
+    print(f' > Arch list: {os.environ["PADDLE_CUDA_ARCH_LIST"]}')
     print()
 
     extension_hybrid_ep_cpp = CUDAExtension(
-        "hybrid_ep_cpp",
+        name="hybrid_ep_cpp",
         sources=sources,
         include_dirs=include_dirs,
         library_dirs=library_dirs,
@@ -203,7 +205,7 @@ def get_extension_deep_ep_cpp():
 
     if int(os.getenv('DISABLE_SM90_FEATURES', 0)):
         # Prefer A100
-        os.environ['TORCH_CUDA_ARCH_LIST'] = os.getenv('TORCH_CUDA_ARCH_LIST', '8.0')
+        os.environ['PADDLE_CUDA_ARCH_LIST'] = os.getenv('PADDLE_CUDA_ARCH_LIST', '8.0')
 
         # Disable some SM90 features: FP8, launch methods, and TMA
         cxx_flags.append('-DDISABLE_SM90_FEATURES')
@@ -213,7 +215,7 @@ def get_extension_deep_ep_cpp():
         assert disable_nvshmem
     else:
         # Prefer H800 series
-        os.environ['TORCH_CUDA_ARCH_LIST'] = os.getenv('TORCH_CUDA_ARCH_LIST', '9.0')
+        os.environ['PADDLE_CUDA_ARCH_LIST'] = os.getenv('PADDLE_CUDA_ARCH_LIST', '9.0')
 
         # CUDA 12 flags
         nvcc_flags.extend(['-rdc=true', '--ptxas-options=--register-usage-level=10'])
@@ -222,8 +224,11 @@ def get_extension_deep_ep_cpp():
         if '-rdc=true' in nvcc_flags and '-dlink' not in nvcc_dlink:
             nvcc_dlink.append('-dlink')
 
+    # CUDA 12 flags
+    nvcc_flags.extend(['-rdc=true', '--ptxas-options=--register-usage-level=10'])
+
     # Disable LD/ST tricks, as some CUDA version does not support `.L1::no_allocate`
-    if os.environ['TORCH_CUDA_ARCH_LIST'].strip() != '9.0':
+    if os.environ['PADDLE_CUDA_ARCH_LIST'].strip() != '9.0':
         assert int(os.getenv('DISABLE_AGGRESSIVE_PTX_INSTRS', 1)) == 1
         os.environ['DISABLE_AGGRESSIVE_PTX_INSTRS'] = '1'
 
@@ -238,6 +243,7 @@ def get_extension_deep_ep_cpp():
         'nvcc': nvcc_flags,
     }
     if len(nvcc_dlink) > 0:
+        nvcc_dlink = nvcc_dlink + _get_cuda_arch_flags()
         extra_compile_args['nvcc_dlink'] = nvcc_dlink
 
     # Summary
@@ -247,9 +253,15 @@ def get_extension_deep_ep_cpp():
     print(f' > Libraries: {library_dirs}')
     print(f' > Compilation flags: {extra_compile_args}')
     print(f' > Link flags: {extra_link_args}')
-    print(f' > Arch list: {os.environ["TORCH_CUDA_ARCH_LIST"]}')
+    print(f' > Arch list: {os.environ["PADDLE_CUDA_ARCH_LIST"]}')
     print(f' > NVSHMEM path: {nvshmem_dir}')
     print()
+
+    add_compile_flag(extra_compile_args, ['-DPADDLE_WITH_CUDA'])
+    add_compile_flag(extra_compile_args, ['-DWITH_DISTRIBUTE'])
+    add_compile_flag(extra_compile_args, ['-DWITH_NVSHMEM'])
+    add_compile_flag(extra_compile_args, ['-DWITH_GPU'])
+    add_compile_flag(extra_compile_args, ['-DWITH_FLUID_ONLY'])
 
     extension_deep_ep_cpp = CUDAExtension(
         name='deep_ep_cpp',
@@ -280,8 +292,8 @@ if __name__ == '__main__':
             'pynvml',
         ],
         ext_modules=[
-            get_extension_deep_ep_cpp(),
-            get_extension_hybrid_ep_cpp()
+            # get_extension_deep_ep_cpp(),
+            get_extension_hybrid_ep_cpp(),
         ],
         cmdclass={
             'build_ext': BuildExtension

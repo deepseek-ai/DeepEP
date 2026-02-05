@@ -299,8 +299,14 @@ void HybridEPBuffer::exchange_remote_handle() {
   auto torch_distributed = py::module_::import("torch.distributed");
   
   // Move tensors to CUDA for communication
-  auto dispatch_cuda = dispatch_memory_handles.cuda();
-  auto combine_cuda = combine_memory_handles.cuda();
+  // auto dispatch_cuda = dispatch_memory_handles.cuda();
+  MemHandle dispatch_handles[4]
+  auto dispatch_cuda = torch::empty({static_cast<int64_t>(sizeof(dispatch_handles))},
+                                        torch::dtype(torch::kUInt8).device(torch::kCUDA));
+  // auto combine_cuda = combine_memory_handles.cuda();
+  MemHandle combine_handles[3];
+  combine_memory_handles = torch::empty({static_cast<int64_t>(sizeof(combine_handles))},
+                                       torch::dtype(torch::kUInt8).device(torch::kCUDA));
   
   // Get world size from process group
   int world_size = process_group.attr("size")().cast<int>();

@@ -6,7 +6,8 @@
 #include <pybind11/pybind11.h>
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/util/Optional.h>
-#include <torch/torch.h>
+// #include <torch/torch.h>
+#include <torch/python.h>
 #include <iostream>
 #include <dlfcn.h>
 #include "backend/hybrid_ep_backend.cuh"

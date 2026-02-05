@@ -7,7 +7,7 @@ from typing import Any, Optional, Tuple
 
 # noinspection PyUnresolvedReferences
 from deep_ep_cpp import Config, EventHandle
-
+import paddle
 
 class EventOverlap:
     """
@@ -39,6 +39,12 @@ class EventOverlap:
         """
         assert self.event is not None
         self.event.current_stream_wait()
+    
+    def calc_stream_wait(self, group_idx) -> None:
+        self.event.calc_stream_wait(group_idx)
+
+    def comm_stream_wait(self, group_idx) -> None:
+        self.event.comm_stream_wait(group_idx)
 
     def __enter__(self) -> Any:
         """
@@ -64,7 +70,7 @@ class EventOverlap:
             self.event.current_stream_wait()
 
 
-def check_nvlink_connections(group: dist.ProcessGroup, 
+def check_nvlink_connections(group, 
                               allow_nvlink_for_normal_mode: bool = True,
                               allow_nvlink_for_low_latency_mode: bool = True,
                               low_latency_mode: bool = False) -> None:
@@ -102,3 +108,7 @@ def check_nvlink_connections(group: dist.ProcessGroup,
     pynvml.nvmlShutdown()
 
 
+def get_event_from_comm_stream(group_id: int) -> EventOverlap:
+    return EventOverlap(
+        event=paddle.base.core.get_event_handle_from_comm_stream(group_id)
+    )

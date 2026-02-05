@@ -9,6 +9,7 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/pytypes.h>
 #include <torch/types.h>
+#include <c10/cuda/CUDAStream.h>
 #include <tuple>
 #include <vector>
 
@@ -16,6 +17,9 @@
 #include "event.hpp"
 #include "kernels/configs.cuh"
 #include "kernels/exception.cuh"
+
+#include "paddle/phi/core/memory/allocation/allocator_facade.h"
+#include "paddle/fluid/distributed/collective/process_group_nccl.h"
 
 #ifndef TORCH_EXTENSION_NAME
 #define TORCH_EXTENSION_NAME deep_ep_cpp
@@ -79,7 +83,10 @@ private:
     shared_memory::MemHandle ipc_handles[NUM_MAX_NVL_PEERS];
 
     // Stream for communication
-    at::cuda::CUDAStream comm_stream;
+    cudaStream_t comm_stream;
+
+    phi::distributed::NCCLCommContext* comm_ctx;
+    phi::GPUContext* calc_ctx;
 
     // After IPC/NVSHMEM synchronization, this flag will be true
     bool available = false;
@@ -118,7 +125,8 @@ public:
            bool low_latency_mode,
            bool disable_nvlink_for_normal_mode,
            bool explicitly_destroy,
-           bool use_fabric);
+           bool use_fabric,
+           int context_ring_id);
 
     ~Buffer() noexcept(false);
 
@@ -140,7 +148,7 @@ public:
 
     torch::Tensor get_local_buffer_tensor(const pybind11::object& dtype, int64_t offset, bool use_rdma_buffer) const;
 
-    torch::Stream get_comm_stream() const;
+    cudaStream_t get_comm_stream() const;
 
     void sync(const std::vector<int>& device_ids, const std::vector<std::optional<pybind11::bytearray>>& all_gathered_handles, const std::optional<pybind11::bytearray>& root_unique_id_opt);
 
@@ -223,5 +231,12 @@ public:
     torch::Tensor
     get_next_low_latency_combine_buffer(int num_max_dispatch_tokens_per_rank, int hidden, int num_experts) const;
 };
+
+inline void SetAllocatorStreamForGPUContext(gpuStream_t stream,
+                                            phi::GPUContext* ctx) {
+  ctx->SetAllocator(paddle::memory::allocation::AllocatorFacade::Instance()
+                        .GetAllocator(ctx->GetPlace(), stream)
+                        .get());
+}
 
 } // namespace deep_ep

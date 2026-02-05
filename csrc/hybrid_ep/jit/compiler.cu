@@ -31,7 +31,7 @@ NVCCCompiler::NVCCCompiler(std::string base_path, std::string comm_id):
     base_path(base_path), comm_id(comm_id) {
     jit_dir = get_jit_dir();
 
-    nvcc_path = get_env("CUDA_HOME") + "/bin/nvcc";
+    nvcc_path = get_env("CUDA_HOME") + "nvcc";
 
     // Init the flags to compiler
     std::string sm_arch_flags = convert_to_nvcc_arch_flags(SM_ARCH);
