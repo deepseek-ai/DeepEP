@@ -199,5 +199,5 @@ Refer to `tests/test_hybrid_ep.py` for comprehensive usage examples including:
 - Inter-node testing scenarios
 - Performance benchmarking setups
 
-For more information on the design and tuning details, please refer to the [Hybrid-EP Design Document](../csrc/hybrid_ep/hybrid_ep_doc.md).
+For more information on the design and tuning details, please refer to the [Hybrid-EP Design Document](Hybrid-EP_Implementation.md).
 
