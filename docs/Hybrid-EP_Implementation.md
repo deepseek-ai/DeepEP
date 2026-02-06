@@ -17,7 +17,7 @@
 
 ### Architecture Diagram
 
-![Hybrid-EP Workflow](hybrid-ep-img/Hybrid-EP-workflow.svg)
+![Hybrid-EP Workflow](../figures/hybrid-ep-img/Hybrid-EP-workflow.svg)
 
 ### Code Structure
 ```
@@ -286,7 +286,7 @@ Buffer allocation and registration are time-consuming operations, so they are pe
 3. **Exchange**: Use `torch.distributed.all_gather` to exchange handles across ranks
 4. **Open Handle**: Each rank opens handles from other ranks to obtain remote buffer addresses
 
-![Buffer Registration](hybrid-ep-img/RegisterBuffer.png)
+![Buffer Registration](../figures/hybrid-ep-img/RegisterBuffer.png)
 
 ### 4.5 Dynamic Buffer Update
 
@@ -417,7 +417,7 @@ We define GPUs with the same local rank across different nodes as *peers* (e.g.,
 
 ### 8.1 Dispatch Kernel
 
-![Dispatch Kernel](hybrid-ep-img/hybrid_ep_dispatch.png)
+![Dispatch Kernel](../figures/hybrid-ep-img/hybrid_ep_dispatch.png)
 
 The dispatch kernel moves tokens from attention output to expert input buffers:
 
@@ -428,7 +428,7 @@ The dispatch kernel moves tokens from attention output to expert input buffers:
 
 ### 8.2 Combine Kernel
 
-![Combine Kernel](hybrid-ep-img/hybrid_ep_combine.png)
+![Combine Kernel](../figures/hybrid-ep-img/hybrid_ep_combine.png)
 
 The combine kernel aggregates expert outputs back to original token positions.
 
