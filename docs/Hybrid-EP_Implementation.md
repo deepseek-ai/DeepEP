@@ -364,6 +364,38 @@ Conversely, `combine_with_unpermute` reverses this process: it unpermutes expert
 
 Additionally, some training frameworks require token alignment per expert (e.g., for efficient GEMM). The `pad_multiple` parameter enables padding to meet these alignment requirements.
 
+#### Buffer Allocation Challenge
+
+When using `dispatch_with_permute` / `combine_with_unpermute`, we face a fundamental challenge: **the number of permuted tokens is unknown before preprocessing completes** due to the dynamic nature of MoE routing.
+
+Allocating buffers for the worst case would require `worst_case_dispatch_output × min(topk, num_experts_per_rank)` tokens—an unacceptable memory overhead. Additionally, the permuted output serves as expert input (activation memory) and cannot be globally reused. Furthermore, integrating permutation into Hybrid-EP **eliminates the opportunity for recomputing permutation** during backward pass.
+
+#### Default Mode (Blocking)
+
+By default, `dispatch_with_permute` performs a **stream synchronization** after the preprocessing kernel to obtain the exact token count, then allocates a precisely-sized buffer using `torch.empty()`:
+
+```
+┌───────────────────┐     ┌──────────────┐     ┌─────────────────┐     ┌─────────────────┐     ┌────────────────┐
+│ Permute           │────▶│ Stream Sync  │────▶│ Allocate Buffer │────▶│ Dispatch Kernel │────▶│ Permute Kernel │
+│ Preprocessing     │     │ (blocking)   │     │ (exact size)    │     │                 │     │                │
+└───────────────────┘     └──────────────┘     └─────────────────┘     └─────────────────┘     └────────────────┘
+```
+
+#### Non-Blocking Mode
+
+For CUDA graph capture, `non_blocking=True` allows users to provide an estimated token count (`num_permuted_tokens`) to avoid synchronization:
+
+```
+┌───────────────────┐     ┌─────────────────────┐     ┌─────────────────┐     ┌────────────────┐
+│ Permute           │────▶│ Allocate Buffer     │────▶│ Dispatch Kernel │────▶│ Permute Kernel │
+│ Preprocessing     │     │ (user-estimated)    │     │                 │     │                │
+└───────────────────┘     └─────────────────────┘     └─────────────────┘     └────────────────┘
+```
+
+**Output behavior**:
+- **Overflow** (actual > estimated): Excess tokens are dropped, `overflow_flag = True`
+- **Underflow** (actual ≤ estimated): Trailing portion contains garbage data, use `tokens_per_expert` to find valid ranges
+
 ---
 
 ## 8. Hybrid-EP Kernels
