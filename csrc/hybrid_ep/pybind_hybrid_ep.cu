@@ -119,7 +119,21 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
                  " token_data_type=" + type_to_string(config.token_data_type) +
                  ">";
         });
-  
+
+    pybind11::class_<HandleImpl>(m, "HandleImpl")
+        .def(py::init<>())
+        .def_readwrite("sparse_to_dense_map", &HandleImpl::sparse_to_dense_map)
+        .def_readwrite("rdma_to_attn_map", &HandleImpl::rdma_to_attn_map)
+        .def_readwrite("attn_to_rdma_map", &HandleImpl::attn_to_rdma_map)
+        .def_readwrite("num_dispatched_tokens_tensor", &HandleImpl::num_dispatched_tokens_tensor)
+        .def_readwrite("local_expert_routing_map", &HandleImpl::local_expert_routing_map)
+        .def_readwrite("num_of_tokens_per_rank", &HandleImpl::num_of_tokens_per_rank)
+        .def_readwrite("config", &HandleImpl::config)
+        .def_readwrite("row_id_map", &HandleImpl::row_id_map)
+        .def_readwrite("tokens_per_expert", &HandleImpl::tokens_per_expert)
+        .def_readwrite("overflow_flag", &HandleImpl::overflow_flag)
+        .def_readwrite("num_permuted_tokens", &HandleImpl::num_permuted_tokens);
+
     pybind11::class_<HybridEPBuffer>(m, "HybridEPBuffer")
         .def(py::init<py::object, BufferConfig, int, int, int, std::string, bool, bool, bool>(),
             py::arg("process_group"),
@@ -133,38 +147,38 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
             py::arg("enable_custom_allgather") = true)
         .def("update_buffer", &HybridEPBuffer::update_buffer, py::arg("config"))
         .def("metadata_preprocessing", &HybridEPBuffer::metadata_preprocessing,
-             py::kw_only(), py::arg("config"), py::arg("routing_map"), py::arg("num_of_tokens_per_rank"), py::arg("non_blocking") = false)
-        .def("dispatch", &HybridEPBuffer::dispatch, py::kw_only(), 
-             py::arg("config"), py::arg("hidden"),
-             py::arg("probs") = c10::nullopt,
-             py::arg("scaling_factor") = c10::nullopt,
-             py::arg("sparse_to_dense_map"), py::arg("rdma_to_attn_map"),
-             py::arg("attn_to_rdma_map"), py::arg("num_dispatched_tokens_tensor"),
-             py::arg("num_dispatched_tokens") = std::nullopt, py::arg("num_of_tokens_per_rank"),
-             py::arg("with_probs"))
-        .def("combine", &HybridEPBuffer::combine, py::kw_only(), 
-             py::arg("config"), py::arg("hidden"),
-             py::arg("probs") = c10::nullopt, py::arg("sparse_to_dense_map"),
-             py::arg("rdma_to_attn_map"), py::arg("attn_to_rdma_map"),
+             py::kw_only(),
+             py::arg("config"),
+             py::arg("routing_map"),
              py::arg("num_of_tokens_per_rank"),
-             py::arg("with_probs"))
-        .def("dispatch_with_permute", &HybridEPBuffer::dispatch_with_permute, py::kw_only(), 
-             py::arg("config"), py::arg("hidden"),
+             py::arg("num_permuted_tokens") = std::nullopt,
+             py::arg("pad_multiple") = std::nullopt,
+             py::arg("enable_permute") = false,
+             py::arg("non_blocking") = false)
+        .def("dispatch", &HybridEPBuffer::dispatch, py::kw_only(),
+             py::arg("hidden"),
              py::arg("probs") = c10::nullopt,
              py::arg("scaling_factor") = c10::nullopt,
-             py::arg("sparse_to_dense_map"), py::arg("rdma_to_attn_map"),
-             py::arg("attn_to_rdma_map"), py::arg("num_dispatched_tokens_tensor"),
-             py::arg("local_expert_routing_map"), py::arg("row_id_map"),
-             py::arg("num_permuted_tokens") = std::nullopt,
-             py::arg("num_of_tokens_per_rank"), py::arg("pad_multiple") = std::nullopt, py::arg("non_blocking") = false,
-             py::arg("with_probs") = false)
-        .def("combine_with_unpermute", &HybridEPBuffer::combine_with_unpermute, py::kw_only(), 
-             py::arg("config"), py::arg("hidden"),
+             py::arg("handle"),
+             py::arg("with_probs"))
+        .def("combine", &HybridEPBuffer::combine, py::kw_only(),
+             py::arg("hidden"),
              py::arg("probs") = c10::nullopt,
-             py::arg("sparse_to_dense_map"), py::arg("rdma_to_attn_map"),
-             py::arg("attn_to_rdma_map"), py::arg("num_dispatched_tokens_tensor"),
-             py::arg("row_id_map"),
-             py::arg("num_of_tokens_per_rank"), py::arg("pad_multiple") = std::nullopt,
+             py::arg("handle"),
+             py::arg("with_probs"))
+        .def("dispatch_with_permute", &HybridEPBuffer::dispatch_with_permute, py::kw_only(),
+             py::arg("hidden"),
+             py::arg("probs") = c10::nullopt,
+             py::arg("scaling_factor") = c10::nullopt,
+             py::arg("handle"),
+             py::arg("pad_multiple") = std::nullopt,
+             py::arg("non_blocking") = false,
+             py::arg("with_probs") = false)
+        .def("combine_with_unpermute", &HybridEPBuffer::combine_with_unpermute, py::kw_only(),
+             py::arg("hidden"),
+             py::arg("probs") = c10::nullopt,
+             py::arg("handle"),
+             py::arg("pad_multiple") = std::nullopt,
              py::arg("with_probs") = false);    
     
   }

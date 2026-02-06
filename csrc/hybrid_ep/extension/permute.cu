@@ -44,7 +44,7 @@
                                            int64_t* tokens_per_expert,
                                            int* row_id_map,
                                            int* overflow_flag,
-                                           int num_permuted_tokens) {
+                                           int64_t num_permuted_tokens) {
    /**
     * Common variables
     */
@@ -241,7 +241,7 @@
        if(overflow_num < 0) {
         tokens_per_expert[i] = static_cast<int64_t>(tokens_for_expert_i);
        }else{
-        tokens_per_expert[i] = static_cast<int64_t>(max(0, tokens_for_expert_i - overflow_num));
+        tokens_per_expert[i] = static_cast<int64_t>(max(0L, tokens_for_expert_i - overflow_num));
        }
      }
    }
@@ -252,11 +252,11 @@
      bool* routing_map,
      torch::Tensor num_dispatched_token_tensor,
      // Used in the permute case, use up-bound to avoid synchronization to get the real num_dispatched_tokens from the pinned memory
-     int max_num_dispatched_tokens,
+     int64_t max_num_dispatched_tokens,
      int num_of_local_experts,
      int pad_multiple,
      int num_of_blocks,
-     int num_permuted_tokens,
+     int64_t num_permuted_tokens,
      bool non_blocking,
      cudaStream_t stream) {
    constexpr int block_size = 256;
@@ -278,7 +278,7 @@
    torch::Tensor overflow_flag = torch::empty({1}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
  
    // Construct the template buffers
-   int rows_workspace_1 = (max_num_dispatched_tokens + block_size - 1) / block_size;
+   int rows_workspace_1 = static_cast<int>((max_num_dispatched_tokens + block_size - 1) / block_size);
    int rows_workspace_2 = (rows_workspace_1 + block_size - 1) / block_size;
    auto workspace1 = torch::empty({rows_workspace_1, num_of_local_experts},
                                   torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));

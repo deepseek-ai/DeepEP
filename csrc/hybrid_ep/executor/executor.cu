@@ -54,12 +54,15 @@ torch::Tensor Executor::allgather_routing_map(
     return global_routing_map;
 }
 
-std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
-Executor::metadata_preprocess_core(
+HandleImpl Executor::metadata_preprocess_core(
     HybridEpConfigInstance config, 
     hybrid_ep::tmp_state_t *preprocessing_tmp,
     torch::Tensor global_routing_map,
-    int num_of_tokens_per_rank,
+    int64_t num_of_tokens_per_rank,
+    int64_t max_num_dispatched_tokens,
+    int64_t num_permuted_tokens,
+    int64_t pad_multiple,
+    bool enable_permute,
     bool non_blocking
 ) {
   nvtxRangePushA("metadata_preprocess_core in hybrid-ep");
@@ -78,44 +81,73 @@ Executor::metadata_preprocess_core(
 
   // padding for the routing map
   const int rdma_to_attn_map_size_per_node = (((num_of_tokens_per_rank - 1) / 16) + 1) * 16;
+  auto stream = at::cuda::getCurrentCUDAStream();
 
   // Construt the output tensor of the metadata preprocessing kernel.
-  auto sparse_to_dense_map =
+  HandleImpl handle;
+  handle.config = config;
+  handle.num_of_tokens_per_rank = num_of_tokens_per_rank;
+  handle.num_permuted_tokens = num_permuted_tokens;
+  handle.sparse_to_dense_map =
       torch::empty({num_of_tokens_per_rank * config.num_of_nodes,
                     config.num_of_ranks_per_node},
                    torch::dtype(torch::kInt32).device(torch::kCUDA));
-  auto rdma_to_attn_map =
+  handle.rdma_to_attn_map =
       torch::empty({rdma_to_attn_map_size_per_node, config.num_of_nodes},
                    torch::dtype(torch::kBool).device(torch::kCUDA));
-  auto attn_to_rdma_map =
+  handle.attn_to_rdma_map =
       torch::empty({num_of_tokens_per_rank, config.num_of_nodes - 1},
                    torch::dtype(torch::kBool).device(torch::kCUDA));
-  torch::Tensor num_of_tokens_for_experts;
   if (non_blocking) {
-    num_of_tokens_for_experts =
+    handle.num_dispatched_tokens_tensor =
         torch::empty({1}, torch::dtype(torch::kInt32).device(torch::kCUDA));
   } else {
-    num_of_tokens_for_experts =
+    handle.num_dispatched_tokens_tensor =
         torch::empty({1}, torch::dtype(torch::kInt32).pinned_memory(true));
   }
-  auto local_expert_routing_map = torch::empty(
+  handle.local_expert_routing_map = torch::empty(
       {num_of_tokens_per_rank * config.num_of_ranks_per_node * config.num_of_nodes, config.num_of_experts_per_rank},
       torch::dtype(torch::kBool).device(torch::kCUDA));
   
   kernel_cache.run_proprecess_kernel(
       config, global_routing_map.data_ptr<bool>(), preprocessing_tmp,
-      sparse_to_dense_map.data_ptr<int32_t>(),
-      rdma_to_attn_map.data_ptr<bool>(), attn_to_rdma_map.data_ptr<bool>(),
-      num_of_tokens_for_experts.data_ptr<int32_t>(),
-      local_expert_routing_map.data_ptr<bool>(), static_cast<int>(node_rank),
-      static_cast<int>(local_rank), num_of_tokens_per_rank, at::cuda::getCurrentCUDAStream());
+      handle.sparse_to_dense_map.data_ptr<int32_t>(),
+      handle.rdma_to_attn_map.data_ptr<bool>(), handle.attn_to_rdma_map.data_ptr<bool>(),
+      handle.num_dispatched_tokens_tensor.data_ptr<int32_t>(),
+      handle.local_expert_routing_map.data_ptr<bool>(), static_cast<int>(node_rank),
+      static_cast<int>(local_rank), num_of_tokens_per_rank, stream);
+
+  if(enable_permute) {
+    std::tie(handle.row_id_map, handle.tokens_per_expert, handle.overflow_flag) = permute_preprocessing(
+        handle.local_expert_routing_map.data_ptr<bool>(), 
+        handle.num_dispatched_tokens_tensor,
+        max_num_dispatched_tokens, 
+        config.num_of_experts_per_rank, 
+        pad_multiple, 
+        config.num_of_blocks_preprocessing_api,
+        handle.num_permuted_tokens,
+        non_blocking,
+        stream
+    );
+    // If we want to put the tokens_per_expert/num_dispatched_tokens_tensor can be used in the host, we need to synchronize the stream.
+    if (!non_blocking) {
+        cudaStreamSynchronize(stream);
+        if (handle.num_permuted_tokens < 0) {
+            const int64_t* tokens_per_expert_ptr = handle.tokens_per_expert.data_ptr<int64_t>();
+            int64_t num_permuted_tokens = 0;
+            for (int i = 0; i < config.num_of_experts_per_rank; ++i) {
+                num_permuted_tokens += static_cast<int64_t>(tokens_per_expert_ptr[i]);
+            }
+            handle.num_permuted_tokens = num_permuted_tokens;
+        }
+    }
+  }
 
   nvtxRangePop();  // End of metadata_preprocess_core nvtx range
-  return std::make_tuple(sparse_to_dense_map, rdma_to_attn_map, attn_to_rdma_map, num_of_tokens_for_experts, local_expert_routing_map);
+  return handle;
 }
 
-std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> 
-Executor::dispatch_preprocess(HybridEpConfigInstance config, DispatchArgs& args) {
+void Executor::dispatch_preprocess(HybridEpConfigInstance config, DispatchArgs& args) {
     nvtxRangePushA("dispatch_preprocess in hybrid-ep");
     if(config.num_of_nodes > 1) {
 #ifdef HYBRID_EP_BUILD_MULTINODE_ENABLE
@@ -131,47 +163,7 @@ Executor::dispatch_preprocess(HybridEpConfigInstance config, DispatchArgs& args)
         throw std::runtime_error("Multi-node support is not enabled in this build.");
 #endif
     } 
-
-    torch::Tensor row_id_map;
-    torch::Tensor tokens_per_expert;
-    torch::Tensor overflow_flag;
-
-    if(args.enable_permute) {
-        if(args.row_id_map.has_value()){
-            assert(args.num_permuted_tokens >= 0);
-            row_id_map = args.row_id_map.value();
-        } else {
-            assert(args.local_expert_routing_map.has_value());
-            std::tie(row_id_map, tokens_per_expert, overflow_flag) = permute_preprocessing(
-                args.local_expert_routing_map.value().data_ptr<bool>(), 
-                args.num_dispatched_tokens_tensor.value(),
-                args.max_num_dispatched_tokens, 
-                config.num_of_experts_per_rank, 
-                args.pad_multiple, 
-                config.num_of_blocks_preprocessing_api,
-                args.num_permuted_tokens,
-                args.non_blocking,
-                args.stream
-            );
-            args.row_id_map = row_id_map;
-
-            // If we want to put the tokens_per_expert/num_dispatched_tokens_tensor can be used in the host, we need to synchronize the stream.
-            if (!args.non_blocking) {
-                cudaStreamSynchronize(args.stream);
-                if (args.num_permuted_tokens < 0) {
-                    const int64_t* tokens_per_expert_ptr = tokens_per_expert.data_ptr<int64_t>();
-                    int64_t num_permuted_tokens = 0;
-                    for (int i = 0; i < config.num_of_experts_per_rank; ++i) {
-                        num_permuted_tokens += static_cast<int64_t>(tokens_per_expert_ptr[i]);
-                    }
-                    args.num_permuted_tokens = num_permuted_tokens;
-                }
-            }
-        }
-    }
     nvtxRangePop();  // End of dispatch_preprocess nvtx range
-
-    return std::make_tuple(row_id_map, tokens_per_expert, overflow_flag);
 }
 
 template void Executor::dispatch_core<uint8_t>(HybridEpConfigInstance config, DispatchArgs& args);
@@ -239,15 +231,11 @@ void Executor::dispatch_core(HybridEpConfigInstance config, DispatchArgs& args) 
     nvtxRangePop();  // End of dispatch_core nvtx range
 }
 
-std::tuple<torch::Tensor, c10::optional<torch::Tensor>, c10::optional<torch::Tensor> >
-Executor::dispatch_postprocess(HybridEpConfigInstance config, DispatchArgs& args) {
+void Executor::dispatch_postprocess(HybridEpConfigInstance config, DispatchArgs& args,
+    torch::Tensor& out_dispatched_tokens,
+    c10::optional<torch::Tensor>& out_dispatched_probs,
+    c10::optional<torch::Tensor>& out_dispatched_scaling_factor) {
     nvtxRangePushA("dispatch_postprocess in hybrid-ep");
-
-    // Create and return output tensors
-    // The output tensor of the dispatch kernel.
-    torch::Tensor dispatched_tokens;
-    c10::optional<torch::Tensor> dispatched_probs;
-    c10::optional<torch::Tensor> dispatched_scaling_factor;
 
     if(args.enable_permute) {
         // Use permute kernel to avoid standalone D2D memory copy
@@ -276,54 +264,48 @@ Executor::dispatch_postprocess(HybridEpConfigInstance config, DispatchArgs& args
         permute_args.num_of_blocks_permute_api = config.num_of_blocks_permute_api;
         
         if(config.token_data_type == APP_TOKEN_DATA_TYPE::UINT16) {
-            std::tie(dispatched_tokens, dispatched_scaling_factor, dispatched_probs) = 
+            std::tie(out_dispatched_tokens, out_dispatched_scaling_factor, out_dispatched_probs) = 
                 permute_launcher<uint16_t, float, float>(permute_args);
         } else if (config.token_data_type == APP_TOKEN_DATA_TYPE::UINT8) {
-            std::tie(dispatched_tokens, dispatched_scaling_factor, dispatched_probs) = 
+            std::tie(out_dispatched_tokens, out_dispatched_scaling_factor, out_dispatched_probs) = 
                 permute_launcher<uint8_t, float, float>(permute_args);
         }else {
             throw std::runtime_error("Unsupported token data type: " + type_to_string(config.token_data_type));
         }
     }else {
         // D2D copy the result to the pytorch tensor
-        int num_dispatched_tokens = 0;
-        if (args.num_dispatched_tokens >= 0) {
-          num_dispatched_tokens = args.num_dispatched_tokens;
-        } else {
-          num_dispatched_tokens = args.num_dispatched_tokens_tensor.value().item<int>();
-        }
+        int num_dispatched_tokens = args.num_dispatched_tokens_tensor.value().item<int>();
         size_t sizeof_token_data_type = get_token_data_type_size(intra_node_dispatch_buffers->data_type);
-        dispatched_tokens = torch::empty(
+        out_dispatched_tokens = torch::empty(
             {num_dispatched_tokens, config.hidden_dim}, 
             torch::dtype(args.hidden.dtype()).device(torch::kCUDA)
         );
         auto res_sz = static_cast<size_t>(num_dispatched_tokens) * config.hidden_dim * sizeof_token_data_type;
-        CUDA_CHECK(cudaMemcpyAsync(dispatched_tokens.data_ptr(), intra_node_dispatch_buffers->expert_output_token, res_sz, cudaMemcpyDeviceToDevice, args.stream));
+        CUDA_CHECK(cudaMemcpyAsync(out_dispatched_tokens.data_ptr(), intra_node_dispatch_buffers->expert_output_token, res_sz, cudaMemcpyDeviceToDevice, args.stream));
 
         if(config.forward_dispatch_api) {
-            dispatched_probs = torch::empty({num_dispatched_tokens,
+            out_dispatched_probs = torch::empty({num_dispatched_tokens,
                 config.num_of_experts_per_rank * config.num_of_ranks_per_node},
                             torch::dtype(torch::kFloat32).device(torch::kCUDA));
             auto probs_sz = static_cast<size_t>(num_dispatched_tokens) * config.num_of_experts_per_rank * config.num_of_ranks_per_node * sizeof(float);
-            CUDA_CHECK(cudaMemcpyAsync(dispatched_probs.value().data_ptr<float>(),
+            CUDA_CHECK(cudaMemcpyAsync(out_dispatched_probs.value().data_ptr<float>(),
                 intra_node_dispatch_buffers->expert_output_prob,
                 probs_sz, cudaMemcpyDeviceToDevice, args.stream));
         }
 
         if(config.token_data_type == APP_TOKEN_DATA_TYPE::UINT8) {
-            dispatched_scaling_factor = torch::empty({
+            out_dispatched_scaling_factor = torch::empty({
                     num_dispatched_tokens, 
                     config.hidden_dim / 128}, 
                     torch::dtype(torch::kFloat32).device(torch::kCUDA));
             auto scaling_factor_sz = static_cast<size_t>(num_dispatched_tokens) * config.hidden_dim / 128 * sizeof(float);
-            CUDA_CHECK(cudaMemcpyAsync(dispatched_scaling_factor.value().data_ptr<float>(),
+            CUDA_CHECK(cudaMemcpyAsync(out_dispatched_scaling_factor.value().data_ptr<float>(),
                 intra_node_dispatch_buffers->expert_output_scaling_factor,
                 scaling_factor_sz, cudaMemcpyDeviceToDevice, args.stream));
         }
     }
 
     nvtxRangePop();  // End of dispatch_postprocess nvtx range
-    return std::make_tuple(dispatched_tokens, dispatched_probs, dispatched_scaling_factor);
 }
 
 void Executor::combine_preprocess(HybridEpConfigInstance config, CombineArgs& args) {

@@ -16,6 +16,25 @@
 #include "buffer/internode.cuh"
 #endif
 
+struct HandleImpl {
+    // Handle for dispatch
+    torch::Tensor sparse_to_dense_map;
+    torch::Tensor rdma_to_attn_map;
+    torch::Tensor attn_to_rdma_map;
+    torch::Tensor num_dispatched_tokens_tensor;
+    torch::Tensor local_expert_routing_map;
+    int64_t num_of_tokens_per_rank = -1;
+    HybridEpConfigInstance config;
+
+    // Handle for standalone permute
+    torch::Tensor row_id_map;
+    torch::Tensor tokens_per_expert;
+    torch::Tensor overflow_flag;
+    int64_t num_permuted_tokens = -1;
+
+    // Handle for fused permute
+};
+
 class Executor {
 public:
     Executor(int local_rank, int node_rank, std::string base_path, std::string comm_id, bool load_cached_kernels, bool enable_custom_allgather);
@@ -77,24 +96,28 @@ public:
         py::object process_group
     );
 
-    std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
-    metadata_preprocess_core(
+    HandleImpl metadata_preprocess_core(
         HybridEpConfigInstance config,
         hybrid_ep::tmp_state_t *preprocessing_tmp,
         torch::Tensor global_routing_map,
-        int num_of_tokens_per_rank,
+        int64_t num_of_tokens_per_rank,
+        int64_t max_num_dispatched_tokens,
+        int64_t num_permuted_tokens,
+        int64_t pad_multiple,
+        bool enable_permute,
         bool non_blocking
     );
 
-    std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> 
-    dispatch_preprocess(
+    void dispatch_preprocess(
         HybridEpConfigInstance config, DispatchArgs& args);
     template<typename DType> 
     void dispatch_core(
         HybridEpConfigInstance config, DispatchArgs& args);
-    std::tuple<torch::Tensor, c10::optional<torch::Tensor>, c10::optional<torch::Tensor> > 
-    dispatch_postprocess(
-        HybridEpConfigInstance config, DispatchArgs& args); 
+    void dispatch_postprocess(
+        HybridEpConfigInstance config, DispatchArgs& args,
+        torch::Tensor& out_dispatched_tokens,
+        c10::optional<torch::Tensor>& out_dispatched_probs,
+        c10::optional<torch::Tensor>& out_dispatched_scaling_factor); 
 
     void combine_preprocess(
         HybridEpConfigInstance config, CombineArgs& args);
