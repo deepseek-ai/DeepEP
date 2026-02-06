@@ -37,10 +37,204 @@ def init_dist(local_rank: int, num_local_ranks: int):
 
 
 def calc_diff(x: torch.Tensor, y: torch.Tensor):
+    # avoid NaN
+    if x.numel() == 0 and y.numel() == 0:
+        return 0.0
     x, y = x.double() + 1, y.double() + 1
     denominator = (x * x + y * y).sum()
     sim = 2 * (x * y).sum() / denominator
     return (1 - sim).item()
+
+
+def get_global_token_indices(distribution_type, num_experts, num_tokens, num_ranks, num_topk, imbalance_factor, simulation_seed=0):
+    """
+    Generates and returns the global top-k indices for all tokens across all ranks,
+    matching the target imbalance factor.
+    """
+    if imbalance_factor <= 1.0:
+        # use uniform
+        print(f"Distribution: uniform, Target ratio: {imbalance_factor}", flush=True)
+        expert_probs = torch.ones(num_experts, dtype=torch.float32, device='cuda')
+        expert_probs /= expert_probs.sum()
+
+        total_tokens = num_tokens * num_ranks
+        token_probs_expanded = expert_probs.unsqueeze(0).expand(total_tokens, -1)
+
+        torch.manual_seed(simulation_seed)
+        global_topk_idx = torch.multinomial(token_probs_expanded, num_samples=num_topk, replacement=False)
+        return global_topk_idx
+    else:
+        # Imbalanced case: find params and get indices directly
+        params, global_topk_idx = find_distribution_parameters_for_target_ratio(distribution_type=distribution_type,
+                                                                                target_imbalance_ratio=imbalance_factor,
+                                                                                num_experts=num_experts,
+                                                                                num_tokens_per_rank=num_tokens,
+                                                                                num_ranks=num_ranks,
+                                                                                num_topk=num_topk,
+                                                                                simulation_seed=simulation_seed)
+
+        print(f'Distribution: {distribution_type}, Target ratio: {imbalance_factor}, '
+              f'Found parameters: {params}', flush=True)
+        return global_topk_idx.contiguous()
+
+
+def _simulate_global_sampling(distribution_type: str,
+                              params_dict: dict,
+                              num_experts: int,
+                              total_tokens: int,
+                              num_ranks: int,
+                              num_topk: int,
+                              simulation_seed: int = 0,
+                              permutation: torch.Tensor = None):
+    """
+    Simulates global sampling and returns both the resulting imbalance ratio and the generated indices.
+    """
+    num_local_experts = num_experts // num_ranks
+    expert_probs = _generate_expert_probs(distribution_type, params_dict, num_experts, permutation=permutation)
+    token_probs_expanded = expert_probs.unsqueeze(0).expand(total_tokens, -1)
+
+    torch.manual_seed(simulation_seed)
+    global_topk_idx = torch.multinomial(token_probs_expanded, num_samples=num_topk, replacement=False)
+
+    rank_counts = torch.zeros(num_ranks, dtype=torch.int64, device='cuda')
+    valid_indices = global_topk_idx.flatten()
+    valid_indices = valid_indices[valid_indices >= 0]
+
+    for rank in range(num_ranks):
+        start_expert = rank * num_local_experts
+        end_expert = (rank + 1) * num_local_experts
+        mask = (valid_indices >= start_expert) & (valid_indices < end_expert)
+        rank_counts[rank] = mask.sum().item()
+
+    max_count = rank_counts.max().item()
+    avg_count = rank_counts.float().mean().item()
+
+    imbalance_ratio = max_count / avg_count if avg_count > 0 else 0.0
+
+    return imbalance_ratio, global_topk_idx
+
+
+def find_distribution_parameters_for_target_ratio(distribution_type: str,
+                                                  target_imbalance_ratio: float,
+                                                  num_experts: int,
+                                                  num_tokens_per_rank: int,
+                                                  num_ranks: int,
+                                                  num_topk: int,
+                                                  max_iterations=20,
+                                                  tolerance=0.02,
+                                                  simulation_seed=0):
+    """
+    Finds parameters and returns them along with the final sampled indices.
+    Returns:
+        tuple: (dict of parameters, torch.Tensor of global_topk_idx)
+    """
+    total_tokens = num_tokens_per_rank * num_ranks
+    torch.manual_seed(simulation_seed)
+    permutation = torch.randperm(num_experts, device='cuda')
+
+    def simulate_ratio_only(params_dict):
+        ratio, _ = _simulate_global_sampling(distribution_type,
+                                             params_dict,
+                                             num_experts,
+                                             total_tokens,
+                                             num_ranks,
+                                             num_topk,
+                                             simulation_seed,
+                                             permutation=permutation)
+        return ratio
+
+    search_config = _get_search_config(distribution_type, target_imbalance_ratio)
+    final_params = _binary_search_parameters(simulate_ratio_only, search_config, target_imbalance_ratio, max_iterations, tolerance)
+    _, final_global_topk_idx = _simulate_global_sampling(distribution_type,
+                                                         final_params,
+                                                         num_experts,
+                                                         total_tokens,
+                                                         num_ranks,
+                                                         num_topk,
+                                                         simulation_seed,
+                                                         permutation=permutation)
+    return final_params, final_global_topk_idx
+
+
+def _generate_expert_probs(distribution_type: str, params: dict, num_experts: int, permutation: torch.Tensor = None):
+    """Generate expert probabilities, with optional shuffling."""
+    if distribution_type == 'powerlaw':
+        alpha = params['alpha']
+        ranks = torch.arange(1, num_experts + 1, device='cuda', dtype=torch.float32)
+        popularity_values = ranks**(-alpha if alpha > 0 else 0)
+
+    elif distribution_type == 'lognormal':
+        sigma = params['sigma']
+        log_normal_dist = torch.distributions.LogNormal(loc=0.0, scale=sigma)
+        popularity_values = log_normal_dist.sample((num_experts, )).to('cuda')
+        popularity_values, _ = torch.sort(popularity_values, descending=True)
+        popularity_values.clamp_(min=1e-9)
+
+    elif distribution_type == 'gamma':
+        shape = params['shape']
+        gamma_dist = torch.distributions.Gamma(concentration=shape, rate=2.0)
+        popularity_values = gamma_dist.sample((num_experts, )).to('cuda')
+        popularity_values, _ = torch.sort(popularity_values, descending=True)
+        popularity_values.clamp_(min=1e-9)
+
+    else:
+        raise ValueError(f"Unsupported distribution: {distribution_type}")
+
+    if permutation is not None:
+        shuffled_values = torch.zeros_like(popularity_values)
+        shuffled_values.scatter_(0, permutation, popularity_values)
+        popularity_values = shuffled_values
+
+    return popularity_values / popularity_values.sum()
+
+
+def _get_search_config(distribution_type: str, target_ratio: float):
+    """Get search bounds and parameter names for each distribution"""
+
+    if distribution_type == 'powerlaw':
+        return {'param_name': 'alpha', 'low': 0.0, 'high': 5.0}
+
+    elif distribution_type == 'lognormal':
+        return {'param_name': 'sigma', 'low': 0.1, 'high': 5.0}
+
+    elif distribution_type == 'gamma':
+        return {
+            'param_name': 'shape',
+            'low': 0.001,  # Shape must be > 0
+            'high': 2.0,
+            'inverse_relationship': True  # reverse binary search
+        }
+
+    else:
+        raise ValueError(f"No search config for distribution: {distribution_type}")
+
+
+def _binary_search_parameters(simulate_fn, search_config, target_ratio, max_iterations, tolerance):
+    """Generic binary search for distribution parameters"""
+
+    param_name = search_config['param_name']
+    param_low = search_config['low']
+    param_high = search_config['high']
+    inverse_relationship = search_config.get('inverse_relationship', False)
+
+    for _ in range(max_iterations):
+        param_mid = (param_low + param_high) / 2
+        actual_ratio = simulate_fn({param_name: param_mid})
+
+        if abs(actual_ratio - target_ratio) / target_ratio < tolerance:
+            return {param_name: param_mid}
+
+        condition_for_increasing_param = actual_ratio < target_ratio
+        if inverse_relationship:
+            condition_for_increasing_param = not condition_for_increasing_param
+
+        if condition_for_increasing_param:
+            param_low = param_mid
+        else:
+            param_high = param_mid
+
+    final_param = (param_low + param_high) / 2
+    return {param_name: final_param}
 
 
 def align_up(x, y):
