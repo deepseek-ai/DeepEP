@@ -252,6 +252,8 @@ max_num_of_tokens = max_num_of_tokens_per_rank × num_of_ranks_per_node × num_o
 - `rdma_token_buffer`: `max_tokens_per_rank × (num_nodes - 1) × hidden_dim × sizeof(dtype)`
 - `rdma_prob_buffer`: `max_tokens_per_rank × (num_nodes - 1) × (num_of_experts_per_rank × num_of_ranks_per_node) × sizeof(float)`
 
+Per RDMA buffer footprint is capped at ≤1 GB.
+
 **Example (EP64, 256 experts, BF16, hidden_dim=7168, 4096 tokens/rank):**
 
 | Scenario | Buffer | Calculation | Size |
