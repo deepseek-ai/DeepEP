@@ -81,7 +81,13 @@ typedef INT_BITS_T(TOPK_IDX_BITS) topk_idx_t;  // int32_t or int64_t
 }  // namespace deep_ep
 
 #ifndef DISABLE_NVSHMEM
+// NVSHMEM's IBGDA header can emit a *definition* of nvshmemi_ibgda_device_state_d
+// when included from host-compiled TUs (e.g., deep_ep.cpp built with g++).
+// That collides with the definition in libnvshmem_device.a at link time.
+// Only include it when compiling with NVCC.
+#if defined(__CUDACC__)
 #include <device_host_transport/nvshmem_common_ibgda.h>
+#endif
 #include <infiniband/mlx5dv.h>
 #include <nvshmem.h>
 #include <nvshmemx.h>
