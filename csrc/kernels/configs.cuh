@@ -70,5 +70,13 @@ typedef uint8_t __nv_fp8_storage_t;
 #include <nvshmemx.h>
 #include <infiniband/mlx5dv.h>
 #include <non_abi/device/threadgroup/nvshmemi_common_device_defines.cuh>
+// NVSHMEM's IBGDA header emits a *definition* of nvshmemi_ibgda_device_state_d
+// when included from host-compiled TUs (e.g., deep_ep.cpp built with g++).
+// That instantiates a private shadow copy of the device state inside
+// deep_ep_cpp.so — distinct from the one libnvshmem_device.a populates —
+// causing kernel writes (against NVSHMEM's state) and host reads (against
+// the shadow) to diverge. Only include it when compiling with NVCC.
+#if defined(__CUDACC__)
 #include <device_host_transport/nvshmem_common_ibgda.h>
+#endif
 #endif
