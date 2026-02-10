@@ -110,11 +110,11 @@ HandleImpl Executor::metadata_preprocess_core(
       torch::dtype(torch::kBool).device(torch::kCUDA));
   
   kernel_cache.run_proprecess_kernel(
-      config, global_routing_map.data_ptr<bool>(), preprocessing_tmp,
+      config, global_routing_map.data_ptr<bool>(), preprocessing_tmp, nullptr,
       handle.sparse_to_dense_map.data_ptr<int32_t>(),
       handle.rdma_to_attn_map.data_ptr<bool>(), handle.attn_to_rdma_map.data_ptr<bool>(),
       handle.num_dispatched_tokens_tensor.data_ptr<int32_t>(),
-      handle.local_expert_routing_map.data_ptr<bool>(), static_cast<int>(node_rank),
+      handle.local_expert_routing_map.data_ptr<bool>(), nullptr, nullptr, nullptr, static_cast<int>(node_rank),
       static_cast<int>(local_rank), num_of_tokens_per_rank, stream);
 
   if(enable_permute) {
@@ -220,6 +220,7 @@ void Executor::dispatch_core(HybridEpConfigInstance config, DispatchArgs& args) 
     param.node_rank = node_rank;
     param.num_of_tokens_per_rank = args.num_of_tokens_per_rank;
     param.expected_intra_node_flag_value = intra_node_dispatch_buffers->expected_intra_node_flag_value;
+    param.intra_node_flag_parity = intra_node_dispatch_buffers->intra_node_flag_parity;
 #ifdef HYBRID_EP_BUILD_MULTINODE_ENABLE
     param.expected_rdma_flag_value = inter_node_dispatch_buffers->expected_rdma_flag_value;
     param.d_qps_gpu = reinterpret_cast<void **>(inter_node_dispatch_buffers->d_qps_gpu);
@@ -393,6 +394,7 @@ void Executor::combine_core(HybridEpConfigInstance config, CombineArgs& args) {
     param.num_of_tokens_per_rank = args.num_of_tokens_per_rank;
     param.expected_intra_node_flag_value =
         intra_node_combine_buffers->expected_intra_node_flag_value;
+    param.intra_node_flag_parity = intra_node_combine_buffers->intra_node_flag_parity;
 #ifdef HYBRID_EP_BUILD_MULTINODE_ENABLE
     param.expected_rdma_flag_value = inter_node_combine_buffers->expected_rdma_flag_value;
     param.d_qps_gpu = reinterpret_cast<void **>(inter_node_combine_buffers->d_qps_gpu);

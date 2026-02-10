@@ -167,6 +167,7 @@ std::string NVCCCompiler::get_metadata_preprocessing_code(HybridEpConfigInstance
          std::to_string(config.hidden_dim) + ", " + std::to_string(config.max_num_of_tokens_per_rank) + ", " +
          std::to_string(config.num_of_ranks_per_node) + ", " + std::to_string(config.num_of_nodes) + ", " +
          std::to_string(config.num_of_experts_per_rank) + ">::metadata_preprocessing<" +
+         std::to_string(config.pad_multiple) + ", " + std::to_string(config.num_of_tokens_per_chunk_preprocessing_api) + ", " +
          std::to_string(config.num_of_threads_per_block_preprocessing_api) + ", " + std::to_string(config.num_of_blocks_preprocessing_api) + R"(>;
             return func_ptr;
           }
@@ -188,8 +189,8 @@ std::string NVCCCompiler::get_dispatch_code(HybridEpConfigInstance config) {
          std::to_string(config.hidden_dim) + ", " + std::to_string(config.max_num_of_tokens_per_rank) + ", " +
          std::to_string(config.num_of_ranks_per_node) + ", " + std::to_string(config.num_of_nodes) + ", " +
          std::to_string(config.num_of_experts_per_rank) + ">::dispatch<" + token_type + ", " +
-         std::to_string(config.num_of_stages_dispatch_api) + ", " + std::to_string(config.num_of_in_flight_s2g_dispatch_api) + ", " + std::to_string(config.num_of_tokens_per_chunk_dispatch_api) + ", " +
-         std::to_string(config.num_of_blocks_dispatch_api) + ", " + (config.forward_dispatch_api ? "true" : "false") + ", " +
+         std::to_string(config.num_of_stages_dispatch_api) + ", " + std::to_string(config.num_of_stages_permute_block_dispatch_api) + ", " + std::to_string(config.num_of_in_flight_s2g_dispatch_api) + ", " + std::to_string(config.num_of_in_flight_s2g_permute_block_dispatch_api) + ", " + std::to_string(config.pad_multiple) + ", " + std::to_string(config.num_of_additional_in_flight_s2g_dispatch_api) + ", " + std::to_string(config.num_of_tokens_per_chunk_dispatch_api) + ", " +
+         std::to_string(config.num_of_blocks_dispatch_api) + ", " + std::to_string(config.num_of_blocks_permute_api) + ", " + (config.forward_dispatch_api ? "true" : "false") + ", " +
          (config.device_side_sync_dispatch_api ? "true" : "false") + R"(>;
             return func_ptr;
           }
@@ -239,11 +240,15 @@ void KernelCache::run_proprecess_kernel(
     HybridEpConfigInstance config, 
     const bool* input_routing_map,
     hybrid_ep::tmp_state_t* preprocessing_tmp,
+    hybrid_ep::tmp_state_t* preprocessing_local_experts_tmp,
     int32_t* sparse_to_dense_map,
     bool* rdma_to_attn_map,
     bool* attn_to_rdma_map,
     int32_t* num_of_tokens_for_experts,
     bool* local_expert_routing_map,
+    int32_t* dense_chunk_layout,
+    int32_t* dense_to_expert_map,
+    int32_t* num_of_local_experts_tokens,
     const int node_rank,
     const int local_rank,
     int num_of_tokens_per_rank,
@@ -256,6 +261,8 @@ void KernelCache::run_proprecess_kernel(
         config.num_of_experts_per_rank,
         config.num_of_ranks_per_node,
         config.num_of_nodes,
+        config.pad_multiple,
+        config.num_of_tokens_per_chunk_preprocessing_api,
         config.num_of_threads_per_block_preprocessing_api,
         config.num_of_blocks_preprocessing_api
     );
@@ -269,13 +276,11 @@ void KernelCache::run_proprecess_kernel(
     auto preprocessing_instance = kernel_cache[preprocess_kernel_key];
 
     // Cast the function pointer to the correct type
-    using PreprocessingFuncPtr = void (*)(const bool*, hybrid_ep::tmp_state_t*, int32_t*, bool*, bool*, int32_t*, bool*, const int, const int, int, cudaStream_t);
+    using PreprocessingFuncPtr = void (*)(const bool*, hybrid_ep::tmp_state_t*, hybrid_ep::tmp_state_t*, int32_t*, bool*, bool*, int32_t*, bool*, int32_t*, int32_t*, int32_t*, const int, const int, int, cudaStream_t);
     auto func_ptr = std::any_cast<PreprocessingFuncPtr>(preprocessing_instance);
 
     // Run the kernel
-    func_ptr(input_routing_map, preprocessing_tmp, sparse_to_dense_map, rdma_to_attn_map,
-        attn_to_rdma_map, num_of_tokens_for_experts, local_expert_routing_map, node_rank,
-        local_rank, num_of_tokens_per_rank, stream);
+    func_ptr(input_routing_map, preprocessing_tmp, preprocessing_local_experts_tmp, sparse_to_dense_map, rdma_to_attn_map,attn_to_rdma_map, num_of_tokens_for_experts, local_expert_routing_map, dense_chunk_layout, dense_to_expert_map, num_of_local_experts_tokens, node_rank, local_rank, num_of_tokens_per_rank, stream);
 
 }
 
@@ -306,9 +311,14 @@ void KernelCache::run_dispatch_kernel(
         config.num_of_nodes,
         type_to_string(config.token_data_type),
         config.num_of_stages_dispatch_api,
+        config.num_of_stages_permute_block_dispatch_api,
         config.num_of_in_flight_s2g_dispatch_api,
+        config.num_of_in_flight_s2g_permute_block_dispatch_api,
+        config.pad_multiple,
+        config.num_of_additional_in_flight_s2g_dispatch_api,
         config.num_of_tokens_per_chunk_dispatch_api,
         config.num_of_blocks_dispatch_api,
+        config.num_of_blocks_permute_api,
         config.forward_dispatch_api,
         config.device_side_sync_dispatch_api
     );

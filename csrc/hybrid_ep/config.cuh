@@ -57,12 +57,17 @@ struct HybridEpConfigInstance {
   int num_of_experts_per_rank;
   int num_of_ranks_per_node;
   int num_of_nodes;
+  int pad_multiple;
 
   /*
    *  Metadata-preprocessing API Config
    */
+  int num_of_tokens_per_chunk_preprocessing_api;
   int num_of_threads_per_block_preprocessing_api;
   int num_of_blocks_preprocessing_api;
+
+  // In standalone permute kernel. it is the number of CUDA blocks running permute kernel.
+  // In fused permute-dispatch kernel. it is the number of CUDA blocks for permute part in the fused kernel.
   int num_of_blocks_permute_api;
 
   /*
@@ -70,7 +75,10 @@ struct HybridEpConfigInstance {
    */
   APP_TOKEN_DATA_TYPE token_data_type;
   int num_of_stages_dispatch_api;
+  int num_of_stages_permute_block_dispatch_api;
   int num_of_in_flight_s2g_dispatch_api;
+  int num_of_in_flight_s2g_permute_block_dispatch_api;
+  int num_of_additional_in_flight_s2g_dispatch_api;
   int num_of_tokens_per_chunk_dispatch_api;
   int num_of_blocks_dispatch_api;
   bool forward_dispatch_api;

@@ -141,8 +141,10 @@ void NVLCoordinator::allocate_dispatch_buffers() {
       remote_allocator->allocate((void**)&dispatch_buffers.intra_node_write_completion_flags, 2 * sizeof(uint32_t));
       CUDA_CHECK(cudaMemset(dispatch_buffers.intra_node_write_completion_flags, 0, 2 * sizeof(uint32_t)));
     }
-    CUDA_CHECK(cudaMalloc((void**)&dispatch_buffers.expected_intra_node_flag_value, sizeof(uint32_t)));
-    CUDA_CHECK(cudaMemset(dispatch_buffers.expected_intra_node_flag_value, 0, sizeof(uint32_t)));
+    CUDA_CHECK(cudaMalloc((void**)&dispatch_buffers.expected_intra_node_flag_value, 2 * sizeof(uint32_t)));
+    CUDA_CHECK(cudaMemset(dispatch_buffers.expected_intra_node_flag_value, 0, 2 * sizeof(uint32_t)));
+    CUDA_CHECK(cudaMalloc((void**)&dispatch_buffers.intra_node_flag_parity, sizeof(uint32_t)));
+    CUDA_CHECK(cudaMemset(dispatch_buffers.intra_node_flag_parity, 0, sizeof(uint32_t)));
   
     // Create IPC memory handles
     MemHandle handles[4];
@@ -178,8 +180,10 @@ void NVLCoordinator::allocate_combine_buffers() {
       CUDA_CHECK(cudaMemset(combine_buffers.intra_node_write_completion_flags, 0, 2 * sizeof(uint32_t)));
     }
     
-    CUDA_CHECK(cudaMalloc((void**)&combine_buffers.expected_intra_node_flag_value, sizeof(uint32_t)));
-    CUDA_CHECK(cudaMemset(combine_buffers.expected_intra_node_flag_value, 0, sizeof(uint32_t)));
+    CUDA_CHECK(cudaMalloc((void**)&combine_buffers.expected_intra_node_flag_value, 2 * sizeof(uint32_t)));
+    CUDA_CHECK(cudaMemset(combine_buffers.expected_intra_node_flag_value, 0, 2 * sizeof(uint32_t)));
+    CUDA_CHECK(cudaMalloc((void**)&combine_buffers.intra_node_flag_parity, sizeof(uint32_t)));
+    CUDA_CHECK(cudaMemset(combine_buffers.intra_node_flag_parity, 0, sizeof(uint32_t)));
   
     // Create IPC memory handles
     MemHandle handles[3];

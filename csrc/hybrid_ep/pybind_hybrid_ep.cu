@@ -71,7 +71,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         .def_readwrite("num_of_ranks_per_node",
                        &HybridEpConfigInstance::num_of_ranks_per_node)
         .def_readwrite("num_of_nodes", &HybridEpConfigInstance::num_of_nodes)
+        .def_readwrite("pad_multiple", &HybridEpConfigInstance::pad_multiple)
         // Metadata-preprocessing API Config
+        .def_readwrite("num_of_tokens_per_chunk_preprocessing_api", &HybridEpConfigInstance::num_of_tokens_per_chunk_preprocessing_api)
         .def_readwrite(
             "num_of_threads_per_block_preprocessing_api",
             &HybridEpConfigInstance::num_of_threads_per_block_preprocessing_api)
@@ -83,8 +85,14 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         .def_readwrite("token_data_type", &HybridEpConfigInstance::token_data_type)
         .def_readwrite("num_of_stages_dispatch_api",
                        &HybridEpConfigInstance::num_of_stages_dispatch_api)
+        .def_readwrite("num_of_stages_permute_block_dispatch_api",
+                       &HybridEpConfigInstance::num_of_stages_permute_block_dispatch_api)
         .def_readwrite("num_of_in_flight_s2g_dispatch_api",
                        &HybridEpConfigInstance::num_of_in_flight_s2g_dispatch_api)
+        .def_readwrite("num_of_in_flight_s2g_permute_block_dispatch_api",
+                       &HybridEpConfigInstance::num_of_in_flight_s2g_permute_block_dispatch_api)
+        .def_readwrite("num_of_additional_in_flight_s2g_dispatch_api",
+                       &HybridEpConfigInstance::num_of_additional_in_flight_s2g_dispatch_api)
         .def_readwrite("num_of_tokens_per_chunk_dispatch_api",
                        &HybridEpConfigInstance::num_of_tokens_per_chunk_dispatch_api)
         .def_readwrite("num_of_blocks_dispatch_api",

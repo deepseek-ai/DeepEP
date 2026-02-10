@@ -23,6 +23,7 @@ struct IntraNodeDispatchBuffers {
     // Misc flags
     uint32_t *    intra_node_write_completion_flags = nullptr;
     uint32_t *    expected_intra_node_flag_value = nullptr;
+    uint32_t *    intra_node_flag_parity = nullptr;
 };
 
 struct IntraNodeCombineBuffers {
@@ -34,6 +35,7 @@ struct IntraNodeCombineBuffers {
     // Misc flags
     uint32_t *    intra_node_write_completion_flags = nullptr;
     uint32_t *    expected_intra_node_flag_value = nullptr;
+    uint32_t *    intra_node_flag_parity = nullptr;
 };
   
 

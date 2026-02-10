@@ -44,6 +44,7 @@ class HybridEPBuffer:
         num_sms_dispatch_api: int = None,
         num_sms_combine_api: int = None,
         num_sms_preprocessing_api: int = None,
+        num_blocks_permute_api: int = None,
         # Experimental features
         load_cached_kernels: bool = False,  
         use_shared_buffer: bool = True,
@@ -88,7 +89,8 @@ class HybridEPBuffer:
         sm_count = props.multi_processor_count
         if num_sms_preprocessing_api is None:
             num_sms_preprocessing_api = 108
-        num_blocks_permute_api = sm_count * 16
+        if num_blocks_permute_api is None: 
+            num_blocks_permute_api = sm_count * 16 
         # Inter-node case should use less SMs for the dispatch and combine APIs.
         if num_sms_dispatch_api is None:
             num_sms_dispatch_api = 32 if self.num_of_nodes == 1 else 8
@@ -158,7 +160,9 @@ class HybridEPBuffer:
         hidden_dim: int = None,
         num_of_tokens_per_rank: int = None,
         num_local_experts: int = None,
+        pad_multiple: int = None,
         use_fp8: bool = None,
+        **kwargs,
     ):
         """
         Initialize the HybridEpConfigInstance which used to control the detailed setting of the hybrid-ep kernel.
@@ -193,7 +197,11 @@ class HybridEPBuffer:
         config.num_of_threads_per_block_preprocessing_api = int(
             os.getenv("NUM_OF_THREADS_PER_BLOCK_PREPROCESSING_API", "512")
         )
-        config.num_of_blocks_permute_api = self.num_blocks_permute_api
+        config.num_of_blocks_permute_api = self.num_blocks_permute_api # also used in the fused permute-dispatch kernel
+        config.pad_multiple = pad_multiple if pad_multiple is not None else 0
+        config.num_of_tokens_per_chunk_preprocessing_api = int(
+            os.getenv("NUM_OF_TOKENS_PER_CHUNK_PREPROCESSING_API", "128")
+        )
 
         # Dispatch API Config
         if use_fp8 is None:
@@ -207,8 +215,17 @@ class HybridEPBuffer:
         config.num_of_stages_dispatch_api = int(
             os.getenv("NUM_OF_STAGES_DISPATCH_API", "10")
         )
+        config.num_of_stages_permute_block_dispatch_api = int(
+            os.getenv("NUM_OF_STAGES_PERMUTE_BLOCK_DISPATCH_API", "10")
+        )
         config.num_of_in_flight_s2g_dispatch_api = int(
             os.getenv("NUM_OF_IN_FLIGHT_S2G_DISPATCH_API", "8")
+        )
+        config.num_of_in_flight_s2g_permute_block_dispatch_api = int(
+            os.getenv("NUM_OF_IN_FLIGHT_S2G_PERMUTE_BLOCK_DISPATCH_API", "8")
+        )
+        config.num_of_additional_in_flight_s2g_dispatch_api = int(
+            os.getenv("NUM_OF_ADDITIONAL_IN_FLIGHT_S2G_DISPATCH_API", "2")
         )
         config.num_of_tokens_per_chunk_dispatch_api = int(
             os.getenv("NUM_OF_TOKENS_PER_CHUNK_DISPATCH_API", "128")
@@ -239,6 +256,9 @@ class HybridEPBuffer:
             os.getenv("NUM_OF_ADDITIONAL_IN_FLIGHT_S2G_COMBINE_API", "2")
         )
 
+        # Update the config with the kwargs.
+        for key, value in kwargs.items():
+            setattr(config, key, value)
         assert config.is_valid(), "The config is not valid."
 
         # Use the runtime kernel config to update the buffer.

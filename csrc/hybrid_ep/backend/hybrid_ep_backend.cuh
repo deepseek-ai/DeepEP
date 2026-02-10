@@ -1,6 +1,3 @@
-// SPDX-License-Identifier: MIT 
-// SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-
 #pragma once
 
 #include "utils.cuh"
@@ -272,6 +269,68 @@ struct dispatch_kernel_dynamic_shared_memory_buffer_t<uint16_t, NUM_OF_STAGES, H
   alignas(8) uint64_t S2G_group_mbarrier_buffer;
 };
 
+#ifdef HYBRID_EP_BUILD_PERMUTE_FUSION_ENABLE
+template<typename TOKEN_DATA_TYPE,
+         int NUM_OF_STAGES,
+         int HIDDEN_DIM, 
+         int NUM_OF_EXPERTS_PER_RANK,
+         int NUM_OF_RANKS_PER_NODE,
+         bool FORWARD_DISPATCH>
+struct dispatch_kernel_permute_block_dynamic_shared_memory_buffer_t{};
+
+template<int NUM_OF_STAGES,
+         int HIDDEN_DIM,
+         int NUM_OF_EXPERTS_PER_RANK,
+         int NUM_OF_RANKS_PER_NODE> 
+struct dispatch_kernel_permute_block_dynamic_shared_memory_buffer_t<uint8_t, NUM_OF_STAGES, HIDDEN_DIM, NUM_OF_EXPERTS_PER_RANK, NUM_OF_RANKS_PER_NODE, true>{
+  // Shared memory token buffer. Should be 128B alignment for optimal perf for TMA.
+  alignas(128) uint8_t permute_token_buffer[NUM_OF_STAGES][HIDDEN_DIM];
+  // Shared memory Prob buffer. Only used in FW dispatch. Should be 16B alignment so can be used with TMA. 128B is too strict.
+  alignas(16) float permute_prob_buffer[NUM_OF_STAGES][NUM_OF_EXPERTS_PER_RANK * NUM_OF_RANKS_PER_NODE];
+  // Shared memory scaling factor buffer. Only when using FP8 token. Should be 16B alignment so can be used with TMA. 128B is too strict.
+  alignas(16) float permute_scaling_factor_buffer[NUM_OF_STAGES][HIDDEN_DIM / 128];
+  // Shared memory mbarrier that protect token entry, 1st for producer->consumer, 2nd for consumer->producer. Should be 8B alignment(natural alignment).
+  alignas(8) uint64_t permute_mbarrier_buffer[NUM_OF_STAGES][2];
+};
+
+template<int NUM_OF_STAGES,
+         int HIDDEN_DIM,
+         int NUM_OF_EXPERTS_PER_RANK,
+         int NUM_OF_RANKS_PER_NODE> 
+struct dispatch_kernel_permute_block_dynamic_shared_memory_buffer_t<uint8_t, NUM_OF_STAGES, HIDDEN_DIM, NUM_OF_EXPERTS_PER_RANK, NUM_OF_RANKS_PER_NODE, false>{
+  // Shared memory token buffer. Should be 128B alignment for optimal perf for TMA.
+  alignas(128) uint8_t permute_token_buffer[NUM_OF_STAGES][HIDDEN_DIM];
+  // Shared memory scaling factor buffer. Only when using FP8 token. Should be 16B alignment so can be used with TMA. 128B is too strict.
+  alignas(16) float permute_scaling_factor_buffer[NUM_OF_STAGES][HIDDEN_DIM / 128];
+  // Shared memory mbarrier that protect token entry, 1st for producer->consumer, 2nd for consumer->producer. Should be 8B alignment(natural alignment).
+  alignas(8) uint64_t permute_mbarrier_buffer[NUM_OF_STAGES][2];
+};
+
+template<int NUM_OF_STAGES,
+         int HIDDEN_DIM,
+         int NUM_OF_EXPERTS_PER_RANK,
+         int NUM_OF_RANKS_PER_NODE> 
+struct dispatch_kernel_permute_block_dynamic_shared_memory_buffer_t<uint16_t, NUM_OF_STAGES, HIDDEN_DIM, NUM_OF_EXPERTS_PER_RANK, NUM_OF_RANKS_PER_NODE, true>{
+  // Shared memory token buffer. Should be 128B alignment for optimal perf for TMA.
+  alignas(128) uint16_t permute_token_buffer[NUM_OF_STAGES][HIDDEN_DIM];
+  // Shared memory Prob buffer. Only used in FW dispatch. Should be 16B alignment so can be used with TMA. 128B is too strict.
+  alignas(16) float permute_prob_buffer[NUM_OF_STAGES][NUM_OF_EXPERTS_PER_RANK * NUM_OF_RANKS_PER_NODE];
+  // Shared memory mbarrier that protect token entry, 1st for producer->consumer, 2nd for consumer->producer. Should be 8B alignment(natural alignment).
+  alignas(8) uint64_t permute_mbarrier_buffer[NUM_OF_STAGES][2];
+};
+
+template<int NUM_OF_STAGES,
+         int HIDDEN_DIM,
+         int NUM_OF_EXPERTS_PER_RANK,
+         int NUM_OF_RANKS_PER_NODE> 
+struct dispatch_kernel_permute_block_dynamic_shared_memory_buffer_t<uint16_t, NUM_OF_STAGES, HIDDEN_DIM, NUM_OF_EXPERTS_PER_RANK, NUM_OF_RANKS_PER_NODE, false>{
+  // Shared memory token buffer. Should be 128B alignment for optimal perf for TMA.
+  alignas(128) uint16_t permute_token_buffer[NUM_OF_STAGES][HIDDEN_DIM];
+  // Shared memory mbarrier that protect token entry, 1st for producer->consumer, 2nd for consumer->producer. Should be 8B alignment(natural alignment).
+  alignas(8) uint64_t permute_mbarrier_buffer[NUM_OF_STAGES][2];
+};
+#endif
+
 template<int NUM_OF_STAGES_G2S,
          int NUM_OF_STAGES_S2G,
          int HIDDEN_DIM, 
@@ -435,24 +494,36 @@ struct dispatch_kernel_param_t{
   TOKEN_DATA_TYPE* expert_output_token[MAX_NUM_OF_RANKS_PER_NODE];
   float* expert_output_prob[MAX_NUM_OF_RANKS_PER_NODE]; // Only valid in forward dispatch.
   float* expert_output_scaling_factor[MAX_NUM_OF_RANKS_PER_NODE]; // Only valid for FP8 token type.
+  TOKEN_DATA_TYPE* local_expert_output_token;
+  float* local_expert_output_prob;
+  float* local_expert_output_scaling_factor;
   // Internal temp buffers. These buffers are local buffers.
   const TOKEN_DATA_TYPE* rdma_inter_node_group_token;
   const float* rdma_inter_node_group_prob; // Only valid in forward dispatch.
   const float* rdma_inter_node_group_scaling_factor; // Only valid for FP8 token type.
   uint64_t* rdma_inter_node_group_flags; // For RDMA Atomic flags.
-  uint32_t* intra_node_write_completion_flags; // For intra-node S2G write completion notification.
+  uint32_t* intra_node_write_completion_flags; // For intra-node S2G write completion notification. Need 2 flags for different parity for dispatch kernel.
+  uint32_t* intra_node_expert_output_chunk_flags[MAX_NUM_OF_RANKS_PER_NODE]; // For intra-node S2G -> permute_G2S chunk write completion notification.
   // Metadata buffers. These buffers are local buffers.
   const bool* rdma_to_attn_map;
   const bool* attn_to_rdma_map;
   const int32_t* sparse_to_dense_map;
+  const int32_t* dense_chunk_layout;
+  const int32_t* dense_to_expert_map;
+  const int32_t* num_of_local_experts_tokens;
   uint64_t* expected_rdma_flag_value;
-  uint32_t* expected_intra_node_flag_value;
+  uint32_t* expected_intra_node_flag_value; // Need 2 expected values for different parity for dispatch kernel.
+  uint32_t* expected_permute_flag_value;
+  uint32_t* intra_node_flag_parity;
   int local_rank;
   int node_rank;
   // The number of token output by attn layer on a rank/GPU.
   int num_of_tokens_per_rank;
-  void **d_qps_gpu;
-  void *mr_info;
+#ifdef HYBRID_EP_BUILD_MULTINODE_ENABLE
+  // qp info and mr info
+  struct void **d_qps_gpu;
+  struct void *mr_info;
+#endif
 };
 
 // Data structure for kernel parameter for combine kernel.
@@ -476,11 +547,16 @@ struct combine_kernel_param_t{
   const int32_t* sparse_to_dense_map;
   uint64_t* expected_rdma_flag_value;
   uint32_t* expected_intra_node_flag_value;
+  uint32_t* expected_permute_flag_value;
+  uint32_t* intra_node_flag_parity;
   int node_rank;
   // The number of token output by attn layer on a rank/GPU.
   int num_of_tokens_per_rank;
-  void **d_qps_gpu;
-  void *mr_info;
+#ifdef HYBRID_EP_BUILD_MULTINODE_ENABLE
+  // qp info and mr info
+  struct void **d_qps_gpu;
+  struct void *mr_info;
+#endif
 };
 
 // Each CUDA block has sixteen named barriers numbered 0..15.
@@ -581,7 +657,7 @@ inline __device__ void N2N_warp_group_device_function(const int node_rank,
       for (int token_idx_in_chunk = INTER_NODE_GROUP::thread_rank();
            token_idx_in_chunk < NUM_OF_TOKENS_PER_CHUNK;
            token_idx_in_chunk += INTER_NODE_GROUP::size()) {
-        int64_t token_idx = token_idx_in_chunk + chunk_base_token_idx;
+        int token_idx = token_idx_in_chunk + chunk_base_token_idx;
         bool need_write = false;
         if (token_idx_in_chunk < token_range) {
           need_write = smem_attn_to_rdma_map_ptr[remote_idx + token_idx_in_chunk * (NUM_OF_NODES - 1)];
@@ -653,7 +729,6 @@ inline __device__ void N2N_warp_group_device_function(const int node_rank,
       __syncwarp();
     }
   }
-
   if (INTER_NODE_GROUP::thread_rank() < NUM_OF_NODES - 1) {
     struct doca_gpu_dev_verbs_qp *qp = d_qps_gpu[block_offset + INTER_NODE_GROUP::thread_rank()];
     uint32_t wc_num_to_poll = smem_inter_node_num_of_write_per_node_ptr[INTER_NODE_GROUP::thread_rank()];
@@ -712,7 +787,7 @@ inline __device__ void G2S_warp_group_device_function(const int node_rank,
   uint32_t consumer_parity = 1;
 
   // Only 1 thread within the G2S warp will be active, other threads will just exit.
-  if(elect_sync(~0)){
+  if (elect_sync(~0)) {
     // Loop through all data chunk. Data(chunk) parallel between multiple CUDA blocks.
     for(int i = blockIdx.x; i < num_of_chunks_per_rank; i += NUM_OF_BLOCKS){
       // How many rdma_to_attn load iter for this chunk.
@@ -849,7 +924,7 @@ inline __device__ void G2S_warp_group_device_function(const int node_rank,
       }
     }
   }
-  #ifdef HYBRID_EP_BUILD_MULTINODE_ENABLE
+#ifdef HYBRID_EP_BUILD_MULTINODE_ENABLE
   // Update residue flags.
   int residue_flag_count = max_num_of_chunks_per_rank - num_of_chunks_per_rank;
   for (int node_id = blockIdx.x; node_id < NUM_OF_NODES - 1; node_id += gridDim.x) {
@@ -858,8 +933,7 @@ inline __device__ void G2S_warp_group_device_function(const int node_rank,
       residue_flag_base_ptr[flag_id] = *expected_flag_value;
     }
   }
-  #endif // HYBRID_EP_BUILD_MULTINODE_ENABLE
-
+#endif // HYBRID_EP_BUILD_MULTINODE_ENABLE
 }
 
 // Device function for intra-node S2G warp group for dispatch kernel.
@@ -868,6 +942,7 @@ template<typename INTRA_NODE_S2G_GROUP,
          typename SMEM_TYPE,
          int NUM_OF_STAGES, 
          int NUM_OF_IN_FLIGHT_S2G,
+         int NUM_OF_ADDITIONAL_IN_FLIGHT_S2G, // Different from NUM_OF_IN_FLIGHT_S2G, this parameter indicates how many in-flight S2G token entry before notifying the consumer(permute_G2S warp groups).
          int HIDDEN_DIM,
          int NUM_OF_TOKENS_PER_CHUNK,
          int NUM_OF_EXPERTS_PER_RANK,
@@ -883,6 +958,7 @@ inline __device__ void S2G_warp_group_device_function(const int local_rank,
                                                       TOKEN_DATA_TYPE* const* remote_expert_output_token,
                                                       float* const* remote_expert_output_prob,
                                                       float* const* remote_expert_output_scaling_factor,
+                                                      uint32_t* const* intra_node_expert_output_chunk_flags,
                                                       SMEM_TYPE* smem_buffer_ptr)
 {
   static_assert(NUM_OF_IN_FLIGHT_S2G < NUM_OF_STAGES, "NUM_OF_IN_FLIGHT_S2G must smaller than NUM_OF_STAGES.");
@@ -913,6 +989,12 @@ inline __device__ void S2G_warp_group_device_function(const int local_rank,
   uint32_t sparse_to_dense_map_stage = 0;
   // sparse_to_dense map parity for consuming.
   uint32_t sparse_to_dense_map_parity = 0;
+#ifdef HYBRID_EP_BUILD_PERMUTE_FUSION_ENABLE
+  // Whether there are S2G TMA operations of a previous chunk's token entry in-flight(unfinished).
+  bool outstanding_in_flight_chunk = false;
+  // global chunk id in per-rank buffer for previous chunk. Used for updating flags.
+  int last_chunk_global_chunk_id;
+#endif
 
   // Only 1 thread per warp within the S2G warp group will be active, other threads will just exit.
   if(elect_sync(~0)){
@@ -1012,10 +1094,45 @@ inline __device__ void S2G_warp_group_device_function(const int local_rank,
         // Wait for sparse_to_dense map ready in smem for current chunk.
         while(!cuda::ptx::mbarrier_try_wait_parity(&smem_buffer_ptr->sparse_to_dense_map_mbarrier_buffer[sparse_to_dense_map_stage], sparse_to_dense_map_parity)){}
 
+#ifdef HYBRID_EP_BUILD_PERMUTE_FUSION_ENABLE
+        // How many S2G token entry of current chunk have been in-flight.
+        int additional_in_flight_s2g = 0;
+#endif
         for(int k = 0; k < num_of_routing_info_load_iter_for_current_chunk; k++){
           rdma_to_attn_map_load_t rdma_to_attn_map_data = rdma_to_attn_map_load_base_addr[k];
           #pragma unroll
           for(int n = 0; n < NUM_OF_TOKENS_PER_LOAD_ITER; n++){
+#ifdef HYBRID_EP_BUILD_PERMUTE_FUSION_ENABLE
+            // When permute fusion is enabled,
+            // check whether there is a previous chunk's token entry S2G is in-flight and also current chunk already has NUM_OF_ADDITIONAL_IN_FLIGHT_S2G token entry S2G in-flight.
+            // If so, wait for previous chunk's token entry S2G finish and notify the permute_G2S warp groups on all target ranks.
+            if(outstanding_in_flight_chunk && (additional_in_flight_s2g == NUM_OF_ADDITIONAL_IN_FLIGHT_S2G)){
+              // Wait for previous chunk's token entry S2G finish.
+              cuda::ptx::cp_async_bulk_wait_group(cuda::ptx::n32_t<NUM_OF_ADDITIONAL_IN_FLIGHT_S2G>{});
+              // Need a system-scope release memory fence(release sem should be enough) to let all target ranks can observe the side effect of TMA writes of this chunk 
+              // before they can observe the update of the flags.
+              asm volatile("fence.release.sys;"
+                           :
+                           : 
+                           : "memory");
+              // Notify the permute_G2S warp groups of all target ranks in this node.
+              // Atomically reduce add 1 to the u32 flag of the last attn token chunk to all target ranks within the current node.
+              for(int m = INTRA_NODE_S2G_GROUP::warp_rank(); m < NUM_OF_SPARSE_TO_DENSE_MAP_LOAD_ITER_PER_INPUT_TOKEN; m += INTRA_NODE_S2G_GROUP::warp_size()){
+                #pragma unroll
+                for(int t = 0; t < NUM_OF_OUTPUT_TOKENS_PER_LOAD_ITER; t++){
+                  int remote_rank_id = m * NUM_OF_OUTPUT_TOKENS_PER_LOAD_ITER + t;
+                  uint32_t* last_chunk_flag_addr = intra_node_expert_output_chunk_flags[remote_rank_id] + last_chunk_global_chunk_id;
+                  // Need a strong system-scope red to make sure the target ranks can observe the update of the flag,
+                  // Notify last chunk.
+                  asm volatile("red.relaxed.sys.global.add.u32 [%0], %1;"
+                               :
+                               : "l"(__cvta_generic_to_global(last_chunk_flag_addr)), "n"(1)
+                               : "memory");
+                }
+              }
+              outstanding_in_flight_chunk = false;
+            }
+#endif
             int current_token_id = k * NUM_OF_TOKENS_PER_LOAD_ITER + n;
             // If the current token is out-of-bound, then just end this load iter.
             if(current_token_id >= current_chunk_size){
@@ -1093,9 +1210,57 @@ inline __device__ void S2G_warp_group_device_function(const int local_rank,
                 stage = 0;
                 producer_parity ^= 1;
               }
+#ifdef HYBRID_EP_BUILD_PERMUTE_FUSION_ENABLE
+              // Another token entry's S2G in-flight.
+              additional_in_flight_s2g += 1;
+#endif
             }
           }
         }
+#ifdef HYBRID_EP_BUILD_PERMUTE_FUSION_ENABLE
+        // When permute fusion is enabled, we need to notify the permute_G2S warp groups of all target ranks in this node that a chunks is ready to be consumed.
+        // Calculate what is the global chunk id of the current chunk within the per-rank buffer.
+        int global_chunk_id = num_of_chunks_per_rank * NUM_OF_RANKS_PER_NODE * node_id + num_of_chunks_per_rank * local_rank + i;
+        // If the current chunk does not have NUM_OF_ADDITIONAL_IN_FLIGHT_S2G dst token entry in-flight, which is possible of rdma_to_attn map is really sparse.
+        // We need to wait for both previous and current chunks' S2G entry to finish and notify the permute_G2S warp groups.
+        if(outstanding_in_flight_chunk){
+          // Wait for all previous chunk's(i.e. previous and current chunk) S2G finish.
+          cuda::ptx::cp_async_bulk_wait_group(cuda::ptx::n32_t<0>{});
+          // Need a system-scope release memory fence(release sem should be enough) to let all target ranks can observe the side effect of TMA writes of this chunk 
+          // before they can observe the update of the flags.
+          asm volatile("fence.release.sys;"
+                        :
+                        : 
+                        : "memory");
+          // Notify the permute_G2S warp groups of all target ranks in this node.
+          // Atomically reduce add 1 to the u32 flag of this attn token chunk to all target ranks within the current node.
+          for(int k = INTRA_NODE_S2G_GROUP::warp_rank(); k < NUM_OF_SPARSE_TO_DENSE_MAP_LOAD_ITER_PER_INPUT_TOKEN; k += INTRA_NODE_S2G_GROUP::warp_size()){
+            #pragma unroll
+            for(int n = 0; n < NUM_OF_OUTPUT_TOKENS_PER_LOAD_ITER; n++){
+              int remote_rank_id = k * NUM_OF_OUTPUT_TOKENS_PER_LOAD_ITER + n;
+              uint32_t* last_chunk_flag_addr = intra_node_expert_output_chunk_flags[remote_rank_id] + last_chunk_global_chunk_id;
+              uint32_t* current_chunk_flag_addr = intra_node_expert_output_chunk_flags[remote_rank_id] + global_chunk_id;
+              // Need a strong system-scope red to make sure the target ranks can observe the update of the flag,
+              // Notify last chunk.
+              asm volatile("red.relaxed.sys.global.add.u32 [%0], %1;"
+                           :
+                           : "l"(__cvta_generic_to_global(last_chunk_flag_addr)), "n"(1)
+                           : "memory");
+              // Notify current chunk.
+              asm volatile("red.relaxed.sys.global.add.u32 [%0], %1;"
+                           :
+                           : "l"(__cvta_generic_to_global(current_chunk_flag_addr)), "n"(1)
+                           : "memory");
+            }
+          }
+          outstanding_in_flight_chunk = false;
+        }else{ // Otherwise, the current chunks is in-flight.
+          outstanding_in_flight_chunk = true;
+        }
+
+        // Update last chunk's id.
+        last_chunk_global_chunk_id = global_chunk_id;
+#endif
         // Before goto next chunk, go to next sparse_to_dense map stage.
         sparse_to_dense_map_stage += 1;
         if(sparse_to_dense_map_stage == 2){
@@ -1104,8 +1269,462 @@ inline __device__ void S2G_warp_group_device_function(const int local_rank,
         }
       }
     }
+#ifdef HYBRID_EP_BUILD_PERMUTE_FUSION_ENABLE
+    // When all chunks have been processed, we need to check whether the last chunk is still in-flight.
+    // If so, wait for it and notify the permute_G2S warp groups.
+    if(outstanding_in_flight_chunk){
+      // Wait for the last chunk's S2G finish.
+      cuda::ptx::cp_async_bulk_wait_group(cuda::ptx::n32_t<0>{});
+      // Need a system-scope release memory fence(release sem should be enough) to let all target ranks can observe the side effect of TMA writes of this chunk 
+      // before they can observe the update of the flags.
+      asm volatile("fence.release.sys;"
+                    :
+                    : 
+                    : "memory");
+      // Notify the permute_G2S warp groups of all target ranks in this node.
+      // Atomically reduce add 1 to the u32 flag of the last attn token chunk to all target ranks within the current node.
+      for(int i = INTRA_NODE_S2G_GROUP::warp_rank(); i < NUM_OF_SPARSE_TO_DENSE_MAP_LOAD_ITER_PER_INPUT_TOKEN; i += INTRA_NODE_S2G_GROUP::warp_size()){
+        #pragma unroll
+        for(int j = 0; j < NUM_OF_OUTPUT_TOKENS_PER_LOAD_ITER; j++){
+          int remote_rank_id = i * NUM_OF_OUTPUT_TOKENS_PER_LOAD_ITER + j;
+          uint32_t* last_chunk_flag_addr = intra_node_expert_output_chunk_flags[remote_rank_id] + last_chunk_global_chunk_id;
+          // Need a strong system-scope red to make sure the target ranks can observe the update of the flag,
+          // Notify last chunk.
+          asm volatile("red.relaxed.sys.global.add.u32 [%0], %1;"
+                        :
+                        : "l"(__cvta_generic_to_global(last_chunk_flag_addr)), "n"(1)
+                        : "memory");
+        }
+      }
+    }
+#endif
   }
 }
+
+#ifdef HYBRID_EP_BUILD_PERMUTE_FUSION_ENABLE
+// Device function for rank-local permute G2S warp for dispatch kernel. There can be only 1 such warp per CUDA block!
+template<typename PERMUTE_G2S_GROUP,
+         typename TOKEN_DATA_TYPE,
+         typename SMEM_TYPE,
+         int NUM_OF_STAGES, 
+         int HIDDEN_DIM,
+         int NUM_OF_TOKENS_PER_CHUNK,
+         int MAX_NUM_OF_TOKENS_PER_RANK,
+         int NUM_OF_EXPERTS_PER_RANK,
+         int NUM_OF_RANKS_PER_NODE,
+         int NUM_OF_NODES,
+         int NUM_OF_PERMUTE_BLOCKS,
+         int NUM_OF_DISPATCH_BLOCKS, // In current design, each dispatch grid has N dispatch blocks + M permute blocks, with dispatch block come first to minimize code change.
+         bool FORWARD_DISPATCH>
+inline __device__ void permute_G2S_warp_group_device_function(const int node_rank,
+                                                              const int num_of_tokens_per_rank,
+                                                              const uint32_t* expected_flag_value,
+                                                              const int32_t* dense_chunk_layout,
+                                                              const TOKEN_DATA_TYPE* remote_expert_output_token,
+                                                              const float* remote_expert_output_prob,
+                                                              const float* remote_expert_output_scaling_factor,
+                                                              uint32_t* intra_node_expert_output_chunk_flags,
+                                                              SMEM_TYPE* smem_buffer_ptr)
+{ 
+  // How many chunks per rank. Including full chunks and the remainder chunk.
+  const int num_of_chunks_per_rank = ((num_of_tokens_per_rank - 1) / NUM_OF_TOKENS_PER_CHUNK) + 1;
+  constexpr int MAX_NUM_OF_CHUNKS_PER_RANK = ((MAX_NUM_OF_TOKENS_PER_RANK - 1) / NUM_OF_TOKENS_PER_CHUNK) + 1;
+  // How many total chunks.
+  const int num_of_total_attn_chunks = num_of_chunks_per_rank * NUM_OF_RANKS_PER_NODE * NUM_OF_NODES;
+  // How many chunks iterations. Including full iters and the remainder iter.
+  const int num_of_total_chunk_iters = ((num_of_chunks_per_rank - 1) / NUM_OF_DISPATCH_BLOCKS) + 1;
+  // Size of the remainder iter.
+  const int remainder_iter_size = num_of_chunks_per_rank % NUM_OF_DISPATCH_BLOCKS;
+
+  int stage = 0;
+  uint32_t consumer_parity = 1;
+
+  // Only 1 thread within the permute G2S warp will be active, other threads will just exit if no residue flag need to updated.
+  if(elect_sync(~0)){
+    // Loop through all data chunk. Data(chunk) parallel between multiple permute CUDA blocks.
+    // We flatten the global chunk id of all attn chunks.
+    // Need to take the dispatch block's offset into account.
+    for(int i = blockIdx.x - NUM_OF_DISPATCH_BLOCKS; i < num_of_total_attn_chunks; i += NUM_OF_PERMUTE_BLOCKS){
+      // Calculate which node, rank and chunk does this global chunk id map to.
+      // The order of producing attn chunks in the local per-rank buffer(i.e. the remote_expert_output_token buffer) is [0, N-1] chunks for all ranks on local_node(N is NUM_OF_DISPATCH_BLOCKS), 
+      // then [0, N-1] chunks for all ranks on local_node - 1, ......, then [0, N-1] chunks for all ranks on local_node + 1, then [N, 2N-1] chunks for all ranks on local_node,
+      // ......, then [N, 2N -1] chunks for all ranks on local_node + 1. etc.
+      // So the mapping order of global chunk id is first chunk_id, then rank_id and finally node_id, this full iteration called chunk iteration. 
+      // Which is ([0, N-1] chunks for rank 0 on local_node, [0, N-1] chunks for rank 1 on local_node,
+      // ......, [0, N-1] chunks for rank 0 on local_node - 1, [0, N-1] chunks for rank 1 on local_node - 1, ......,) ([N, 2N-1] chunks for rank 0 on local_node,
+      // [N, 2N-1] chunks for rank 1 on local_node, ......, [N, 2N-1] chunks for rank 0 on local_node - 1, [N, 2N-1] chunks for rank 1 on local_node - 1,) etc.
+      int current_chunk_iter = i / (NUM_OF_DISPATCH_BLOCKS * NUM_OF_RANKS_PER_NODE * NUM_OF_NODES);
+      int local_chunk_id_offset = current_chunk_iter * NUM_OF_DISPATCH_BLOCKS;
+      int current_iter_chunks_per_rank;
+      if(remainder_iter_size != 0 && current_chunk_iter == num_of_total_chunk_iters - 1){
+        current_iter_chunks_per_rank = remainder_iter_size;
+      }else{
+        current_iter_chunks_per_rank = NUM_OF_DISPATCH_BLOCKS;
+      }
+      int local_iter_chunk_id = i % (NUM_OF_DISPATCH_BLOCKS * NUM_OF_RANKS_PER_NODE * NUM_OF_NODES);
+      int current_iter_chunks_per_node = current_iter_chunks_per_rank * NUM_OF_RANKS_PER_NODE;
+      int current_node_linear_id = local_iter_chunk_id / current_iter_chunks_per_node;
+      // The node id of current chunk.
+      int current_node_id = node_rank >= current_node_linear_id ? node_rank - current_node_linear_id : node_rank + NUM_OF_NODES - current_node_linear_id;
+      int local_node_chunk_id = local_iter_chunk_id % current_iter_chunks_per_node;
+      // The rank id of the current chunk within its node.
+      int current_rank_id = local_node_chunk_id / current_iter_chunks_per_rank;
+      // The chunk id of the current chunk within its rank.
+      int current_chunk_id = local_node_chunk_id % current_iter_chunks_per_rank + local_chunk_id_offset;
+
+      // Calculate the chunk id of the current chunk within the per-rank buffer(i.e. the remote_expert_output_token buffer) according to the node_id, rank_id and chunk_id.
+      int current_global_id = current_node_id * num_of_chunks_per_rank * NUM_OF_RANKS_PER_NODE + current_rank_id * num_of_chunks_per_rank + current_chunk_id;
+
+      // Load the chunk layout info for current chunk from dense_chunk_layout map, and calculate the starting token and number of tokens of the current chunk within the local per-rank buffer.
+      // Per-rank buffer is a dense buffer, every token within this buffer is needed by this rank(which means every token within this buffer is needed by at least 1 local expert).
+      // So, every token within this buffer need to be multicast to at least 1 local expert, which means every token within this buffer need to be loaded into smem FIFO.
+      int next_chunk_starting_location_within_expert_output_buffer = dense_chunk_layout[current_global_id];
+      int current_chunk_starting_location_within_expert_output_buffer = 0;
+      if(current_global_id != 0){
+        current_chunk_starting_location_within_expert_output_buffer = dense_chunk_layout[current_global_id - 1];
+      }
+      int num_of_tokens_for_current_chunk = next_chunk_starting_location_within_expert_output_buffer - current_chunk_starting_location_within_expert_output_buffer;
+      
+      // Check if the current chunk is ready to be consumed within the local per-rank buffer.
+      // The chunk within the local per-rank buffer is produced by S2G warp group of all rank within this node(a.k.a peer ranks). 
+      // Should poll the flag produced by peer ranks' atomic reduce add before consuming the chunk.
+      const uint32_t* flag_location = intra_node_expert_output_chunk_flags + current_global_id;
+      uint32_t intra_node_chunk_flag = 0;
+      do{
+        intra_node_chunk_flag = 0;
+        // Need a strong system-scope load to observe peer ranks' Atomic result.
+        asm volatile("ld.relaxed.sys.global.u32 %0, [%1];"
+                      : "=r"(intra_node_chunk_flag)
+                      : "l"(__cvta_generic_to_global(flag_location))
+                      : "memory");
+      }while(intra_node_chunk_flag != *expected_flag_value);
+
+      const TOKEN_DATA_TYPE* token_load_base_addr = remote_expert_output_token + current_chunk_starting_location_within_expert_output_buffer * static_cast<int64_t>(HIDDEN_DIM);
+      const float* prob_load_base_addr;
+      const float* scaling_factor_load_base_addr;
+      if constexpr(FORWARD_DISPATCH){
+        prob_load_base_addr = remote_expert_output_prob + current_chunk_starting_location_within_expert_output_buffer * (NUM_OF_EXPERTS_PER_RANK * NUM_OF_RANKS_PER_NODE);
+      }
+      if constexpr(std::is_same<TOKEN_DATA_TYPE, uint8_t>::value){
+        scaling_factor_load_base_addr = remote_expert_output_scaling_factor + current_chunk_starting_location_within_expert_output_buffer * (HIDDEN_DIM / 128);
+      }
+
+      // Future optimization point: considering that any chunk in per-rank buffer is a contiguous buffer, so theoretically we can do token coalescing in permute/unpermute up to chunk granularity.
+      // But you need enough smem capacity to hold that.
+      // So we still do a single-token level data transfer here which is the most generic pattern, if we find that this pattern is bottlenecking the overall perf(which is unlikely), 
+      // we will need to use token coalescing pattern.
+      for(int j = 0; j < num_of_tokens_for_current_chunk; j++){
+        // Wait until shared memory has free entry.
+        while(!cuda::ptx::mbarrier_try_wait_parity(&smem_buffer_ptr->permute_mbarrier_buffer[stage][1], consumer_parity)){}
+        // Issue TMA to load current token and its properties from global to shared memory.
+        uint32_t total_tx_size = 0;
+        // Load token.
+        cuda::ptx::cp_async_bulk(cuda::ptx::space_shared,
+                                 cuda::ptx::space_global,
+                                 reinterpret_cast<void*>(&smem_buffer_ptr->permute_token_buffer[stage][0]),
+                                 reinterpret_cast<const void*>(token_load_base_addr + (j * static_cast<int64_t>(HIDDEN_DIM))),
+                                 (uint32_t)(HIDDEN_DIM * sizeof(TOKEN_DATA_TYPE)),
+                                 &smem_buffer_ptr->permute_mbarrier_buffer[stage][0]);
+
+        total_tx_size += (uint32_t)(HIDDEN_DIM * sizeof(TOKEN_DATA_TYPE));
+
+        // Optionally load prob(Only in FW dispatch).
+        // The prob vec in per-rank buffer has been padded to NUM_OF_EXPERTS_PER_RANK * NUM_OF_RANKS_PER_NODE to fit TMA requirement, so we still load the token from per-rank buffer in this format.
+        if constexpr(FORWARD_DISPATCH){
+          cuda::ptx::cp_async_bulk(cuda::ptx::space_shared,
+                                   cuda::ptx::space_global,
+                                   reinterpret_cast<void*>(&smem_buffer_ptr->permute_prob_buffer[stage][0]),
+                                   reinterpret_cast<const void*>(prob_load_base_addr + (j * (NUM_OF_EXPERTS_PER_RANK * NUM_OF_RANKS_PER_NODE))),
+                                   (uint32_t)((NUM_OF_EXPERTS_PER_RANK * NUM_OF_RANKS_PER_NODE) * sizeof(float)),
+                                   &smem_buffer_ptr->permute_mbarrier_buffer[stage][0]);
+
+          total_tx_size += (uint32_t)((NUM_OF_EXPERTS_PER_RANK * NUM_OF_RANKS_PER_NODE) * sizeof(float));
+        }
+
+        // Optionally load scaling factor(Only for FP8 token).
+        if constexpr(std::is_same<TOKEN_DATA_TYPE, uint8_t>::value){
+          cuda::ptx::cp_async_bulk(cuda::ptx::space_shared,
+                                   cuda::ptx::space_global,
+                                   reinterpret_cast<void*>(&smem_buffer_ptr->permute_scaling_factor_buffer[stage][0]),
+                                   reinterpret_cast<const void*>(scaling_factor_load_base_addr + (j * (HIDDEN_DIM / 128))),
+                                   (uint32_t)((HIDDEN_DIM / 128) * sizeof(float)),
+                                   &smem_buffer_ptr->permute_mbarrier_buffer[stage][0]);
+
+          total_tx_size += (uint32_t)((HIDDEN_DIM / 128) * sizeof(float));
+        }
+
+        cuda::ptx::mbarrier_arrive_expect_tx(cuda::ptx::sem_release,
+                                             cuda::ptx::scope_cta,
+                                             cuda::ptx::space_shared,
+                                             &smem_buffer_ptr->permute_mbarrier_buffer[stage][0],
+                                             total_tx_size);
+
+        stage += 1;
+        if(stage == NUM_OF_STAGES){
+          stage = 0;
+          consumer_parity ^= 1;
+        }
+      }
+    }
+  }
+  // Update residue flags in intra_node_expert_output_chunk_flags. Write-and-forget operations.
+  int residue_flag_count = (MAX_NUM_OF_CHUNKS_PER_RANK * NUM_OF_RANKS_PER_NODE * NUM_OF_NODES) - num_of_total_attn_chunks;
+  // The residue flags will be updated by all threads of the permute_G2S warp group of all permute CUDA block. Calculate how many threads to perform this update oeprations.
+  constexpr int RESIDUE_FLAG_UPDATE_THREAD_COUNT = PERMUTE_G2S_GROUP::size() * NUM_OF_PERMUTE_BLOCKS;
+  int residue_flag_update_thread_id = PERMUTE_G2S_GROUP::thread_rank() + (blockIdx.x - NUM_OF_DISPATCH_BLOCKS) * PERMUTE_G2S_GROUP::size();
+  for(int i = residue_flag_update_thread_id; i < residue_flag_count; i += RESIDUE_FLAG_UPDATE_THREAD_COUNT){
+    intra_node_expert_output_chunk_flags[num_of_total_attn_chunks + i] = *expected_flag_value;
+  }
+}
+
+// Device function for intra-node S2G warp group for dispatch kernel.
+template<typename PERMUTE_S2G_GROUP,
+         typename TOKEN_DATA_TYPE,
+         typename SMEM_TYPE,
+         int NUM_OF_STAGES, 
+         int NUM_OF_IN_FLIGHT_S2G,
+         int HIDDEN_DIM,
+         int NUM_OF_TOKENS_PER_CHUNK,
+         int NUM_OF_EXPERTS_PER_RANK,
+         int NUM_OF_RANKS_PER_NODE,
+         int NUM_OF_NODES,
+         int LOCAL_EXPERTS_PADDING_SIZE,
+         int NUM_OF_PERMUTE_BLOCKS,
+         int NUM_OF_DISPATCH_BLOCKS, // In current design, each dispatch grid has N dispatch blocks + M permute blocks, with dispatch block come first to minimize code change.
+         bool FORWARD_DISPATCH>
+inline __device__ void permute_S2G_warp_group_device_function(const int local_rank,
+                                                              const int node_rank,
+                                                              const int num_of_tokens_per_rank,
+                                                              const int32_t* dense_chunk_layout,
+                                                              const int32_t* dense_to_expert_map,
+                                                              const int32_t* num_of_local_experts_tokens,
+                                                              TOKEN_DATA_TYPE* local_expert_output_token,
+                                                              float* local_expert_output_prob,
+                                                              float* local_expert_output_scaling_factor,
+                                                              SMEM_TYPE* smem_buffer_ptr)
+{
+  static_assert(NUM_OF_IN_FLIGHT_S2G < NUM_OF_STAGES, "NUM_OF_IN_FLIGHT_S2G must smaller than NUM_OF_STAGES.");
+
+  // Load dense_to_expert_map according to the NUM_OF_EXPERTS_PER_RANK.
+  using dense_to_expert_map_load_t = Copy_t<NUM_OF_EXPERTS_PER_RANK * sizeof(int32_t)>;
+  constexpr int NUM_OF_DENSE_TO_EXPERT_MAP_LOAD_ITER_PER_INPUT_TOKEN = (NUM_OF_EXPERTS_PER_RANK * sizeof(int32_t)) / sizeof(dense_to_expert_map_load_t);
+  constexpr int NUM_OF_OUTPUT_TOKENS_PER_LOAD_ITER = sizeof(dense_to_expert_map_load_t) / sizeof(int32_t);
+  
+  //const int remainder_chunk_size = num_of_tokens_per_rank % NUM_OF_TOKENS_PER_CHUNK;
+  // How many chunks per rank. Including full chunks and the remainder chunk.
+  const int num_of_chunks_per_rank = ((num_of_tokens_per_rank - 1) / NUM_OF_TOKENS_PER_CHUNK) + 1;
+  // How many total chunks.
+  const int num_of_total_attn_chunks = num_of_chunks_per_rank * NUM_OF_RANKS_PER_NODE * NUM_OF_NODES;
+  // How many chunks iterations. Including full iters and the remainder iter.
+  const int num_of_total_chunk_iters = ((num_of_chunks_per_rank - 1) / NUM_OF_DISPATCH_BLOCKS) + 1;
+  // Size of the remainder iter.
+  const int remainder_iter_size = num_of_chunks_per_rank % NUM_OF_DISPATCH_BLOCKS;
+
+  // How many S2G token entry of smem FIFO have been in-flight.
+  int in_flight_s2g = 0;
+  int stage = 0;
+  uint32_t producer_parity = 0;
+
+  // Zero-init all padding tokens in local experts' output buffer. Write-and-forget operations.
+  // The padding tokens will be init by all threads of the permute_S2G warp group of all permute CUDA block.
+  // Padding tokens will be assigned to all permute blocks, and then a padding token will be divided into init unit and assigned to all threads of the permute_S2G warp group of this permute block.
+  
+  // Calculate the padding token count for each local expert, and their starting location within the local expert's output buffer.
+  int32_t num_of_local_experts_padding_tokens[NUM_OF_EXPERTS_PER_RANK];
+  int32_t starting_index_of_local_experts_padding_token[NUM_OF_EXPERTS_PER_RANK];
+  int32_t token_acc = 0;
+  int32_t total_local_experts_padding_tokens = 0;
+  #pragma unroll
+  for(int i = 0; i < NUM_OF_EXPERTS_PER_RANK; i++){
+    // Number of actual tokens of current local expert.
+    int32_t current_expert_tokens = num_of_local_experts_tokens[i];
+    // Padding the number of token to padding size. Local experts sum can be >= zero, so need to handle the corner case.
+    int num_of_padding_tile = (current_expert_tokens % LOCAL_EXPERTS_PADDING_SIZE == 0) ? (current_expert_tokens / LOCAL_EXPERTS_PADDING_SIZE)
+                                                                                        : (current_expert_tokens / LOCAL_EXPERTS_PADDING_SIZE + 1);
+    // Number of total tokens(actual + padding) of current expert.
+    int32_t current_expert_tokens_with_padding = num_of_padding_tile * LOCAL_EXPERTS_PADDING_SIZE;
+    // Number of padding tokens of current expert.
+    num_of_local_experts_padding_tokens[i] = current_expert_tokens_with_padding - current_expert_tokens;
+    // Starting location(global offset within the local expert buffer) of the first padding token of current local expert. 
+    starting_index_of_local_experts_padding_token[i] = token_acc + current_expert_tokens;
+    // Accumulate current local expert's total token count to accumulator.
+    token_acc += current_expert_tokens_with_padding;
+    total_local_experts_padding_tokens += num_of_local_experts_padding_tokens[i];
+  }
+
+  // We use uint4(STG.128) as the unit to init padding token.
+  static_assert((HIDDEN_DIM * sizeof(TOKEN_DATA_TYPE)) % 16 == 0, "The size of each token must be multiple of 16B.");
+  static_assert(sizeof(uint4) == 16, "uint4 is not 16Byte?");
+  using token_init_t = uint4;
+  constexpr int NUM_OF_INIT_ITER_PER_PADDING_TOKEN = (HIDDEN_DIM * sizeof(TOKEN_DATA_TYPE)) / sizeof(token_init_t);
+
+  // We use uint4(STG.128) as the unit to init padding scaling vector.
+  if constexpr(std::is_same<TOKEN_DATA_TYPE, uint8_t>::value){
+    static_assert(((HIDDEN_DIM / 128) * sizeof(float)) % 16 == 0, "The size of each scaling vector must be multiple of 16B.");
+  }
+  using scaling_factor_init_t = uint4;
+  constexpr int NUM_OF_INIT_ITER_PER_PADDING_SCALING_FACTOR = ((HIDDEN_DIM / 128) * sizeof(float)) / sizeof(scaling_factor_init_t);
+
+  // We use float(STG.32) as the unit to init padding prob element(each padding token in the local experts' output buffer only has 1 prob element, not a prob vec).
+  using prob_init_t = float;
+
+  // Assign Padding tokens to all permute blocks.
+  for(int i = blockIdx.x - NUM_OF_DISPATCH_BLOCKS; i < total_local_experts_padding_tokens; i += NUM_OF_PERMUTE_BLOCKS){
+    // Calculate the global token id of this padding token within the local experts' output buffer.
+    int padding_token_index;
+    int32_t lower_bound = 0;
+    #pragma unroll
+    for(int j = 0; j < NUM_OF_EXPERTS_PER_RANK; j++){
+      int32_t upper_bound = lower_bound + num_of_local_experts_padding_tokens[j];
+      if(i < upper_bound){
+        padding_token_index = starting_index_of_local_experts_padding_token[j] + (i - lower_bound);
+        break;
+      }
+      lower_bound = upper_bound;
+    }
+
+    // Divide padding token into init unit and assigned them to all permute_S2G threads.
+    token_init_t* padding_token_base_addr = reinterpret_cast<token_init_t*>(local_expert_output_token + padding_token_index * static_cast<int64_t>(HIDDEN_DIM));
+    for(int j = PERMUTE_S2G_GROUP::thread_rank(); j < NUM_OF_INIT_ITER_PER_PADDING_TOKEN; j += PERMUTE_S2G_GROUP::size()){
+      padding_token_base_addr[j] = make_uint4(0, 0, 0, 0);
+    }
+
+    // Divide padding scaling factor into init unit and assigned them to all permute_S2G threads for FP8 tokens.
+    if constexpr(std::is_same<TOKEN_DATA_TYPE, uint8_t>::value){
+      scaling_factor_init_t* padding_scaling_factor_base_addr = reinterpret_cast<scaling_factor_init_t*>(local_expert_output_scaling_factor + padding_token_index * (HIDDEN_DIM / 128));
+      for(int j = PERMUTE_S2G_GROUP::thread_rank(); j < NUM_OF_INIT_ITER_PER_PADDING_SCALING_FACTOR; j += PERMUTE_S2G_GROUP::size()){
+        padding_scaling_factor_base_addr[j] = make_uint4(0, 0, 0, 0);
+      }
+    }
+
+    // Prob only has 1 init unit, so let the first permute_S2G thread to init it for FW dispatch.
+    if constexpr(FORWARD_DISPATCH){
+      prob_init_t* padding_prob_base_addr = reinterpret_cast<prob_init_t*>(local_expert_output_prob + padding_token_index);
+      if(PERMUTE_S2G_GROUP::thread_rank() == 0){
+        *padding_prob_base_addr = 0.0f;
+      }
+    }
+  }
+
+  // Only 1 thread per warp within the permute S2G warp group will be active, other threads will just exit.
+  if(elect_sync(~0)){
+    // Loop through all data chunk. Data(chunk) parallel between multiple permute CUDA blocks.
+    // We flatten the global chunk id of all attn chunks.
+    // Need to take the dispatch block's offset into account.
+    for(int i = blockIdx.x - NUM_OF_DISPATCH_BLOCKS; i < num_of_total_attn_chunks; i += NUM_OF_PERMUTE_BLOCKS){
+      // Calculate which node, rank and chunk does this global chunk id map to.
+      // Permute_S2G consume the tokens as the exact same order of which permute_G2S produce tokens, so the same calculation as permute_G2S warp group.
+      int current_chunk_iter = i / (NUM_OF_DISPATCH_BLOCKS * NUM_OF_RANKS_PER_NODE * NUM_OF_NODES);
+      int local_chunk_id_offset = current_chunk_iter * NUM_OF_DISPATCH_BLOCKS;
+      int current_iter_chunks_per_rank;
+      if(remainder_iter_size != 0 && current_chunk_iter == num_of_total_chunk_iters - 1){
+        current_iter_chunks_per_rank = remainder_iter_size;
+      }else{
+        current_iter_chunks_per_rank = NUM_OF_DISPATCH_BLOCKS;
+      }
+      int local_iter_chunk_id = i % (NUM_OF_DISPATCH_BLOCKS * NUM_OF_RANKS_PER_NODE * NUM_OF_NODES);
+      int current_iter_chunks_per_node = current_iter_chunks_per_rank * NUM_OF_RANKS_PER_NODE;
+      int current_node_linear_id = local_iter_chunk_id / current_iter_chunks_per_node;
+      // The node id of current chunk.
+      int current_node_id = node_rank >= current_node_linear_id ? node_rank - current_node_linear_id : node_rank + NUM_OF_NODES - current_node_linear_id;
+      int local_node_chunk_id = local_iter_chunk_id % current_iter_chunks_per_node;
+      // The rank id of the current chunk within its node.
+      int current_rank_id = local_node_chunk_id / current_iter_chunks_per_rank;
+      // The chunk id of the current chunk within its rank.
+      int current_chunk_id = local_node_chunk_id % current_iter_chunks_per_rank + local_chunk_id_offset;
+
+      // Calculate the chunk id of the current chunk within the per-rank buffer(i.e. the remote_expert_output_token buffer) according to the node_id, rank_id and chunk_id.
+      int current_global_id = current_node_id * num_of_chunks_per_rank * NUM_OF_RANKS_PER_NODE + current_rank_id * num_of_chunks_per_rank + current_chunk_id;
+
+      // Load the chunk layout info for current chunk from dense_chunk_layout map, and calculate the starting token and number of tokens of the current chunk within the local per-rank buffer.
+      // Per-rank buffer is a dense buffer, every token within this buffer is needed by this rank(which means every token within this buffer is needed by at least 1 local expert).
+      // So, every token within this buffer need to be multicast to at least 1 local expert, which means every token within this buffer need to be loaded into smem FIFO.
+      int next_chunk_starting_location_within_expert_output_buffer = dense_chunk_layout[current_global_id];
+      int current_chunk_starting_location_within_expert_output_buffer = 0;
+      if(current_global_id != 0){
+        current_chunk_starting_location_within_expert_output_buffer = dense_chunk_layout[current_global_id - 1];
+      }
+      int num_of_tokens_for_current_chunk = next_chunk_starting_location_within_expert_output_buffer - current_chunk_starting_location_within_expert_output_buffer;
+
+      // Base addr to load dense_to_expert_map for this chunk.
+      const int32_t* dense_to_expert_map_load_base_addr = dense_to_expert_map + current_chunk_starting_location_within_expert_output_buffer * NUM_OF_EXPERTS_PER_RANK;
+
+      for(int j = 0; j < num_of_tokens_for_current_chunk; j++){
+        const dense_to_expert_map_load_t* dense_to_expert_map_load_addr = reinterpret_cast<const dense_to_expert_map_load_t*>(dense_to_expert_map_load_base_addr + j * NUM_OF_EXPERTS_PER_RANK);
+        // Wait until token entry within the shared memory has been produced.
+        while(!cuda::ptx::mbarrier_try_wait_parity(&smem_buffer_ptr->permute_mbarrier_buffer[stage][0], producer_parity)){}
+
+        // This token entry will be multicast to all local experts on local rank which need this token and its properties.
+        // The current implementation do the multicast by issue each unicast separately(we call it a unicast group). 
+        // Multicast of a src token will be ditributed to multiple permute S2G threads.
+        for(int k = PERMUTE_S2G_GROUP::warp_rank(); k < NUM_OF_DENSE_TO_EXPERT_MAP_LOAD_ITER_PER_INPUT_TOKEN; k += PERMUTE_S2G_GROUP::warp_size()){
+          // Load dense_to_expert_map.
+          dense_to_expert_map_load_t dense_to_expert_map_data = dense_to_expert_map_load_addr[k];
+          #pragma unroll
+          for(int n = 0; n < NUM_OF_OUTPUT_TOKENS_PER_LOAD_ITER; n++){
+            int current_local_expert_id = k * NUM_OF_OUTPUT_TOKENS_PER_LOAD_ITER + n;
+            int32_t output_buffer_index = *(reinterpret_cast<int32_t*>(&dense_to_expert_map_data) + n);
+            // Only unicast to this local expert if it need the current token.
+            if(output_buffer_index != -1){
+              // Store the token from shared to local global(local expert output buffers).
+              TOKEN_DATA_TYPE* local_expert_token_addr = local_expert_output_token + (output_buffer_index * static_cast<int64_t>(HIDDEN_DIM));
+              cuda::ptx::cp_async_bulk(cuda::ptx::space_global,
+                                       cuda::ptx::space_shared,
+                                       reinterpret_cast<void*>(local_expert_token_addr),
+                                       reinterpret_cast<const void*>(&smem_buffer_ptr->permute_token_buffer[stage][0]),
+                                       (uint32_t)(HIDDEN_DIM * sizeof(TOKEN_DATA_TYPE)));
+
+              // Store the prob from shared to local global(local expert output buffers) for FW dispatch.
+              if constexpr(FORWARD_DISPATCH){
+                float* local_expert_prob_addr = local_expert_output_prob + output_buffer_index;
+                // Only need to save 1 prob element back to the local global buffer, so can't use TMA for prob element, use normal LDS+STG instead.
+                *local_expert_prob_addr = smem_buffer_ptr->permute_prob_buffer[stage][local_rank * NUM_OF_EXPERTS_PER_RANK + current_local_expert_id];
+              }
+
+              // Store the scaling factor from shared to local global(local expert output buffers) for FP8 tokens.
+              if constexpr(std::is_same<TOKEN_DATA_TYPE, uint8_t>::value){
+                float* local_expert_scaling_factor_addr = local_expert_output_scaling_factor + (output_buffer_index * (HIDDEN_DIM / 128));
+                cuda::ptx::cp_async_bulk(cuda::ptx::space_global,
+                                         cuda::ptx::space_shared,
+                                         reinterpret_cast<void*>(local_expert_scaling_factor_addr),
+                                         reinterpret_cast<const void*>(&smem_buffer_ptr->permute_scaling_factor_buffer[stage][0]),
+                                         (uint32_t)((HIDDEN_DIM / 128) * sizeof(float)));
+
+              }
+            }
+          }
+        }
+        // Commit the previous issued S2G TMA instructions for the same shared memory token entry to a bulk async copy group.
+        cuda::ptx::cp_async_bulk_commit_group();
+        // Add 1 more in-flight S2G token entry to the counter.
+        in_flight_s2g += 1;
+        // If in-flight S2G token entry count has exceeded the expectation, release the 1 oldest token entry for the producer.
+        if(in_flight_s2g > NUM_OF_IN_FLIGHT_S2G){
+          // Wait for all TMA S2G instructions for the 1 oldest token entry to finish reading the shared memory, so the token entry can be reused by the producer.
+          cuda::ptx::cp_async_bulk_wait_group_read(cuda::ptx::n32_t<NUM_OF_IN_FLIGHT_S2G>{});
+          // Reduce 1 in-flight S2G token entry from the counter.
+          in_flight_s2g -= 1;
+          // Notify the producer warp to load next token entry to the oldest token entry as the shared memory can be reused.
+          int notify_stage = (stage - NUM_OF_IN_FLIGHT_S2G) >= 0 ? (stage - NUM_OF_IN_FLIGHT_S2G) : (stage - NUM_OF_IN_FLIGHT_S2G + NUM_OF_STAGES);
+          // mbarrier_arrive will have a default .release semantics to .cta scope(all threads within this permute CUDA block).
+          // So itself can already guarantee that any thread within this permute block can observe the completion of 
+          // all the normal LDS and STG instructions to the prob elements before the this arrive operations(up till this token entry) and the TMA reading operations for the oldest token entry
+          // when they successfully wait for the arrive-on operation of this mbarrier.
+          // So, although we don't use TMA instructions for prob elements, mbarrier_arrive can already guarantee the correct behaviour.
+          cuda::ptx::mbarrier_arrive(&smem_buffer_ptr->permute_mbarrier_buffer[notify_stage][1]);
+        }
+              
+        // Goto next token entry in shared memory.
+        stage += 1;
+        if(stage == NUM_OF_STAGES){
+          stage = 0;
+          producer_parity ^= 1;
+        }
+      }
+    }
+  }
+}
+#endif
 
 // Device function for intra-node G2S warp for combine kernel. There can be only 1 such warp per CUDA block!
 template<typename SMEM_TYPE,
@@ -1450,7 +2069,7 @@ inline __device__ void intra_node_red_warp_group_device_function(const int node_
                 float2 src_data_fp32 = __bfloat1622float2(src_data);
                 acc_token_fp32[n].x += src_data_fp32.x;
                 acc_token_fp32[n].y += src_data_fp32.y;
-              }     
+              }   
             }
 
             if constexpr(BACKWARD_COMBINE){
@@ -1696,8 +2315,8 @@ inline __device__ void inter_node_N2N_warp_group_device_function(const int node_
     for (int token_idx_in_chunk = INTER_NODE_RDMA_GROUP::thread_rank();
          token_idx_in_chunk < NUM_OF_TOKENS_PER_CHUNK;
          token_idx_in_chunk += INTER_NODE_RDMA_GROUP::size()) {
-      int64_t token_idx = token_idx_in_chunk + chunk_id * NUM_OF_TOKENS_PER_CHUNK;
-      int64_t local_token_idx = rdma_remote_node_id * MAX_NUM_OF_TOKENS_PER_RANK + token_idx;
+      int token_idx = token_idx_in_chunk + chunk_id * NUM_OF_TOKENS_PER_CHUNK;
+      int local_token_idx = rdma_remote_node_id * MAX_NUM_OF_TOKENS_PER_RANK + token_idx;
       bool need_write = false;
       if (token_idx_in_chunk < token_range) {
         need_write = rdma_to_attn_map[token_idx_in_chunk + chunk_base_token_idx];
@@ -1715,7 +2334,8 @@ inline __device__ void inter_node_N2N_warp_group_device_function(const int node_
                                                   DOCA_GPUNETIO_IB_MLX5_WQE_CTRL_CQ_UPDATE, 0,
                                                   smem_mr_info_ptr[rdma_remote_node_id].token_raddr + token_idx * static_cast<int64_t>(HIDDEN_DIM) * sizeof(uint16_t),
                                                   smem_mr_info_ptr[rdma_remote_node_id].token_rkey,
-                                                  smem_mr_info_ptr[rdma_remote_node_id].token_laddr + local_token_idx * static_cast<int64_t>(HIDDEN_DIM) * sizeof(uint16_t),                                  smem_mr_info_ptr[rdma_remote_node_id].token_lkey,
+                                                  smem_mr_info_ptr[rdma_remote_node_id].token_laddr + local_token_idx * static_cast<int64_t>(HIDDEN_DIM) * sizeof(uint16_t),
+                                                  smem_mr_info_ptr[rdma_remote_node_id].token_lkey,
                                                   HIDDEN_DIM * sizeof(uint16_t));
         if constexpr(BACKWARD_COMBINE) {
           my_wqe_idx += write_cnt;
@@ -1725,7 +2345,8 @@ inline __device__ void inter_node_N2N_warp_group_device_function(const int node_
                                                     DOCA_GPUNETIO_IB_MLX5_WQE_CTRL_CQ_UPDATE, 0,
                                                     smem_mr_info_ptr[rdma_remote_node_id].prob_raddr + token_idx * (NUM_OF_EXPERTS_PER_RANK * NUM_OF_RANKS_PER_NODE) * sizeof(float),
                                                     smem_mr_info_ptr[rdma_remote_node_id].prob_rkey,
-                                                    smem_mr_info_ptr[rdma_remote_node_id].prob_laddr + local_token_idx * (NUM_OF_EXPERTS_PER_RANK * NUM_OF_RANKS_PER_NODE) * sizeof(float),                                   smem_mr_info_ptr[rdma_remote_node_id].prob_lkey,
+                                                    smem_mr_info_ptr[rdma_remote_node_id].prob_laddr + local_token_idx * (NUM_OF_EXPERTS_PER_RANK * NUM_OF_RANKS_PER_NODE) * sizeof(float),
+                                                    smem_mr_info_ptr[rdma_remote_node_id].prob_lkey,
                                                     (NUM_OF_EXPERTS_PER_RANK * NUM_OF_RANKS_PER_NODE) * sizeof(float));
         }
       }
@@ -1954,7 +2575,7 @@ inline __device__ void inter_node_G2S_warp_group_device_function(const int node_
           // Then accumulate from rdma inter-node buffers. There are total NUM_OF_NODES - 1 (possible) src tokens from rdma buffer to reduce.
           const bool* attn_to_rdma_map_load_addr = attn_to_rdma_map_load_base_addr + (j * NUM_OF_TOKENS_PER_GROUP + k) * (NUM_OF_NODES - 1);
           #pragma unroll
-          for(int n = 1; n < NUM_OF_NODES; n++){
+          for (int n = 1; n < NUM_OF_NODES; n++) {
             // The current node been processed. For each chunk id, node_id order is 
             // (no local_node itself, which is already been accumulated above) local_node - 1, local_node - 2, ......, local_node + 1 and will wrap around.
             int node_id = node_rank >= n ? node_rank - n : node_rank + NUM_OF_NODES - n;
@@ -2031,7 +2652,7 @@ inline __device__ void inter_node_G2S_warp_group_device_function(const int node_
       }
     }
   }
-  #ifdef HYBRID_EP_BUILD_MULTINODE_ENABLE
+#ifdef HYBRID_EP_BUILD_MULTINODE_ENABLE
   // Update residue flags.
   int residue_flag_count = max_num_of_chunks_per_rank - num_of_chunks_per_rank;
   for (int node_id = blockIdx.x; node_id < NUM_OF_NODES - 1; node_id += gridDim.x) {
@@ -2040,7 +2661,7 @@ inline __device__ void inter_node_G2S_warp_group_device_function(const int node_
       residue_flag_base_ptr[flag_id] = *expected_flag_value;
     }
   }
-  #endif // HYBRID_EP_BUILD_MULTINODE_ENABLE
+#endif // HYBRID_EP_BUILD_MULTINODE_ENABLE
 }
 
 // Device function for inter-node reduction warp group for combine kernel.
@@ -2280,7 +2901,7 @@ inline __device__ void inter_node_red_warp_group_device_function(const int node_
                 float2 src_data_fp32 = __bfloat1622float2(src_data);
                 acc_token_fp32[m].x += src_data_fp32.x;
                 acc_token_fp32[m].y += src_data_fp32.y;
-              }  
+              }     
             }
 
             if constexpr(BACKWARD_COMBINE){
@@ -2405,16 +3026,20 @@ inline __device__ void inter_node_red_warp_group_device_function(const int node_
   // So we can directly exit w/o any explicit synchronization with TMA operations.
 }
 
+template<int NUM_OF_RANKS_PER_NODE>
 __launch_bounds__(1, 1)
-static __global__ void device_sync_kernel(uint32_t* intra_node_remote_flags, const uint32_t* expected_flag_value)
+__global__ void device_sync_kernel(uint32_t* intra_node_remote_flags, uint32_t* expected_flag_value, uint32_t* parity)
 {
   // Add system-level fence to confirm correctness in cuda graph.
   __threadfence_system();
+  // What's the current parity used for this sync.
+  uint32_t flag_parity = *parity;
+  uint32_t current_parity_expected_flag_value = expected_flag_value[flag_parity] + NUM_OF_RANKS_PER_NODE;
   // Atomically reduce add 1 to the u32 flag on rank #0 in current NVLink domain. 
   // Need a strong system-scope red to make sure all ranks from current NVLink domain can see the side effect.
   asm volatile("red.relaxed.sys.global.add.u32 [%0], %1;"
                 :
-                : "l"(__cvta_generic_to_global(intra_node_remote_flags)), "n"(1)
+                : "l"(__cvta_generic_to_global(intra_node_remote_flags + flag_parity)), "n"(1)
                 : "memory");
 
   // Polling flag value from the u32 flag on rank #0 in current NVLink domain.
@@ -2426,25 +3051,27 @@ static __global__ void device_sync_kernel(uint32_t* intra_node_remote_flags, con
       // But no no memory fence(i.e. .aquired) needed since no memory operation behind this.
       asm volatile("ld.relaxed.sys.global.u32 %0, [%1];"
                     : "=r"(flag_data)
-                    : "l"(__cvta_generic_to_global(intra_node_remote_flags))
+                    : "l"(__cvta_generic_to_global(intra_node_remote_flags + flag_parity))
                     : "memory");
-    }while(flag_data != *expected_flag_value);
+    }while(flag_data != current_parity_expected_flag_value);
+  // Save the new expected_flag_value and the parity back to global memory.
+  expected_flag_value[flag_parity] = current_parity_expected_flag_value;
+  *parity = flag_parity ^ 1;
 }
 
-// This kernel will update expected_rdma_flag_value and expected_intra_node_flag_value in local device memory
-// by increasing the expected_rdma_flag_value by 1 and expected_intra_node_flag_value by NUM_OF_RANKS_PER_NODE.
-template<int NUM_OF_NODES,
-         int NUM_OF_RANKS_PER_NODE,
-         bool DEVICE_SIDE_SYNC>
+// This kernel will update expected_rdma_flag_value by increasing the expected_rdma_flag_value by 1 in local device memory.
+// When permute fusion is enabled, will also update expected_permute_flag_value in local device memory
+// by increasing the expected_permute_flag_value by 1.
+template<int NUM_OF_NODES>
 __launch_bounds__(1, 1)
-__global__ void update_expected_value_kernel(uint64_t* expected_rdma_flag_value, uint32_t* expected_intra_node_flag_value)
+__global__ void update_expected_value_kernel(uint64_t* expected_rdma_flag_value, uint32_t* expected_permute_flag_value)
 {
   if constexpr(NUM_OF_NODES != 1){
     (*expected_rdma_flag_value) += 1;
   }
-  if constexpr(DEVICE_SIDE_SYNC){
-    (*expected_intra_node_flag_value) += NUM_OF_RANKS_PER_NODE;
-  }
+#ifdef HYBRID_EP_BUILD_PERMUTE_FUSION_ENABLE
+  (*expected_permute_flag_value) += 1;
+#endif
 }
 
 template<typename TOKEN_DATA_TYPE, 
@@ -2454,10 +3081,22 @@ template<typename TOKEN_DATA_TYPE,
          typename INTRA_NODE_G2S_GROUP,
          // This type represent intra-node S2G warp group.
          typename INTRA_NODE_S2G_GROUP,
+         // This type represent permute G2S warp group.
+         typename PERMUTE_G2S_GROUP,
+         // This type represent permute S2G warp group.
+         typename PERMUTE_S2G_GROUP,
          // Number of token entry in the shared memory.
          int NUM_OF_STAGES,
+         // Number of token entry in the shared memory for permute block.
+         int NUM_OF_STAGES_PERMUTE_BLOCK,
          // Number of in-flight S2G token entry in the shared memory, must be smaller than NUM_OF_STAGES.
          int NUM_OF_IN_FLIGHT_S2G,
+         // Number of in-flight S2G token entry in the shared memory for permute block, must be smaller than NUM_OF_STAGES_PERMUTE_BLOCK.
+         int NUM_OF_IN_FLIGHT_S2G_PERMUTE_BLOCK,
+         // The padding size for each local expert.
+         int LOCAL_EXPERTS_PADDING_SIZE,
+         // Number of additional in-flight S2G entry before notify the permute G2S warp group.
+         int NUM_OF_ADDITIONAL_IN_FLIGHT_S2G,
          // Size of each chunk.
          int NUM_OF_TOKENS_PER_CHUNK,
          // Model configuration.
@@ -2468,11 +3107,16 @@ template<typename TOKEN_DATA_TYPE,
          int NUM_OF_NODES,
          // Number of CUDA block running dispatch kernel.
          int NUM_OF_BLOCKS,
+         // Number of CUDA block running permute.
+         int NUM_OF_PERMUTE_BLOCKS,
          // Whether the dispatch kernel is used in forward process or backward process.
          bool FORWARD_DISPATCH>
 // Each CUDA block of dispatch kernel has 3 warp groups and has the following layout: 
 // 1. inter-node warp group(i.e. RDMA N2N warp group, 1 warp, only valid for multinode scenario) 2. intra-node G2S warp group(i.e. NVL G2S warp group, 1 warp). 
 // 3. intra-node S2G warp group(i.e. NVL S2G warp group, 2(multinode scenario)-3(single-node scenario) warps). Total 4 warps per CUDA block/SM.
+// When permute fusion is enabled, the dispatch kernel will has NUM_OF_BLOCKS dispatch blocks + NUM_OF_PERMUTE_BLOCKS permute blocks(block-specialization enabled), with dispatch blocks come first.
+// The dispatch block still follow the previous warp group layout, the permute block has 2 warp groups and has the following layout:
+// 1. permute G2S warp group(1 warp). 2. permute S2G warp group(3 warps). Total 4 warps per CUDA block/SM, same as dispatch blocks.
 __launch_bounds__(INTER_NODE_GROUP::size() + INTRA_NODE_G2S_GROUP::size() + INTRA_NODE_S2G_GROUP::size(), 1)
 __global__ void dispatch_kernel(const __grid_constant__ dispatch_kernel_param_t<TOKEN_DATA_TYPE> param)
 {
@@ -2481,6 +3125,10 @@ __global__ void dispatch_kernel(const __grid_constant__ dispatch_kernel_param_t<
   static_assert(INTER_NODE_GROUP::size() == 32, "Dispatch kernel only support 1 N2N warp currently.");
 #endif
   static_assert(INTRA_NODE_G2S_GROUP::size() == 32, "Dispatch kernel only support 1 G2S warp currently.");
+#ifdef HYBRID_EP_BUILD_PERMUTE_FUSION_ENABLE
+  static_assert(PERMUTE_G2S_GROUP::size() == 32, "Dispatch kernel only support 1 permute G2S warp currently.");
+  static_assert(INTER_NODE_GROUP::size() + INTRA_NODE_G2S_GROUP::size() + INTRA_NODE_S2G_GROUP::size() == PERMUTE_G2S_GROUP::size() + PERMUTE_S2G_GROUP::size(), "Dispatch blocks and permute block should have the same size.");
+#endif
   // The token and its properties should meet size and alignment requirement.
   // Currently, we use TMA to copy prob data, which need at least 16B size and alignment(which requires expert per node to be multiple of 4).
   // We need to add padding or not using TMA for prob, if we want to support other scenario.
@@ -2493,11 +3141,54 @@ __global__ void dispatch_kernel(const __grid_constant__ dispatch_kernel_param_t<
     static_assert(((HIDDEN_DIM / 128) * sizeof(float)) % 16 == 0, "Currently, scaling factor per token must be multiple of 16B.");
   }
 
+
   // Shared memory used over 48KB, should use dynamic shared memory.
   extern __shared__ uint8_t smem_bytes[];
   using cur_smem_t = dispatch_kernel_dynamic_shared_memory_buffer_t<TOKEN_DATA_TYPE, NUM_OF_STAGES, HIDDEN_DIM, NUM_OF_TOKENS_PER_CHUNK, NUM_OF_EXPERTS_PER_RANK, NUM_OF_RANKS_PER_NODE, NUM_OF_NODES, FORWARD_DISPATCH>;
+#ifdef HYBRID_EP_BUILD_PERMUTE_FUSION_ENABLE
+  // When permute fusion is enabled, also need to declare the type for the smem for permute blocks.
+  using cur_permute_block_smem_t = dispatch_kernel_permute_block_dynamic_shared_memory_buffer_t<TOKEN_DATA_TYPE, NUM_OF_STAGES_PERMUTE_BLOCK, HIDDEN_DIM, NUM_OF_EXPERTS_PER_RANK, NUM_OF_RANKS_PER_NODE, FORWARD_DISPATCH>;
+#endif
   cur_smem_t* smem_buffer_ptr = reinterpret_cast<cur_smem_t*>(smem_bytes);
 
+#ifdef HYBRID_EP_BUILD_PERMUTE_FUSION_ENABLE
+  // When permute fusion is enabled, also need to declare the ptr for the smem for permute block.
+  // Different types of blocks will use different ptr.
+  cur_permute_block_smem_t* permute_block_smem_buffer_ptr = reinterpret_cast<cur_permute_block_smem_t*>(smem_bytes);
+#endif
+#ifdef HYBRID_EP_BUILD_PERMUTE_FUSION_ENABLE
+  // To prevent compiler generate pointless comparison warning.
+  int blockIdx_x_int = (int)blockIdx.x;
+  // Let first thread of each CUDA block initialize the mbarrier.
+  if(threadIdx.x == 0){
+    if(blockIdx_x_int < NUM_OF_BLOCKS){
+      // Dispatch blocks.
+      for(int i = 0; i < NUM_OF_STAGES; i++){
+        // Initialize mbarrier
+        cuda::ptx::mbarrier_init(&smem_buffer_ptr->intra_node_mbarrier_buffer[i][0], 1);
+        cuda::ptx::mbarrier_init(&smem_buffer_ptr->intra_node_mbarrier_buffer[i][1], INTRA_NODE_S2G_GROUP::warp_size());
+      }
+      // Initialize sparse_to_dense map mbarrier.
+      cuda::ptx::mbarrier_init(&smem_buffer_ptr->sparse_to_dense_map_mbarrier_buffer[0], 1);
+      cuda::ptx::mbarrier_init(&smem_buffer_ptr->sparse_to_dense_map_mbarrier_buffer[1], 1);
+      // Initialize S2G warp group mbarrier.
+      cuda::ptx::mbarrier_init(&smem_buffer_ptr->S2G_group_mbarrier_buffer, INTRA_NODE_S2G_GROUP::warp_size());
+      // Make mbarriers initialization visible to async proxy(TMA).
+      cuda::ptx::fence_proxy_async(cuda::ptx::space_shared);
+    }else if(blockIdx_x_int < NUM_OF_BLOCKS + NUM_OF_PERMUTE_BLOCKS){
+      // Permute blocks.
+      for(int i = 0; i < NUM_OF_STAGES_PERMUTE_BLOCK; i++){
+        // Initialize mbarrier
+        cuda::ptx::mbarrier_init(&permute_block_smem_buffer_ptr->permute_mbarrier_buffer[i][0], 1);
+        cuda::ptx::mbarrier_init(&permute_block_smem_buffer_ptr->permute_mbarrier_buffer[i][1], PERMUTE_S2G_GROUP::warp_size());
+      }
+      // Make mbarriers initialization visible to async proxy(TMA).
+      cuda::ptx::fence_proxy_async(cuda::ptx::space_shared);
+    }else{
+      // Too many blocks, should not goes here.
+    }
+  }
+#else
   // Let first thread of each CUDA block initialize the mbarrier.
   if(threadIdx.x == 0){
     for(int i = 0; i < NUM_OF_STAGES; i++){
@@ -2513,21 +3204,75 @@ __global__ void dispatch_kernel(const __grid_constant__ dispatch_kernel_param_t<
     // Make mbarriers initialization visible to async proxy(TMA).
     cuda::ptx::fence_proxy_async(cuda::ptx::space_shared);
   }
+#endif
 
   // Make sure all the warps wait for mbarriers to be initialized before producing/consuming data.
   __syncthreads();
 
+  // Now blocks can become specialized if permute fusion is enabled.
   // Now warps can become specialized.
   // The input warp group data type must match the warp groups layout.
   // To prevent compiler generate pointless comparison warning.
   int threadIdx_x_int = (int)threadIdx.x;
+#ifdef HYBRID_EP_BUILD_PERMUTE_FUSION_ENABLE
+  if(blockIdx_x_int < NUM_OF_BLOCKS){
+    // Dispatch blocks.
+    if(threadIdx_x_int < INTER_NODE_GROUP::size()){
+#ifdef HYBRID_EP_BUILD_MULTINODE_ENABLE
+      // Inter-node warps groups.
+      if constexpr(NUM_OF_NODES != 1){
+        N2N_warp_group_device_function
+        <INTER_NODE_GROUP, TOKEN_DATA_TYPE, cur_smem_t, NUM_OF_STAGES, HIDDEN_DIM, NUM_OF_TOKENS_PER_CHUNK, NUM_OF_EXPERTS_PER_RANK, NUM_OF_RANKS_PER_NODE, NUM_OF_NODES, NUM_OF_BLOCKS, FORWARD_DISPATCH>
+        (param.node_rank, param.num_of_tokens_per_rank, param.attn_to_rdma_map, reinterpret_cast<doca_gpu_dev_verbs_qp**>(param.d_qps_gpu), reinterpret_cast<dispatch_memory_region_info_t*>(param.mr_info), smem_buffer_ptr);
+      }
+#endif
+    }else if(threadIdx_x_int < INTER_NODE_GROUP::size() + INTRA_NODE_G2S_GROUP::size()){
+      // Intra-node G2S warp groups.
+      G2S_warp_group_device_function
+      <INTRA_NODE_G2S_GROUP, TOKEN_DATA_TYPE, cur_smem_t, NUM_OF_STAGES, HIDDEN_DIM, NUM_OF_TOKENS_PER_CHUNK,
+      MAX_NUM_OF_TOKENS_PER_RANK, NUM_OF_EXPERTS_PER_RANK, NUM_OF_RANKS_PER_NODE, NUM_OF_NODES, NUM_OF_BLOCKS, FORWARD_DISPATCH>
+      (param.node_rank, param.num_of_tokens_per_rank, param.expected_rdma_flag_value, param.rdma_to_attn_map,
+      param.attn_input_token, param.attn_input_prob, param.attn_input_token_scaling_factor, param.rdma_inter_node_group_token,
+      param.rdma_inter_node_group_prob, param.rdma_inter_node_group_scaling_factor, param.rdma_inter_node_group_flags, smem_buffer_ptr);
+    }else if(threadIdx_x_int < INTER_NODE_GROUP::size() + INTRA_NODE_G2S_GROUP::size() + INTRA_NODE_S2G_GROUP::size()){
+      // Intra-node S2G warp groups.
+      S2G_warp_group_device_function
+      <INTRA_NODE_S2G_GROUP, TOKEN_DATA_TYPE, cur_smem_t, NUM_OF_STAGES, NUM_OF_IN_FLIGHT_S2G, NUM_OF_ADDITIONAL_IN_FLIGHT_S2G, HIDDEN_DIM, NUM_OF_TOKENS_PER_CHUNK, NUM_OF_EXPERTS_PER_RANK, NUM_OF_RANKS_PER_NODE, NUM_OF_NODES, NUM_OF_BLOCKS, FORWARD_DISPATCH>
+      (param.local_rank, param.node_rank, param.num_of_tokens_per_rank, param.rdma_to_attn_map, param.sparse_to_dense_map, param.expert_output_token, param.expert_output_prob,
+      param.expert_output_scaling_factor, param.intra_node_expert_output_chunk_flags, smem_buffer_ptr);
+    }else{
+      // Too many threads, should not goes here.
+    }
+  }else if(blockIdx_x_int < NUM_OF_BLOCKS + NUM_OF_PERMUTE_BLOCKS){
+    // Permute blocks.
+    if(threadIdx_x_int < PERMUTE_G2S_GROUP::size()){
+      // Permute G2S warp groups.
+      permute_G2S_warp_group_device_function
+      <PERMUTE_G2S_GROUP, TOKEN_DATA_TYPE, cur_permute_block_smem_t, NUM_OF_STAGES_PERMUTE_BLOCK, HIDDEN_DIM, NUM_OF_TOKENS_PER_CHUNK, MAX_NUM_OF_TOKENS_PER_RANK,
+      NUM_OF_EXPERTS_PER_RANK, NUM_OF_RANKS_PER_NODE, NUM_OF_NODES, NUM_OF_PERMUTE_BLOCKS, NUM_OF_BLOCKS, FORWARD_DISPATCH>
+      (param.node_rank, param.num_of_tokens_per_rank, param.expected_permute_flag_value, param.dense_chunk_layout, param.expert_output_token[param.local_rank], 
+      param.expert_output_prob[param.local_rank], param.expert_output_scaling_factor[param.local_rank], param.intra_node_expert_output_chunk_flags[param.local_rank], permute_block_smem_buffer_ptr);
+    }else if(threadIdx_x_int < PERMUTE_G2S_GROUP::size() + PERMUTE_S2G_GROUP::size()){
+      // Permute S2G warp groups.
+      permute_S2G_warp_group_device_function
+      <PERMUTE_S2G_GROUP, TOKEN_DATA_TYPE, cur_permute_block_smem_t, NUM_OF_STAGES_PERMUTE_BLOCK, NUM_OF_IN_FLIGHT_S2G_PERMUTE_BLOCK, HIDDEN_DIM, NUM_OF_TOKENS_PER_CHUNK, NUM_OF_EXPERTS_PER_RANK,
+      NUM_OF_RANKS_PER_NODE, NUM_OF_NODES, LOCAL_EXPERTS_PADDING_SIZE, NUM_OF_PERMUTE_BLOCKS, NUM_OF_BLOCKS, FORWARD_DISPATCH>
+      (param.local_rank, param.node_rank, param.num_of_tokens_per_rank, param.dense_chunk_layout, param.dense_to_expert_map, param.num_of_local_experts_tokens, param.local_expert_output_token,
+      param.local_expert_output_prob, param.local_expert_output_scaling_factor, permute_block_smem_buffer_ptr);
+    }else{
+      // Too many threads, should not goes here.
+    }
+  }else{
+    // Too many blocks, should not goes here.
+  }
+#else
   if(threadIdx_x_int < INTER_NODE_GROUP::size()){
 #ifdef HYBRID_EP_BUILD_MULTINODE_ENABLE
     // Inter-node warps groups.
     if constexpr(NUM_OF_NODES != 1){
       N2N_warp_group_device_function
       <INTER_NODE_GROUP, TOKEN_DATA_TYPE, cur_smem_t, NUM_OF_STAGES, HIDDEN_DIM, NUM_OF_TOKENS_PER_CHUNK, NUM_OF_EXPERTS_PER_RANK, NUM_OF_RANKS_PER_NODE, NUM_OF_NODES, NUM_OF_BLOCKS, FORWARD_DISPATCH>
-      (param.node_rank, param.num_of_tokens_per_rank, param.attn_to_rdma_map, reinterpret_cast<doca_gpu_dev_verbs_qp**>(param.d_qps_gpu), reinterpret_cast<dispatch_memory_region_info_t*>(param.mr_info), smem_buffer_ptr);
+      (param.node_rank, param.num_of_tokens_per_rank, param.rdma_to_attn_map, reinterpret_cast<doca_gpu_dev_verbs_qp**>(param.d_qps_gpu), reinterpret_cast<combine_memory_region_info_t*>(param.mr_info), smem_buffer_ptr);
     }
 #endif
   }else if(threadIdx_x_int < INTER_NODE_GROUP::size() + INTRA_NODE_G2S_GROUP::size()){
@@ -2541,12 +3286,13 @@ __global__ void dispatch_kernel(const __grid_constant__ dispatch_kernel_param_t<
   }else if(threadIdx_x_int < INTER_NODE_GROUP::size() + INTRA_NODE_G2S_GROUP::size() + INTRA_NODE_S2G_GROUP::size()){
     // Intra-node S2G warp groups.
     S2G_warp_group_device_function
-    <INTRA_NODE_S2G_GROUP, TOKEN_DATA_TYPE, cur_smem_t, NUM_OF_STAGES, NUM_OF_IN_FLIGHT_S2G, HIDDEN_DIM, NUM_OF_TOKENS_PER_CHUNK, NUM_OF_EXPERTS_PER_RANK, NUM_OF_RANKS_PER_NODE, NUM_OF_NODES, NUM_OF_BLOCKS, FORWARD_DISPATCH>
+    <INTRA_NODE_S2G_GROUP, TOKEN_DATA_TYPE, cur_smem_t, NUM_OF_STAGES, NUM_OF_IN_FLIGHT_S2G, NUM_OF_ADDITIONAL_IN_FLIGHT_S2G, HIDDEN_DIM, NUM_OF_TOKENS_PER_CHUNK, NUM_OF_EXPERTS_PER_RANK, NUM_OF_RANKS_PER_NODE, NUM_OF_NODES, NUM_OF_BLOCKS, FORWARD_DISPATCH>
     (param.local_rank, param.node_rank, param.num_of_tokens_per_rank, param.rdma_to_attn_map, param.sparse_to_dense_map, param.expert_output_token, param.expert_output_prob,
-    param.expert_output_scaling_factor, smem_buffer_ptr);
+    param.expert_output_scaling_factor, param.intra_node_expert_output_chunk_flags, smem_buffer_ptr);
   }else{
     // Too many threads, should not goes here.
   }
+#endif
 }
 
 template<// This type represent intra-node reduction warp group.
@@ -2605,7 +3351,6 @@ __global__ void combine_kernel(const __grid_constant__ combine_kernel_param_t pa
   extern __shared__ uint8_t smem_bytes[];
   using cur_smem_t = combine_kernel_dynamic_shared_memory_buffer_t
   <NUM_OF_STAGES_G2S, NUM_OF_STAGES_S2G, HIDDEN_DIM, MAX_NUM_OF_TOKENS_PER_RANK, NUM_OF_TOKENS_PER_CHUNK, NUM_OF_EXPERTS_PER_RANK, NUM_OF_RANKS_PER_NODE, NUM_OF_NODES, BACKWARD_COMBINE>;
-  
   cur_smem_t* smem_buffer_ptr = reinterpret_cast<cur_smem_t*>(smem_bytes);
 
   // Let first thread of each CUDA block initialize the mbarrier.
@@ -2672,7 +3417,7 @@ __global__ void combine_kernel(const __grid_constant__ combine_kernel_param_t pa
     if constexpr(NUM_OF_NODES != 1){
       inter_node_N2N_warp_group_device_function
       <INTER_NODE_RDMA_GROUP, cur_smem_t, NUM_OF_STAGES_S2G, HIDDEN_DIM, NUM_OF_TOKENS_PER_CHUNK, MAX_NUM_OF_TOKENS_PER_RANK, NUM_OF_EXPERTS_PER_RANK, NUM_OF_RANKS_PER_NODE, NUM_OF_NODES, NUM_OF_BLOCKS, BACKWARD_COMBINE>
-      (param.node_rank, param.num_of_tokens_per_rank, param.rdma_to_attn_map, reinterpret_cast<doca_gpu_dev_verbs_qp**>(param.d_qps_gpu), reinterpret_cast<combine_memory_region_info_t*>(param.mr_info), smem_buffer_ptr);
+      (param.node_rank, param.num_of_tokens_per_rank, param.rdma_to_attn_map, param.d_qps_gpu, param.mr_info, smem_buffer_ptr);
     }
 #endif
   }else{
@@ -2682,17 +3427,23 @@ __global__ void combine_kernel(const __grid_constant__ combine_kernel_param_t pa
 
 template<int NUM_THREADS_PER_BLOCK,
          int NUM_OF_BLOCKS,
+         int LOCAL_EXPERTS_PADDING_SIZE, 
+         int NUM_OF_TOKENS_PER_CHUNK, 
          int NUM_OF_RANKS_PER_NODE,
          int NUM_OF_NODES,
          int NUM_OF_EXPERTS_PER_RANK>
 __launch_bounds__(NUM_THREADS_PER_BLOCK, 1)
 __global__ void scan(const bool* input_routing_map, 
                      tmp_state_t* tmp, 
+                     tmp_state_t* local_experts_tmp, 
                      int32_t* sparse_to_dense_map, 
                      bool* rdma_to_attn_map,
                      bool* attn_to_rdma_map,
                      int32_t* num_of_tokens_for_experts,
                      bool* local_expert_routing_map,
+                     int32_t* dense_chunk_layout,
+                     int32_t* dense_to_expert_map,
+                     int32_t* num_of_local_experts_tokens,
                      const int node_rank,
                      const int local_rank,
                      const int num_of_tokens_per_rank)
@@ -2716,6 +3467,12 @@ __global__ void scan(const bool* input_routing_map,
   // That means the size of rdma_to_attn_map should be rdma_to_attn_map_size_per_node * NUM_OF_NODES.
   const int rdma_to_attn_map_size_per_node = (((num_of_tokens_per_rank - 1) / 16) + 1) * 16;
 
+#ifdef HYBRID_EP_BUILD_PERMUTE_FUSION_ENABLE
+  // How many chunks per rank. Including full chunks and the remainder chunk.
+  const int num_of_chunks_per_rank = ((num_of_tokens_per_rank - 1) / NUM_OF_TOKENS_PER_CHUNK) + 1;
+  // How many total chunks for all ranks.
+  const int num_of_total_attn_chunks = num_of_chunks_per_rank * NUM_OF_RANKS_PER_NODE * NUM_OF_NODES;
+#endif
   // For each token(row in routing map), calculate how many bytes need to be loaded from the routing map and how to load them.
   static_assert(sizeof(bool) == 1, "Bool is not 1 byte???");
   constexpr int NUM_OF_BYTES_TO_LOAD_FOR_EACH_TOKEN = NUM_OF_EXPERTS_PER_RANK * NUM_OF_RANKS_PER_NODE;
@@ -2728,6 +3485,13 @@ __global__ void scan(const bool* input_routing_map,
   using write_t = Copy_t<NUM_OF_BYTES_TO_STORE_FOR_EACH_TOKEN>;
   static_assert(NUM_OF_BYTES_TO_STORE_FOR_EACH_TOKEN % sizeof(write_t) == 0, "NUM_OF_BYTES_TO_STORE_FOR_EACH_TOKEN and write_t mismatch");
   constexpr int S2D_MAP_STORE_ITER = NUM_OF_BYTES_TO_STORE_FOR_EACH_TOKEN / sizeof(write_t);
+#ifdef HYBRID_EP_BUILD_PERMUTE_FUSION_ENABLE
+  // When permute fusion is enabled, calculate how many bytes need to be store to dense_to_expert_map per token.
+  constexpr int NUM_OF_BYTES_TO_STORE_FOR_EACH_TOKEN_FOR_LOCAL_EXPERTS = sizeof(int32_t) * NUM_OF_EXPERTS_PER_RANK;
+  using local_experts_write_t = Copy_t<NUM_OF_BYTES_TO_STORE_FOR_EACH_TOKEN_FOR_LOCAL_EXPERTS>;
+  static_assert(NUM_OF_BYTES_TO_STORE_FOR_EACH_TOKEN_FOR_LOCAL_EXPERTS % sizeof(local_experts_write_t) == 0, "NUM_OF_BYTES_TO_STORE_FOR_EACH_TOKEN_FOR_LOCAL_EXPERTS and local_experts_write_t mismatch");
+  constexpr int D2E_MAP_STORE_ITER = NUM_OF_BYTES_TO_STORE_FOR_EACH_TOKEN_FOR_LOCAL_EXPERTS / sizeof(local_experts_write_t);
+#endif
 
   // How to convert per-expert routing info to per-rank routing info. We support any number of expert per rank.
   using expert_to_rank_t = Reduce_t<NUM_OF_EXPERTS_PER_RANK>;
@@ -2741,11 +3505,33 @@ __global__ void scan(const bool* input_routing_map,
 
   // How do a warp save per-rank routing info back to shared memory. What's the max number of elements does each thread save back.
   constexpr int NUM_OF_RANKS_PER_THREAD = ((NUM_OF_RANKS_PER_NODE - 1) / WARP_SIZE) + 1;
+#ifdef HYBRID_EP_BUILD_PERMUTE_FUSION_ENABLE
+  // How do a warp save local experts' routing info back to shared memory. What's the max number of elements does each thread save back.
+  constexpr int NUM_OF_LOCAL_EXPERTS_PER_THREAD = ((NUM_OF_EXPERTS_PER_RANK - 1) / WARP_SIZE) + 1;
+#endif
 
   // Sum of per-rank routing info of all warps within the block.
   __shared__ int32_t warp_token_routing_map_sum[NUM_OF_WARPS_PER_BLOCK][NUM_OF_RANKS_PER_NODE];
+#ifdef HYBRID_EP_BUILD_PERMUTE_FUSION_ENABLE
+  // Sum of local experts' routing info of all warps within the block.
+  __shared__ int32_t warp_token_local_experts_routing_map_sum[NUM_OF_WARPS_PER_BLOCK][NUM_OF_EXPERTS_PER_RANK];
+#endif
   // Sum of previous blocks' per-rank routing info.
   __shared__ int32_t previous_block_sum[NUM_OF_RANKS_PER_NODE];
+#ifdef HYBRID_EP_BUILD_PERMUTE_FUSION_ENABLE
+  // Sum of all blocks' local experts' routing info.
+  __shared__ int32_t all_block_local_experts_sum[NUM_OF_EXPERTS_PER_RANK];
+  // Sum of previous blocks' local experts' routing info accumulated with previous local experts' routing info.
+  __shared__ int32_t previous_block_local_experts_sum[NUM_OF_EXPERTS_PER_RANK];
+#endif
+
+#ifdef HYBRID_EP_BUILD_PERMUTE_FUSION_ENABLE
+  // Init shared memory which are used as accumulator.
+  for(int i = threadIdx.x; i < NUM_OF_EXPERTS_PER_RANK; i += NUM_THREADS_PER_BLOCK){
+    all_block_local_experts_sum[i] = 0;
+    previous_block_local_experts_sum[i] = 0;
+  }
+#endif
 
   // We assign contiguous tokens called chunk to each CUDA block, each CUDA block get the same size of chunk.
   int block_starting_token = blockIdx.x * num_of_tokens_per_block;
@@ -2767,6 +3553,15 @@ __global__ void scan(const bool* input_routing_map,
   for(int i = 0; i < NUM_OF_RANKS_PER_NODE; i++){
     token_routing_map_sum[i] = 0;
   }
+
+#ifdef HYBRID_EP_BUILD_PERMUTE_FUSION_ENABLE
+  // Sum of local experts' token routing map within a thread.
+  int32_t token_local_experts_routing_map_sum[NUM_OF_EXPERTS_PER_RANK];
+  #pragma unroll
+  for(int i = 0; i < NUM_OF_EXPERTS_PER_RANK; i++){
+    token_local_experts_routing_map_sum[i] = 0;
+  }
+#endif
 
   //#pragma unroll
   for(int i = 0; i < num_of_tokens_per_thread; i++){
@@ -2797,6 +3592,7 @@ __global__ void scan(const bool* input_routing_map,
 
     // Convert the routing map to per rank routing info and accumulate to accumulator.
     // Also convert the per rank routing info to per node routing info.
+    // When permute fusion is enabled, also accumulate local experts to accumulator.
     bool token_needed_by_this_node = false;
     #pragma unroll
     for(int j = 0; j < NUM_OF_RANKS_PER_NODE; j++){
@@ -2814,6 +3610,15 @@ __global__ void scan(const bool* input_routing_map,
         token_routing_map_sum[j] += 1;
         token_needed_by_this_node = true;
       }
+#ifdef HYBRID_EP_BUILD_PERMUTE_FUSION_ENABLE
+      if(j == local_rank){
+        int current_local_expert_id = j * NUM_OF_EXPERTS_PER_RANK;
+        #pragma unroll
+        for(int k = 0; k < NUM_OF_EXPERTS_PER_RANK; k++){
+          token_local_experts_routing_map_sum[k] += (int32_t)(token_routing_map[current_local_expert_id + k]);
+        }
+      }
+#endif
     }
 
     // Save the per node routing info back to rdma_to_attn_map if needed.
@@ -2842,11 +3647,36 @@ __global__ void scan(const bool* input_routing_map,
     }
   }
 
+#ifdef HYBRID_EP_BUILD_PERMUTE_FUSION_ENABLE
+  // When permute fusion is enabled, each warp sum the local experts' routing info from all its threads.
+  #pragma unroll
+  for(int i = 0; i < NUM_OF_EXPERTS_PER_RANK; i++){
+    int dst_tid = i % WARP_SIZE;
+    int dst_id = i / WARP_SIZE;
+    int32_t temp_sum = __reduce_add_sync(~0, token_local_experts_routing_map_sum[i]);
+    if(lane_id == dst_tid){
+      token_local_experts_routing_map_sum[dst_id] = temp_sum;
+    }
+  }
+
+  // When permute fusion is enabled, each warp store the sum of local experts' routing info back to shared memory.
+  #pragma unroll
+  for(int i = 0; i < NUM_OF_LOCAL_EXPERTS_PER_THREAD; i++){
+    int element_id = i * WARP_SIZE + lane_id;
+    if(element_id < NUM_OF_EXPERTS_PER_RANK){
+      warp_token_local_experts_routing_map_sum[warp_id][element_id] = token_local_experts_routing_map_sum[i];
+    }
+  }
+#endif
+
   // Sync within a CUDA block to make sure all warps have produced the per-rank sum data to the shared memory before any thread can consume them to produce CUDA block level's sum data.
+  // When permute fusion is enabled, also make sure all warps have produced the local experts' sum data to the shared memory.
   __syncthreads();
 
   // Step 1: Communication between CUDA blocks. Each CUDA block's threads need to produce and store the current block's per-rank sum data to global memory,
   // and load and accumulate previous blocks' per-rank sum data and save the result to shared memory.
+  // When permute fusion is enabled, Each CUDA block's threads also need to produce and store the current block's local experts' sum data to global memory,
+  // and load and accumulate all & previous blocks' local experts' sum data and save the result to shared memory. This is due to the layout requirement of local experts' output buffer.
 
   // Each thread within a CUDA block calculate the CUDA block level sum for a single rank at a time.
   for(int i = threadIdx.x; i < NUM_OF_RANKS_PER_NODE; i += NUM_THREADS_PER_BLOCK){
@@ -2867,6 +3697,28 @@ __global__ void scan(const bool* input_routing_map,
                   : "l"(__cvta_generic_to_global(tmp_dst)), "l"(data)
                   : "memory");
   }
+
+#ifdef HYBRID_EP_BUILD_PERMUTE_FUSION_ENABLE
+  // When permute fusion is enabled, each thread within a CUDA block calculate the CUDA block level sum for a local expert at a time.
+  for(int i = threadIdx.x; i < NUM_OF_EXPERTS_PER_RANK; i += NUM_THREADS_PER_BLOCK){
+    int32_t local_expert_acc = 0;
+    // Calculate the sum of current local expert within this CUDA block.
+    #pragma unroll
+    for(int j = 0; j < NUM_OF_WARPS_PER_BLOCK; j++){
+      local_expert_acc += warp_token_local_experts_routing_map_sum[j][i];
+    }
+
+    // Store the sum of current local expert within this CUDA block to global memory for later scan opeartions.
+    // Strong(atomic) store is needed to be visible to strong(atomic) load from other blocks.
+    tmp_state_t* tmp_dst = &local_experts_tmp[blockIdx.x * NUM_OF_EXPERTS_PER_RANK + i];
+    tmp_state_t tmp_data{PRIV_SUM, local_expert_acc};
+    uint64_t data = *reinterpret_cast<uint64_t*>(&tmp_data);
+    asm volatile("st.relaxed.gpu.global.b64 [%0], %1;"
+                  :
+                  : "l"(__cvta_generic_to_global(tmp_dst)), "l"(data)
+                  : "memory");
+  }
+#endif
 
   // Each thread within a CUDA block load previous blocks' block level sum for a single rank at a time.
   for(int i = threadIdx.x; i < NUM_OF_RANKS_PER_NODE; i += NUM_THREADS_PER_BLOCK){
@@ -2889,11 +3741,85 @@ __global__ void scan(const bool* input_routing_map,
     previous_block_sum[i] = previous_block_sum_for_current_rank;
   }
 
+#ifdef HYBRID_EP_BUILD_PERMUTE_FUSION_ENABLE
+  // When permute fusion is enabled, all threads within a CUDA block load all blocks' block level sum and accumulate to shared memory.
+  for(int i = threadIdx.x; i < NUM_OF_EXPERTS_PER_RANK * NUM_OF_BLOCKS; i += NUM_THREADS_PER_BLOCK){
+    // Which block and which local expert is this sum element belongs to.
+    int block_index = i / NUM_OF_EXPERTS_PER_RANK;
+    int local_expert_index = i % NUM_OF_EXPERTS_PER_RANK;
+    // Poll the sum element from global memory.
+    tmp_state_t tmp_data{EMPTY, 0};
+    tmp_state_t* tmp_src = &local_experts_tmp[i];
+    do{
+        // Load a block-level local expert's sum from global memory.
+        // Strong(atomic) load is needed to view strong(atomic) store from other blocks.
+        uint64_t data = 0;
+        asm volatile("ld.relaxed.gpu.global.b64 %0, [%1];"
+                      : "=l"(data)
+                      : "l"(__cvta_generic_to_global(tmp_src))
+                      : "memory");
+        tmp_data = *reinterpret_cast<tmp_state_t*>(&data);
+    }while(tmp_data.state != PRIV_SUM);
+
+    // Atomically add the block-level local expert's sum element to shared memory to produce all blocks' sum and previous blocks' sum.
+    atomicAdd_block(&all_block_local_experts_sum[local_expert_index], tmp_data.value);
+    if(block_index < (int)blockIdx.x){
+      atomicAdd_block(&previous_block_local_experts_sum[local_expert_index], tmp_data.value);
+    }
+  }
+#endif
+
   // Sync within a CUDA block to make sure all previous blocks' per-rank sum have been produced to the shared memory before any thread can consume them in scan operation.
+  // When permute fusion is enabled, also make sure all and previous blocks' local experts' sum have been produced to the shared memory.
   __syncthreads();
+
+#ifdef HYBRID_EP_BUILD_PERMUTE_FUSION_ENABLE 
+  // Load sum of all blocks' local experts' routing info to produce the accumulation of previous local experts' routing info. 
+  int32_t thread_local_all_block_local_experts_sum[NUM_OF_EXPERTS_PER_RANK - 1];
+  // Only threads which will participate in accumulation will need to load the data from the shared memory.
+  if(threadIdx.x < NUM_OF_EXPERTS_PER_RANK){
+    #pragma unroll
+    for(int i = 0; i < NUM_OF_EXPERTS_PER_RANK - 1; i++){
+      thread_local_all_block_local_experts_sum[i] = all_block_local_experts_sum[i];
+    }
+  }
+  
+  // When permute fusion is enabled, all threads within a CUDA block produced sum of previous blocks' local experts' routing info accumulated with previous local experts' routing info.
+  for(int i = threadIdx.x; i < NUM_OF_EXPERTS_PER_RANK; i += NUM_THREADS_PER_BLOCK){
+    int32_t current_expert_previous_block_sum = previous_block_local_experts_sum[i];
+    int32_t previous_experts_acc = 0;
+    #pragma unroll
+    for(int j = 0; j < NUM_OF_EXPERTS_PER_RANK - 1; j++){
+      if(j < i){
+        // local experts sum can be >= zero, so need to handle the corner case.
+        int num_of_padding_tile = (thread_local_all_block_local_experts_sum[j] % LOCAL_EXPERTS_PADDING_SIZE == 0) ? (thread_local_all_block_local_experts_sum[j] / LOCAL_EXPERTS_PADDING_SIZE)
+                                                                                                                  : (thread_local_all_block_local_experts_sum[j] / LOCAL_EXPERTS_PADDING_SIZE + 1);
+        int32_t local_expert_sum_with_padding = num_of_padding_tile * LOCAL_EXPERTS_PADDING_SIZE;
+        previous_experts_acc += local_expert_sum_with_padding;
+      }
+    }
+    previous_block_local_experts_sum[i] = current_expert_previous_block_sum + previous_experts_acc;
+  }
+
+  // Sync within a CUDA block to make sure all the final accumulated previous blocks' local experts' routing info have been produced to the shared memory 
+  // before any thread can consume them in scan operation.
+  __syncthreads();
+
+  // First block will need to save all local experts' sum back to output buffer.
+  if(blockIdx.x == 0){
+    for(int i = threadIdx.x; i < NUM_OF_EXPERTS_PER_RANK; i += NUM_THREADS_PER_BLOCK){
+      num_of_local_experts_tokens[i] = all_block_local_experts_sum[i];
+    }
+  }
+#endif
 
   // Step 2: Each warp scan the sub-chunk assigned to them(the same sub-chunk as step 0) and produce sparse_to_dense_map, local_expert_routing_map and num_of_tokens_for_experts.
   int32_t previous_token_sum[NUM_OF_RANKS_PER_NODE];
+
+#ifdef HYBRID_EP_BUILD_PERMUTE_FUSION_ENABLE 
+  // When permute fusion is enabled, each warp will also need to scan and produce dense_chunk_layout and dense_to_expert_map.
+  int32_t previous_token_local_experts_sum[NUM_OF_EXPERTS_PER_RANK];
+#endif
 
   // Each warp load the previous blocks' per-rank sum from shared memory.
   #pragma unroll
@@ -2924,6 +3850,37 @@ __global__ void scan(const bool* input_routing_map,
     previous_token_sum[i] = __shfl_sync(~0, previous_token_sum[src_id], src_tid);
   }
 
+#ifdef HYBRID_EP_BUILD_PERMUTE_FUSION_ENABLE
+  // When permute fusion is enabled, each warp load the previous blocks' local experts' sum from shared memory.
+  #pragma unroll
+  for(int i = 0; i < NUM_OF_LOCAL_EXPERTS_PER_THREAD; i++){
+    int element_id = i * WARP_SIZE + lane_id;
+    if(element_id < NUM_OF_EXPERTS_PER_RANK){
+      previous_token_local_experts_sum[i] = previous_block_local_experts_sum[element_id];
+    }
+  }
+
+  // When permute fusion is enabled, each warp accumulate the previous warps' local experts' sum from shared memory.
+  #pragma unroll
+  for(int i = 0; i < NUM_OF_LOCAL_EXPERTS_PER_THREAD; i++){
+    int element_id = i * WARP_SIZE + lane_id;
+    if(element_id < NUM_OF_EXPERTS_PER_RANK){
+      for(int j = 0; j < warp_id; j++){
+        previous_token_local_experts_sum[i] += warp_token_local_experts_routing_map_sum[j][element_id];
+      }
+    }
+  }
+
+  // Each warp broadcast the accumulated previous local experts' routing info to all its threads.
+  // Exact reverse of warp reduce operation.
+  #pragma unroll
+  for(int i = NUM_OF_EXPERTS_PER_RANK - 1; i >= 0 ; i--){
+    int src_tid = i % WARP_SIZE;
+    int src_id = i / WARP_SIZE;
+    previous_token_local_experts_sum[i] = __shfl_sync(~0, previous_token_local_experts_sum[src_id], src_tid);
+  }
+#endif
+
   // Each warp scan all the tiles within its sub-chunk.
   //#pragma unroll
   for(int i = 0; i < num_of_tokens_per_thread; i++){
@@ -2941,6 +3898,14 @@ __global__ void scan(const bool* input_routing_map,
     int current_token_node_rank = current_token_id / (num_of_tokens_per_rank * NUM_OF_RANKS_PER_NODE);
     int current_token_local_rank = (current_token_id % (num_of_tokens_per_rank * NUM_OF_RANKS_PER_NODE)) / num_of_tokens_per_rank;
     int current_token_local_id = current_token_id % num_of_tokens_per_rank;
+#ifdef HYBRID_EP_BUILD_PERMUTE_FUSION_ENABLE
+    // When permute fusion is enabled, calculate chunk-related info.
+    bool first_token_of_a_chunk = (current_token_local_id % NUM_OF_TOKENS_PER_CHUNK) == 0;
+    int current_token_global_chunk_id = (current_token_node_rank * NUM_OF_RANKS_PER_NODE + current_token_local_rank) * num_of_chunks_per_rank +
+                                        (current_token_local_id / NUM_OF_TOKENS_PER_CHUNK);
+    // If this token belongs to a valid attn token chunk, and it is the first token of this chunk, then we need to save this token's per-rank ex-scan of local rank to dense_chunk_layout map.
+    bool token_needed_by_dense_chunk_layout = first_token_of_a_chunk && current_token_global_chunk_id > 0 && current_token_global_chunk_id < num_of_total_attn_chunks;
+#endif
 
     // Global routing map load base addr for current token.
     const copy_t* routing_map_load_base_addr = reinterpret_cast<const copy_t*>(input_routing_map + 
@@ -2963,8 +3928,9 @@ __global__ void scan(const bool* input_routing_map,
     for(int j = 0; j < NUM_OF_RANKS_PER_NODE; j++){
       int32_t temp_scan = 0;
       bool token_needed_by_this_rank = false;
+      // Old warp-level scan implementation, using warp shuffle, suitable for general data type, but not fast enough for bool type.
       // If the token is not out-of-bound, check whether this rank need this token.
-      if(token_out_of_bound == 0){
+      /*if(token_out_of_bound == 0){
         #pragma unroll
         for(int k = 0; k < EXPERTS_TO_RANK_REDUCE_ITER; k++){
           int current_expert_to_rank_t_id = j * EXPERTS_TO_RANK_REDUCE_ITER + k;
@@ -2995,14 +3961,63 @@ __global__ void scan(const bool* input_routing_map,
 
       // Make scan exclusive.
       int32_t exclusive_scan = __shfl_up_sync(~0, temp_scan, 1);
-      temp_scan = (lane_id >= 1) ? exclusive_scan : 0;
+      temp_scan = (lane_id >= 1) ? exclusive_scan : 0;*/
+
+      // New warp-level scan implementation for bool value, using warp vote instead of warp shuffle. Warp vote is way faster than warp shuffle.
+      // If the token is not out-of-bound, check whether this rank need this token.
+      if(token_out_of_bound == 0){
+        #pragma unroll
+        for(int k = 0; k < EXPERTS_TO_RANK_REDUCE_ITER; k++){
+          int current_expert_to_rank_t_id = j * EXPERTS_TO_RANK_REDUCE_ITER + k;
+          expert_to_rank_t reduction_data = *(reinterpret_cast<expert_to_rank_t*>(token_routing_map) + current_expert_to_rank_t_id);
+          if(reduction_data != (expert_to_rank_t)0){
+            token_needed_by_this_rank = true;
+            break;
+          }
+        }
+      }
+
+      // Each warp vote to create a bit mask indicating which token is needed by this rank within this tile.
+      unsigned vote_result = __ballot_sync(~0, token_needed_by_this_rank);
+      // The sum of this rank of this tile. Need to accumulate that for later tiles.
+      int32_t temp_sum = __popc(vote_result);
+      // Each warp perform a exclusive scan from all threads(lanes).
+      temp_scan = __popc(vote_result << (WARP_SIZE - lane_id));
 
       // Calculate the final exclusive scan for current token. -1 represent that the current rank does not need the current token. 
       final_ex_scan[j] = token_needed_by_this_rank ? previous_token_sum[j] + temp_scan : -1;
 
-      // Accumulate the sum to accumulator.
-      previous_token_sum[j] += temp_sum;
-
+#ifdef HYBRID_EP_BUILD_PERMUTE_FUSION_ENABLE
+      // When permute fusion is enabled, we need to do extra work to local experts of local rank.
+      if(j == local_rank){
+        int32_t final_local_experts_ex_scan[NUM_OF_EXPERTS_PER_RANK];
+        // First calculate ex-scan for this tile for all local experts of the local rank.
+        #pragma unroll
+        for(int k = 0; k < NUM_OF_EXPERTS_PER_RANK; k++){
+          bool token_needed_by_this_local_expert = false;
+          if(token_out_of_bound == 0){
+            token_needed_by_this_local_expert = token_routing_map[j * NUM_OF_EXPERTS_PER_RANK + k];
+          }
+          unsigned local_expert_vote_result = __ballot_sync(~0, token_needed_by_this_local_expert);
+          int32_t local_expert_temp_sum = __popc(local_expert_vote_result);
+          int32_t local_expert_temp_scan = __popc(local_expert_vote_result << (WARP_SIZE - lane_id));
+          final_local_experts_ex_scan[k] = token_needed_by_this_local_expert ? previous_token_local_experts_sum[k] + local_expert_temp_scan : -1;
+          previous_token_local_experts_sum[k] += local_expert_temp_sum;
+        }
+        // Then save the ex-scan back to dense_to_expert map if the current token is needed by local rank.
+        if(token_needed_by_this_rank){
+          local_experts_write_t* dense_to_expert_map_store_base_addr = reinterpret_cast<local_experts_write_t*>(dense_to_expert_map + final_ex_scan[j] * NUM_OF_EXPERTS_PER_RANK);
+          #pragma unroll
+          for(int k = 0; k < D2E_MAP_STORE_ITER; k++){
+            dense_to_expert_map_store_base_addr[k] = *(reinterpret_cast<local_experts_write_t*>(final_local_experts_ex_scan) + k);
+          }
+        }
+        // If condition meet, we also need to save current token's local rank's ex-scan to dense_chunk_layout map.
+        if(token_needed_by_dense_chunk_layout){
+          dense_chunk_layout[current_token_global_chunk_id - 1] = previous_token_sum[j] + temp_scan;
+        }
+      }
+#else
       // Each thread save local routing map for this token of the local rank to local_expert_routing_map if this token is needed by the local rank.
       if(j == local_rank && token_needed_by_this_rank){
         expert_to_rank_t* local_expert_routing_map_store_base_addr = reinterpret_cast<expert_to_rank_t*>(local_expert_routing_map + (final_ex_scan[j] * NUM_OF_EXPERTS_PER_RANK));
@@ -3012,10 +4027,16 @@ __global__ void scan(const bool* input_routing_map,
           local_expert_routing_map_store_base_addr[k] = *(reinterpret_cast<expert_to_rank_t*>(token_routing_map) + current_expert_to_rank_t_id);
         }
       }
-
+#endif
+      // Accumulate the sum to accumulator.
+      previous_token_sum[j] += temp_sum;
       // The thread that processing the global last token save the final sum for current rank to num_of_tokens_for_experts.
       if(current_token_id == num_of_total_attn_tokens - 1 && j == local_rank){
         *num_of_tokens_for_experts = previous_token_sum[j];
+#ifdef HYBRID_EP_BUILD_PERMUTE_FUSION_ENABLE
+        // When permute fusion is enabled, also need to save the final sum for current rank to the last element of dense_chunk_layout.
+        dense_chunk_layout[num_of_total_attn_chunks - 1] = previous_token_sum[j];
+#endif
       }
     }
 
@@ -3120,6 +4141,8 @@ public:
   // Routing map which contain global routing info from all tokens to all expert. Allgather is needed before passing the routing map to this API.
   // preprocessing_tmp: IO: output/input, dtype: tmp_state_t, shape: [NUM_OF_BLOCKS for preprocessing kernel, NUM_OF_RANKS_PER_NODE].
   // The temp buffer needed by the preprocessing kernel.
+  // preprocessing_local_experts_tmp: IO: output/input, dtype: tmp_state_t, shape: [NUM_OF_BLOCKS for preprocessing kernel, NUM_OF_EXPERTS_PER_RANK].
+  // The temp buffer needed by the preprocessing kernel when the permute fusion is enabled.
   // sparse_to_dense_map: IO: output, dtype: int32_t, shape: [NUM_OF_TOKENS_PER_RANK * NUM_OF_NODES, NUM_OF_RANKS_PER_NODE].
   // The routing info needed by NVL warps(i.e. intra-node communication warps) during both dispatch and combine operation. Remains the same in a trainning iteration(FW+BP).
   // rdma_to_attn_map: IO: output, dtype: bool, shape: [NUM_OF_TOKENS_PER_RANK padded to 16 * NUM_OF_NODES]
@@ -3131,18 +4154,34 @@ public:
   // Remains the same in a trainning iteration(FW+BP).
   // local_expert_routing_map: IO: output, dtype: bool, shape: [at least num_of_tokens_for_experts, NUM_OF_EXPERTS_PER_RANK].
   // The per-expert routing info for all tokens within the expert buffer of this rank. It is used by later layer to routing the tokens to different experts on this rank.
+  // Valid only when permute fusion is NOT enabled.
   // Remains the same in a trainning iteration(FW+BP).
-  template<// Block size for preprocessing kernel.
+  // dense_chunk_layout: IO: output, dtype: int32_t, shape: [num_of_chunks_per_rank * num_of_total_ranks].
+  // What's the starting location of each attn token chunk within the local rank's per-rank buffer. dense_chunk_layout[i + 1] - dense_chunk_layout[i] means chunk size of (i + 1) chunk.
+  // Valid only when permute fusion is enabled.
+  // dense_to_expert_map: IO: output, dtype: int32_t, shape: [at least num_of_tokens_for_experts, NUM_OF_EXPERTS_PER_RANK].
+  // The index of each token within the per-rank buffer to the local expert buffer. Valid only when permute fusion is enabled.
+  // num_of_local_experts_tokens: IO: output, dtype: int32_t, shape: [NUM_OF_EXPERTS_PER_RANK].
+  // How many real token per each local expert w/o padding. Valid only when permute fusion is enabled.
+  template<// The padding size of each local expert's output.
+           int LOCAL_EXPERTS_PADDING_SIZE,
+           // The size of token chunk used in preprocessing kernel.
+           int NUM_OF_TOKENS_PER_CHUNK,
+           // Block size for preprocessing kernel.
            int NUM_THREADS_PER_BLOCK, 
            // Grid size for preprocessing kernel(1:1 block:SM mapping).
            int NUM_OF_BLOCKS>
   static void metadata_preprocessing(const bool* input_routing_map, 
                                      tmp_state_t* preprocessing_tmp,
+                                     tmp_state_t* preprocessing_local_experts_tmp,
                                      int32_t* sparse_to_dense_map,
                                      bool* rdma_to_attn_map,
                                      bool* attn_to_rdma_map,
                                      int32_t* num_of_tokens_for_experts,
                                      bool* local_expert_routing_map,
+                                     int32_t* dense_chunk_layout,
+                                     int32_t* dense_to_expert_map,
+                                     int32_t* num_of_local_experts_tokens,
                                      const int node_rank,
                                      const int local_rank,
                                      const int num_of_tokens_per_rank,
@@ -3162,11 +4201,17 @@ public:
     // Init preprocessing_tmp buffers.
     constexpr size_t preprocessing_tmp_sz = NUM_OF_BLOCKS * NUM_OF_RANKS_PER_NODE * sizeof(tmp_state_t);
     CUDA_CHECK(cudaMemsetAsync(preprocessing_tmp, 0, preprocessing_tmp_sz, stream));
+#ifdef HYBRID_EP_BUILD_PERMUTE_FUSION_ENABLE
+    // When permute fusion is enabled, also init preprocessing_tmp buffers for local expert scan.
+    constexpr size_t preprocessing_local_experts_tmp_sz = NUM_OF_BLOCKS * NUM_OF_EXPERTS_PER_RANK * sizeof(tmp_state_t);
+    CUDA_CHECK(cudaMemsetAsync(preprocessing_local_experts_tmp, 0, preprocessing_local_experts_tmp_sz, stream));
+#endif
 
     // Launch the preprocessing kernel to process the global routing map.
-    scan<NUM_THREADS_PER_BLOCK, NUM_OF_BLOCKS, NUM_OF_RANKS_PER_NODE, NUM_OF_NODES, NUM_OF_EXPERTS_PER_RANK>
+    scan<NUM_THREADS_PER_BLOCK, NUM_OF_BLOCKS, LOCAL_EXPERTS_PADDING_SIZE, NUM_OF_TOKENS_PER_CHUNK, NUM_OF_RANKS_PER_NODE, NUM_OF_NODES, NUM_OF_EXPERTS_PER_RANK>
     <<<NUM_OF_BLOCKS, NUM_THREADS_PER_BLOCK, 0, stream>>>
-    (input_routing_map, preprocessing_tmp, sparse_to_dense_map, rdma_to_attn_map, attn_to_rdma_map, num_of_tokens_for_experts, local_expert_routing_map, node_rank, local_rank, num_of_tokens_per_rank);
+    (input_routing_map, preprocessing_tmp, preprocessing_local_experts_tmp, sparse_to_dense_map, rdma_to_attn_map, attn_to_rdma_map, num_of_tokens_for_experts, local_expert_routing_map, 
+    dense_chunk_layout, dense_to_expert_map, num_of_local_experts_tokens, node_rank, local_rank, num_of_tokens_per_rank);
 
     // Check if there is any CUDA error.
     CUDA_CHECK(cudaGetLastError());
@@ -3177,12 +4222,22 @@ public:
            typename TOKEN_DATA_TYPE,
            // Number of token entry in the shared memory.
            int NUM_OF_STAGES,
+           // Number of token entry in the shared memory for permute block.
+           int NUM_OF_STAGES_PERMUTE_BLOCK,
            // Number of in-flight S2G token entry in the shared memory, must be smaller than NUM_OF_STAGES.
            int NUM_OF_IN_FLIGHT_S2G,
+           // Number of in-flight S2G token entry in the shared memory for permute block, must be smaller than NUM_OF_STAGES_PERMUTE_BLOCK.
+           int NUM_OF_IN_FLIGHT_S2G_PERMUTE_BLOCK,
+           // The padding size for each local expert.
+           int LOCAL_EXPERTS_PADDING_SIZE,
+           // Number of additional in-flight S2G entry before notify the permute G2S warp group.
+           int NUM_OF_ADDITIONAL_IN_FLIGHT_S2G,
            // The size of token chunk used in dispatch kernel.
            int NUM_OF_TOKENS_PER_CHUNK,
            // Grid size for dispatch kernel(1:1 block:SM mapping).
            int NUM_OF_BLOCKS,
+           // Number of CUDA block running permute(1:1 block:SM mapping).
+           int NUM_OF_PERMUTE_BLOCKS,
            // Whether the dispatch kernel is used in forward process.
            bool FORWARD_DISPATCH,
            // Whether the dispatch kernel need device-side sync before exit. 
@@ -3199,16 +4254,32 @@ public:
     using INTRA_NODE_G2S_GROUP = warp_group<1, 0>;
     using INTRA_NODE_S2G_GROUP = warp_group<3, 1>;
 #endif
+#ifdef HYBRID_EP_BUILD_PERMUTE_FUSION_ENABLE
+    using PERMUTE_G2S_GROUP = warp_group<1, 0>;
+    using PERMUTE_S2G_GROUP = warp_group<3, 1>;
+#else
+    using PERMUTE_G2S_GROUP = warp_group<0, 0>;
+    using PERMUTE_S2G_GROUP = warp_group<0, 0>;
+#endif
     // The shared memory needed by the dispatch kernel.
     using dispatch_kernel_smem_t = dispatch_kernel_dynamic_shared_memory_buffer_t<TOKEN_DATA_TYPE, NUM_OF_STAGES, HIDDEN_DIM, NUM_OF_TOKENS_PER_CHUNK,
                                                                                   NUM_OF_EXPERTS_PER_RANK, NUM_OF_RANKS_PER_NODE, NUM_OF_NODES, FORWARD_DISPATCH>;
+#ifdef HYBRID_EP_BUILD_PERMUTE_FUSION_ENABLE
+    using dispatch_kernel_permute_block_smem_t = dispatch_kernel_permute_block_dynamic_shared_memory_buffer_t<TOKEN_DATA_TYPE, NUM_OF_STAGES_PERMUTE_BLOCK, HIDDEN_DIM,  NUM_OF_EXPERTS_PER_RANK,
+                                                                                                              NUM_OF_RANKS_PER_NODE, FORWARD_DISPATCH>;
+#endif
     // The dispatch kernel to be launched.
-    const auto dispatch_kernel_ptr = dispatch_kernel<TOKEN_DATA_TYPE, INTER_NODE_GROUP, INTRA_NODE_G2S_GROUP, INTRA_NODE_S2G_GROUP, NUM_OF_STAGES,
-                                                     NUM_OF_IN_FLIGHT_S2G, NUM_OF_TOKENS_PER_CHUNK, HIDDEN_DIM, MAX_NUM_OF_TOKENS_PER_RANK,
-                                                     NUM_OF_EXPERTS_PER_RANK, NUM_OF_RANKS_PER_NODE, NUM_OF_NODES, NUM_OF_BLOCKS, FORWARD_DISPATCH>;
+    const auto dispatch_kernel_ptr = dispatch_kernel<TOKEN_DATA_TYPE, INTER_NODE_GROUP, INTRA_NODE_G2S_GROUP, INTRA_NODE_S2G_GROUP, PERMUTE_G2S_GROUP, PERMUTE_S2G_GROUP, NUM_OF_STAGES,
+                                                     NUM_OF_STAGES_PERMUTE_BLOCK, NUM_OF_IN_FLIGHT_S2G, NUM_OF_IN_FLIGHT_S2G_PERMUTE_BLOCK, LOCAL_EXPERTS_PADDING_SIZE, NUM_OF_ADDITIONAL_IN_FLIGHT_S2G,
+                                                     NUM_OF_TOKENS_PER_CHUNK, HIDDEN_DIM, MAX_NUM_OF_TOKENS_PER_RANK, NUM_OF_EXPERTS_PER_RANK, NUM_OF_RANKS_PER_NODE, NUM_OF_NODES, 
+                                                     NUM_OF_BLOCKS, NUM_OF_PERMUTE_BLOCKS, FORWARD_DISPATCH>;
 
     // Configure dynamic shared memory for the dispatch kernel.
+#ifdef HYBRID_EP_BUILD_PERMUTE_FUSION_ENABLE
+    constexpr int SMEM_SIZE = sizeof(dispatch_kernel_smem_t) > sizeof(dispatch_kernel_permute_block_smem_t) ? sizeof(dispatch_kernel_smem_t) : sizeof(dispatch_kernel_permute_block_smem_t);
+#else
     constexpr int SMEM_SIZE = sizeof(dispatch_kernel_smem_t);
+#endif
     // The dispatch kernel only need to be configured once.
     static bool config_completed = false;
     if(!config_completed){
@@ -3219,21 +4290,30 @@ public:
     }
 
     // Launch update_expected_value_kernel to update expected flag value.
-    update_expected_value_kernel<NUM_OF_NODES, NUM_OF_RANKS_PER_NODE, DEVICE_SIDE_SYNC>
-    <<<1, 1, 0, stream>>>(param.expected_rdma_flag_value, param.expected_intra_node_flag_value);
+    update_expected_value_kernel<NUM_OF_NODES>
+    <<<1, 1, 0, stream>>>(param.expected_rdma_flag_value, param.expected_permute_flag_value);
 
+#ifndef HYBRID_EP_BUILD_PERMUTE_FUSION_ENABLE
+    // If the permute fusion is not enabled, we need to launch device_sync_kernel before AND after the dispatch kernel if DEVICE_SIDE_SYNC is true.
+    // If the permute fusion is enabled, only need to launch device_sync_kernel after the dispatch kernel.
     // Launch device sync kernel if needed.
     if constexpr(DEVICE_SIDE_SYNC){
-      device_sync_kernel<<<1, 1, 0, stream>>>(param.intra_node_write_completion_flags, param.expected_intra_node_flag_value);
+      device_sync_kernel<NUM_OF_RANKS_PER_NODE><<<1, 1, 0, stream>>>(param.intra_node_write_completion_flags, param.expected_intra_node_flag_value, param.intra_node_flag_parity);
     }
-
+#endif
     // Launch dispatch kernel.
+#ifdef HYBRID_EP_BUILD_PERMUTE_FUSION_ENABLE
+    static_assert(INTER_NODE_GROUP::size() + INTRA_NODE_G2S_GROUP::size() + INTRA_NODE_S2G_GROUP::size() == PERMUTE_G2S_GROUP::size() + PERMUTE_S2G_GROUP::size(), "Dispatch blocks and permute block should have the same size.");
+    constexpr int NUM_OF_BLOCKS_TOTAL = NUM_OF_BLOCKS + NUM_OF_PERMUTE_BLOCKS;
+#else
+    constexpr int NUM_OF_BLOCKS_TOTAL = NUM_OF_BLOCKS;
+#endif
     constexpr int BLOCK_DIM = INTER_NODE_GROUP::size() + INTRA_NODE_G2S_GROUP::size() + INTRA_NODE_S2G_GROUP::size();
-    dispatch_kernel_ptr<<<NUM_OF_BLOCKS, BLOCK_DIM, SMEM_SIZE, stream>>>(param);
+    dispatch_kernel_ptr<<<NUM_OF_BLOCKS_TOTAL, BLOCK_DIM, SMEM_SIZE, stream>>>(param);
 
     // Launch device sync kernel if needed.
     if constexpr(DEVICE_SIDE_SYNC){
-      device_sync_kernel<<<1, 1, 0, stream>>>(param.intra_node_write_completion_flags + 1, param.expected_intra_node_flag_value);
+      device_sync_kernel<NUM_OF_RANKS_PER_NODE><<<1, 1, 0, stream>>>(param.intra_node_write_completion_flags, param.expected_intra_node_flag_value, param.intra_node_flag_parity);
     }
 
     // Check if there is any CUDA error.
@@ -3297,12 +4377,12 @@ public:
     }
 
     // Launch update_expected_value_kernel to update expected flag value.
-    update_expected_value_kernel<NUM_OF_NODES, NUM_OF_RANKS_PER_NODE, DEVICE_SIDE_SYNC>
-    <<<1, 1, 0, stream>>>(param.expected_rdma_flag_value, param.expected_intra_node_flag_value);
+    update_expected_value_kernel<NUM_OF_NODES>
+    <<<1, 1, 0, stream>>>(param.expected_rdma_flag_value, param.expected_permute_flag_value);
 
     // Launch device sync kernel if needed.
     if constexpr(DEVICE_SIDE_SYNC){
-      device_sync_kernel<<<1, 1, 0, stream>>>(param.intra_node_write_completion_flags, param.expected_intra_node_flag_value);
+      device_sync_kernel<NUM_OF_RANKS_PER_NODE><<<1, 1, 0, stream>>>(param.intra_node_write_completion_flags, param.expected_intra_node_flag_value, param.intra_node_flag_parity);
     }
 
     // Launch combine kernel.
@@ -3311,8 +4391,9 @@ public:
 
     // Launch device sync kernel if needed.
     if constexpr(DEVICE_SIDE_SYNC){
-      device_sync_kernel<<<1, 1, 0, stream>>>(param.intra_node_write_completion_flags + 1, param.expected_intra_node_flag_value);
+      device_sync_kernel<NUM_OF_RANKS_PER_NODE><<<1, 1, 0, stream>>>(param.intra_node_write_completion_flags, param.expected_intra_node_flag_value, param.intra_node_flag_parity);
     }
+    
     // Check if there is any CUDA error.
     CUDA_CHECK(cudaGetLastError());
   }
