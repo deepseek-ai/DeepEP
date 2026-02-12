@@ -127,8 +127,6 @@ def test_hybrid_ep_correctness(buffer: deep_ep.HybridEPBuffer, ref: TorchRef, us
         routing_map,
         probs if with_probs else None,
         scaling_factor,
-        local_expert_routing_map=local_expert_routing_map,
-        out_token_num=tokens_per_expert.sum().item(),
         pad_multiple=PAD_MULTIPLE,
         enable_permute=True,
     )

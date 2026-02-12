@@ -1,3 +1,5 @@
+// SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+
 #pragma once
 
 #include "utils.cuh"
@@ -3272,7 +3274,7 @@ __global__ void dispatch_kernel(const __grid_constant__ dispatch_kernel_param_t<
     if constexpr(NUM_OF_NODES != 1){
       N2N_warp_group_device_function
       <INTER_NODE_GROUP, TOKEN_DATA_TYPE, cur_smem_t, NUM_OF_STAGES, HIDDEN_DIM, NUM_OF_TOKENS_PER_CHUNK, NUM_OF_EXPERTS_PER_RANK, NUM_OF_RANKS_PER_NODE, NUM_OF_NODES, NUM_OF_BLOCKS, FORWARD_DISPATCH>
-      (param.node_rank, param.num_of_tokens_per_rank, param.rdma_to_attn_map, reinterpret_cast<doca_gpu_dev_verbs_qp**>(param.d_qps_gpu), reinterpret_cast<combine_memory_region_info_t*>(param.mr_info), smem_buffer_ptr);
+      (param.node_rank, param.num_of_tokens_per_rank, param.attn_to_rdma_map, reinterpret_cast<doca_gpu_dev_verbs_qp**>(param.d_qps_gpu), reinterpret_cast<dispatch_memory_region_info_t*>(param.mr_info), smem_buffer_ptr);
     }
 #endif
   }else if(threadIdx_x_int < INTER_NODE_GROUP::size() + INTRA_NODE_G2S_GROUP::size()){
@@ -3417,7 +3419,7 @@ __global__ void combine_kernel(const __grid_constant__ combine_kernel_param_t pa
     if constexpr(NUM_OF_NODES != 1){
       inter_node_N2N_warp_group_device_function
       <INTER_NODE_RDMA_GROUP, cur_smem_t, NUM_OF_STAGES_S2G, HIDDEN_DIM, NUM_OF_TOKENS_PER_CHUNK, MAX_NUM_OF_TOKENS_PER_RANK, NUM_OF_EXPERTS_PER_RANK, NUM_OF_RANKS_PER_NODE, NUM_OF_NODES, NUM_OF_BLOCKS, BACKWARD_COMBINE>
-      (param.node_rank, param.num_of_tokens_per_rank, param.rdma_to_attn_map, param.d_qps_gpu, param.mr_info, smem_buffer_ptr);
+      (param.node_rank, param.num_of_tokens_per_rank, param.rdma_to_attn_map, reinterpret_cast<doca_gpu_dev_verbs_qp**>(param.d_qps_gpu), reinterpret_cast<combine_memory_region_info_t*>(param.mr_info), smem_buffer_ptr);
     }
 #endif
   }else{
