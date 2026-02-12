@@ -77,7 +77,7 @@ def init_tensor(
     return hidden, probs, scaling_factor, routing_map
 
 
-def test_hybrid_ep_correctness(buffer: deep_ep.HybridEPBuffer, ref: TorchRef, use_fp8: bool, with_probs: bool):
+def test_hybrid_ep_correctness(buffer: deep_ep.HybridEPBuffer, ref: TorchRef, use_fp8: bool, with_probs: bool, fused_permute_dispatch: bool):
     # Construct the input
     hidden, probs, scaling_factor, routing_map = init_tensor(
         hidden_dim=HIDDEN_DIM,
@@ -104,10 +104,10 @@ def test_hybrid_ep_correctness(buffer: deep_ep.HybridEPBuffer, ref: TorchRef, us
         pad_multiple=PAD_MULTIPLE,
         num_permuted_tokens=num_permuted_tokens,
         non_blocking=True,
+        fuse_permute_dispatch=fused_permute_dispatch,
     )
-    _, _, _, num_dispatched_tokens_tensor, local_expert_routing_map, _, _, _, _ = (
-        handle
-    )
+    num_dispatched_tokens_tensor = handle[3]
+    local_expert_routing_map = handle[4]
     num_dispatched_tokens_tensor = num_dispatched_tokens_tensor.cpu()
     local_expert_routing_map = local_expert_routing_map[
         : num_dispatched_tokens_tensor.item()
@@ -117,7 +117,8 @@ def test_hybrid_ep_correctness(buffer: deep_ep.HybridEPBuffer, ref: TorchRef, us
         hidden=dispatched_hidden.to(torch.bfloat16),
         probs=dispatched_probs,
         handle=handle,
-        pad_multiple=PAD_MULTIPLE
+        pad_multiple=PAD_MULTIPLE,
+        fuse_unpermute_combine=fused_permute_dispatch,
     )
 
     # Get the reference
@@ -155,6 +156,7 @@ def test_hybrid_ep_correctness(buffer: deep_ep.HybridEPBuffer, ref: TorchRef, us
             pad_multiple=PAD_MULTIPLE,
             num_permuted_tokens=num_permuted_tokens,
             non_blocking=True,
+            fuse_permute_dispatch=fused_permute_dispatch,
         )
         dispatched_hidden_bf16 = graph_dispatched_hidden.to(torch.bfloat16)
         (
@@ -164,7 +166,8 @@ def test_hybrid_ep_correctness(buffer: deep_ep.HybridEPBuffer, ref: TorchRef, us
             hidden=dispatched_hidden_bf16,
             probs=graph_dispatched_probs,
             handle=graph_handle,
-            pad_multiple=PAD_MULTIPLE
+            pad_multiple=PAD_MULTIPLE,
+            fuse_unpermute_combine=fused_permute_dispatch,
         )
     graph.replay()
     torch.cuda.synchronize()
@@ -204,20 +207,21 @@ def test_main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
 
     for use_fp8 in [False, True]:
         for with_probs in [True, False]:
-            buffer = deep_ep.HybridEPBuffer(
-                group=group,
-                hidden_dim=HIDDEN_DIM,
-                max_num_of_tokens_per_rank=MAX_NUM_OF_TOKENS_PER_RANK,
-                num_local_experts=NUM_LOCAL_EXPERTS,
-                use_fp8=use_fp8
-            )
-            ref = TorchRef(
-                ep_group=group,
-                num_of_experts=NUM_OF_EXPERTS,
-                num_of_ranks_per_node=NUM_OF_RANKS_PER_NODE,
-            )
+            for fused_permute_dispatch in [False, True]:
+                buffer = deep_ep.HybridEPBuffer(
+                    group=group,
+                    hidden_dim=HIDDEN_DIM,
+                    max_num_of_tokens_per_rank=MAX_NUM_OF_TOKENS_PER_RANK,
+                    num_local_experts=NUM_LOCAL_EXPERTS,
+                    use_fp8=use_fp8
+                )
+                ref = TorchRef(
+                    ep_group=group,
+                    num_of_experts=NUM_OF_EXPERTS,
+                    num_of_ranks_per_node=NUM_OF_RANKS_PER_NODE,
+                )
 
-            test_hybrid_ep_correctness(buffer, ref, use_fp8, with_probs)
+            test_hybrid_ep_correctness(buffer, ref, use_fp8, with_probs, fused_permute_dispatch)
 
     dist.barrier()
     dist.destroy_process_group()

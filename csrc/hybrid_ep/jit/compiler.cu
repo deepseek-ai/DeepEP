@@ -76,7 +76,7 @@ NVCCCompiler::NVCCCompiler(std::string base_path, std::string comm_id):
 }
   
 
-std::string NVCCCompiler::build(std::string code, std::string signature, int local_rank, int node_rank, int num_of_nodes) {
+std::string NVCCCompiler::build(std::string code, std::string signature, int local_rank, int node_rank, int num_of_nodes, bool fuse_permute_dispatch) {
     // Create the source directory
     std::filesystem::create_directories(jit_dir);
 
@@ -99,12 +99,19 @@ std::string NVCCCompiler::build(std::string code, std::string signature, int loc
         jit_dir + "/" + extended_signature + ".so";
     // Remove the output .so file if it exists
     remove(output_path.c_str());
+
+    // Build extra define flags
+    std::string extra_flags;
+    if (fuse_permute_dispatch) {
+        extra_flags += " -DHYBRID_EP_BUILD_PERMUTE_FUSION_ENABLE";
+    }
+
     // Choose the flags based on the number of nodes
     std::string compile_command;
     if(num_of_nodes > 1) {
-        compile_command = nvcc_path + " " + inter_node_flags + " " + source_path + " " + objs + " -o " + output_path;
+        compile_command = nvcc_path + " " + inter_node_flags + extra_flags + " " + source_path + " " + objs + " -o " + output_path;
     }else {
-        compile_command = nvcc_path + " " + intra_node_flags + " " + source_path + " -o " + output_path;
+        compile_command = nvcc_path + " " + intra_node_flags + extra_flags + " " + source_path + " -o " + output_path;
     }
     
     // Run the compile command
@@ -120,8 +127,10 @@ std::string NVCCCompiler::build(std::string code, std::string signature, int loc
 }
 
 std::any NVCCCompiler::get_instance(std::string library_path, std::string kernel_key) {
-    // Open the compiled library with RTLD_GLOBAL for symbol visibility
-    void* handle = dlopen(library_path.c_str(), RTLD_NOW | RTLD_GLOBAL);
+    // Open the compiled library with RTLD_LOCAL to avoid symbol conflicts
+    // between JIT-compiled templates (e.g. with HYBRID_EP_BUILD_PERMUTE_FUSION_ENABLE)
+    // and the same template instantiated in the main module (without the macro).
+    void* handle = dlopen(library_path.c_str(), RTLD_NOW | RTLD_LOCAL);
     if (handle == nullptr) {
         const char* error = dlerror();
         std::string error_msg = "Failed to open library: " + library_path + "\n";
@@ -236,7 +245,7 @@ node_rank(node_rank), local_rank(local_rank), nvcc_compiler(base_path, comm_id) 
     }
 }
 
-void KernelCache::run_proprecess_kernel(
+void KernelCache::run_preprocess_kernel(
     HybridEpConfigInstance config, 
     const bool* input_routing_map,
     hybrid_ep::tmp_state_t* preprocessing_tmp,
@@ -252,6 +261,7 @@ void KernelCache::run_proprecess_kernel(
     const int node_rank,
     const int local_rank,
     int num_of_tokens_per_rank,
+    bool fuse_permute_dispatch,
     cudaStream_t stream
 ){
     // Generate the unique key to search the kernel in the cache
@@ -264,13 +274,14 @@ void KernelCache::run_proprecess_kernel(
         config.pad_multiple,
         config.num_of_tokens_per_chunk_preprocessing_api,
         config.num_of_threads_per_block_preprocessing_api,
-        config.num_of_blocks_preprocessing_api
+        config.num_of_blocks_preprocessing_api,
+        fuse_permute_dispatch
     );
     
     auto it = kernel_cache.find(preprocess_kernel_key);
     if (it == kernel_cache.end()) {
         auto preprocessing_code = nvcc_compiler.get_metadata_preprocessing_code(config);
-        auto preprocessing_path = nvcc_compiler.build(preprocessing_code, preprocess_kernel_key, local_rank, node_rank, config.num_of_nodes);
+        auto preprocessing_path = nvcc_compiler.build(preprocessing_code, preprocess_kernel_key, local_rank, node_rank, config.num_of_nodes, fuse_permute_dispatch);
         kernel_cache[preprocess_kernel_key] = nvcc_compiler.get_instance(preprocessing_path, preprocess_kernel_key);
     }
     auto preprocessing_instance = kernel_cache[preprocess_kernel_key];
@@ -287,12 +298,14 @@ void KernelCache::run_proprecess_kernel(
 template void KernelCache::run_dispatch_kernel<uint8_t>(
     HybridEpConfigInstance config, 
     hybrid_ep::dispatch_kernel_param_t<uint8_t> param,
+    bool fuse_permute_dispatch,
     cudaStream_t stream
 );
 
 template void KernelCache::run_dispatch_kernel<uint16_t>(
     HybridEpConfigInstance config, 
     hybrid_ep::dispatch_kernel_param_t<uint16_t> param,
+    bool fuse_permute_dispatch,
     cudaStream_t stream
 );
 
@@ -300,6 +313,7 @@ template<typename DATA_TYPE>
 void KernelCache::run_dispatch_kernel(
     HybridEpConfigInstance config, 
     hybrid_ep::dispatch_kernel_param_t<DATA_TYPE> param,
+    bool fuse_permute_dispatch,
     cudaStream_t stream
 ){
     // Generate the unique key to search the kernel in the cache
@@ -320,14 +334,15 @@ void KernelCache::run_dispatch_kernel(
         config.num_of_blocks_dispatch_api,
         config.num_of_blocks_permute_api,
         config.forward_dispatch_api,
-        config.device_side_sync_dispatch_api
+        config.device_side_sync_dispatch_api,
+        fuse_permute_dispatch
     );
 
     auto it = kernel_cache.find(dispatch_kernel_key);
     if (it == kernel_cache.end()) {
         // JIT Compile the kernel
         auto dispatch_code = nvcc_compiler.get_dispatch_code(config);
-        auto dispatch_path = nvcc_compiler.build(dispatch_code, dispatch_kernel_key, local_rank, node_rank, config.num_of_nodes);
+        auto dispatch_path = nvcc_compiler.build(dispatch_code, dispatch_kernel_key, local_rank, node_rank, config.num_of_nodes, fuse_permute_dispatch);
         kernel_cache[dispatch_kernel_key] = nvcc_compiler.get_instance(dispatch_path, dispatch_kernel_key);
     }
     auto dispatch_instance = kernel_cache[dispatch_kernel_key];
@@ -344,6 +359,7 @@ void KernelCache::run_dispatch_kernel(
 void KernelCache::run_combine_kernel(
     HybridEpConfigInstance config, 
     hybrid_ep::combine_kernel_param_t param,
+    bool fuse_permute_dispatch,
     cudaStream_t stream
 ){
     // Generate the unique key to search the kernel in the cache
@@ -360,14 +376,15 @@ void KernelCache::run_combine_kernel(
         config.num_of_blocks_combine_api,
         config.num_of_additional_in_flight_s2g_combine_api,
         config.backward_combine_api,
-        config.device_side_sync_combine_api
+        config.device_side_sync_combine_api,
+        fuse_permute_dispatch
     );
 
     auto it = kernel_cache.find(combine_kernel_key);
     if (it == kernel_cache.end()) {
         // JIT Compile the kernel
         auto combine_code = nvcc_compiler.get_combine_code(config);
-        auto combine_path = nvcc_compiler.build(combine_code, combine_kernel_key, local_rank, node_rank, config.num_of_nodes);
+        auto combine_path = nvcc_compiler.build(combine_code, combine_kernel_key, local_rank, node_rank, config.num_of_nodes, fuse_permute_dispatch);
         kernel_cache[combine_kernel_key] = nvcc_compiler.get_instance(combine_path, combine_kernel_key);
     }
     auto combine_instance = kernel_cache[combine_kernel_key];

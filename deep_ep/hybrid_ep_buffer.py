@@ -162,6 +162,7 @@ class HybridEPBuffer:
         num_local_experts: int = None,
         pad_multiple: int = None,
         use_fp8: bool = None,
+        fuse_permute_dispatch: bool = False,
         **kwargs,
     ):
         """
@@ -198,7 +199,7 @@ class HybridEPBuffer:
             os.getenv("NUM_OF_THREADS_PER_BLOCK_PREPROCESSING_API", "512")
         )
         config.num_of_blocks_permute_api = self.num_blocks_permute_api # also used in the fused permute-dispatch kernel
-        config.pad_multiple = pad_multiple if pad_multiple is not None else 0
+        config.pad_multiple = pad_multiple if pad_multiple is not None and pad_multiple > 0 else 1
         config.num_of_tokens_per_chunk_preprocessing_api = int(
             os.getenv("NUM_OF_TOKENS_PER_CHUNK_PREPROCESSING_API", "128")
         )
@@ -210,6 +211,9 @@ class HybridEPBuffer:
             hybrid_ep_cpp.UINT8 if use_fp8 else hybrid_ep_cpp.UINT16
         )
         config.num_of_blocks_dispatch_api = self.num_sms_dispatch_api
+        # If we use the fused permute-dispatch kernel, the default number of blocks for permute part is the same as the number of blocks for dispatch part.
+        if fuse_permute_dispatch:
+            config.num_of_blocks_permute_api = self.num_sms_dispatch_api
         config.device_side_sync_dispatch_api = True
         # Dispatch stages config:
         config.num_of_stages_dispatch_api = int(
@@ -225,7 +229,7 @@ class HybridEPBuffer:
             os.getenv("NUM_OF_IN_FLIGHT_S2G_PERMUTE_BLOCK_DISPATCH_API", "8")
         )
         config.num_of_additional_in_flight_s2g_dispatch_api = int(
-            os.getenv("NUM_OF_ADDITIONAL_IN_FLIGHT_S2G_DISPATCH_API", "2")
+            os.getenv("NUM_OF_ADDITIONAL_IN_FLIGHT_S2G_DISPATCH_API", "6")
         )
         config.num_of_tokens_per_chunk_dispatch_api = int(
             os.getenv("NUM_OF_TOKENS_PER_CHUNK_DISPATCH_API", "128")
@@ -422,6 +426,7 @@ class HybridEPBuffer:
         # If non_blocking is True, no stream synchronization will be used, the all output are on the GPU.
         # Otherwise, num_dispatched_tokens_tensor and tokens_per_expert are on the CPU pinned memory, the stream synchronization will be used to wait for the data in pinned memory.
         non_blocking: bool = False,
+        fuse_permute_dispatch: bool = False,
         # Deprecated parameters
         num_dispatched_tokens: int = None,
         use_host_meta: bool = None,
@@ -460,7 +465,9 @@ class HybridEPBuffer:
                     hidden_dim=hidden_dim,
                     num_of_tokens_per_rank=num_of_tokens_per_rank,
                     num_local_experts=num_of_experts_per_rank,
+                    pad_multiple=pad_multiple,
                     use_fp8=use_fp8,
+                    fuse_permute_dispatch=fuse_permute_dispatch,
                 )
                 handle_impl = self.runtime.metadata_preprocessing(
                     config=config,
@@ -469,22 +476,38 @@ class HybridEPBuffer:
                     num_permuted_tokens=num_permuted_tokens,
                     pad_multiple=pad_multiple,
                     enable_permute=True,
+                    fuse_permute_dispatch=fuse_permute_dispatch,
                     non_blocking=non_blocking,
                 )
             else:
-                # Convert legacy 9-element tuple to HandleImpl
+                # Convert legacy tuple to HandleImpl
                 handle_impl = hybrid_ep_cpp.HandleImpl()
-                (
-                    handle_impl.sparse_to_dense_map,
-                    handle_impl.rdma_to_attn_map,
-                    handle_impl.attn_to_rdma_map,
-                    handle_impl.num_dispatched_tokens_tensor,
-                    handle_impl.local_expert_routing_map,
-                    handle_impl.row_id_map,
-                    handle_impl.num_of_tokens_per_rank,
-                    handle_impl.config,
-                    handle_impl.overflow_flag,
-                ) = handle
+                if fuse_permute_dispatch:
+                    (
+                        handle_impl.sparse_to_dense_map,
+                        handle_impl.rdma_to_attn_map,
+                        handle_impl.attn_to_rdma_map,
+                        handle_impl.num_dispatched_tokens_tensor,
+                        handle_impl.local_expert_routing_map,
+                        handle_impl.dense_chunk_layout,
+                        handle_impl.dense_to_expert_map,
+                        handle_impl.tokens_per_expert,
+                        handle_impl.num_of_tokens_per_rank,
+                        handle_impl.config,
+                        handle_impl.overflow_flag,
+                    ) = handle
+                else:
+                    (
+                        handle_impl.sparse_to_dense_map,
+                        handle_impl.rdma_to_attn_map,
+                        handle_impl.attn_to_rdma_map,
+                        handle_impl.num_dispatched_tokens_tensor,
+                        handle_impl.local_expert_routing_map,
+                        handle_impl.row_id_map,
+                        handle_impl.num_of_tokens_per_rank,
+                        handle_impl.config,
+                        handle_impl.overflow_flag,
+                    ) = handle
                 handle_impl.num_permuted_tokens = num_permuted_tokens
                 if handle_impl.num_of_tokens_per_rank != num_of_tokens_per_rank:
                     warnings.warn("This handle could be invalid.")
@@ -499,16 +522,27 @@ class HybridEPBuffer:
                 scaling_factor=scaling_factor,
                 handle=handle_impl,
                 pad_multiple=pad_multiple,
+                fuse_permute_dispatch=fuse_permute_dispatch,
                 non_blocking=non_blocking,
                 with_probs=probs is not None,
             )
-
-        return (
-            dispatched_token,
-            dispatched_probs,
-            dispatched_scaling_factor,
-            handle_impl.tokens_per_expert,
-            (
+        
+        if fuse_permute_dispatch:
+            returned_handle = (
+                handle_impl.sparse_to_dense_map,
+                handle_impl.rdma_to_attn_map,
+                handle_impl.attn_to_rdma_map,
+                handle_impl.num_dispatched_tokens_tensor,
+                handle_impl.local_expert_routing_map,
+                handle_impl.dense_chunk_layout,
+                handle_impl.dense_to_expert_map,
+                handle_impl.tokens_per_expert,
+                handle_impl.num_of_tokens_per_rank,
+                handle_impl.config,
+                handle_impl.overflow_flag,
+            )
+        else:
+            returned_handle = (
                 handle_impl.sparse_to_dense_map,
                 handle_impl.rdma_to_attn_map,
                 handle_impl.attn_to_rdma_map,
@@ -518,7 +552,14 @@ class HybridEPBuffer:
                 handle_impl.num_of_tokens_per_rank,
                 handle_impl.config,
                 handle_impl.overflow_flag,
-            ),
+            )
+
+        return (
+            dispatched_token,
+            dispatched_probs,
+            dispatched_scaling_factor,
+            handle_impl.padded_tokens_per_expert,
+            returned_handle,
         )
 
     def combine_with_unpermute(
@@ -529,6 +570,7 @@ class HybridEPBuffer:
         probs: torch.Tensor = None,
         handle: tuple = None,
         pad_multiple: int = None,
+        fuse_unpermute_combine: bool = False,
         # Deprecated parameters
         num_dispatched_tokens: int = None,
     ):
@@ -544,24 +586,41 @@ class HybridEPBuffer:
             assert handle is not None, "The handle is necessary in the combine pass."
 
             # Convert legacy tuple to HandleImpl
-            handle_impl = hybrid_ep_cpp.HandleImpl()
-            (
-                handle_impl.sparse_to_dense_map,
-                handle_impl.rdma_to_attn_map,
-                handle_impl.attn_to_rdma_map,
-                handle_impl.num_dispatched_tokens_tensor,
-                _,
-                handle_impl.row_id_map,
-                handle_impl.num_of_tokens_per_rank,
-                handle_impl.config,
-                _,
-            ) = handle
+            if fuse_unpermute_combine:
+                handle_impl = hybrid_ep_cpp.HandleImpl()
+                (
+                    handle_impl.sparse_to_dense_map,
+                    handle_impl.rdma_to_attn_map,
+                    handle_impl.attn_to_rdma_map,
+                    handle_impl.num_dispatched_tokens_tensor,
+                    handle_impl.local_expert_routing_map,
+                    handle_impl.dense_chunk_layout,
+                    handle_impl.dense_to_expert_map,
+                    handle_impl.tokens_per_expert,
+                    handle_impl.num_of_tokens_per_rank,
+                    handle_impl.config,
+                    handle_impl.overflow_flag,
+                ) = handle
+            else :
+                handle_impl = hybrid_ep_cpp.HandleImpl()
+                (
+                    handle_impl.sparse_to_dense_map,
+                    handle_impl.rdma_to_attn_map,
+                    handle_impl.attn_to_rdma_map,
+                    handle_impl.num_dispatched_tokens_tensor,
+                    handle_impl.local_expert_routing_map,
+                    handle_impl.row_id_map,
+                    handle_impl.num_of_tokens_per_rank,
+                    handle_impl.config,
+                    handle_impl.overflow_flag,
+                ) = handle
 
             combined_token, combined_probs = self.runtime.combine_with_unpermute(
                 hidden=hidden,
                 probs=probs,
                 handle=handle_impl,
                 pad_multiple=pad_multiple,
+                fuse_unpermute_combine=fuse_unpermute_combine,
                 with_probs=probs is not None,
             )
         return combined_token, combined_probs

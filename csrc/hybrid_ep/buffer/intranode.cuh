@@ -24,6 +24,9 @@ struct IntraNodeDispatchBuffers {
     uint32_t *    intra_node_write_completion_flags = nullptr;
     uint32_t *    expected_intra_node_flag_value = nullptr;
     uint32_t *    intra_node_flag_parity = nullptr;
+    uint32_t *    expected_permute_flag_value = nullptr;
+    uint32_t *    intra_node_expert_output_chunk_flags = nullptr;              // Local rank's chunk flags buffer
+    uint32_t **   intra_node_expert_output_chunk_flags_all_ranks = nullptr;  // Host array of per-rank device pointers
 };
 
 struct IntraNodeCombineBuffers {
@@ -36,6 +39,8 @@ struct IntraNodeCombineBuffers {
     uint32_t *    intra_node_write_completion_flags = nullptr;
     uint32_t *    expected_intra_node_flag_value = nullptr;
     uint32_t *    intra_node_flag_parity = nullptr;
+    // Fused unpermute-combine flags
+    uint32_t *    expected_permute_flag_value = nullptr;
 };
   
 
@@ -56,8 +61,11 @@ public:
     IntraNodeCombineBuffers combine_buffers;
     // Buffer for metadata preprocessing
     hybrid_ep::tmp_state_t *preprocessing_tmp = nullptr;
+    hybrid_ep::tmp_state_t *preprocessing_local_experts_tmp = nullptr;
     // Maximum number of tokens for experts (worst case: all tokens to one expert)
     int64_t max_num_of_tokens = -1;
+    // Number of dispatch chunks per rank (for fused permute-dispatch)
+    int num_of_dispatch_chunks = -1;
     // On intra-node communication, dispatch/combine can share same buffers.
     bool use_shared_buffer = false;
 

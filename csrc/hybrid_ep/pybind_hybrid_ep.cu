@@ -139,8 +139,11 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         .def_readwrite("config", &HandleImpl::config)
         .def_readwrite("row_id_map", &HandleImpl::row_id_map)
         .def_readwrite("tokens_per_expert", &HandleImpl::tokens_per_expert)
+        .def_readwrite("padded_tokens_per_expert", &HandleImpl::padded_tokens_per_expert)
         .def_readwrite("overflow_flag", &HandleImpl::overflow_flag)
-        .def_readwrite("num_permuted_tokens", &HandleImpl::num_permuted_tokens);
+        .def_readwrite("num_permuted_tokens", &HandleImpl::num_permuted_tokens)
+        .def_readwrite("dense_chunk_layout", &HandleImpl::dense_chunk_layout)
+        .def_readwrite("dense_to_expert_map", &HandleImpl::dense_to_expert_map);
 
     pybind11::class_<HybridEPBuffer>(m, "HybridEPBuffer")
         .def(py::init<py::object, BufferConfig, int, int, int, std::string, bool, bool, bool>(),
@@ -162,6 +165,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
              py::arg("num_permuted_tokens") = std::nullopt,
              py::arg("pad_multiple") = std::nullopt,
              py::arg("enable_permute") = false,
+             py::arg("fuse_permute_dispatch") = false,
              py::arg("non_blocking") = false)
         .def("dispatch", &HybridEPBuffer::dispatch, py::kw_only(),
              py::arg("hidden"),
@@ -180,6 +184,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
              py::arg("scaling_factor") = c10::nullopt,
              py::arg("handle"),
              py::arg("pad_multiple") = std::nullopt,
+             py::arg("fuse_permute_dispatch") = false,
              py::arg("non_blocking") = false,
              py::arg("with_probs") = false)
         .def("combine_with_unpermute", &HybridEPBuffer::combine_with_unpermute, py::kw_only(),
@@ -187,6 +192,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
              py::arg("probs") = c10::nullopt,
              py::arg("handle"),
              py::arg("pad_multiple") = std::nullopt,
+             py::arg("fuse_unpermute_combine") = false,
              py::arg("with_probs") = false);    
     
   }

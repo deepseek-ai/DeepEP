@@ -30,6 +30,7 @@ public:
     c10::optional<int64_t> num_permuted_tokens, 
     c10::optional<int64_t> pad_multiple, 
     bool enable_permute, 
+    bool fuse_permute_dispatch,
     bool non_blocking
   );
 
@@ -51,6 +52,7 @@ public:
             c10::optional<torch::Tensor> scaling_factor,
             HandleImpl handle,
             c10::optional<int64_t> pad_multiple,
+            bool fuse_permute_dispatch,
             bool non_blocking,
             bool with_probs);
 
@@ -60,6 +62,7 @@ public:
           c10::optional<torch::Tensor> probs,
           HandleImpl handle,
           c10::optional<int64_t> pad_multiple,
+          bool fuse_unpermute_combine,
           bool with_probs);       
 
 private:

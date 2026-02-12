@@ -18,6 +18,11 @@ struct PermuteArgs {
   float* scaling_factor_ptr;
   torch::Tensor row_id_map;
 
+  // The address of the output (pre-allocated by caller)
+  void* output_tokens_ptr = nullptr;
+  float* output_probs_ptr = nullptr;
+  float* output_scaling_factor_ptr = nullptr;
+
   // The shape message of the input
   int hidden_size;
   int scales_per_token; // Now is hidden_size/128
@@ -61,17 +66,7 @@ struct UnpermuteArgs {
 };
 
  /**
-  * @brief Make the row id map for the permute kernel, padding at the num of
-  * tokens dimension
-  * @param routing_map[in] shape: [num_dispatched_tokens, num_of_local_experts],
-  * type: bool
-  * @param max_num_dispatched_tokens[in]
-  * @param num_of_local_experts[in]
-  * @param pad_multiple[in]
-  * @param non_blocking[in]
-  * @param stream[in]
-  * @return row_id_map[out] shape: [num_dispatched_tokens, num_of_local_experts],
-  * type: int
+  * @brief Preprocess routing map to produce row_id_map, tokens_per_expert, and overflow_flag for permute.
   */
  std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> 
  permute_preprocessing(
@@ -86,38 +81,23 @@ struct UnpermuteArgs {
      cudaStream_t stream);
  
  /**
-  * @brief Permute the tokens to the experts
-  * @param tokens_ptr[in] shape: [num_dispatched_tokens, hidden_size], type:
-  * DType
-  * @param probs_ptr[in] shape: [num_dispatched_tokens, num_of_local_experts],
-  * type: ProbType, now only support float
-  * @param scaling_factor_ptr[in] shape: [num_dispatched_tokens,
-  * scales_per_token], type: ScalarType
-  * @param row_id_map[in] shape: [num_dispatched_tokens, num_of_local_experts],
-  * type: int
-  * @return permuted_tokens[out] shape: [num_dispatched_tokens, hidden_size],
-  * type: DType
-  * @return permuted_scaling_factor[out] shape: [num_dispatched_tokens,
-  * scales_per_token], type: ScalarType
-  * @return permuted_probs[out] shape: [num_dispatched_tokens,
-  * num_of_local_experts], type: ProbType, now only support float
+  * @brief Pad each element of tokens_per_expert to the nearest multiple of pad_multiple, writing int64 result to dst.
+  */
+ void pad_tokens_per_expert(
+     const int32_t* src,   // GPU raw counts [num_experts]
+     int64_t* dst,         // pinned or device [num_experts]
+     int num_experts,
+     int pad_multiple,
+     cudaStream_t stream);
+
+ /**
+  * @brief Permute tokens according to row_id_map. Input/output via PermuteArgs (output buffers pre-allocated by caller).
   */
  template <typename DType, typename ProbType, typename ScalarType>
- std::tuple<torch::Tensor, c10::optional<torch::Tensor>, c10::optional<torch::Tensor>>
- permute_launcher(PermuteArgs args);
+ void permute_launcher(PermuteArgs args);
  
  /**
-  * @brief Unpermute the tokens to the original order
-  * @param permuted_tokens[in] shape: [num_permuted_token_from_permute,
-  * hidden_size], type: DType
-  * @param permuted_probs[in] shape: [num_permuted_token_from_permute], type:
-  * ProbType, now only support float
-  * @param tokens_ptr[out] shape: [num_dispatched_tokens, hidden_size], type:
-  * DType
-  * @param probs_ptr[out] shape: [num_dispatched_tokens, num_of_local_experts],
-  * type: ProbType, now only support float
-  * @param row_id_map[in] shape: [num_dispatched_tokens, num_of_local_experts],
-  * type: int
+  * @brief Unpermute tokens back to original order. Input/output via UnpermuteArgs.
   */
  template <typename DType, typename ProbType>
  void unpermute_launcher(UnpermuteArgs args);

@@ -4280,14 +4280,9 @@ public:
 #else
     constexpr int SMEM_SIZE = sizeof(dispatch_kernel_smem_t);
 #endif
-    // The dispatch kernel only need to be configured once.
-    static bool config_completed = false;
-    if(!config_completed){
-      // If the dynamic shared memory requested is too large, we may need to modify the carveout.
-      //CUDA_CHECK(cudaFuncSetAttribute(dispatch_kernel_ptr, cudaFuncAttributePreferredSharedMemoryCarveout, 100));
-      CUDA_CHECK(cudaFuncSetAttribute(dispatch_kernel_ptr, cudaFuncAttributeMaxDynamicSharedMemorySize, SMEM_SIZE));
-      config_completed = true;
-    }
+    // Always call cudaFuncSetAttribute because JIT-compiled fuse and non-fuse .so files
+    // may share the static variable but have different kernel pointers (different fatbins).
+    CUDA_CHECK(cudaFuncSetAttribute(dispatch_kernel_ptr, cudaFuncAttributeMaxDynamicSharedMemorySize, SMEM_SIZE));
 
     // Launch update_expected_value_kernel to update expected flag value.
     update_expected_value_kernel<NUM_OF_NODES>
@@ -4366,15 +4361,10 @@ public:
                                                    NUM_OF_RANKS_PER_NODE, NUM_OF_NODES, NUM_OF_BLOCKS, NUM_OF_ADDITIONAL_IN_FLIGHT_S2G, BACKWARD_COMBINE>;
 
     // Configure dynamic shared memory for the combine kernel.
+    // Always call cudaFuncSetAttribute because JIT-compiled fuse and non-fuse .so files
+    // may share the static variable but have different kernel pointers (different fatbins).
     constexpr int SMEM_SIZE = sizeof(combine_kernel_smem_t);
-    // The combine kernel only need to be configured once.
-    static bool config_completed = false;
-    if(!config_completed){
-      // If the dynamic shared memory requested is too large, we may need to modify the carveout.
-      //CUDA_CHECK(cudaFuncSetAttribute(combine_kernel_ptr, cudaFuncAttributePreferredSharedMemoryCarveout, 100));
-      CUDA_CHECK(cudaFuncSetAttribute(combine_kernel_ptr, cudaFuncAttributeMaxDynamicSharedMemorySize, SMEM_SIZE));
-      config_completed = true;
-    }
+    CUDA_CHECK(cudaFuncSetAttribute(combine_kernel_ptr, cudaFuncAttributeMaxDynamicSharedMemorySize, SMEM_SIZE));
 
     // Launch update_expected_value_kernel to update expected flag value.
     update_expected_value_kernel<NUM_OF_NODES>

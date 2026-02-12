@@ -38,10 +38,11 @@ public:
     * file
     * @param local_rank The local rank of the current process
     * @param node_rank The node rank of the current process
-    * @param num_of_nodes The number of nodes in the communication 
+    * @param num_of_nodes The number of nodes in the communication
+    * @param fuse_permute_dispatch Whether to enable fused permute-dispatch kernel
     * @return std::string The path of the compiled .so file
     */
-    std::string build(std::string code, std::string signature, int local_rank, int node_rank, int num_of_nodes);
+    std::string build(std::string code, std::string signature, int local_rank, int node_rank, int num_of_nodes, bool fuse_permute_dispatch = false);
 
     /**
     * @brief Get the compiled function pointer from the compiled .so file
@@ -67,7 +68,7 @@ class KernelCache{
 public:
     KernelCache(int node_rank, int local_rank, std::string base_path, std::string comm_id, bool load_cached_kernels);
 
-    void run_proprecess_kernel(
+    void run_preprocess_kernel(
         HybridEpConfigInstance config, 
         const bool* input_routing_map,
         hybrid_ep::tmp_state_t* preprocessing_tmp,
@@ -83,6 +84,7 @@ public:
         const int node_rank,
         const int local_rank,
         int num_of_tokens_per_rank,
+        bool fuse_permute_dispatch,
         cudaStream_t stream
     );
 
@@ -90,12 +92,14 @@ public:
     void run_dispatch_kernel(
         HybridEpConfigInstance config, 
         hybrid_ep::dispatch_kernel_param_t<DATA_TYPE> param,
+        bool fuse_permute_dispatch,
         cudaStream_t stream
     );
 
     void run_combine_kernel(
         HybridEpConfigInstance config, 
         hybrid_ep::combine_kernel_param_t param,
+        bool fuse_permute_dispatch,
         cudaStream_t stream
     );
 

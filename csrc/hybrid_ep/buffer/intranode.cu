@@ -21,6 +21,7 @@ void NVLCoordinator::destroy() {
       
     // Clean up preprocessing buffer
     free_buffer(this->preprocessing_tmp, false);
+    free_buffer(this->preprocessing_local_experts_tmp, false);
 
     // Clean up dispatch buffers
     if (!use_shared_buffer) {
@@ -49,6 +50,20 @@ void NVLCoordinator::destroy() {
         dispatch_buffers.expert_output_prob_all_ranks = nullptr;
         dispatch_buffers.expert_output_scaling_factor_all_ranks = nullptr;
     }
+    // Clean up fused permute-dispatch buffers
+    free_buffer(dispatch_buffers.expected_permute_flag_value, false);
+    if (dispatch_buffers.intra_node_expert_output_chunk_flags_all_ranks != nullptr) {
+        for (int i = 0; i < buffer_config.num_of_ranks_per_node; i++) {
+            if (i == local_rank) {
+                remote_allocator->free(dispatch_buffers.intra_node_expert_output_chunk_flags_all_ranks[i]);
+            } else {
+                remote_allocator->close_handle(dispatch_buffers.intra_node_expert_output_chunk_flags_all_ranks[i]);
+            }
+        }
+        delete[] dispatch_buffers.intra_node_expert_output_chunk_flags_all_ranks;
+        dispatch_buffers.intra_node_expert_output_chunk_flags_all_ranks = nullptr;
+        dispatch_buffers.intra_node_expert_output_chunk_flags = nullptr;
+    }
 
     // Clean up combine buffers
     free_buffer(combine_buffers.expert_input_token, true);
@@ -59,6 +74,7 @@ void NVLCoordinator::destroy() {
     }else{
         remote_allocator->close_handle(combine_buffers.intra_node_write_completion_flags);
     }
+    free_buffer(combine_buffers.expected_permute_flag_value, false);
     if (combine_buffers.expert_input_token_all_ranks != nullptr) {
         for (int i = 0; i < buffer_config.num_of_ranks_per_node; i++) {
             if (i != local_rank) {
@@ -97,6 +113,8 @@ void NVLCoordinator::init(
     assert(this->max_num_of_tokens % 4 == 0); 
     // The number of tokens for experts should be divisible by 4,
     // this is required by the permute make_row_id_map kernel
+    this->num_of_dispatch_chunks = (buffer_config.max_num_of_tokens_per_rank - 1) /
+                                    buffer_config.num_of_tokens_per_chunk_dispatch_api + 1;
 }
 
 void NVLCoordinator::update_config(BufferConfig config) {
@@ -104,14 +122,22 @@ void NVLCoordinator::update_config(BufferConfig config) {
     this->max_num_of_tokens = config.max_num_of_tokens_per_rank *
                               config.num_of_ranks_per_node *
                               config.num_of_nodes;
+    this->num_of_dispatch_chunks = (config.max_num_of_tokens_per_rank - 1) /
+                                    config.num_of_tokens_per_chunk_dispatch_api + 1;
 }
 
 void NVLCoordinator::allocate_preprocessing_buffers() {
     auto preprocessing_tmp_elts =
       buffer_config.num_of_blocks_preprocessing_api * buffer_config.num_of_ranks_per_node;
+    auto preprocessing_local_experts_tmp_elts =
+      buffer_config.num_of_blocks_preprocessing_api * buffer_config.num_of_experts_per_rank;
+
     CUDA_CHECK(
         cudaMalloc((void **)&this->preprocessing_tmp,
                    preprocessing_tmp_elts * sizeof(hybrid_ep::tmp_state_t)));
+    CUDA_CHECK(
+        cudaMalloc((void **)&this->preprocessing_local_experts_tmp,
+                   preprocessing_local_experts_tmp_elts * sizeof(hybrid_ep::tmp_state_t)));
 }
   
 void NVLCoordinator::allocate_dispatch_buffers() {
@@ -145,15 +171,24 @@ void NVLCoordinator::allocate_dispatch_buffers() {
     CUDA_CHECK(cudaMemset(dispatch_buffers.expected_intra_node_flag_value, 0, 2 * sizeof(uint32_t)));
     CUDA_CHECK(cudaMalloc((void**)&dispatch_buffers.intra_node_flag_parity, sizeof(uint32_t)));
     CUDA_CHECK(cudaMemset(dispatch_buffers.intra_node_flag_parity, 0, sizeof(uint32_t)));
+
+    // Allocate fused permute-dispatch synchronization buffers
+    CUDA_CHECK(cudaMalloc((void**)&dispatch_buffers.expected_permute_flag_value, sizeof(uint32_t)));
+    CUDA_CHECK(cudaMemset(dispatch_buffers.expected_permute_flag_value, 0, sizeof(uint32_t)));
+    // Allocate local chunk flags buffer via remote allocator (accessible by other ranks)
+    remote_allocator->allocate((void**)&dispatch_buffers.intra_node_expert_output_chunk_flags, num_of_dispatch_chunks * buffer_config.num_of_ranks_per_node * buffer_config.num_of_nodes * sizeof(uint32_t));
+    CUDA_CHECK(cudaMemset(dispatch_buffers.intra_node_expert_output_chunk_flags, 0,
+                           num_of_dispatch_chunks * buffer_config.num_of_ranks_per_node * buffer_config.num_of_nodes * sizeof(uint32_t)));
   
-    // Create IPC memory handles
-    MemHandle handles[4];
+    // Create memory handles for cross-rank buffer exchange
+    MemHandle handles[5];
     remote_allocator->get_handle(&handles[0], dispatch_buffers.expert_output_token);
     remote_allocator->get_handle(&handles[1], dispatch_buffers.expert_output_prob);
     remote_allocator->get_handle(&handles[2], dispatch_buffers.expert_output_scaling_factor);
     if (local_rank == 0) {
       remote_allocator->get_handle(&handles[3], dispatch_buffers.intra_node_write_completion_flags);
     }
+    remote_allocator->get_handle(&handles[4], dispatch_buffers.intra_node_expert_output_chunk_flags);
     
     // Pack handles into tensor
     dispatch_memory_handles = torch::empty({static_cast<int64_t>(sizeof(handles))},
@@ -184,8 +219,11 @@ void NVLCoordinator::allocate_combine_buffers() {
     CUDA_CHECK(cudaMemset(combine_buffers.expected_intra_node_flag_value, 0, 2 * sizeof(uint32_t)));
     CUDA_CHECK(cudaMalloc((void**)&combine_buffers.intra_node_flag_parity, sizeof(uint32_t)));
     CUDA_CHECK(cudaMemset(combine_buffers.intra_node_flag_parity, 0, sizeof(uint32_t)));
+    // Allocate fused unpermute-combine synchronization buffer
+    CUDA_CHECK(cudaMalloc((void**)&combine_buffers.expected_permute_flag_value, sizeof(uint32_t)));
+    CUDA_CHECK(cudaMemset(combine_buffers.expected_permute_flag_value, 0, sizeof(uint32_t)));
   
-    // Create IPC memory handles
+    // Create memory handles
     MemHandle handles[3];
     remote_allocator->get_handle(&handles[0], combine_buffers.expert_input_token);
     remote_allocator->get_handle(&handles[1], combine_buffers.expert_input_prob);
@@ -266,10 +304,12 @@ void NVLCoordinator::open_handles_from_other_ranks(
                              &intra_node_write_completion_flags_handle);
     }
   
-    // Open the handles for export_output
+    // Open the handles for expert_output and chunk_flags
+    dispatch_buffers.intra_node_expert_output_chunk_flags_all_ranks =
+        new uint32_t*[buffer_config.num_of_ranks_per_node];
     for (int i = 0; i < buffer_config.num_of_ranks_per_node; i++) {
       MemHandle expert_output_token_handle, expert_output_prob_handle,
-          expert_output_scaling_factor_handle;
+          expert_output_scaling_factor_handle, chunk_flags_handle;
   
       // Extract the handles from the tensor.
       auto base_ptr = dispatch_handles[i + global_offset].data_ptr<uint8_t>();
@@ -279,8 +319,9 @@ void NVLCoordinator::open_handles_from_other_ranks(
       memcpy(&expert_output_scaling_factor_handle,
              base_ptr + sizeof(MemHandle) * 2,
              sizeof(MemHandle));
+      memcpy(&chunk_flags_handle, base_ptr + sizeof(MemHandle) * 4,
+             sizeof(MemHandle));
   
-      // Open the handles for export_output
       if (i != local_rank) {
         remote_allocator->open_handle((void**)(&dispatch_buffers.expert_output_token_all_ranks[i]),
                                &expert_output_token_handle);
@@ -288,17 +329,22 @@ void NVLCoordinator::open_handles_from_other_ranks(
                                &expert_output_prob_handle);
         remote_allocator->open_handle((void**)(&dispatch_buffers.expert_output_scaling_factor_all_ranks[i]), 
                                &expert_output_scaling_factor_handle);
+        remote_allocator->open_handle(
+            (void**)&dispatch_buffers.intra_node_expert_output_chunk_flags_all_ranks[i],
+            &chunk_flags_handle);
       } else {
-        // For local rank, use direct pointer assignment (more efficient, no IPC overhead)
+        // For local rank, use direct pointer assignment
         dispatch_buffers.expert_output_token_all_ranks[i] =
             dispatch_buffers.expert_output_token;
         dispatch_buffers.expert_output_prob_all_ranks[i] =
             dispatch_buffers.expert_output_prob;
         dispatch_buffers.expert_output_scaling_factor_all_ranks[i] =
             dispatch_buffers.expert_output_scaling_factor;
+        dispatch_buffers.intra_node_expert_output_chunk_flags_all_ranks[i] =
+            dispatch_buffers.intra_node_expert_output_chunk_flags;
       }
     }
-  
+
     // Allocate the pointer arrays used in the combine kernel.
     combine_buffers.expert_input_token_all_ranks =
         new uint16_t*[buffer_config.num_of_ranks_per_node];
