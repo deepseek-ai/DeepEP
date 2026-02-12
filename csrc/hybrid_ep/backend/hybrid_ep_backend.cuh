@@ -523,8 +523,8 @@ struct dispatch_kernel_param_t{
   int num_of_tokens_per_rank;
 #ifdef HYBRID_EP_BUILD_MULTINODE_ENABLE
   // qp info and mr info
-  struct void **d_qps_gpu;
-  struct void *mr_info;
+  void **d_qps_gpu;
+  void *mr_info;
 #endif
 };
 
@@ -556,8 +556,8 @@ struct combine_kernel_param_t{
   int num_of_tokens_per_rank;
 #ifdef HYBRID_EP_BUILD_MULTINODE_ENABLE
   // qp info and mr info
-  struct void **d_qps_gpu;
-  struct void *mr_info;
+  void **d_qps_gpu;
+  void *mr_info;
 #endif
 };
 
