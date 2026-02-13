@@ -1111,12 +1111,6 @@ inline __device__ void S2G_warp_group_device_function(const int local_rank,
             if(outstanding_in_flight_chunk && (additional_in_flight_s2g == NUM_OF_ADDITIONAL_IN_FLIGHT_S2G)){
               // Wait for previous chunk's token entry S2G finish.
               cuda::ptx::cp_async_bulk_wait_group(cuda::ptx::n32_t<NUM_OF_ADDITIONAL_IN_FLIGHT_S2G>{});
-              // Need a system-scope release memory fence(release sem should be enough) to let all target ranks can observe the side effect of TMA writes of this chunk 
-              // before they can observe the update of the flags.
-              asm volatile("fence.release.sys;"
-                           :
-                           : 
-                           : "memory");
               // Notify the permute_G2S warp groups of all target ranks in this node.
               // Atomically reduce add 1 to the u32 flag of the last attn token chunk to all target ranks within the current node.
               for(int m = INTRA_NODE_S2G_GROUP::warp_rank(); m < NUM_OF_SPARSE_TO_DENSE_MAP_LOAD_ITER_PER_INPUT_TOKEN; m += INTRA_NODE_S2G_GROUP::warp_size()){
@@ -1228,12 +1222,6 @@ inline __device__ void S2G_warp_group_device_function(const int local_rank,
         if(outstanding_in_flight_chunk){
           // Wait for all previous chunk's(i.e. previous and current chunk) S2G finish.
           cuda::ptx::cp_async_bulk_wait_group(cuda::ptx::n32_t<0>{});
-          // Need a system-scope release memory fence(release sem should be enough) to let all target ranks can observe the side effect of TMA writes of this chunk 
-          // before they can observe the update of the flags.
-          asm volatile("fence.release.sys;"
-                        :
-                        : 
-                        : "memory");
           // Notify the permute_G2S warp groups of all target ranks in this node.
           // Atomically reduce add 1 to the u32 flag of this attn token chunk to all target ranks within the current node.
           for(int k = INTRA_NODE_S2G_GROUP::warp_rank(); k < NUM_OF_SPARSE_TO_DENSE_MAP_LOAD_ITER_PER_INPUT_TOKEN; k += INTRA_NODE_S2G_GROUP::warp_size()){
@@ -1277,12 +1265,6 @@ inline __device__ void S2G_warp_group_device_function(const int local_rank,
     if(outstanding_in_flight_chunk){
       // Wait for the last chunk's S2G finish.
       cuda::ptx::cp_async_bulk_wait_group(cuda::ptx::n32_t<0>{});
-      // Need a system-scope release memory fence(release sem should be enough) to let all target ranks can observe the side effect of TMA writes of this chunk 
-      // before they can observe the update of the flags.
-      asm volatile("fence.release.sys;"
-                    :
-                    : 
-                    : "memory");
       // Notify the permute_G2S warp groups of all target ranks in this node.
       // Atomically reduce add 1 to the u32 flag of the last attn token chunk to all target ranks within the current node.
       for(int i = INTRA_NODE_S2G_GROUP::warp_rank(); i < NUM_OF_SPARSE_TO_DENSE_MAP_LOAD_ITER_PER_INPUT_TOKEN; i += INTRA_NODE_S2G_GROUP::warp_size()){
