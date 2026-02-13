@@ -291,7 +291,6 @@ void Executor::dispatch_core(HybridEpConfigInstance config, DispatchArgs& args) 
     param.d_qps_gpu = reinterpret_cast<void **>(inter_node_dispatch_buffers->d_qps_gpu);
     param.mr_info = reinterpret_cast<void*>(inter_node_dispatch_buffers->mr_info);
 #endif
-    
     // Launch kernel
     kernel_cache.run_dispatch_kernel<DType>(config, param, args.fuse_permute_dispatch, args.stream);
     nvtxRangePop();  // End of dispatch_core nvtx range

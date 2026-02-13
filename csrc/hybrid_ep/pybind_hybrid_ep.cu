@@ -42,6 +42,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         .def_readwrite("num_of_blocks_permute_api", &BufferConfig::num_of_blocks_permute_api)
         .def_readwrite("num_of_tokens_per_chunk_dispatch_api", &BufferConfig::num_of_tokens_per_chunk_dispatch_api)
         .def_readwrite("num_of_tokens_per_chunk_combine_api", &BufferConfig::num_of_tokens_per_chunk_combine_api)
+        .def_readwrite("num_of_dispatch_chunks", &BufferConfig::num_of_dispatch_chunks)
         .def("is_valid", &BufferConfig::is_valid)
         .def("__repr__", [](const BufferConfig &config) {
           return "<BufferConfig hidden_dim=" +
@@ -57,7 +58,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
                  " num_of_blocks_permute_api=" + std::to_string(config.num_of_blocks_permute_api) + 
                  " num_of_tokens_per_chunk_dispatch_api=" + std::to_string(config.num_of_tokens_per_chunk_dispatch_api) + 
                  " num_of_tokens_per_chunk_combine_api=" + std::to_string(config.num_of_tokens_per_chunk_combine_api) + 
-                 ">";
+                 " num_of_dispatch_chunks=" + std::to_string(config.num_of_dispatch_chunks) + ">";
         });
 
     pybind11::class_<HybridEpConfigInstance>(m, "HybridEpConfigInstance")
@@ -119,7 +120,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
                        &HybridEpConfigInstance::backward_combine_api)
         .def_readwrite("device_side_sync_combine_api",
                        &HybridEpConfigInstance::device_side_sync_combine_api)
-        .def("is_valid", &HybridEpConfigInstance::is_valid)
+        .def("is_valid", &HybridEpConfigInstance::is_valid, py::arg("fuse_permute_dispatch") = false)
         .def("__repr__", [](const HybridEpConfigInstance &config) {
           return "<HybridEpConfigInstance hidden_dim=" +
                  std::to_string(config.hidden_dim) + " max_num_of_tokens_per_rank=" +
@@ -127,6 +128,22 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
                  " token_data_type=" + type_to_string(config.token_data_type) +
                  ">";
         });
+
+    pybind11::class_<Configurer>(m, "Configurer")
+        .def(py::init<int, int, int, int, int, bool, int, int, int, int>(),
+            py::arg("hidden_dim"),
+            py::arg("max_num_of_tokens_per_rank"),
+            py::arg("num_local_experts"),
+            py::arg("num_of_ranks_per_node"),
+            py::arg("num_of_nodes"),
+            py::arg("use_fp8") = false,
+            py::arg("num_sms_dispatch_api") = -1,
+            py::arg("num_sms_combine_api") = -1,
+            py::arg("num_sms_preprocessing_api") = -1,
+            py::arg("num_blocks_permute_api") = -1)
+        .def_readwrite("buffer_config", &Configurer::buffer_config)
+        .def("get_default_config", &Configurer::get_default_config,
+            py::arg("fuse_permute_dispatch") = false);
 
     pybind11::class_<HandleImpl>(m, "HandleImpl")
         .def(py::init<>())

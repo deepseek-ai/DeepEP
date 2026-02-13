@@ -168,7 +168,7 @@ handle = (
 
 Hybrid-EP uses two configuration structures defined in [`config.cuh`](../csrc/hybrid_ep/config.cuh):
 
-- **`BufferConfig`**: A subset of parameters used solely for buffer size calculation, stored persistently in the buffer object.
+- **`BufferConfig`**: Parameters used solely for buffer size calculation, stored persistently in the buffer object.
 - **`HybridEpConfigInstance`**: Contains all parameters needed for JIT-compiling and launching Hybrid-EP kernels. A new instance is created for each invocation.
 
 Each run compares the new `HybridEpConfigInstance` against `BufferConfig` to detect whether existing buffers are sufficient. If not, a free-reallocate cycle is triggered (see [4. Buffer Management](#4-buffer-management)).

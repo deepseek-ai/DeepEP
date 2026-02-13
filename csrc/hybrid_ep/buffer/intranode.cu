@@ -113,8 +113,6 @@ void NVLCoordinator::init(
     assert(this->max_num_of_tokens % 4 == 0); 
     // The number of tokens for experts should be divisible by 4,
     // this is required by the permute make_row_id_map kernel
-    this->num_of_dispatch_chunks = (buffer_config.max_num_of_tokens_per_rank - 1) /
-                                    buffer_config.num_of_tokens_per_chunk_dispatch_api + 1;
 }
 
 void NVLCoordinator::update_config(BufferConfig config) {
@@ -122,8 +120,6 @@ void NVLCoordinator::update_config(BufferConfig config) {
     this->max_num_of_tokens = config.max_num_of_tokens_per_rank *
                               config.num_of_ranks_per_node *
                               config.num_of_nodes;
-    this->num_of_dispatch_chunks = (config.max_num_of_tokens_per_rank - 1) /
-                                    config.num_of_tokens_per_chunk_dispatch_api + 1;
 }
 
 void NVLCoordinator::allocate_preprocessing_buffers() {
@@ -176,10 +172,11 @@ void NVLCoordinator::allocate_dispatch_buffers() {
     CUDA_CHECK(cudaMalloc((void**)&dispatch_buffers.expected_permute_flag_value, sizeof(uint32_t)));
     CUDA_CHECK(cudaMemset(dispatch_buffers.expected_permute_flag_value, 0, sizeof(uint32_t)));
     // Allocate local chunk flags buffer via remote allocator (accessible by other ranks)
-    remote_allocator->allocate((void**)&dispatch_buffers.intra_node_expert_output_chunk_flags, num_of_dispatch_chunks * buffer_config.num_of_ranks_per_node * buffer_config.num_of_nodes * sizeof(uint32_t));
+    int64_t chunk_flags_numel = static_cast<int64_t>(buffer_config.num_of_dispatch_chunks) * buffer_config.num_of_ranks_per_node * buffer_config.num_of_nodes;
+    remote_allocator->allocate((void**)&dispatch_buffers.intra_node_expert_output_chunk_flags, chunk_flags_numel * sizeof(uint32_t));
     CUDA_CHECK(cudaMemset(dispatch_buffers.intra_node_expert_output_chunk_flags, 0,
-                           num_of_dispatch_chunks * buffer_config.num_of_ranks_per_node * buffer_config.num_of_nodes * sizeof(uint32_t)));
-  
+                           chunk_flags_numel * sizeof(uint32_t)));
+
     // Create memory handles for cross-rank buffer exchange
     MemHandle handles[5];
     remote_allocator->get_handle(&handles[0], dispatch_buffers.expert_output_token);

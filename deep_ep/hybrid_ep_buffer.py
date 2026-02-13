@@ -83,68 +83,31 @@ class HybridEPBuffer:
         self.node_rank = self.rank // self.num_of_hybrid_ep_ranks_per_nvlink_domain
         # The number of nodes.
         self.num_of_nodes = self.group_size // self.num_of_hybrid_ep_ranks_per_nvlink_domain
-        self.use_fp8 = use_fp8
+        # Create Configurer: auto-detects SM count, applies SM defaults, fills and validates BufferConfig.
+        self.configurer = hybrid_ep_cpp.Configurer(
+            hidden_dim=hidden_dim,
+            max_num_of_tokens_per_rank=max_num_of_tokens_per_rank,
+            num_local_experts=num_local_experts,
+            num_of_ranks_per_node=self.num_of_hybrid_ep_ranks_per_nvlink_domain,
+            num_of_nodes=self.num_of_nodes,
+            use_fp8=use_fp8,
+            num_sms_dispatch_api=num_sms_dispatch_api if num_sms_dispatch_api is not None else -1,
+            num_sms_combine_api=num_sms_combine_api if num_sms_combine_api is not None else -1,
+            num_sms_preprocessing_api=num_sms_preprocessing_api if num_sms_preprocessing_api is not None else -1,
+            num_blocks_permute_api=num_blocks_permute_api if num_blocks_permute_api is not None else -1,
+        )
 
-        props = torch.cuda.get_device_properties(torch.cuda.current_device())
-        sm_count = props.multi_processor_count
-        if num_sms_preprocessing_api is None:
-            num_sms_preprocessing_api = 108
-        if num_blocks_permute_api is None: 
-            num_blocks_permute_api = sm_count * 16 
-        # Inter-node case should use less SMs for the dispatch and combine APIs.
-        if num_sms_dispatch_api is None:
-            num_sms_dispatch_api = 32 if self.num_of_nodes == 1 else 8
-        if num_sms_combine_api is None:
-            num_sms_combine_api = 32 if self.num_of_nodes == 1 else 8
-        assert (
-            sm_count >= num_sms_preprocessing_api
-            and sm_count >= num_sms_dispatch_api
-            and sm_count >= num_sms_combine_api
-        ), "check the sms occupancy setting"
-        # Used SMs for preprocessing of dispatch and permute.
-        self.num_sms_preprocessing_api = num_sms_preprocessing_api
-        self.num_sms_dispatch_api = num_sms_dispatch_api
-        self.num_sms_combine_api = num_sms_combine_api
-        self.num_blocks_permute_api = num_blocks_permute_api
-        
-        # Initialize the BufferConfig for the hybrid-ep buffer allocation.
-        self.config = hybrid_ep_cpp.BufferConfig()
-        self.config.hidden_dim = hidden_dim
-        self.config.max_num_of_tokens_per_rank = max(max_num_of_tokens_per_rank, 512)
-        self.config.num_of_experts_per_rank = num_local_experts
-        self.config.num_of_ranks_per_node = self.num_of_hybrid_ep_ranks_per_nvlink_domain
-        self.config.num_of_nodes = self.num_of_nodes
-        self.config.num_of_blocks_dispatch_api = self.num_sms_dispatch_api
-        self.config.num_of_blocks_combine_api = self.num_sms_combine_api
-        # The SMs of preprocessing, chunk size of dispatch and combine will affact the size of intermediate buffers.
-        self.config.num_of_blocks_preprocessing_api = self.num_sms_preprocessing_api
-        self.config.num_of_blocks_permute_api = self.num_blocks_permute_api
-        # The fp8/bf16/fp16 data is communicated in the uint8/uint16 format.
-        self.config.token_data_type = (
-            hybrid_ep_cpp.UINT8 if self.use_fp8 else hybrid_ep_cpp.UINT16
-        )
-        self.config.num_of_tokens_per_chunk_dispatch_api = int(
-            os.getenv("NUM_OF_TOKENS_PER_CHUNK_DISPATCH_API", "128")
-        )
-        self.config.num_of_tokens_per_chunk_combine_api = int(
-            os.getenv("NUM_OF_TOKENS_PER_CHUNK_COMBINE_API", "128")
-        )
-        # assert self.config.is_valid(), "The buffer config is not valid."
-        if not self.config.is_valid():
-            print(f"The buffer config is not valid. hidden_dim={hidden_dim}, max_num_of_tokens_per_rank={max_num_of_tokens_per_rank}, num_local_experts={num_local_experts}, self.config.num_of_ranks_per_node={self.config.num_of_ranks_per_node}, self.config.num_of_nodes={self.config.num_of_nodes}, use_fp8={use_fp8}")
-            raise ValueError("The buffer config is not valid.")
-      
         # Create C++ buffer - this will allocate all buffers during construction
         self.runtime = hybrid_ep_cpp.HybridEPBuffer(
-            self.group, 
-            self.config, 
-            self.local_rank, 
-            self.node_rank, 
-            self.group_size, 
-            os.path.dirname(os.path.abspath(__file__)), 
-            load_cached_kernels = load_cached_kernels,   # whether to load the cached kernels in disk
-            use_shared_buffer = use_shared_buffer,      # whether to use the shared buffer for dispatch and combine
-            enable_custom_allgather = enable_custom_allgather  # whether to use the custom allgather for intra-node communication
+            self.group,
+            self.configurer.buffer_config,
+            self.local_rank,
+            self.node_rank,
+            self.group_size,
+            os.path.dirname(os.path.abspath(__file__)),
+            load_cached_kernels=load_cached_kernels,
+            use_shared_buffer=use_shared_buffer,
+            enable_custom_allgather=enable_custom_allgather,
         )
 
     def empty_jit_cache(self):
@@ -169,101 +132,35 @@ class HybridEPBuffer:
         Initialize the HybridEpConfigInstance which used to control the detailed setting of the hybrid-ep kernel.
         In common case, no need to change the default setting.
         """
-        config = hybrid_ep_cpp.HybridEpConfigInstance()
+        # Get a config with all env-var defaults and buffer-level state filled in.
+        config = self.configurer.get_default_config(fuse_permute_dispatch)
 
-        # Initialize the ConfigInstance
-        # Hybrid-ep Config
-        config.hidden_dim = (
-            hidden_dim if hidden_dim is not None else self.config.hidden_dim
-        )
-        if num_of_tokens_per_rank is None:
-            num_of_tokens_per_rank = self.config.max_num_of_tokens_per_rank
-        # Align num_of_tokens_per_rank up to the nearest multiple of 16.
-        num_of_tokens_per_rank = (num_of_tokens_per_rank + 15) // 16 * 16
-        config.max_num_of_tokens_per_rank = max(
-            num_of_tokens_per_rank, self.config.max_num_of_tokens_per_rank
-        )
-        self.config.max_num_of_tokens_per_rank = config.max_num_of_tokens_per_rank
-        
-        config.num_of_experts_per_rank = (
-            num_local_experts
-            if num_local_experts is not None
-            else self.config.num_of_experts_per_rank
-        )
-        config.num_of_ranks_per_node = self.num_of_hybrid_ep_ranks_per_nvlink_domain
-        config.num_of_nodes = self.num_of_nodes
-
-        # Metadata-preprocessing API Config
-        config.num_of_blocks_preprocessing_api = self.num_sms_preprocessing_api
-        config.num_of_threads_per_block_preprocessing_api = int(
-            os.getenv("NUM_OF_THREADS_PER_BLOCK_PREPROCESSING_API", "512")
-        )
-        config.num_of_blocks_permute_api = self.num_blocks_permute_api # also used in the fused permute-dispatch kernel
-        config.pad_multiple = pad_multiple if pad_multiple is not None and pad_multiple > 0 else 1
-        config.num_of_tokens_per_chunk_preprocessing_api = int(
-            os.getenv("NUM_OF_TOKENS_PER_CHUNK_PREPROCESSING_API", "128")
-        )
-
-        # Dispatch API Config
-        if use_fp8 is None:
-            use_fp8 = self.use_fp8
-        config.token_data_type = (
-            hybrid_ep_cpp.UINT8 if use_fp8 else hybrid_ep_cpp.UINT16
-        )
-        config.num_of_blocks_dispatch_api = self.num_sms_dispatch_api
-        # If we use the fused permute-dispatch kernel, the default number of blocks for permute part is the same as the number of blocks for dispatch part.
-        if fuse_permute_dispatch:
-            config.num_of_blocks_permute_api = self.num_sms_dispatch_api
-        config.device_side_sync_dispatch_api = True
-        # Dispatch stages config:
-        config.num_of_stages_dispatch_api = int(
-            os.getenv("NUM_OF_STAGES_DISPATCH_API", "10")
-        )
-        config.num_of_stages_permute_block_dispatch_api = int(
-            os.getenv("NUM_OF_STAGES_PERMUTE_BLOCK_DISPATCH_API", "10")
-        )
-        config.num_of_in_flight_s2g_dispatch_api = int(
-            os.getenv("NUM_OF_IN_FLIGHT_S2G_DISPATCH_API", "8")
-        )
-        config.num_of_in_flight_s2g_permute_block_dispatch_api = int(
-            os.getenv("NUM_OF_IN_FLIGHT_S2G_PERMUTE_BLOCK_DISPATCH_API", "8")
-        )
-        config.num_of_additional_in_flight_s2g_dispatch_api = int(
-            os.getenv("NUM_OF_ADDITIONAL_IN_FLIGHT_S2G_DISPATCH_API", "6")
-        )
-        config.num_of_tokens_per_chunk_dispatch_api = int(
-            os.getenv("NUM_OF_TOKENS_PER_CHUNK_DISPATCH_API", "128")
-        )
-
-        # Combine API Config
-        config.num_of_blocks_combine_api = self.num_sms_combine_api
-        config.device_side_sync_combine_api = True
-        # Combine stages config:
-        if self.config.num_of_nodes > 1:
-            config.num_of_stages_g2s_combine_api = int(
-                os.getenv("NUM_OF_STAGES_G2S_COMBINE_API", "5")
+        # Per-call dynamic overrides
+        if hidden_dim is not None:
+            config.hidden_dim = hidden_dim
+        if num_of_tokens_per_rank is not None:
+            # Align num_of_tokens_per_rank up to the nearest multiple of 16.
+            num_of_tokens_per_rank = (num_of_tokens_per_rank + 15) // 16 * 16
+            config.max_num_of_tokens_per_rank = max(
+                num_of_tokens_per_rank,
+                self.configurer.buffer_config.max_num_of_tokens_per_rank,
             )
-        else:
-            config.num_of_stages_g2s_combine_api = int(
-                os.getenv("NUM_OF_STAGES_G2S_COMBINE_API", "10")
+            self.configurer.buffer_config.max_num_of_tokens_per_rank = config.max_num_of_tokens_per_rank
+        if num_local_experts is not None:
+            config.num_of_experts_per_rank = num_local_experts
+        if pad_multiple is not None and pad_multiple > 0:
+            config.pad_multiple = pad_multiple
+        if use_fp8 is not None:
+            config.token_data_type = (
+                hybrid_ep_cpp.UINT8 if use_fp8 else hybrid_ep_cpp.UINT16
             )
-        config.num_of_stages_s2g_combine_api = int(
-            os.getenv("NUM_OF_STAGES_S2G_COMBINE_API", "2")
-        )
-        config.num_of_tokens_per_chunk_combine_api = int(
-            os.getenv("NUM_OF_TOKENS_PER_CHUNK_COMBINE_API", "128")
-        )
-        config.num_of_tokens_per_group_combine_api = int(
-            os.getenv("NUM_OF_TOKENS_PER_GROUP_COMBINE_API", "4")
-        )
-        config.num_of_additional_in_flight_s2g_combine_api = int(
-            os.getenv("NUM_OF_ADDITIONAL_IN_FLIGHT_S2G_COMBINE_API", "2")
-        )
 
         # Update the config with the kwargs.
         for key, value in kwargs.items():
             setattr(config, key, value)
-        assert config.is_valid(), "The config is not valid."
+        assert config.is_valid(fuse_permute_dispatch), "The config is not valid."
+
+        config.num_of_additional_in_flight_s2g_dispatch_api = 4
 
         # Use the runtime kernel config to update the buffer.
         self.runtime.update_buffer(config)
@@ -582,7 +479,7 @@ class HybridEPBuffer:
             warnings.warn("The num_dispatched_tokens is deprecated, it will be removed in the future.")
 
         with torch.cuda.nvtx.range("hybrid-ep combine with unpermute phase"):
-            assert self.config is not None, "Please initialize the config first."
+            assert self.configurer is not None, "Please initialize the configurer first."
             assert handle is not None, "The handle is necessary in the combine pass."
 
             # Convert legacy tuple to HandleImpl
