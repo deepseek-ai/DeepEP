@@ -158,6 +158,8 @@ class HybridEPBuffer:
         # Update the config with the kwargs.
         for key, value in kwargs.items():
             setattr(config, key, value)
+        # Auto-tune stages based on current device shared memory limit.
+        self.configurer.adjust_template(config, fuse_permute_dispatch)
         assert config.is_valid(fuse_permute_dispatch), "The config is not valid."
 
         config.num_of_additional_in_flight_s2g_dispatch_api = 4

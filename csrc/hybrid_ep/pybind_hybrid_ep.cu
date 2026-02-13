@@ -143,6 +143,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
             py::arg("num_blocks_permute_api") = -1)
         .def_readwrite("buffer_config", &Configurer::buffer_config)
         .def("get_default_config", &Configurer::get_default_config,
+            py::arg("fuse_permute_dispatch") = false)
+        .def("adjust_template", &Configurer::adjust_template,
+            py::arg("config"),
             py::arg("fuse_permute_dispatch") = false);
 
     pybind11::class_<HandleImpl>(m, "HandleImpl")

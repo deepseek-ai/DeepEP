@@ -3,7 +3,9 @@
 
 #pragma once
 #include <tuple>
+#include <map>
 #include <cassert>
+#include <cstring>
 #include <stdexcept>
 #include "utils.cuh"
 
@@ -132,6 +134,10 @@ struct HybridEpConfigInstance {
     }
     return valid;
   }
+
+  bool operator<(const HybridEpConfigInstance& other) const {
+    return std::memcmp(this, &other, sizeof(HybridEpConfigInstance)) < 0;
+  }
 };
 
 static int get_env_int(const char* name, int default_value) {
@@ -139,9 +145,123 @@ static int get_env_int(const char* name, int default_value) {
     return val ? atoi(val) : default_value;
 }
 
+// Helper to simulate C++ struct layout with alignas fields.
+// Usage: call add(size, align) for each field in declaration order,
+// then call total() to get the final struct size (with trailing padding).
+struct SmemLayoutBuilder {
+    int64_t offset = 0;
+    int max_align = 1;
+
+    void add(int64_t size, int align) {
+        // Align current offset to the field's alignment requirement
+        offset = ((offset + align - 1) / align) * align;
+        offset += size;
+        if (align > max_align) max_align = align;
+    }
+
+    int64_t total() {
+        // Pad to the maximum alignment seen (struct trailing padding)
+        return ((offset + max_align - 1) / max_align) * max_align;
+    }
+};
+
+// Computed shared memory sizes for dispatch, permute_block, and combine kernels.
+struct SmemSizes {
+    int64_t dispatch;
+    int64_t permute_block;
+    int64_t combine;
+};
+
+// Compute the dynamic shared memory sizes for all three kernel types in one call.
+// Mirrors the struct layouts in hybrid_ep_backend.cuh:
+//   - dispatch_kernel_dynamic_shared_memory_buffer_t
+//   - dispatch_kernel_permute_block_dynamic_shared_memory_buffer_t
+//   - combine_kernel_dynamic_shared_memory_buffer_t
+static SmemSizes compute_smem_sizes(const HybridEpConfigInstance& c) {
+    static std::map<HybridEpConfigInstance, SmemSizes> cache;
+    auto it = cache.find(c);
+    if (it != cache.end()) return it->second;
+
+    SmemSizes result;
+    bool is_fp8 = (c.token_data_type == APP_TOKEN_DATA_TYPE::UINT8);
+    int token_size = is_fp8 ? 1 : 2;
+    bool multinode = (c.num_of_nodes > 1);
+
+    // --- dispatch kernel ---
+    {
+        SmemLayoutBuilder b;
+        b.add((int64_t)c.num_of_stages_dispatch_api * c.hidden_dim * token_size, 128);
+        b.add((int64_t)2 * c.num_of_tokens_per_chunk_dispatch_api * c.num_of_ranks_per_node * 4, 128);
+        if (c.forward_dispatch_api)
+            b.add((int64_t)c.num_of_stages_dispatch_api * c.num_of_experts_per_rank * c.num_of_ranks_per_node * 4, 16);
+        if (is_fp8)
+            b.add((int64_t)c.num_of_stages_dispatch_api * (c.hidden_dim / 128) * 4, 16);
+        if (multinode)
+            b.add((int64_t)c.num_of_tokens_per_chunk_dispatch_api * (c.num_of_nodes - 1), 16);
+        b.add((int64_t)c.num_of_stages_dispatch_api * 2 * 8, 8);
+        b.add((int64_t)2 * 8, 8);
+        b.add((int64_t)8, 8);
+        if (multinode)
+            b.add((int64_t)(c.num_of_nodes - 1) * 96, 8);
+        if (multinode)
+            b.add((int64_t)(c.num_of_nodes - 1) * 4, 4);
+        result.dispatch = b.total();
+    }
+
+    // --- dispatch permute_block kernel ---
+    {
+        SmemLayoutBuilder b;
+        b.add((int64_t)c.num_of_stages_permute_block_dispatch_api * c.hidden_dim * token_size, 128);
+        if (c.forward_dispatch_api)
+            b.add((int64_t)c.num_of_stages_permute_block_dispatch_api * c.num_of_experts_per_rank * c.num_of_ranks_per_node * 4, 16);
+        if (is_fp8)
+            b.add((int64_t)c.num_of_stages_permute_block_dispatch_api * (c.hidden_dim / 128) * 4, 16);
+        b.add((int64_t)c.num_of_stages_permute_block_dispatch_api * 2 * 8, 8);
+        result.permute_block = b.total();
+    }
+
+    // --- combine kernel (always uint16_t, 2 bytes per token) ---
+    {
+        SmemLayoutBuilder b;
+        if (multinode) {
+            b.add((int64_t)c.num_of_stages_g2s_combine_api * c.hidden_dim * 2, 128);
+            b.add((int64_t)c.num_of_stages_s2g_combine_api * c.hidden_dim * 2, 128);
+        }
+        b.add((int64_t)c.num_of_stages_g2s_combine_api * c.hidden_dim * 2, 128);
+        b.add((int64_t)c.num_of_stages_s2g_combine_api * c.hidden_dim * 2, 128);
+        if (c.backward_combine_api) {
+            if (multinode) {
+                b.add((int64_t)c.num_of_stages_g2s_combine_api * c.num_of_experts_per_rank * c.num_of_ranks_per_node * 4, 16);
+                b.add((int64_t)c.num_of_stages_s2g_combine_api * c.num_of_experts_per_rank * c.num_of_ranks_per_node * 4, 16);
+                b.add((int64_t)c.num_of_stages_g2s_combine_api * c.num_of_experts_per_rank * c.num_of_ranks_per_node * 4, 16);
+                b.add((int64_t)c.num_of_stages_s2g_combine_api * c.num_of_experts_per_rank * c.num_of_ranks_per_node * c.num_of_nodes * 4, 16);
+            } else {
+                b.add((int64_t)c.num_of_stages_g2s_combine_api * c.num_of_experts_per_rank * c.num_of_ranks_per_node * 4, 16);
+                b.add((int64_t)c.num_of_stages_s2g_combine_api * c.num_of_experts_per_rank * c.num_of_ranks_per_node * 4, 16);
+            }
+        }
+        if (multinode)
+            b.add((int64_t)c.num_of_stages_g2s_combine_api * 2 * 8, 8);
+        b.add((int64_t)c.num_of_stages_g2s_combine_api * 2 * 8, 8);
+        if (multinode) {
+            b.add((int64_t)(c.num_of_nodes - 1) * (c.max_num_of_tokens_per_rank / c.num_of_tokens_per_chunk_combine_api) * 8, 8);
+            b.add((int64_t)(c.num_of_nodes - 1) * 72, 8);
+            b.add((int64_t)(c.num_of_nodes - 1) * 4, 4);
+        }
+        if (multinode)
+            b.add((int64_t)c.num_of_stages_g2s_combine_api, 1);
+        b.add((int64_t)c.num_of_stages_g2s_combine_api, 1);
+        result.combine = b.total();
+    }
+
+    cache[c] = result;
+    return result;
+}
+
 class Configurer {
 public:
     BufferConfig buffer_config;
+    int max_smem_per_block;  // Device max dynamic shared memory per block (optin)
 
     Configurer(
         int hidden_dim,
@@ -155,12 +275,15 @@ public:
         int num_sms_preprocessing_api = -1,
         int num_blocks_permute_api = -1
     ) {
-        // Auto-detect SM count
+        // Auto-detect SM count and max shared memory
         cudaDeviceProp props;
         int device;
         CUDA_CHECK(cudaGetDevice(&device));
         CUDA_CHECK(cudaGetDeviceProperties(&props, device));
         int sm_count = props.multiProcessorCount;
+        max_smem_per_block = 0;
+        CUDA_CHECK(cudaDeviceGetAttribute(&max_smem_per_block,
+            cudaDevAttrMaxSharedMemoryPerBlockOptin, device));
 
         // Apply SM defaults
         if (num_sms_preprocessing_api < 0) num_sms_preprocessing_api = 108;
@@ -182,8 +305,8 @@ public:
         buffer_config.num_of_blocks_preprocessing_api = num_sms_preprocessing_api;
         buffer_config.num_of_blocks_permute_api = num_blocks_permute_api;
         buffer_config.token_data_type = use_fp8 ? APP_TOKEN_DATA_TYPE::UINT8 : APP_TOKEN_DATA_TYPE::UINT16;
-        buffer_config.num_of_tokens_per_chunk_dispatch_api = get_env_int("NUM_OF_TOKENS_PER_CHUNK_DISPATCH_API", 32);
-        buffer_config.num_of_tokens_per_chunk_combine_api = get_env_int("NUM_OF_TOKENS_PER_CHUNK_COMBINE_API", 32);
+        buffer_config.num_of_tokens_per_chunk_dispatch_api = get_env_int("NUM_OF_TOKENS_PER_CHUNK_DISPATCH_API", 128);
+        buffer_config.num_of_tokens_per_chunk_combine_api = get_env_int("NUM_OF_TOKENS_PER_CHUNK_COMBINE_API", 128);
         buffer_config.num_of_dispatch_chunks = (buffer_config.max_num_of_tokens_per_rank - 1)
             / buffer_config.num_of_tokens_per_chunk_dispatch_api + 1;
 
@@ -216,6 +339,7 @@ public:
         config.num_of_threads_per_block_preprocessing_api = get_env_int("NUM_OF_THREADS_PER_BLOCK_PREPROCESSING_API", 512);
         int default_chunk_size = fuse_permute_dispatch ? 64 : 128;
         config.num_of_tokens_per_chunk_preprocessing_api  = get_env_int("NUM_OF_TOKENS_PER_CHUNK_PREPROCESSING_API", default_chunk_size);
+        config.forward_dispatch_api = true;
         config.device_side_sync_dispatch_api = true;
         config.num_of_stages_dispatch_api = get_env_int("NUM_OF_STAGES_DISPATCH_API", 10);
         config.num_of_stages_permute_block_dispatch_api = get_env_int("NUM_OF_STAGES_PERMUTE_BLOCK_DISPATCH_API", 10);
@@ -223,6 +347,7 @@ public:
         config.num_of_in_flight_s2g_permute_block_dispatch_api = get_env_int("NUM_OF_IN_FLIGHT_S2G_PERMUTE_BLOCK_DISPATCH_API", 8);
         config.num_of_additional_in_flight_s2g_dispatch_api = get_env_int("NUM_OF_ADDITIONAL_IN_FLIGHT_S2G_DISPATCH_API", 6);
         config.num_of_tokens_per_chunk_dispatch_api = get_env_int("NUM_OF_TOKENS_PER_CHUNK_DISPATCH_API", default_chunk_size);
+        config.backward_combine_api = true;
         config.device_side_sync_combine_api = true;
         config.num_of_stages_g2s_combine_api = get_env_int("NUM_OF_STAGES_G2S_COMBINE_API",
             buffer_config.num_of_nodes > 1 ? 5 : 10);
@@ -239,5 +364,62 @@ public:
         }
 
         return config;
+    }
+
+    // Adjust template parameters (stages, in-flight counts) so that kernel
+    // shared memory fits within the device limit. Reduces stages down to
+    // MIN_STAGES, then errors if still too large.
+    void adjust_template(HybridEpConfigInstance& config, bool fuse_permute_dispatch = false) {
+        const int max_smem = max_smem_per_block;
+        constexpr int MIN_STAGES = 2;
+
+        // Ensure val < limit (in-flight must be strictly less than stages)
+        auto clamp_below = [](int& val, int limit) {
+            if (val >= limit) val = limit - 1;
+        };
+        // Effective dispatch smem: in fuse mode, take max of dispatch and permute_block
+        auto dispatch_smem = [&]() -> int64_t {
+            auto s = compute_smem_sizes(config);
+            return fuse_permute_dispatch ? std::max(s.dispatch, s.permute_block) : s.dispatch;
+        };
+
+        // 1. Dispatch: reduce stages
+        while (dispatch_smem() > max_smem && config.num_of_stages_dispatch_api > MIN_STAGES)
+            config.num_of_stages_dispatch_api--;
+        clamp_below(config.num_of_in_flight_s2g_dispatch_api, config.num_of_stages_dispatch_api);
+        clamp_below(config.num_of_additional_in_flight_s2g_dispatch_api, config.num_of_stages_dispatch_api);
+
+        // 2. Permute block (fuse mode only): reduce stages independently
+        if (fuse_permute_dispatch) {
+            while (compute_smem_sizes(config).permute_block > max_smem
+                   && config.num_of_stages_permute_block_dispatch_api > MIN_STAGES)
+                config.num_of_stages_permute_block_dispatch_api--;
+            clamp_below(config.num_of_in_flight_s2g_permute_block_dispatch_api,
+                        config.num_of_stages_permute_block_dispatch_api);
+        }
+
+        // 3. Combine: alternately reduce g2s / s2g stages
+        bool reduce_g2s = true;
+        while (compute_smem_sizes(config).combine > max_smem
+               && (config.num_of_stages_g2s_combine_api > MIN_STAGES
+                   || config.num_of_stages_s2g_combine_api > MIN_STAGES)) {
+            if (reduce_g2s && config.num_of_stages_g2s_combine_api > MIN_STAGES)
+                config.num_of_stages_g2s_combine_api--;
+            else if (config.num_of_stages_s2g_combine_api > MIN_STAGES)
+                config.num_of_stages_s2g_combine_api--;
+            reduce_g2s = !reduce_g2s;
+        }
+        clamp_below(config.num_of_additional_in_flight_s2g_combine_api,
+                    config.num_of_stages_s2g_combine_api);
+
+        // 4. Final validation
+        int64_t final_dispatch = dispatch_smem();
+        int64_t final_combine = compute_smem_sizes(config).combine;
+        if (final_dispatch > max_smem || final_combine > max_smem) {
+            fprintf(stderr, "[Error] adjust_template: smem exceeds device limit (%d B)."
+                    " dispatch=%ld, combine=%ld\n", max_smem, (long)final_dispatch, (long)final_combine);
+            fflush(stderr);
+            throw std::runtime_error("Cannot fit kernels into shared memory even with minimum stages.");
+        }
     }
 };
