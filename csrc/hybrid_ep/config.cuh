@@ -336,7 +336,7 @@ public:
         config.token_data_type = buffer_config.token_data_type;
 
         // Env-var defaults (runtime chunk sizes use 64, different from buffer's 32)
-        config.num_of_threads_per_block_preprocessing_api = get_env_int("NUM_OF_THREADS_PER_BLOCK_PREPROCESSING_API", 512);
+        config.num_of_threads_per_block_preprocessing_api = get_env_int("NUM_OF_THREADS_PER_BLOCK_PREPROCESSING_API", 256);
         int default_chunk_size = fuse_permute_dispatch ? 64 : 128;
         config.num_of_tokens_per_chunk_preprocessing_api  = get_env_int("NUM_OF_TOKENS_PER_CHUNK_PREPROCESSING_API", default_chunk_size);
         config.forward_dispatch_api = true;

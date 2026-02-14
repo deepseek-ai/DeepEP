@@ -162,8 +162,6 @@ class HybridEPBuffer:
         self.configurer.adjust_template(config, fuse_permute_dispatch)
         assert config.is_valid(fuse_permute_dispatch), "The config is not valid."
 
-        config.num_of_additional_in_flight_s2g_dispatch_api = 4
-
         # Use the runtime kernel config to update the buffer.
         self.runtime.update_buffer(config)
         return config
