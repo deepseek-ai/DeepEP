@@ -97,7 +97,7 @@ def test_hybrid_ep_correctness(buffer: deep_ep.HybridEPBuffer, ref: TorchRef, us
     dtype_str = "FP8" if hidden.dtype == torch.uint8 else "BF16"
     dist.barrier()
     if dist.get_rank() == 0:
-        print(f'\n=== Correctness Check ({dtype_str}) ===', flush=True)
+        print(f'\n=== Correctness Check ({dtype_str}, {dist.get_world_size()} ranks) ===', flush=True)
 
     # Dispatch correctness check
     for with_probs in [True, False]:
@@ -347,7 +347,7 @@ def test_hybrid_ep_benchmark(buffer: deep_ep.HybridEPBuffer, group: dist.Process
 
     # ---- Bench: torch API ----
     if rank == 0:
-        print(f'\n=== Torch API Benchmark ({dtype_str}) ===', flush=True)
+        print(f'\n=== Torch API Benchmark ({dtype_str}, {dist.get_world_size()} ranks) ===', flush=True)
         print(f'  Non-permute:  dispatch = dispatch_kernel + d2d + misc', flush=True)
         print(f'                combine  = d2d + combine_kernel + misc', flush=True)
         print(f'  Permute:      dispatch = dispatch_kernel + permute_kernel + misc', flush=True)
@@ -378,7 +378,7 @@ def test_hybrid_ep_benchmark(buffer: deep_ep.HybridEPBuffer, group: dist.Process
     # Kineto measures pure GPU kernel time only (no CPU overhead, no d2d, no device_sync)
     if not nsys_profile:
         if rank == 0:
-            print(f'\n=== Kernel Benchmark ({dtype_str}) ===', flush=True)
+            print(f'\n=== Kernel Benchmark ({dtype_str}, {dist.get_world_size()} ranks) ===', flush=True)
             print(f'  Non-fused:  dispatch_kernel only  |  combine_kernel only', flush=True)
             print(f'  Fused:      fused_permute_dispatch_kernel only  |  fused_combine_unpermute_kernel only', flush=True)
 

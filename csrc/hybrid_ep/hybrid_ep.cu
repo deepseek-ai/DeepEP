@@ -50,6 +50,7 @@ HybridEPBuffer::HybridEPBuffer(
     executor(local_rank, node_rank, base_path, get_comm_id(process_group), load_cached_kernels, enable_custom_allgather)
 {
     buffer_config.num_of_dispatch_chunks = (buffer_config.max_num_of_tokens_per_rank - 1) / buffer_config.num_of_tokens_per_chunk_dispatch_api + 1;
+    buffer_config.num_of_combine_chunks = (buffer_config.max_num_of_tokens_per_rank - 1) / buffer_config.num_of_tokens_per_chunk_combine_api + 1;
     CUDA_CHECK(cudaGetLastError());
     CUDA_CHECK(cudaDeviceSynchronize());
     
@@ -120,10 +121,20 @@ bool HybridEPBuffer::update_buffer(HybridEpConfigInstance config) {
   need_reallocate |= grow_to(buffer_config.num_of_nodes,           config.num_of_nodes);
   need_reallocate |= grow_to(buffer_config.num_of_blocks_preprocessing_api, config.num_of_blocks_preprocessing_api);
   need_reallocate |= grow_to(buffer_config.num_of_blocks_dispatch_api, config.num_of_blocks_dispatch_api);
-  need_reallocate |= grow_to(buffer_config.num_of_tokens_per_chunk_dispatch_api, config.num_of_tokens_per_chunk_dispatch_api);
-  need_reallocate |= grow_to(buffer_config.num_of_tokens_per_chunk_combine_api, config.num_of_tokens_per_chunk_combine_api);
-  int required_dispatch_chunks = (config.max_num_of_tokens_per_rank - 1) / config.num_of_tokens_per_chunk_dispatch_api + 1;
-  need_reallocate |= grow_to(buffer_config.num_of_dispatch_chunks, required_dispatch_chunks);
+  // Chunk size: any change triggers reallocation (RDMA flag stride must match kernel)
+  if (buffer_config.num_of_tokens_per_chunk_dispatch_api != config.num_of_tokens_per_chunk_dispatch_api) {
+    need_reallocate = true;
+    buffer_config.num_of_tokens_per_chunk_dispatch_api = config.num_of_tokens_per_chunk_dispatch_api;
+  }
+  if (buffer_config.num_of_tokens_per_chunk_combine_api != config.num_of_tokens_per_chunk_combine_api) {
+    need_reallocate = true;
+    buffer_config.num_of_tokens_per_chunk_combine_api = config.num_of_tokens_per_chunk_combine_api;
+  }
+  // Recalculate derived chunk counts
+  buffer_config.num_of_dispatch_chunks = (buffer_config.max_num_of_tokens_per_rank - 1)
+      / buffer_config.num_of_tokens_per_chunk_dispatch_api + 1;
+  buffer_config.num_of_combine_chunks = (buffer_config.max_num_of_tokens_per_rank - 1)
+      / buffer_config.num_of_tokens_per_chunk_combine_api + 1;
   // Special case for token data type.
   if(get_token_data_type_size(buffer_config.token_data_type) < get_token_data_type_size(config.token_data_type)
       && !nvl_coordinator.use_shared_buffer) {
