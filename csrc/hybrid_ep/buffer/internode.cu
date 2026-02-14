@@ -376,8 +376,7 @@ void RDMACoordinator::allocate_dispatch_buffers(){
                                         * buffer_config.num_of_ranks_per_node);
   auto rdma_inter_node_group_scaling_factor_elts = buffer_config.max_num_of_tokens_per_rank * 
                                                     (buffer_config.num_of_nodes - 1) * (buffer_config.hidden_dim / 128);
-  auto rdma_inter_node_group_flags_elts = ((buffer_config.max_num_of_tokens_per_rank - 1) /
-                                           buffer_config.num_of_tokens_per_chunk_dispatch_api + 1) *
+  auto rdma_inter_node_group_flags_elts = buffer_config.num_of_dispatch_chunks *
                                           (buffer_config.num_of_nodes - 1);
   // Allocate RDMA buffers
   CUDA_CHECK(cudaMalloc((void**)&dispatch_buffers.attn_input_token,
@@ -540,8 +539,7 @@ void RDMACoordinator::allocate_combine_buffers(){
                                           (buffer_config.num_of_nodes - 1) * buffer_config.hidden_dim;
   auto rdma_inter_node_group_prob_elts = buffer_config.max_num_of_tokens_per_rank * (buffer_config.num_of_nodes - 1) *
                                          (buffer_config.num_of_experts_per_rank * buffer_config.num_of_ranks_per_node);
-  auto rdma_inter_node_group_flags_elts = ((buffer_config.max_num_of_tokens_per_rank - 1) /
-                                           buffer_config.num_of_tokens_per_chunk_combine_api + 1) *
+  auto rdma_inter_node_group_flags_elts = buffer_config.num_of_combine_chunks *
                                           (buffer_config.num_of_nodes - 1);
                                     
   // Allocate RDMA buffers

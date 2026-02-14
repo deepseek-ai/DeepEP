@@ -27,8 +27,9 @@ struct BufferConfig {
   int num_of_blocks_permute_api;
   int num_of_tokens_per_chunk_dispatch_api;
   int num_of_tokens_per_chunk_combine_api;
-  /** Number of dispatch chunks (derived from max_num_of_tokens_per_rank and num_of_tokens_per_chunk_dispatch_api), used for buffer sizing; grow_to on this triggers reallocate when chunk size shrinks. */
+  /** Number of chunks, used for buffer sizing; grow_to on this triggers reallocate when chunk size shrinks. */
   int num_of_dispatch_chunks;
+  int num_of_combine_chunks;
 
   /*
    *  Validation check
@@ -309,6 +310,8 @@ public:
         buffer_config.num_of_tokens_per_chunk_combine_api = get_env_int("NUM_OF_TOKENS_PER_CHUNK_COMBINE_API", 128);
         buffer_config.num_of_dispatch_chunks = (buffer_config.max_num_of_tokens_per_rank - 1)
             / buffer_config.num_of_tokens_per_chunk_dispatch_api + 1;
+        buffer_config.num_of_combine_chunks = (buffer_config.max_num_of_tokens_per_rank - 1)
+            / buffer_config.num_of_tokens_per_chunk_combine_api + 1;
 
         if (!buffer_config.is_valid()) {
             fprintf(stderr, "[Error] Configurer: invalid buffer config. hidden_dim=%d, max_num_of_tokens_per_rank=%d, "
