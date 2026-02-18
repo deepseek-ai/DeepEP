@@ -19,9 +19,9 @@
 
 namespace py = pybind11;
 
-// Wrapper for combine with logging
+// Wrapper for enable pytorch profiler tracing
 template<typename Func>
-auto wrap_with_logging(Func func, const std::string& name) {
+auto wrap_with_tracing(Func func, const std::string& name) {
     return [func, name](HybridEPBuffer& self,
                         HybridEpConfigInstance config,
                         torch::Tensor hidden,
@@ -191,7 +191,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
              py::arg("num_dispatched_tokens") = std::nullopt, py::arg("num_of_tokens_per_rank"),
              py::arg("with_probs"))
         .def("combine", 
-             wrap_with_logging(&HybridEPBuffer::combine, "combine"),
+             wrap_with_tracing(&HybridEPBuffer::combine, "HybridEPBuffer::combine"),
              py::kw_only(), 
              py::arg("config"), py::arg("hidden"),
              py::arg("probs") = c10::nullopt, py::arg("sparse_to_dense_map"),
