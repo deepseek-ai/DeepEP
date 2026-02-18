@@ -9,8 +9,56 @@
 #include "hybrid_ep.cuh"
 #include "utils.cuh"
 #include "config.cuh"
+#include <iostream>
+#include <sstream>
+#include <tuple>
+#include <type_traits>
+#include <vector>
+#include <ATen/core/ivalue.h>
+#include <ATen/record_function.h>
 
 namespace py = pybind11;
+
+// Wrapper for combine with logging
+template<typename Func>
+auto wrap_with_logging(Func func, const std::string& name) {
+    return [func, name](HybridEPBuffer& self,
+                        HybridEpConfigInstance config,
+                        torch::Tensor hidden,
+                        c10::optional<torch::Tensor> probs,
+                        torch::Tensor sparse_to_dense_map,
+                        torch::Tensor rdma_to_attn_map,
+                        torch::Tensor attn_to_rdma_map,
+                        int64_t num_of_tokens_per_rank,
+                        bool with_probs) {
+
+        auto result = (self.*func)(config, hidden, probs, sparse_to_dense_map,
+                                   rdma_to_attn_map, attn_to_rdma_map,
+                                   num_of_tokens_per_rank, with_probs);
+
+        if (at::isRecordFunctionEnabled()) {
+            std::initializer_list<const c10::IValue> inputList = { 
+                config.to_ivalue_tuple(),
+                c10::IValue(hidden),
+                probs.has_value() ? c10::IValue(probs.value()) : c10::IValue(),
+                c10::IValue(sparse_to_dense_map),
+                c10::IValue(rdma_to_attn_map),
+                c10::IValue(attn_to_rdma_map),
+                c10::IValue(num_of_tokens_per_rank),
+                c10::IValue(with_probs),
+            };
+            c10::IValue out0(std::get<0>(result));
+            c10::IValue out1(std::get<1>(result));
+            std::initializer_list<const c10::IValue> outputList = { out0, out1 };
+
+            c10::ArrayRef<const c10::IValue> inputsArray(inputList);    
+            c10::ArrayRef<const c10::IValue> outputsArray(outputList);                 
+            RECORD_FUNCTION_WITH_INPUTS_OUTPUTS(name, inputsArray, outputsArray);                        
+        }
+
+        return result;
+    };
+}
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.doc() = "HybridEP, efficiently enable the expert-parallel communication in "
@@ -142,7 +190,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
              py::arg("attn_to_rdma_map"), py::arg("num_dispatched_tokens_tensor"),
              py::arg("num_dispatched_tokens") = std::nullopt, py::arg("num_of_tokens_per_rank"),
              py::arg("with_probs"))
-        .def("combine", &HybridEPBuffer::combine, py::kw_only(), 
+        .def("combine", 
+             wrap_with_logging(&HybridEPBuffer::combine, "combine"),
+             py::kw_only(), 
              py::arg("config"), py::arg("hidden"),
              py::arg("probs") = c10::nullopt, py::arg("sparse_to_dense_map"),
              py::arg("rdma_to_attn_map"), py::arg("attn_to_rdma_map"),
