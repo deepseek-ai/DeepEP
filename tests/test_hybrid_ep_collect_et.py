@@ -87,6 +87,9 @@ def test_main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
 
     stream = torch.cuda.Stream()
     with torch.cuda.stream(stream):
+        et = ExecutionTraceObserver().register_callback(f"et_{dist.get_rank()}.json")
+        et.start()
+
         buffer = deep_ep.HybridEPBuffer(
             group=group,
             hidden_dim=HIDDEN_DIM,
@@ -102,9 +105,6 @@ def test_main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
             num_of_experts=NUM_OF_EXPERTS,
             use_fp8=truediv,
         )
-
-        et = ExecutionTraceObserver().register_callback(f"et_{dist.get_rank()}.json")
-        et.start()
 
         dispatched_hidden, dispatched_probs, _, handle = (
             buffer.dispatch(hidden=hidden, scaling_factor=scaling_factor, topk_idx=topk_idx, topk_weights=topk_weights, num_of_experts=NUM_OF_EXPERTS)
