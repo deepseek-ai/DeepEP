@@ -37,19 +37,21 @@ auto wrap_with_tracing(Func func, const std::string& name) {
                                    num_of_tokens_per_rank, with_probs);
 
         if (at::isRecordFunctionEnabled()) {
-            std::initializer_list<const c10::IValue> inputList = { 
-                config.to_ivalue_tuple(),
-                c10::IValue(hidden),
-                probs.has_value() ? c10::IValue(probs.value()) : c10::IValue(),
-                c10::IValue(sparse_to_dense_map),
-                c10::IValue(rdma_to_attn_map),
-                c10::IValue(attn_to_rdma_map),
-                c10::IValue(num_of_tokens_per_rank),
-                c10::IValue(with_probs),
-            };
-            c10::IValue out0(std::get<0>(result));
-            c10::IValue out1(std::get<1>(result));
-            std::initializer_list<const c10::IValue> outputList = { out0, out1 };
+            c10::impl::GenericList inputList(c10::AnyType::get());
+            inputList.reserve(8);
+            inputList.emplace_back(config.to_ivalue_tuple());
+            inputList.emplace_back(c10::IValue(hidden));
+            inputList.emplace_back(probs.has_value() ? c10::IValue(probs.value()) : c10::IValue());
+            inputList.emplace_back(c10::IValue(sparse_to_dense_map));
+            inputList.emplace_back(c10::IValue(rdma_to_attn_map));
+            inputList.emplace_back(c10::IValue(attn_to_rdma_map));
+            inputList.emplace_back(c10::IValue(num_of_tokens_per_rank));
+            inputList.emplace_back(c10::IValue(with_probs));
+
+            c10::impl::GenericList outputList(c10::AnyType::get());
+            outputList.reserve(2);
+            outputList.emplace_back(std::get<0>(result));
+            outputList.emplace_back(std::get<1>(result));
 
             c10::ArrayRef<const c10::IValue> inputsArray(inputList);    
             c10::ArrayRef<const c10::IValue> outputsArray(outputList);                 
