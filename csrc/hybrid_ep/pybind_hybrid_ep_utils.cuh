@@ -43,7 +43,7 @@ inline HybridEPBuffer* hybrid_ep_buffer_init(
     bool use_shared_buffer, bool enable_custom_allgather) {
     if (at::isRecordFunctionEnabled()) {
         c10::impl::GenericList inputList(c10::AnyType::get());
-        inputList.emplace_back(c10::IValue(get_comm_id(process_group)));
+        inputList.emplace_back(c10::IValue(process_group.attr("group_name").cast<std::string>()));
         inputList.emplace_back(to_ivalue(config));
         inputList.emplace_back(to_ivalue(local_rank));
         inputList.emplace_back(to_ivalue(node_rank));
