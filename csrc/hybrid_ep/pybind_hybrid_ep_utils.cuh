@@ -37,7 +37,30 @@ inline void record_result(c10::impl::GenericList& outputList, Result&& result) {
     }, result);
 }
 
-// Wrapper for combine
+inline HybridEPBuffer* hybrid_ep_buffer_init(
+    py::object process_group, BufferConfig config, int local_rank, int node_rank,
+    int group_size, std::string base_path, bool load_cached_kernels,
+    bool use_shared_buffer, bool enable_custom_allgather) {
+    if (at::isRecordFunctionEnabled()) {
+        c10::impl::GenericList inputList(c10::AnyType::get());
+        inputList.emplace_back(c10::IValue(get_comm_id(process_group)));
+        inputList.emplace_back(to_ivalue(config));
+        inputList.emplace_back(to_ivalue(local_rank));
+        inputList.emplace_back(to_ivalue(node_rank));
+        inputList.emplace_back(to_ivalue(group_size));
+        inputList.emplace_back(to_ivalue(base_path));
+        inputList.emplace_back(to_ivalue(load_cached_kernels));
+        inputList.emplace_back(to_ivalue(use_shared_buffer));
+        inputList.emplace_back(to_ivalue(enable_custom_allgather));
+        c10::impl::GenericList outputList(c10::AnyType::get());
+        c10::ArrayRef<const c10::IValue> inputsArray(inputList);
+        c10::ArrayRef<const c10::IValue> outputsArray(outputList);
+        RECORD_FUNCTION_WITH_INPUTS_OUTPUTS("HybridEPBuffer::__init__", inputsArray, outputsArray);
+    }
+    return new HybridEPBuffer(process_group, config, local_rank, node_rank, group_size,
+                              base_path, load_cached_kernels, use_shared_buffer, enable_custom_allgather);
+}
+
 template<typename Func>
 auto hybrid_ep_buffer_combine(Func func, const std::string& name) {
     return [func, name](HybridEPBuffer& self,
@@ -205,28 +228,4 @@ auto hybrid_ep_buffer_combine_with_unpermute(Func func, const std::string& name)
         }
         return result;
     };
-}
-
-// HybridEPBuffer constructor with tracing
-inline HybridEPBuffer* hybrid_ep_buffer_init(
-    py::object process_group, BufferConfig config, int local_rank, int node_rank,
-    int group_size, std::string base_path, bool load_cached_kernels,
-    bool use_shared_buffer, bool enable_custom_allgather) {
-    if (at::isRecordFunctionEnabled()) {
-        c10::impl::GenericList inputList(c10::AnyType::get());
-        inputList.emplace_back(to_ivalue(config));
-        inputList.emplace_back(to_ivalue(local_rank));
-        inputList.emplace_back(to_ivalue(node_rank));
-        inputList.emplace_back(to_ivalue(group_size));
-        inputList.emplace_back(to_ivalue(base_path));
-        inputList.emplace_back(to_ivalue(load_cached_kernels));
-        inputList.emplace_back(to_ivalue(use_shared_buffer));
-        inputList.emplace_back(to_ivalue(enable_custom_allgather));
-        c10::impl::GenericList outputList(c10::AnyType::get());
-        c10::ArrayRef<const c10::IValue> inputsArray(inputList);
-        c10::ArrayRef<const c10::IValue> outputsArray(outputList);
-        RECORD_FUNCTION_WITH_INPUTS_OUTPUTS("HybridEPBuffer::__init__", inputsArray, outputsArray);
-    }
-    return new HybridEPBuffer(process_group, config, local_rank, node_rank, group_size,
-                              base_path, load_cached_kernels, use_shared_buffer, enable_custom_allgather);
 }

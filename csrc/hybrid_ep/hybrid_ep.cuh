@@ -19,6 +19,8 @@
 #include "buffer/internode.cuh"
 #endif
 
+std::string get_comm_id(pybind11::object process_group);
+
 class HybridEPBuffer {
 public:
   HybridEPBuffer(pybind11::object process_group, BufferConfig config, int local_rank, int node_rank, int group_size, std::string base_path, bool load_cached_kernels, bool use_shared_buffer, bool enable_custom_allgather);
