@@ -87,7 +87,7 @@ def test_main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
 
     stream = torch.cuda.Stream()
     with torch.cuda.stream(stream):
-        et = ExecutionTraceObserver().register_callback(f"et_{dist.get_rank()}.json")
+        et = ExecutionTraceObserver().register_callback(f"rank-{dist.get_rank()}.json")
         et.start()
 
         buffer = deep_ep.HybridEPBuffer(

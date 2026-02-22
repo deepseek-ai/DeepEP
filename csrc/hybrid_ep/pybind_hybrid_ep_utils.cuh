@@ -10,6 +10,7 @@
 #include <type_traits>
 #include <vector>
 #include <ATen/core/ivalue.h>
+#include <ATen/core/function_schema.h>
 #include <ATen/record_function.h>
 
 namespace py = pybind11;
@@ -55,15 +56,20 @@ inline HybridEPBuffer* hybrid_ep_buffer_init(
         c10::impl::GenericList outputList(c10::AnyType::get());
         c10::ArrayRef<const c10::IValue> inputsArray(inputList);
         c10::ArrayRef<const c10::IValue> outputsArray(outputList);
-        RECORD_FUNCTION_WITH_INPUTS_OUTPUTS("HybridEPBuffer::__init__", inputsArray, outputsArray);
+        std::vector<c10::Argument> args;
+        std::vector<c10::Argument> returns;
+        c10::FunctionSchema schema(
+            "HybridEPBuffer::__init__", "",
+            std::move(args), std::move(returns), false, false);
+        RECORD_FUNCTION_WITH_INPUTS_OUTPUTS(schema, inputsArray, outputsArray);
     }
     return new HybridEPBuffer(process_group, config, local_rank, node_rank, group_size,
                               base_path, load_cached_kernels, use_shared_buffer, enable_custom_allgather);
 }
 
 template<typename Func>
-auto hybrid_ep_buffer_combine(Func func, const std::string& name) {
-    return [func, name](HybridEPBuffer& self,
+auto hybrid_ep_buffer_combine(Func func) {
+    return [func](HybridEPBuffer& self,
                         HybridEpConfigInstance config,
                         torch::Tensor hidden,
                         c10::optional<torch::Tensor> probs,
@@ -89,7 +95,12 @@ auto hybrid_ep_buffer_combine(Func func, const std::string& name) {
             record_result(outputList, result);
             c10::ArrayRef<const c10::IValue> inputsArray(inputList);
             c10::ArrayRef<const c10::IValue> outputsArray(outputList);
-            RECORD_FUNCTION_WITH_INPUTS_OUTPUTS(name, inputsArray, outputsArray);
+            std::vector<c10::Argument> args;
+            std::vector<c10::Argument> returns;
+            c10::FunctionSchema schema(
+                "HybridEPBuffer::combine", "",
+                std::move(args), std::move(returns), false, false);
+            RECORD_FUNCTION_WITH_INPUTS_OUTPUTS(schema, inputsArray, outputsArray);
         }
         return result;
     };
@@ -97,8 +108,8 @@ auto hybrid_ep_buffer_combine(Func func, const std::string& name) {
 
 // Wrapper for dispatch (returns 3-tuple)
 template<typename Func>
-auto hybrid_ep_buffer_dispatch(Func func, const std::string& name) {
-    return [func, name](HybridEPBuffer& self,
+auto hybrid_ep_buffer_dispatch(Func func) {
+    return [func](HybridEPBuffer& self,
                         HybridEpConfigInstance config,
                         torch::Tensor hidden,
                         c10::optional<torch::Tensor> probs,
@@ -131,7 +142,13 @@ auto hybrid_ep_buffer_dispatch(Func func, const std::string& name) {
             record_result(outputList, result);
             c10::ArrayRef<const c10::IValue> inputsArray(inputList);
             c10::ArrayRef<const c10::IValue> outputsArray(outputList);
-            RECORD_FUNCTION_WITH_INPUTS_OUTPUTS(name, inputsArray, outputsArray);
+
+            std::vector<c10::Argument> args;
+            std::vector<c10::Argument> returns;
+            c10::FunctionSchema schema(
+                "HybridEPBuffer::dispatch", "",
+                std::move(args), std::move(returns), false, false);
+            RECORD_FUNCTION_WITH_INPUTS_OUTPUTS(schema, inputsArray, outputsArray);
         }
         return result;
     };
@@ -139,8 +156,8 @@ auto hybrid_ep_buffer_dispatch(Func func, const std::string& name) {
 
 // Wrapper for dispatch_with_permute (returns 6-tuple)
 template<typename Func>
-auto hybrid_ep_buffer_dispatch_with_permute(Func func, const std::string& name) {
-    return [func, name](HybridEPBuffer& self,
+auto hybrid_ep_buffer_dispatch_with_permute(Func func) {
+    return [func](HybridEPBuffer& self,
                         HybridEpConfigInstance config,
                         torch::Tensor hidden,
                         c10::optional<torch::Tensor> probs,
@@ -182,7 +199,12 @@ auto hybrid_ep_buffer_dispatch_with_permute(Func func, const std::string& name) 
             record_result(outputList, result);
             c10::ArrayRef<const c10::IValue> inputsArray(inputList);
             c10::ArrayRef<const c10::IValue> outputsArray(outputList);
-            RECORD_FUNCTION_WITH_INPUTS_OUTPUTS(name, inputsArray, outputsArray);
+            std::vector<c10::Argument> args;
+            std::vector<c10::Argument> returns;
+            c10::FunctionSchema schema(
+                "HybridEPBuffer::dispatch_with_permute", "",
+                std::move(args), std::move(returns), false, false);
+            RECORD_FUNCTION_WITH_INPUTS_OUTPUTS(schema, inputsArray, outputsArray);
         }
         return result;
     };
@@ -190,8 +212,8 @@ auto hybrid_ep_buffer_dispatch_with_permute(Func func, const std::string& name) 
 
 // Wrapper for combine_with_unpermute (returns 2-tuple)
 template<typename Func>
-auto hybrid_ep_buffer_combine_with_unpermute(Func func, const std::string& name) {
-    return [func, name](HybridEPBuffer& self,
+auto hybrid_ep_buffer_combine_with_unpermute(Func func) {
+    return [func](HybridEPBuffer& self,
                         HybridEpConfigInstance config,
                         torch::Tensor hidden,
                         c10::optional<torch::Tensor> probs,
@@ -224,7 +246,12 @@ auto hybrid_ep_buffer_combine_with_unpermute(Func func, const std::string& name)
             record_result(outputList, result);
             c10::ArrayRef<const c10::IValue> inputsArray(inputList);
             c10::ArrayRef<const c10::IValue> outputsArray(outputList);
-            RECORD_FUNCTION_WITH_INPUTS_OUTPUTS(name, inputsArray, outputsArray);
+            std::vector<c10::Argument> args;
+            std::vector<c10::Argument> returns;
+            c10::FunctionSchema schema(
+                "HybridEPBuffer::combine_with_unpermute", "",
+                std::move(args), std::move(returns), false, false);
+            RECORD_FUNCTION_WITH_INPUTS_OUTPUTS(schema, inputsArray, outputsArray);
         }
         return result;
     };

@@ -136,7 +136,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         .def("metadata_preprocessing", &HybridEPBuffer::metadata_preprocessing,
              py::kw_only(), py::arg("config"), py::arg("routing_map"), py::arg("num_of_tokens_per_rank"), py::arg("non_blocking") = false)
         .def("dispatch",
-             hybrid_ep_buffer_dispatch(&HybridEPBuffer::dispatch, "HybridEPBuffer::dispatch"),
+             hybrid_ep_buffer_dispatch(&HybridEPBuffer::dispatch),
              py::kw_only(),
              py::arg("config"), py::arg("hidden"),
              py::arg("probs") = c10::nullopt,
@@ -146,7 +146,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
              py::arg("num_dispatched_tokens") = std::nullopt, py::arg("num_of_tokens_per_rank"),
              py::arg("with_probs"))
         .def("combine", 
-             hybrid_ep_buffer_combine(&HybridEPBuffer::combine, "HybridEPBuffer::combine"),
+            hybrid_ep_buffer_combine(&HybridEPBuffer::combine),
              py::kw_only(), 
              py::arg("config"), py::arg("hidden"),
              py::arg("probs") = c10::nullopt, py::arg("sparse_to_dense_map"),
@@ -154,7 +154,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
              py::arg("num_of_tokens_per_rank"),
              py::arg("with_probs"))
         .def("dispatch_with_permute",
-             hybrid_ep_buffer_dispatch_with_permute(&HybridEPBuffer::dispatch_with_permute, "HybridEPBuffer::dispatch_with_permute"),
+             hybrid_ep_buffer_dispatch_with_permute(&HybridEPBuffer::dispatch_with_permute),
              py::kw_only(),
              py::arg("config"), py::arg("hidden"),
              py::arg("probs") = c10::nullopt,
@@ -166,7 +166,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
              py::arg("num_of_tokens_per_rank"), py::arg("pad_multiple") = std::nullopt, py::arg("non_blocking") = false,
              py::arg("with_probs") = false)
         .def("combine_with_unpermute",
-             hybrid_ep_buffer_combine_with_unpermute(&HybridEPBuffer::combine_with_unpermute, "HybridEPBuffer::combine_with_unpermute"),
+             hybrid_ep_buffer_combine_with_unpermute(&HybridEPBuffer::combine_with_unpermute),
              py::kw_only(),
              py::arg("config"), py::arg("hidden"),
              py::arg("probs") = c10::nullopt,
