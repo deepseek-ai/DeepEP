@@ -134,7 +134,7 @@ struct HybridEpConfigInstance {
   /** Convert all attributes to a single IValue holding a tuple of IValues (ints/bools). */
   c10::IValue to_ivalue_tuple() const {
     std::vector<c10::IValue> elements;
-    elements.reserve(24);
+    elements.reserve(23);
     // Hybrid-ep Config
     elements.push_back(c10::IValue(static_cast<int64_t>(hidden_dim)));
     elements.push_back(c10::IValue(static_cast<int64_t>(max_num_of_tokens_per_rank)));

@@ -6,11 +6,13 @@
 #include <pybind11/pybind11.h>
 #include "hybrid_ep.cuh"
 #include "config.cuh"
+#include <iostream>
 #include <tuple>
 #include <type_traits>
 #include <vector>
 #include <ATen/core/ivalue.h>
 #include <ATen/core/function_schema.h>
+#include <ATen/core/jit_type.h>
 #include <ATen/record_function.h>
 
 namespace py = pybind11;
@@ -57,11 +59,21 @@ inline HybridEPBuffer* hybrid_ep_buffer_init(
         c10::ArrayRef<const c10::IValue> inputsArray(inputList);
         c10::ArrayRef<const c10::IValue> outputsArray(outputList);
         std::vector<c10::Argument> args;
+        args.emplace_back("group_name", c10::StringType::get());
+        args.emplace_back("config", c10::AnyType::get());
+        args.emplace_back("local_rank", c10::IntType::get());
+        args.emplace_back("node_rank", c10::IntType::get());
+        args.emplace_back("group_size", c10::IntType::get());
+        args.emplace_back("base_path", c10::StringType::get());
+        args.emplace_back("load_cached_kernels", c10::BoolType::get());
+        args.emplace_back("use_shared_buffer", c10::BoolType::get());
+        args.emplace_back("enable_custom_allgather", c10::BoolType::get());
         std::vector<c10::Argument> returns;
+        // outputList is empty for __init__ (buffer pointer not recorded as IValue)
         c10::FunctionSchema schema(
             "HybridEPBuffer::__init__", "",
             std::move(args), std::move(returns), false, false);
-        RECORD_FUNCTION_WITH_INPUTS_OUTPUTS(schema, inputsArray, outputsArray);
+        RECORD_FUNCTION_WITH_INPUTS_OUTPUTS("HybridEPBuffer::__init__", inputsArray, outputsArray);
     }
     return new HybridEPBuffer(process_group, config, local_rank, node_rank, group_size,
                               base_path, load_cached_kernels, use_shared_buffer, enable_custom_allgather);
@@ -95,12 +107,26 @@ auto hybrid_ep_buffer_combine(Func func) {
             record_result(outputList, result);
             c10::ArrayRef<const c10::IValue> inputsArray(inputList);
             c10::ArrayRef<const c10::IValue> outputsArray(outputList);
+            /*
+            std::cout << "outputList size: " << outputList.size() << std::endl;
             std::vector<c10::Argument> args;
+            args.emplace_back("config", c10::AnyType::get());
+            args.emplace_back("hidden", c10::TensorType::get());
+            args.emplace_back("probs", c10::OptionalType::create(c10::TensorType::get()));
+            args.emplace_back("sparse_to_dense_map", c10::TensorType::get());
+            args.emplace_back("rdma_to_attn_map", c10::TensorType::get());
+            args.emplace_back("attn_to_rdma_map", c10::TensorType::get());
+            args.emplace_back("num_of_tokens_per_rank", c10::IntType::get());
+            args.emplace_back("with_probs", c10::BoolType::get());
             std::vector<c10::Argument> returns;
+            returns.emplace_back("", c10::TensorType::get());
+            returns.emplace_back("", c10::TensorType::get());
             c10::FunctionSchema schema(
                 "HybridEPBuffer::combine", "",
                 std::move(args), std::move(returns), false, false);
-            RECORD_FUNCTION_WITH_INPUTS_OUTPUTS(schema, inputsArray, outputsArray);
+                */
+            RECORD_FUNCTION_WITH_INPUTS_OUTPUTS("HybridEPBuffer::combine", inputsArray, outputsArray);
+            //RECORD_FUNCTION_WITH_INPUTS_OUTPUTS(schema, inputsArray, outputsArray);
         }
         return result;
     };
@@ -142,13 +168,26 @@ auto hybrid_ep_buffer_dispatch(Func func) {
             record_result(outputList, result);
             c10::ArrayRef<const c10::IValue> inputsArray(inputList);
             c10::ArrayRef<const c10::IValue> outputsArray(outputList);
-
-            std::vector<c10::Argument> args;
-            std::vector<c10::Argument> returns;
-            c10::FunctionSchema schema(
-                "HybridEPBuffer::dispatch", "",
-                std::move(args), std::move(returns), false, false);
-            RECORD_FUNCTION_WITH_INPUTS_OUTPUTS(schema, inputsArray, outputsArray);
+            // std::vector<c10::Argument> args;
+            // args.emplace_back("config", c10::AnyType::get());
+            // args.emplace_back("hidden", c10::TensorType::get());
+            // args.emplace_back("probs", c10::OptionalType::create(c10::TensorType::get()));
+            // args.emplace_back("scaling_factor", c10::OptionalType::create(c10::TensorType::get()));
+            // args.emplace_back("sparse_to_dense_map", c10::TensorType::get());
+            // args.emplace_back("rdma_to_attn_map", c10::TensorType::get());
+            // args.emplace_back("attn_to_rdma_map", c10::TensorType::get());
+            // args.emplace_back("num_dispatched_tokens_tensor", c10::OptionalType::create(c10::TensorType::get()));
+            // args.emplace_back("num_dispatched_tokens", c10::OptionalType::create(c10::IntType::get()));
+            // args.emplace_back("num_of_tokens_per_rank", c10::IntType::get());
+            // args.emplace_back("with_probs", c10::BoolType::get());
+            // std::vector<c10::Argument> returns;
+            // returns.emplace_back("", c10::TensorType::get());
+            // returns.emplace_back("", c10::TensorType::get());
+            // returns.emplace_back("", c10::TensorType::get());
+            // c10::FunctionSchema schema(
+            //     "HybridEPBuffer::dispatch", "",
+            //     std::move(args), std::move(returns), false, false);
+            RECORD_FUNCTION_WITH_INPUTS_OUTPUTS("HybridEPBuffer::dispatch", inputsArray, outputsArray);
         }
         return result;
     };
@@ -200,7 +239,28 @@ auto hybrid_ep_buffer_dispatch_with_permute(Func func) {
             c10::ArrayRef<const c10::IValue> inputsArray(inputList);
             c10::ArrayRef<const c10::IValue> outputsArray(outputList);
             std::vector<c10::Argument> args;
+            args.emplace_back("config", c10::AnyType::get());
+            args.emplace_back("hidden", c10::TensorType::get());
+            args.emplace_back("probs", c10::OptionalType::create(c10::TensorType::get()));
+            args.emplace_back("scaling_factor", c10::OptionalType::create(c10::TensorType::get()));
+            args.emplace_back("sparse_to_dense_map", c10::TensorType::get());
+            args.emplace_back("rdma_to_attn_map", c10::TensorType::get());
+            args.emplace_back("attn_to_rdma_map", c10::TensorType::get());
+            args.emplace_back("num_dispatched_tokens_tensor", c10::OptionalType::create(c10::TensorType::get()));
+            args.emplace_back("local_expert_routing_map", c10::OptionalType::create(c10::TensorType::get()));
+            args.emplace_back("row_id_map", c10::OptionalType::create(c10::TensorType::get()));
+            args.emplace_back("num_permuted_tokens", c10::OptionalType::create(c10::IntType::get()));
+            args.emplace_back("num_of_tokens_per_rank", c10::IntType::get());
+            args.emplace_back("pad_multiple", c10::OptionalType::create(c10::IntType::get()));
+            args.emplace_back("non_blocking", c10::BoolType::get());
+            args.emplace_back("with_probs", c10::BoolType::get());
             std::vector<c10::Argument> returns;
+            returns.emplace_back("", c10::TensorType::get());
+            returns.emplace_back("", c10::TensorType::get());
+            returns.emplace_back("", c10::TensorType::get());
+            returns.emplace_back("", c10::TensorType::get());
+            returns.emplace_back("", c10::TensorType::get());
+            returns.emplace_back("", c10::TensorType::get());
             c10::FunctionSchema schema(
                 "HybridEPBuffer::dispatch_with_permute", "",
                 std::move(args), std::move(returns), false, false);
@@ -247,7 +307,20 @@ auto hybrid_ep_buffer_combine_with_unpermute(Func func) {
             c10::ArrayRef<const c10::IValue> inputsArray(inputList);
             c10::ArrayRef<const c10::IValue> outputsArray(outputList);
             std::vector<c10::Argument> args;
+            args.emplace_back("config", c10::AnyType::get());
+            args.emplace_back("hidden", c10::TensorType::get());
+            args.emplace_back("probs", c10::OptionalType::create(c10::TensorType::get()));
+            args.emplace_back("sparse_to_dense_map", c10::TensorType::get());
+            args.emplace_back("rdma_to_attn_map", c10::TensorType::get());
+            args.emplace_back("attn_to_rdma_map", c10::TensorType::get());
+            args.emplace_back("num_dispatched_tokens_tensor", c10::OptionalType::create(c10::TensorType::get()));
+            args.emplace_back("row_id_map", c10::OptionalType::create(c10::TensorType::get()));
+            args.emplace_back("num_of_tokens_per_rank", c10::IntType::get());
+            args.emplace_back("pad_multiple", c10::OptionalType::create(c10::IntType::get()));
+            args.emplace_back("with_probs", c10::BoolType::get());
             std::vector<c10::Argument> returns;
+            returns.emplace_back("", c10::TensorType::get());
+            returns.emplace_back("", c10::TensorType::get());
             c10::FunctionSchema schema(
                 "HybridEPBuffer::combine_with_unpermute", "",
                 std::move(args), std::move(returns), false, false);
