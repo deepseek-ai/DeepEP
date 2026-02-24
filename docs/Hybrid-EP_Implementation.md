@@ -469,3 +469,11 @@ This environment variable specifies the number of ranks that can directly access
 - `num_of_nodes = group_size // NUM_OF_HYBRID_EP_RANKS_PER_NVLINK_DOMAIN` — total number of NVLink domains
 
 The value must evenly divide the total number of ranks.
+
+To disable MNNVL (fabric) support and fall back to IPC-based memory sharing, set:
+
+```bash
+export USE_MNNVL=0   # or USE_MNNVL=false (case-insensitive)
+```
+
+When this variable is set to `0` or `false`, the allocator forces `support_fabric_` to `false` regardless of hardware capability, causing all allocations to use `cudaMalloc` / `cudaIpc*` instead of fabric handles.
