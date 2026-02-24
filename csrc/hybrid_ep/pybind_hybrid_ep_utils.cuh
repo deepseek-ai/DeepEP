@@ -34,7 +34,7 @@ inline c10::IValue to_ivalue(T&& arg) {
 }
 
 template<typename Result>
-inline void record_result(c10::impl::GenericList& outputList, Result&& result) {
+inline void record_result(std::vector<c10::IValue>& outputList, Result&& result) {
     std::apply([&outputList](const auto&... elem) {
         (outputList.emplace_back(c10::IValue(elem)), ...);
     }, result);
@@ -45,35 +45,35 @@ inline HybridEPBuffer* hybrid_ep_buffer_init(
     int group_size, std::string base_path, bool load_cached_kernels,
     bool use_shared_buffer, bool enable_custom_allgather) {
     if (at::isRecordFunctionEnabled()) {
-        c10::impl::GenericList inputList(c10::AnyType::get());
-        inputList.emplace_back(c10::IValue(process_group.attr("group_name").cast<std::string>()));
-        inputList.emplace_back(to_ivalue(config));
-        inputList.emplace_back(to_ivalue(local_rank));
-        inputList.emplace_back(to_ivalue(node_rank));
-        inputList.emplace_back(to_ivalue(group_size));
-        inputList.emplace_back(to_ivalue(base_path));
-        inputList.emplace_back(to_ivalue(load_cached_kernels));
-        inputList.emplace_back(to_ivalue(use_shared_buffer));
-        inputList.emplace_back(to_ivalue(enable_custom_allgather));
-        c10::impl::GenericList outputList(c10::AnyType::get());
-        c10::ArrayRef<const c10::IValue> inputsArray(inputList);
-        c10::ArrayRef<const c10::IValue> outputsArray(outputList);
-        std::vector<c10::Argument> args;
-        args.emplace_back("group_name", c10::StringType::get());
-        args.emplace_back("config", c10::AnyType::get());
-        args.emplace_back("local_rank", c10::IntType::get());
-        args.emplace_back("node_rank", c10::IntType::get());
-        args.emplace_back("group_size", c10::IntType::get());
-        args.emplace_back("base_path", c10::StringType::get());
-        args.emplace_back("load_cached_kernels", c10::BoolType::get());
-        args.emplace_back("use_shared_buffer", c10::BoolType::get());
-        args.emplace_back("enable_custom_allgather", c10::BoolType::get());
-        std::vector<c10::Argument> returns;
-        // outputList is empty for __init__ (buffer pointer not recorded as IValue)
-        c10::FunctionSchema schema(
-            "HybridEPBuffer::__init__", "",
-            std::move(args), std::move(returns), false, false);
-        RECORD_FUNCTION_WITH_INPUTS_OUTPUTS("HybridEPBuffer::__init__", inputsArray, outputsArray);
+        std::vector<c10::IValue> inputValues;
+        inputValues.reserve(9);
+        inputValues.emplace_back(c10::IValue(process_group.attr("group_name").cast<std::string>()));
+        inputValues.emplace_back(to_ivalue(config));
+        inputValues.emplace_back(to_ivalue(local_rank));
+        inputValues.emplace_back(to_ivalue(node_rank));
+        inputValues.emplace_back(to_ivalue(group_size));
+        inputValues.emplace_back(to_ivalue(base_path));
+        inputValues.emplace_back(to_ivalue(load_cached_kernels));
+        inputValues.emplace_back(to_ivalue(use_shared_buffer));
+        inputValues.emplace_back(to_ivalue(enable_custom_allgather));
+
+        std::vector<c10::IValue> outputValues;
+        // std::vector<c10::Argument> args;
+        // args.emplace_back("group_name", c10::StringType::get());
+        // args.emplace_back("config", c10::AnyType::get());
+        // args.emplace_back("local_rank", c10::IntType::get());
+        // args.emplace_back("node_rank", c10::IntType::get());
+        // args.emplace_back("group_size", c10::IntType::get());
+        // args.emplace_back("base_path", c10::StringType::get());
+        // args.emplace_back("load_cached_kernels", c10::BoolType::get());
+        // args.emplace_back("use_shared_buffer", c10::BoolType::get());
+        // args.emplace_back("enable_custom_allgather", c10::BoolType::get());
+        // std::vector<c10::Argument> returns;
+        // // outputList is empty for __init__ (buffer pointer not recorded as IValue)
+        // c10::FunctionSchema schema(
+        //     "HybridEPBuffer::__init__", "",
+        //     std::move(args), std::move(returns), false, false);
+        RECORD_FUNCTION_WITH_INPUTS_OUTPUTS("HybridEPBuffer::__init__", &inputValues, outputValues);
     }
     return new HybridEPBuffer(process_group, config, local_rank, node_rank, group_size,
                               base_path, load_cached_kernels, use_shared_buffer, enable_custom_allgather);
@@ -94,19 +94,20 @@ auto hybrid_ep_buffer_combine(Func func) {
                                    rdma_to_attn_map, attn_to_rdma_map,
                                    num_of_tokens_per_rank, with_probs);
         if (at::isRecordFunctionEnabled()) {
-            c10::impl::GenericList inputList(c10::AnyType::get());
-            inputList.emplace_back(to_ivalue(config));
-            inputList.emplace_back(to_ivalue(hidden));
-            inputList.emplace_back(to_ivalue(probs));
-            inputList.emplace_back(to_ivalue(sparse_to_dense_map));
-            inputList.emplace_back(to_ivalue(rdma_to_attn_map));
-            inputList.emplace_back(to_ivalue(attn_to_rdma_map));
-            inputList.emplace_back(to_ivalue(num_of_tokens_per_rank));
-            inputList.emplace_back(to_ivalue(with_probs));
-            c10::impl::GenericList outputList(c10::AnyType::get());
-            record_result(outputList, result);
-            c10::ArrayRef<const c10::IValue> inputsArray(inputList);
-            c10::ArrayRef<const c10::IValue> outputsArray(outputList);
+            std::vector<c10::IValue> inputValues;
+            inputValues.reserve(8);
+            inputValues.push_back(to_ivalue(config));
+            inputValues.push_back(to_ivalue(hidden));
+            inputValues.push_back(to_ivalue(probs));
+            inputValues.push_back(to_ivalue(sparse_to_dense_map));
+            inputValues.push_back(to_ivalue(rdma_to_attn_map));
+            inputValues.push_back(to_ivalue(attn_to_rdma_map));
+            inputValues.push_back(to_ivalue(num_of_tokens_per_rank));
+            inputValues.push_back(to_ivalue(with_probs));
+
+            std::vector<c10::IValue> outputValues;
+            record_result(outputValues, result);
+            // c10::ArrayRef<const c10::IValue> outputsArray(outputList);
             /*
             std::cout << "outputList size: " << outputList.size() << std::endl;
             std::vector<c10::Argument> args;
@@ -125,8 +126,7 @@ auto hybrid_ep_buffer_combine(Func func) {
                 "HybridEPBuffer::combine", "",
                 std::move(args), std::move(returns), false, false);
                 */
-            RECORD_FUNCTION_WITH_INPUTS_OUTPUTS("HybridEPBuffer::combine", inputsArray, outputsArray);
-            //RECORD_FUNCTION_WITH_INPUTS_OUTPUTS(schema, inputsArray, outputsArray);
+            RECORD_FUNCTION_WITH_INPUTS_OUTPUTS("HybridEPBuffer::combine", &inputValues, outputValues);
         }
         return result;
     };
@@ -152,22 +152,22 @@ auto hybrid_ep_buffer_dispatch(Func func) {
                                    num_dispatched_tokens_tensor, num_dispatched_tokens,
                                    num_of_tokens_per_rank, with_probs);
         if (at::isRecordFunctionEnabled()) {
-            c10::impl::GenericList inputList(c10::AnyType::get());
-            inputList.emplace_back(to_ivalue(config));
-            inputList.emplace_back(to_ivalue(hidden));
-            inputList.emplace_back(to_ivalue(probs));
-            inputList.emplace_back(to_ivalue(scaling_factor));
-            inputList.emplace_back(to_ivalue(sparse_to_dense_map));
-            inputList.emplace_back(to_ivalue(rdma_to_attn_map));
-            inputList.emplace_back(to_ivalue(attn_to_rdma_map));
-            inputList.emplace_back(to_ivalue(num_dispatched_tokens_tensor));
-            inputList.emplace_back(to_ivalue(num_dispatched_tokens));
-            inputList.emplace_back(to_ivalue(num_of_tokens_per_rank));
-            inputList.emplace_back(to_ivalue(with_probs));
-            c10::impl::GenericList outputList(c10::AnyType::get());
-            record_result(outputList, result);
-            c10::ArrayRef<const c10::IValue> inputsArray(inputList);
-            c10::ArrayRef<const c10::IValue> outputsArray(outputList);
+            std::vector<c10::IValue> inputValues;
+            inputValues.reserve(11);
+            inputValues.push_back(to_ivalue(config));
+            inputValues.push_back(to_ivalue(hidden));
+            inputValues.push_back(to_ivalue(probs));
+            inputValues.push_back(to_ivalue(scaling_factor));
+            inputValues.push_back(to_ivalue(sparse_to_dense_map));
+            inputValues.push_back(to_ivalue(rdma_to_attn_map));
+            inputValues.push_back(to_ivalue(attn_to_rdma_map));
+            inputValues.push_back(to_ivalue(num_dispatched_tokens_tensor));
+            inputValues.push_back(to_ivalue(num_dispatched_tokens));
+            inputValues.push_back(to_ivalue(num_of_tokens_per_rank));
+            inputValues.push_back(to_ivalue(with_probs));
+
+            std::vector<c10::IValue> outputValues;
+            record_result(outputValues, result);
             // std::vector<c10::Argument> args;
             // args.emplace_back("config", c10::AnyType::get());
             // args.emplace_back("hidden", c10::TensorType::get());
@@ -187,7 +187,7 @@ auto hybrid_ep_buffer_dispatch(Func func) {
             // c10::FunctionSchema schema(
             //     "HybridEPBuffer::dispatch", "",
             //     std::move(args), std::move(returns), false, false);
-            RECORD_FUNCTION_WITH_INPUTS_OUTPUTS("HybridEPBuffer::dispatch", inputsArray, outputsArray);
+            RECORD_FUNCTION_WITH_INPUTS_OUTPUTS("HybridEPBuffer::dispatch", &inputValues, outputValues);
         }
         return result;
     };
@@ -218,53 +218,54 @@ auto hybrid_ep_buffer_dispatch_with_permute(Func func) {
                                   num_permuted_tokens, num_of_tokens_per_rank, pad_multiple,
                                   non_blocking, with_probs);
         if (at::isRecordFunctionEnabled()) {
-            c10::impl::GenericList inputList(c10::AnyType::get());
-            inputList.emplace_back(to_ivalue(config));
-            inputList.emplace_back(to_ivalue(hidden));
-            inputList.emplace_back(to_ivalue(probs));
-            inputList.emplace_back(to_ivalue(scaling_factor));
-            inputList.emplace_back(to_ivalue(sparse_to_dense_map));
-            inputList.emplace_back(to_ivalue(rdma_to_attn_map));
-            inputList.emplace_back(to_ivalue(attn_to_rdma_map));
-            inputList.emplace_back(to_ivalue(num_dispatched_tokens_tensor));
-            inputList.emplace_back(to_ivalue(local_expert_routing_map));
-            inputList.emplace_back(to_ivalue(row_id_map));
-            inputList.emplace_back(to_ivalue(num_permuted_tokens));
-            inputList.emplace_back(to_ivalue(num_of_tokens_per_rank));
-            inputList.emplace_back(to_ivalue(pad_multiple));
-            inputList.emplace_back(to_ivalue(non_blocking));
-            inputList.emplace_back(to_ivalue(with_probs));
-            c10::impl::GenericList outputList(c10::AnyType::get());
-            record_result(outputList, result);
-            c10::ArrayRef<const c10::IValue> inputsArray(inputList);
-            c10::ArrayRef<const c10::IValue> outputsArray(outputList);
-            std::vector<c10::Argument> args;
-            args.emplace_back("config", c10::AnyType::get());
-            args.emplace_back("hidden", c10::TensorType::get());
-            args.emplace_back("probs", c10::OptionalType::create(c10::TensorType::get()));
-            args.emplace_back("scaling_factor", c10::OptionalType::create(c10::TensorType::get()));
-            args.emplace_back("sparse_to_dense_map", c10::TensorType::get());
-            args.emplace_back("rdma_to_attn_map", c10::TensorType::get());
-            args.emplace_back("attn_to_rdma_map", c10::TensorType::get());
-            args.emplace_back("num_dispatched_tokens_tensor", c10::OptionalType::create(c10::TensorType::get()));
-            args.emplace_back("local_expert_routing_map", c10::OptionalType::create(c10::TensorType::get()));
-            args.emplace_back("row_id_map", c10::OptionalType::create(c10::TensorType::get()));
-            args.emplace_back("num_permuted_tokens", c10::OptionalType::create(c10::IntType::get()));
-            args.emplace_back("num_of_tokens_per_rank", c10::IntType::get());
-            args.emplace_back("pad_multiple", c10::OptionalType::create(c10::IntType::get()));
-            args.emplace_back("non_blocking", c10::BoolType::get());
-            args.emplace_back("with_probs", c10::BoolType::get());
-            std::vector<c10::Argument> returns;
-            returns.emplace_back("", c10::TensorType::get());
-            returns.emplace_back("", c10::TensorType::get());
-            returns.emplace_back("", c10::TensorType::get());
-            returns.emplace_back("", c10::TensorType::get());
-            returns.emplace_back("", c10::TensorType::get());
-            returns.emplace_back("", c10::TensorType::get());
-            c10::FunctionSchema schema(
-                "HybridEPBuffer::dispatch_with_permute", "",
-                std::move(args), std::move(returns), false, false);
-            RECORD_FUNCTION_WITH_INPUTS_OUTPUTS(schema, inputsArray, outputsArray);
+            std::vector<c10::IValue> inputValues;
+            inputValues.reserve(15);
+            inputValues.push_back(to_ivalue(config));
+            inputValues.push_back(to_ivalue(hidden));
+            inputValues.push_back(to_ivalue(probs));
+            inputValues.push_back(to_ivalue(scaling_factor));
+            inputValues.push_back(to_ivalue(sparse_to_dense_map));
+            inputValues.push_back(to_ivalue(rdma_to_attn_map));
+            inputValues.push_back(to_ivalue(attn_to_rdma_map));
+            inputValues.push_back(to_ivalue(num_dispatched_tokens_tensor));
+            inputValues.push_back(to_ivalue(local_expert_routing_map));
+            inputValues.push_back(to_ivalue(row_id_map));
+            inputValues.push_back(to_ivalue(num_permuted_tokens));
+            inputValues.push_back(to_ivalue(num_of_tokens_per_rank));
+            inputValues.push_back(to_ivalue(pad_multiple));
+            inputValues.push_back(to_ivalue(non_blocking));
+            inputValues.push_back(to_ivalue(with_probs));
+
+            std::vector<c10::IValue> outputValues;
+            record_result(outputValues, result);
+
+            // std::vector<c10::Argument> args;
+            // args.emplace_back("config", c10::AnyType::get());
+            // args.emplace_back("hidden", c10::TensorType::get());
+            // args.emplace_back("probs", c10::OptionalType::create(c10::TensorType::get()));
+            // args.emplace_back("scaling_factor", c10::OptionalType::create(c10::TensorType::get()));
+            // args.emplace_back("sparse_to_dense_map", c10::TensorType::get());
+            // args.emplace_back("rdma_to_attn_map", c10::TensorType::get());
+            // args.emplace_back("attn_to_rdma_map", c10::TensorType::get());
+            // args.emplace_back("num_dispatched_tokens_tensor", c10::OptionalType::create(c10::TensorType::get()));
+            // args.emplace_back("local_expert_routing_map", c10::OptionalType::create(c10::TensorType::get()));
+            // args.emplace_back("row_id_map", c10::OptionalType::create(c10::TensorType::get()));
+            // args.emplace_back("num_permuted_tokens", c10::OptionalType::create(c10::IntType::get()));
+            // args.emplace_back("num_of_tokens_per_rank", c10::IntType::get());
+            // args.emplace_back("pad_multiple", c10::OptionalType::create(c10::IntType::get()));
+            // args.emplace_back("non_blocking", c10::BoolType::get());
+            // args.emplace_back("with_probs", c10::BoolType::get());
+            // std::vector<c10::Argument> returns;
+            // returns.emplace_back("", c10::TensorType::get());
+            // returns.emplace_back("", c10::TensorType::get());
+            // returns.emplace_back("", c10::TensorType::get());
+            // returns.emplace_back("", c10::TensorType::get());
+            // returns.emplace_back("", c10::TensorType::get());
+            // returns.emplace_back("", c10::TensorType::get());
+            // c10::FunctionSchema schema(
+            //     "HybridEPBuffer::dispatch_with_permute", "",
+            //     std::move(args), std::move(returns), false, false);
+            RECORD_FUNCTION_WITH_INPUTS_OUTPUTS("HybridEPBuffer::dispatch_with_permute", &inputValues, outputValues);
         }
         return result;
     };
@@ -290,41 +291,42 @@ auto hybrid_ep_buffer_combine_with_unpermute(Func func) {
                                    num_dispatched_tokens_tensor, row_id_map,
                                    num_of_tokens_per_rank, pad_multiple, with_probs);
         if (at::isRecordFunctionEnabled()) {
-            c10::impl::GenericList inputList(c10::AnyType::get());
-            inputList.emplace_back(to_ivalue(config));
-            inputList.emplace_back(to_ivalue(hidden));
-            inputList.emplace_back(to_ivalue(probs));
-            inputList.emplace_back(to_ivalue(sparse_to_dense_map));
-            inputList.emplace_back(to_ivalue(rdma_to_attn_map));
-            inputList.emplace_back(to_ivalue(attn_to_rdma_map));
-            inputList.emplace_back(to_ivalue(num_dispatched_tokens_tensor));
-            inputList.emplace_back(to_ivalue(row_id_map));
-            inputList.emplace_back(to_ivalue(num_of_tokens_per_rank));
-            inputList.emplace_back(to_ivalue(pad_multiple));
-            inputList.emplace_back(to_ivalue(with_probs));
-            c10::impl::GenericList outputList(c10::AnyType::get());
-            record_result(outputList, result);
-            c10::ArrayRef<const c10::IValue> inputsArray(inputList);
-            c10::ArrayRef<const c10::IValue> outputsArray(outputList);
-            std::vector<c10::Argument> args;
-            args.emplace_back("config", c10::AnyType::get());
-            args.emplace_back("hidden", c10::TensorType::get());
-            args.emplace_back("probs", c10::OptionalType::create(c10::TensorType::get()));
-            args.emplace_back("sparse_to_dense_map", c10::TensorType::get());
-            args.emplace_back("rdma_to_attn_map", c10::TensorType::get());
-            args.emplace_back("attn_to_rdma_map", c10::TensorType::get());
-            args.emplace_back("num_dispatched_tokens_tensor", c10::OptionalType::create(c10::TensorType::get()));
-            args.emplace_back("row_id_map", c10::OptionalType::create(c10::TensorType::get()));
-            args.emplace_back("num_of_tokens_per_rank", c10::IntType::get());
-            args.emplace_back("pad_multiple", c10::OptionalType::create(c10::IntType::get()));
-            args.emplace_back("with_probs", c10::BoolType::get());
-            std::vector<c10::Argument> returns;
-            returns.emplace_back("", c10::TensorType::get());
-            returns.emplace_back("", c10::TensorType::get());
-            c10::FunctionSchema schema(
-                "HybridEPBuffer::combine_with_unpermute", "",
-                std::move(args), std::move(returns), false, false);
-            RECORD_FUNCTION_WITH_INPUTS_OUTPUTS(schema, inputsArray, outputsArray);
+            std::vector<c10::IValue> inputValues;
+            inputValues.reserve(10);
+            inputValues.emplace_back(to_ivalue(config));
+            inputValues.emplace_back(to_ivalue(hidden));
+            inputValues.emplace_back(to_ivalue(probs));
+            inputValues.emplace_back(to_ivalue(sparse_to_dense_map));
+            inputValues.emplace_back(to_ivalue(rdma_to_attn_map));
+            inputValues.emplace_back(to_ivalue(attn_to_rdma_map));
+            inputValues.emplace_back(to_ivalue(num_dispatched_tokens_tensor));
+            inputValues.emplace_back(to_ivalue(row_id_map));
+            inputValues.emplace_back(to_ivalue(num_of_tokens_per_rank));
+            inputValues.emplace_back(to_ivalue(pad_multiple));
+            inputValues.emplace_back(to_ivalue(with_probs));
+
+            std::vector<c10::IValue> outputValues;
+            record_result(outputValues, result);
+
+            // std::vector<c10::Argument> args;
+            // args.emplace_back("config", c10::AnyType::get());
+            // args.emplace_back("hidden", c10::TensorType::get());
+            // args.emplace_back("probs", c10::OptionalType::create(c10::TensorType::get()));
+            // args.emplace_back("sparse_to_dense_map", c10::TensorType::get());
+            // args.emplace_back("rdma_to_attn_map", c10::TensorType::get());
+            // args.emplace_back("attn_to_rdma_map", c10::TensorType::get());
+            // args.emplace_back("num_dispatched_tokens_tensor", c10::OptionalType::create(c10::TensorType::get()));
+            // args.emplace_back("row_id_map", c10::OptionalType::create(c10::TensorType::get()));
+            // args.emplace_back("num_of_tokens_per_rank", c10::IntType::get());
+            // args.emplace_back("pad_multiple", c10::OptionalType::create(c10::IntType::get()));
+            // args.emplace_back("with_probs", c10::BoolType::get());
+            // std::vector<c10::Argument> returns;
+            // returns.emplace_back("", c10::TensorType::get());
+            // returns.emplace_back("", c10::TensorType::get());
+            // c10::FunctionSchema schema(
+            //     "HybridEPBuffer::combine_with_unpermute", "",
+            //     std::move(args), std::move(returns), false, false);
+            RECORD_FUNCTION_WITH_INPUTS_OUTPUTS("HybridEPBuffer::combine_with_unpermute", &inputValues, outputValues);
         }
         return result;
     };
