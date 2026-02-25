@@ -436,7 +436,7 @@ For CUDA graph capture, `non_blocking=True` allows users to provide an estimated
 └───────────────────┘     └─────────────────────┘     └──────────────────────────────────┘
 ```
 
-**Non-blocking output behavior**:
+**Output behavior**:
 - **Overflow** (actual > estimated): Excess tokens are dropped, `overflow_flag = True`
 - **Underflow** (actual ≤ estimated): Trailing portion contains garbage data, use `tokens_per_expert` to find valid ranges
 
