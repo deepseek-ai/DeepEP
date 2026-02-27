@@ -331,8 +331,8 @@ public:
         buffer_config.num_of_blocks_combine_api = sms_combine;
         buffer_config.num_of_blocks_preprocessing_api = sms_preprocessing;
         buffer_config.token_data_type = use_fp8 ? APP_TOKEN_DATA_TYPE::UINT8 : APP_TOKEN_DATA_TYPE::UINT16;
-        buffer_config.num_of_tokens_per_chunk_dispatch_api = get_env_int("NUM_OF_TOKENS_PER_CHUNK_DISPATCH_API", 128);
-        buffer_config.num_of_tokens_per_chunk_combine_api = get_env_int("NUM_OF_TOKENS_PER_CHUNK_COMBINE_API", 128);
+        buffer_config.num_of_tokens_per_chunk_dispatch_api = get_env_int("NUM_OF_TOKENS_PER_CHUNK_DISPATCH_API", num_of_nodes == 1 ? 128 : 64);
+        buffer_config.num_of_tokens_per_chunk_combine_api = get_env_int("NUM_OF_TOKENS_PER_CHUNK_COMBINE_API", num_of_nodes == 1 ? 128 : 64);
         buffer_config.num_of_dispatch_chunks = (buffer_config.max_num_of_tokens_per_rank - 1)
             / buffer_config.num_of_tokens_per_chunk_dispatch_api + 1;
         buffer_config.num_of_combine_chunks = (buffer_config.max_num_of_tokens_per_rank - 1)

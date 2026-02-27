@@ -72,6 +72,10 @@ HybridEPBuffer::HybridEPBuffer(
     allocate_buffer();
 }
 
+HybridEPBuffer::~HybridEPBuffer() {
+    release_buffer();
+}
+
 void HybridEPBuffer::release_buffer() {
   // Synchronize the device to ensure all operations are completed.
   CUDA_CHECK(cudaDeviceSynchronize());

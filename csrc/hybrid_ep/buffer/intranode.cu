@@ -34,6 +34,7 @@ void NVLCoordinator::destroy() {
         free_buffer(dispatch_buffers.intra_node_write_completion_flags, true);
     }else{
         remote_allocator->close_handle(dispatch_buffers.intra_node_write_completion_flags);
+        dispatch_buffers.intra_node_write_completion_flags = nullptr;
     }
     if (dispatch_buffers.expert_output_token_all_ranks != nullptr) {
         for (int i = 0; i < buffer_config.num_of_ranks_per_node; i++) {
@@ -73,6 +74,7 @@ void NVLCoordinator::destroy() {
         free_buffer(combine_buffers.intra_node_write_completion_flags, true);
     }else{
         remote_allocator->close_handle(combine_buffers.intra_node_write_completion_flags);
+        combine_buffers.intra_node_write_completion_flags = nullptr;
     }
     free_buffer(combine_buffers.expected_unpermute_flag_value, false);
     // Clean up fused unpermute-combine chunk flags

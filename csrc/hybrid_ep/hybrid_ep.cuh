@@ -22,6 +22,7 @@
 class HybridEPBuffer {
 public:
   HybridEPBuffer(pybind11::object process_group, BufferConfig config, int local_rank, int node_rank, int group_size, std::string base_path, bool load_cached_kernels, bool use_shared_buffer, bool enable_custom_allgather);
+  ~HybridEPBuffer();
   bool update_buffer(HybridEpConfigInstance config); // True means the buffer is reallocated.
 
   HandleImpl metadata_preprocessing(HybridEpConfigInstance config, 
@@ -66,11 +67,11 @@ public:
           bool with_probs);       
 
 private:
+  ExtendedMemoryAllocator remote_allocator;
 #ifdef HYBRID_EP_BUILD_MULTINODE_ENABLE
   RDMACoordinator rdma_coordinator;
 #endif
   NVLCoordinator nvl_coordinator;
-  ExtendedMemoryAllocator remote_allocator;
   BufferConfig buffer_config;
   Executor executor;
   pybind11::object process_group;
