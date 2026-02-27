@@ -401,7 +401,9 @@ void Executor::combine_preprocess(HybridEpConfigInstance config, CombineArgs& ar
         
         unpermute_launcher<uint16_t, float>(unpermute_args);
     
-    }else if(!args.enable_unpermute) {
+    } else if(args.fuse_unpermute_combine) {
+        // Fused unpermute: data already written to args input tensors by fused combine kernel. No-op.
+    } else if(!args.enable_unpermute) {
         // Copy the input tensor to the input buffer
         auto input_sz = args.hidden.numel() * sizeof(uint16_t);
         CUDA_CHECK(
@@ -424,6 +426,11 @@ void Executor::combine_core(HybridEpConfigInstance config, CombineArgs& args) {
     hybrid_ep::combine_kernel_param_t param;
     
     // Setup input pointers
+    if(args.fuse_unpermute_combine) {
+        param.local_expert_input_token = reinterpret_cast<uint16_t*>(args.hidden.data_ptr());
+        param.local_expert_input_prob = (config.backward_combine_api) ? 
+            reinterpret_cast<float*>(args.probs.data_ptr()) : nullptr;
+    } 
     for (int i = 0; i < config.num_of_ranks_per_node; i++) {
         param.expert_input_token[i] =
             intra_node_combine_buffers->expert_input_token_all_ranks[i];
@@ -455,12 +462,20 @@ void Executor::combine_core(HybridEpConfigInstance config, CombineArgs& args) {
 
     // Misc
     param.node_rank = this->node_rank;
+    param.local_rank = this->local_rank;
     param.num_of_tokens_per_rank = args.num_of_tokens_per_rank;
     param.expected_intra_node_flag_value =
         intra_node_combine_buffers->expected_intra_node_flag_value;
     param.intra_node_flag_parity = intra_node_combine_buffers->intra_node_flag_parity;
     if(args.fuse_unpermute_combine) {
-        param.expected_permute_flag_value = intra_node_combine_buffers->expected_permute_flag_value;
+        // Set permute related metadata & intermediate buffers
+        param.dense_chunk_layout = args.dense_chunk_layout.data_ptr<int32_t>();
+        param.dense_to_expert_map = args.dense_to_expert_map.data_ptr<int32_t>();
+        param.expected_unpermute_flag_value = intra_node_combine_buffers->expected_unpermute_flag_value;
+        for (int i = 0; i < config.num_of_ranks_per_node; i++) {
+            param.intra_node_expert_input_chunk_flags[i] =
+                intra_node_combine_buffers->intra_node_expert_input_chunk_flags_all_ranks[i];
+        }
     }
 #ifdef HYBRID_EP_BUILD_MULTINODE_ENABLE
     param.expected_rdma_flag_value = inter_node_combine_buffers->expected_rdma_flag_value;

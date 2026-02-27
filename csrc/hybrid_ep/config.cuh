@@ -170,18 +170,20 @@ struct SmemLayoutBuilder {
     }
 };
 
-// Computed shared memory sizes for dispatch, permute_block, and combine kernels.
+// Computed shared memory sizes for dispatch, permute_block, combine, and unpermute_block kernels.
 struct SmemSizes {
     int64_t dispatch;
     int64_t permute_block;
     int64_t combine;
+    int64_t unpermute_block;
 };
 
-// Compute the dynamic shared memory sizes for all three kernel types in one call.
+// Compute the dynamic shared memory sizes for all kernel types in one call.
 // Mirrors the struct layouts in hybrid_ep_backend.cuh:
 //   - dispatch_kernel_dynamic_shared_memory_buffer_t
 //   - dispatch_kernel_permute_block_dynamic_shared_memory_buffer_t
 //   - combine_kernel_dynamic_shared_memory_buffer_t
+//   - combine_kernel_unpermute_block_dynamic_shared_memory_buffer_t
 static SmemSizes compute_smem_sizes(const HybridEpConfigInstance& c) {
     static std::map<HybridEpConfigInstance, SmemSizes> cache;
     auto it = cache.find(c);
@@ -257,6 +259,22 @@ static SmemSizes compute_smem_sizes(const HybridEpConfigInstance& c) {
             b.add((int64_t)c.num_of_stages_g2s_combine_api, 1);
         b.add((int64_t)c.num_of_stages_g2s_combine_api, 1);
         result.combine = b.total();
+    }
+
+    // --- combine unpermute_block kernel ---
+    {
+        SmemLayoutBuilder b;
+        b.add((int64_t)c.num_of_stages_g2s_unpermute_block * c.hidden_dim * 2, 128);
+        b.add((int64_t)c.num_of_stages_s2g_unpermute_block * c.hidden_dim * 2, 128);
+        if (c.backward_combine_api) {
+            b.add((int64_t)c.num_of_stages_s2g_unpermute_block * c.num_of_experts_per_rank * c.num_of_ranks_per_node * 4, 16);
+            b.add((int64_t)c.num_of_stages_g2s_unpermute_block * 4, 16);
+        }
+        b.add((int64_t)c.num_of_stages_g2s_unpermute_block * 2 * 8, 8);
+        if (c.backward_combine_api)
+            b.add((int64_t)c.num_of_stages_g2s_unpermute_block * 4, 4);
+        b.add((int64_t)c.num_of_stages_g2s_unpermute_block, 1);
+        result.unpermute_block = b.total();
     }
 
     cache[c] = result;
@@ -359,14 +377,20 @@ public:
         config.num_of_in_flight_s2g_permute_block_dispatch_api = get_env_int("NUM_OF_IN_FLIGHT_S2G_PERMUTE_BLOCK_DISPATCH_API", 8);
         config.num_of_additional_in_flight_s2g_dispatch_api = get_env_int("NUM_OF_ADDITIONAL_IN_FLIGHT_S2G_DISPATCH_API", 6);
         config.num_of_tokens_per_chunk_dispatch_api = get_env_int("NUM_OF_TOKENS_PER_CHUNK_DISPATCH_API", default_chunk_size);
+
         config.backward_combine_api = true;
         config.device_side_sync_combine_api = true;
         config.num_of_stages_g2s_combine_api = get_env_int("NUM_OF_STAGES_G2S_COMBINE_API",
             buffer_config.num_of_nodes > 1 ? 5 : 10);
         config.num_of_stages_s2g_combine_api = get_env_int("NUM_OF_STAGES_S2G_COMBINE_API", 2);
+        config.num_of_stages_g2s_unpermute_block = get_env_int("NUM_OF_STAGES_G2S_UNPERMUTE_BLOCK", 2);
+        config.num_of_stages_s2g_unpermute_block = get_env_int("NUM_OF_STAGES_S2G_UNPERMUTE_BLOCK", 2);
         config.num_of_tokens_per_chunk_combine_api = get_env_int("NUM_OF_TOKENS_PER_CHUNK_COMBINE_API", default_chunk_size);
         config.num_of_tokens_per_group_combine_api = get_env_int("NUM_OF_TOKENS_PER_GROUP_COMBINE_API", 4);
         config.num_of_additional_in_flight_s2g_combine_api = get_env_int("NUM_OF_ADDITIONAL_IN_FLIGHT_S2G_COMBINE_API", 2);
+        config.num_of_additional_in_flight_s2g_unpermute_block_combine_api = get_env_int("NUM_OF_ADDITIONAL_IN_FLIGHT_S2G_UNPERMUTE_BLOCK_COMBINE_API", 2);
+        
+        
         config.pad_multiple = 1;
 
         // If we use the fused permute-dispatch kernel, the number of blocks
@@ -398,6 +422,11 @@ public:
             auto s = compute_smem_sizes(config);
             return fuse_permute_dispatch ? std::max(s.dispatch, s.permute_block) : s.dispatch;
         };
+        // Effective combine smem: in fuse mode, take max of combine and unpermute_block
+        auto combine_smem = [&]() -> int64_t {
+            auto s = compute_smem_sizes(config);
+            return fuse_permute_dispatch ? std::max(s.combine, s.unpermute_block) : s.combine;
+        };
 
         // 1. Dispatch: reduce stages
         while (dispatch_smem() > max_smem && config.num_of_stages_dispatch_api > MIN_STAGES)
@@ -405,7 +434,7 @@ public:
         clamp_below(config.num_of_in_flight_s2g_dispatch_api, config.num_of_stages_dispatch_api);
         clamp_below(config.num_of_additional_in_flight_s2g_dispatch_api, config.num_of_stages_dispatch_api);
 
-        // 2. Permute block (fuse mode only): reduce stages independently
+        // 2. Permute block (fuse permute-dispatch mode only): reduce stages independently
         if (fuse_permute_dispatch) {
             while (compute_smem_sizes(config).permute_block > max_smem
                    && config.num_of_stages_permute_block_dispatch_api > MIN_STAGES)
@@ -416,7 +445,7 @@ public:
 
         // 3. Combine: alternately reduce g2s / s2g stages
         bool reduce_g2s = true;
-        while (compute_smem_sizes(config).combine > max_smem
+        while (combine_smem() > max_smem
                && (config.num_of_stages_g2s_combine_api > MIN_STAGES
                    || config.num_of_stages_s2g_combine_api > MIN_STAGES)) {
             if (reduce_g2s && config.num_of_stages_g2s_combine_api > MIN_STAGES)
@@ -428,9 +457,25 @@ public:
         clamp_below(config.num_of_additional_in_flight_s2g_combine_api,
                     config.num_of_stages_s2g_combine_api);
 
-        // 4. Final validation
+        // 4. Unpermute block (fuse unpermute-combine mode only): alternately reduce g2s / s2g stages
+        if (fuse_permute_dispatch) {
+            bool reduce_g2s_up = true;
+            while (compute_smem_sizes(config).unpermute_block > max_smem
+                   && (config.num_of_stages_g2s_unpermute_block > MIN_STAGES
+                       || config.num_of_stages_s2g_unpermute_block > MIN_STAGES)) {
+                if (reduce_g2s_up && config.num_of_stages_g2s_unpermute_block > MIN_STAGES)
+                    config.num_of_stages_g2s_unpermute_block--;
+                else if (config.num_of_stages_s2g_unpermute_block > MIN_STAGES)
+                    config.num_of_stages_s2g_unpermute_block--;
+                reduce_g2s_up = !reduce_g2s_up;
+            }
+            clamp_below(config.num_of_additional_in_flight_s2g_unpermute_block_combine_api,
+                        config.num_of_stages_s2g_unpermute_block);
+        }
+
+        // 5. Final validation
         int64_t final_dispatch = dispatch_smem();
-        int64_t final_combine = compute_smem_sizes(config).combine;
+        int64_t final_combine = combine_smem();
         if (final_dispatch > max_smem || final_combine > max_smem) {
             fprintf(stderr, "[Error] adjust_template: smem exceeds device limit (%d B)."
                     " dispatch=%ld, combine=%ld\n", max_smem, (long)final_dispatch, (long)final_combine);

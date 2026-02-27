@@ -63,7 +63,9 @@ tests/
 | `use_fp8` | `bool` | Use FP8 quantization (default: False) |
 | `num_sms_dispatch_api` | `int` | SMs for dispatch kernel |
 | `num_sms_combine_api` | `int` | SMs for combine kernel |
-| `num_blocks_permute_api` | `int` | CUDA blocks for permute kernel (standalone or fused) (default: None) |
+| `num_sms_preprocessing_api` | `int` | CUDA blocks for preprocessing kernel |
+| `num_blocks_permute` | `int` | CUDA blocks for permute (standalone or fused permute-dispatch) |
+| `num_blocks_unpermute` | `int` | CUDA blocks for unpermute (standalone or fused unpermute-combine) |
 | `load_cached_kernels` | `bool` | Load pre-compiled JIT kernels (default: False) |
 | `use_shared_buffer` | `bool` | Share intra-node buffer between dispatch/combine (default: True) |
 | `enable_custom_allgather` | `bool` | Use optimized intra-node allgather (default: False) |
@@ -223,9 +225,13 @@ These parameters are pre-tuned for optimal performance. Adjustments are generall
 | `num_of_stages_g2s_combine_api` | `NUM_OF_STAGES_G2S_COMBINE_API` | Pipeline depth for global-to-shared in combine. Same shared memory trade-off as dispatch |
 | `num_of_stages_s2g_combine_api` | `NUM_OF_STAGES_S2G_COMBINE_API` | Pipeline depth for shared-to-global in combine |
 | `num_of_blocks_combine_api` | - | Number of CTAs for combine kernels |
-| `num_of_blocks_permute_api` | - | Number of CUDA blocks for the permute portion (standalone or fused) |
-| `num_of_stages_permute_block_dispatch_api` | - | Shared-memory pipeline stages for permute blocks in fused dispatch |
-| `num_of_in_flight_s2g_permute_block_dispatch_api` | - | In-flight S2G token entries for permute blocks in fused dispatch |
+| `num_of_blocks_permute` | - | Number of CUDA blocks for the permute portion (standalone or fused dispatch) |
+| `num_of_stages_permute_block_dispatch_api` | `NUM_OF_STAGES_PERMUTE_BLOCK_DISPATCH_API` | Shared-memory pipeline stages for permute blocks in fused dispatch |
+| `num_of_in_flight_s2g_permute_block_dispatch_api` | `NUM_OF_IN_FLIGHT_S2G_PERMUTE_BLOCK_DISPATCH_API` | In-flight S2G token entries for permute blocks in fused dispatch |
+| `num_of_blocks_unpermute` | - | Number of CUDA blocks for the unpermute portion (standalone or fused combine) |
+| `num_of_stages_g2s_unpermute_block` | `NUM_OF_STAGES_G2S_UNPERMUTE_BLOCK` | Pipeline depth for G2S in unpermute blocks (fused combine) |
+| `num_of_stages_s2g_unpermute_block` | `NUM_OF_STAGES_S2G_UNPERMUTE_BLOCK` | Pipeline depth for S2G in unpermute blocks (fused combine) |
+| `num_of_additional_in_flight_s2g_unpermute_block_combine_api` | `NUM_OF_ADDITIONAL_IN_FLIGHT_S2G_UNPERMUTE_BLOCK_COMBINE_API` | In-flight S2G token entries for unpermute blocks in fused combine |
 
 > **Fused-mode constraint:** When `fuse_permute_dispatch=True`, `is_valid()` additionally requires all chunk sizes (`num_of_tokens_per_chunk_dispatch_api`, `num_of_tokens_per_chunk_combine_api`, `num_of_tokens_per_chunk_preprocessing_api`) to be identical.
 
@@ -366,7 +372,7 @@ Hybrid-EP uses NVCC JIT compilation to generate optimized kernels based on runti
 HybridEpConfigInstance ──► Generate .cu ──► nvcc compile ──► .so ──► dlopen/dlsym ──► function pointer
 ```
 
-When `fuse_permute_dispatch=True`, the `build()` method passes `-DHYBRID_EP_BUILD_PERMUTE_FUSION_ENABLE` to nvcc, which activates the fused permute code path in the kernel templates. Fused and non-fused kernels produce separate `.so` files; each is loaded with `RTLD_LOCAL` to prevent symbol conflicts between the two variants.
+When `fuse_permute_dispatch=True` or `fuse_unpermute_combine=True`, the `build()` method passes `-DHYBRID_EP_BUILD_PERMUTE_FUSION_ENABLE` to nvcc, which activates the fused permute/unpermute code paths in the kernel templates. The same macro controls both dispatch-side permute fusion and combine-side unpermute fusion. Fused and non-fused kernels produce separate `.so` files; each is loaded with `RTLD_LOCAL` to prevent symbol conflicts between the two variants.
 
 ### 6.2 Cache Management
 
@@ -500,7 +506,17 @@ The combine kernel aggregates expert outputs back to original token positions.
    - *Intra-node* (multi-node only): Writes to RDMA buffer for cross-node transfer
 5. **RDMA Warp Group** (multi-node only): Sends data to peer ranks on other nodes; also receives RDMA data from peers
 
-When `fuse_unpermute_combine=True`, the combine kernel uses the same block-specialization approach: dedicated permute blocks within the kernel grid perform the unpermute operation in-place, using the same chunk-flag synchronization mechanism as the fused dispatch kernel.
+#### Fused Unpermute Blocks
+
+When `fuse_unpermute_combine=True` (compiled with `-DHYBRID_EP_BUILD_PERMUTE_FUSION_ENABLE`), the kernel grid is extended with `NUM_OF_UNPERMUTE_BLOCKS` additional blocks appended after the `NUM_OF_BLOCKS` combine blocks. Block role is determined by `blockIdx.x`:
+
+- `blockIdx.x < NUM_OF_BLOCKS` — combine block (original logic above)
+- `blockIdx.x >= NUM_OF_BLOCKS` — unpermute block
+
+Each unpermute block contains two warp groups:
+
+6. **Unpermute G2S Warp Group**: Reads expert output tokens from the user's input tensor (`local_expert_input_token`) using `dense_to_expert_map` to traverse tokens in expert-grouped order. Produces token entries into the shared memory G2S FIFO with `num_of_stages_g2s_unpermute_block` pipeline depth.
+7. **Unpermute Red Warp Group**: Consumes token entries from the shared memory G2S FIFO, rearranges them from expert-grouped order to chunk-based order, and writes to the local rank's NVLink buffer (`expert_input_token[local_rank]`). Sets chunk-ready flags (`intra_node_expert_input_chunk_flags`) on all ranks after each chunk write completes, notifying combine G2S warp groups that the data is ready for reading.
 
 ## 9. Allocator
 

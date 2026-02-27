@@ -39,10 +39,10 @@ public:
     * @param local_rank The local rank of the current process
     * @param node_rank The node rank of the current process
     * @param num_of_nodes The number of nodes in the communication
-    * @param fuse_permute_dispatch Whether to enable fused permute-dispatch kernel
+    * @param enable_permute_fusion Whether to enable HYBRID_EP_BUILD_PERMUTE_FUSION_ENABLE macro (for fused permute-dispatch or fused unpermute-combine)
     * @return std::string The path of the compiled .so file
     */
-    std::string build(std::string code, std::string signature, int local_rank, int node_rank, int num_of_nodes, bool fuse_permute_dispatch = false);
+    std::string build(std::string code, std::string signature, int local_rank, int node_rank, int num_of_nodes, bool enable_permute_fusion = false);
 
     /**
     * @brief Get the compiled function pointer from the compiled .so file
@@ -99,7 +99,7 @@ public:
     void run_combine_kernel(
         HybridEpConfigInstance config, 
         hybrid_ep::combine_kernel_param_t param,
-        bool fuse_permute_dispatch,
+        bool fuse_unpermute_combine,
         cudaStream_t stream
     );
 

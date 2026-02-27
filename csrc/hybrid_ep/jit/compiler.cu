@@ -76,7 +76,7 @@ NVCCCompiler::NVCCCompiler(std::string base_path, std::string comm_id):
 }
   
 
-std::string NVCCCompiler::build(std::string code, std::string signature, int local_rank, int node_rank, int num_of_nodes, bool fuse_permute_dispatch) {
+std::string NVCCCompiler::build(std::string code, std::string signature, int local_rank, int node_rank, int num_of_nodes, bool enable_permute_fusion) {
     // Create the source directory
     std::filesystem::create_directories(jit_dir);
 
@@ -102,7 +102,7 @@ std::string NVCCCompiler::build(std::string code, std::string signature, int loc
 
     // Build extra define flags
     std::string extra_flags;
-    if (fuse_permute_dispatch) {
+    if (enable_permute_fusion) {
         extra_flags += " -DHYBRID_EP_BUILD_PERMUTE_FUSION_ENABLE";
     }
 
@@ -219,9 +219,11 @@ std::string NVCCCompiler::get_combine_code(HybridEpConfigInstance config) {
          std::to_string(config.num_of_ranks_per_node) + ", " + std::to_string(config.num_of_nodes) + ", " +
          std::to_string(config.num_of_experts_per_rank) + ">::combine<" +
          std::to_string(config.num_of_stages_g2s_combine_api) + ", " + std::to_string(config.num_of_stages_s2g_combine_api) + ", " +
-         std::to_string(config.num_of_tokens_per_chunk_combine_api) + ", " + std::to_string(config.num_of_tokens_per_group_combine_api) +
-         ", " + std::to_string(config.num_of_blocks_combine_api) + ", " +
+         std::to_string(config.num_of_stages_g2s_unpermute_block) + ", " + std::to_string(config.num_of_stages_s2g_unpermute_block) + ", " +
+         std::to_string(config.num_of_tokens_per_chunk_combine_api) + ", " + std::to_string(config.num_of_tokens_per_group_combine_api) + ", " +
+         std::to_string(config.num_of_blocks_combine_api) + ", " + std::to_string(config.num_of_blocks_unpermute) + ", " +
          std::to_string(config.num_of_additional_in_flight_s2g_combine_api) + ", " +
+         std::to_string(config.num_of_additional_in_flight_s2g_unpermute_block_combine_api) + ", " +
          (config.backward_combine_api ? "true" : "false") + ", " +
          (config.device_side_sync_combine_api ? "true" : "false") + R"(>;
             return func_ptr;
@@ -359,7 +361,7 @@ void KernelCache::run_dispatch_kernel(
 void KernelCache::run_combine_kernel(
     HybridEpConfigInstance config, 
     hybrid_ep::combine_kernel_param_t param,
-    bool fuse_permute_dispatch,
+    bool fuse_unpermute_combine,
     cudaStream_t stream
 ){
     // Generate the unique key to search the kernel in the cache
@@ -371,20 +373,24 @@ void KernelCache::run_combine_kernel(
         config.num_of_nodes,
         config.num_of_stages_g2s_combine_api,
         config.num_of_stages_s2g_combine_api,
+        config.num_of_stages_g2s_unpermute_block,
+        config.num_of_stages_s2g_unpermute_block,
         config.num_of_tokens_per_chunk_combine_api,
         config.num_of_tokens_per_group_combine_api,
         config.num_of_blocks_combine_api,
+        config.num_of_blocks_unpermute,
         config.num_of_additional_in_flight_s2g_combine_api,
+        config.num_of_additional_in_flight_s2g_unpermute_block_combine_api,
         config.backward_combine_api,
         config.device_side_sync_combine_api,
-        fuse_permute_dispatch
+        fuse_unpermute_combine
     );
 
     auto it = kernel_cache.find(combine_kernel_key);
     if (it == kernel_cache.end()) {
         // JIT Compile the kernel
         auto combine_code = nvcc_compiler.get_combine_code(config);
-        auto combine_path = nvcc_compiler.build(combine_code, combine_kernel_key, local_rank, node_rank, config.num_of_nodes, fuse_permute_dispatch);
+        auto combine_path = nvcc_compiler.build(combine_code, combine_kernel_key, local_rank, node_rank, config.num_of_nodes, fuse_unpermute_combine);
         kernel_cache[combine_kernel_key] = nvcc_compiler.get_instance(combine_path, combine_kernel_key);
     }
     auto combine_instance = kernel_cache[combine_kernel_key];

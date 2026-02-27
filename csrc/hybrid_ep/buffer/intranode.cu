@@ -74,7 +74,20 @@ void NVLCoordinator::destroy() {
     }else{
         remote_allocator->close_handle(combine_buffers.intra_node_write_completion_flags);
     }
-    free_buffer(combine_buffers.expected_permute_flag_value, false);
+    free_buffer(combine_buffers.expected_unpermute_flag_value, false);
+    // Clean up fused unpermute-combine chunk flags
+    if (combine_buffers.intra_node_expert_input_chunk_flags_all_ranks != nullptr) {
+        for (int i = 0; i < buffer_config.num_of_ranks_per_node; i++) {
+            if (i == local_rank) {
+                remote_allocator->free(combine_buffers.intra_node_expert_input_chunk_flags_all_ranks[i]);
+            } else {
+                remote_allocator->close_handle(combine_buffers.intra_node_expert_input_chunk_flags_all_ranks[i]);
+            }
+        }
+        delete[] combine_buffers.intra_node_expert_input_chunk_flags_all_ranks;
+        combine_buffers.intra_node_expert_input_chunk_flags_all_ranks = nullptr;
+        combine_buffers.intra_node_expert_input_chunk_flags = nullptr;
+    }
     if (combine_buffers.expert_input_token_all_ranks != nullptr) {
         for (int i = 0; i < buffer_config.num_of_ranks_per_node; i++) {
             if (i != local_rank) {
@@ -217,16 +230,22 @@ void NVLCoordinator::allocate_combine_buffers() {
     CUDA_CHECK(cudaMalloc((void**)&combine_buffers.intra_node_flag_parity, sizeof(uint32_t)));
     CUDA_CHECK(cudaMemset(combine_buffers.intra_node_flag_parity, 0, sizeof(uint32_t)));
     // Allocate fused unpermute-combine synchronization buffer
-    CUDA_CHECK(cudaMalloc((void**)&combine_buffers.expected_permute_flag_value, sizeof(uint32_t)));
-    CUDA_CHECK(cudaMemset(combine_buffers.expected_permute_flag_value, 0, sizeof(uint32_t)));
-  
+    CUDA_CHECK(cudaMalloc((void**)&combine_buffers.expected_unpermute_flag_value, sizeof(uint32_t)));
+    CUDA_CHECK(cudaMemset(combine_buffers.expected_unpermute_flag_value, 0, sizeof(uint32_t)));
+    // Allocate local chunk flags buffer via remote allocator (accessible by other ranks)
+    int64_t chunk_flags_numel = static_cast<int64_t>(buffer_config.num_of_combine_chunks) * buffer_config.num_of_ranks_per_node * buffer_config.num_of_nodes;
+    remote_allocator->allocate((void**)&combine_buffers.intra_node_expert_input_chunk_flags, chunk_flags_numel * sizeof(uint32_t));
+    CUDA_CHECK(cudaMemset(combine_buffers.intra_node_expert_input_chunk_flags, 0,
+                           chunk_flags_numel * sizeof(uint32_t)));
+
     // Create memory handles
-    MemHandle handles[3];
+    MemHandle handles[4];
     remote_allocator->get_handle(&handles[0], combine_buffers.expert_input_token);
     remote_allocator->get_handle(&handles[1], combine_buffers.expert_input_prob);
     if (local_rank == 0) {
       remote_allocator->get_handle(&handles[2], combine_buffers.intra_node_write_completion_flags);
     }
+    remote_allocator->get_handle(&handles[3], combine_buffers.intra_node_expert_input_chunk_flags);
   
     // Pack handles into tensor
     combine_memory_handles = torch::empty({static_cast<int64_t>(sizeof(handles))},
@@ -358,26 +377,36 @@ void NVLCoordinator::open_handles_from_other_ranks(
       remote_allocator->open_handle((void**)(&combine_buffers.intra_node_write_completion_flags),
                              &intra_node_write_completion_flags_handle);
     }
-    // Open the handles for expert_input
+    // Open the handles for expert_input and chunk_flags
+    combine_buffers.intra_node_expert_input_chunk_flags_all_ranks =
+        new uint32_t*[buffer_config.num_of_ranks_per_node];
     for (int i = 0; i < buffer_config.num_of_ranks_per_node; i++) {
-      MemHandle expert_input_token_handle, expert_input_prob_handle;
+      MemHandle expert_input_token_handle, expert_input_prob_handle,
+          chunk_flags_handle;
       auto base_ptr = combine_handles[i + global_offset].data_ptr<uint8_t>();
       // Extract the handles from the tensor.
       memcpy(&expert_input_token_handle, base_ptr, sizeof(MemHandle));
       memcpy(&expert_input_prob_handle, base_ptr + sizeof(MemHandle),
              sizeof(MemHandle));
-      // Open the handles for expert_input
+      memcpy(&chunk_flags_handle, base_ptr + sizeof(MemHandle) * 3,
+             sizeof(MemHandle));
+      // Open the handles for expert_input and chunk_flags
       if (i != local_rank) {
         remote_allocator->open_handle((void**)(&combine_buffers.expert_input_token_all_ranks[i]),
                                &expert_input_token_handle);
         remote_allocator->open_handle((void**)(&combine_buffers.expert_input_prob_all_ranks[i]),
                                &expert_input_prob_handle);
+        remote_allocator->open_handle(
+            (void**)&combine_buffers.intra_node_expert_input_chunk_flags_all_ranks[i],
+            &chunk_flags_handle);
       } else {
         // For local rank, use direct pointer assignment (more efficient, no IPC overhead)
         combine_buffers.expert_input_token_all_ranks[i] =
             combine_buffers.expert_input_token;
         combine_buffers.expert_input_prob_all_ranks[i] =
             combine_buffers.expert_input_prob;
+        combine_buffers.intra_node_expert_input_chunk_flags_all_ranks[i] =
+            combine_buffers.intra_node_expert_input_chunk_flags;
       }
     }
 }

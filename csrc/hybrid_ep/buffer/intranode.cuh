@@ -39,8 +39,10 @@ struct IntraNodeCombineBuffers {
     uint32_t *    intra_node_write_completion_flags = nullptr;
     uint32_t *    expected_intra_node_flag_value = nullptr;
     uint32_t *    intra_node_flag_parity = nullptr;
+    uint32_t *    intra_node_expert_input_chunk_flags = nullptr;              // Local rank's chunk flags buffer
+    uint32_t **   intra_node_expert_input_chunk_flags_all_ranks = nullptr;  // Host array of per-rank device pointers
     // Fused unpermute-combine flags
-    uint32_t *    expected_permute_flag_value = nullptr;
+    uint32_t *    expected_unpermute_flag_value = nullptr;
 };
   
 

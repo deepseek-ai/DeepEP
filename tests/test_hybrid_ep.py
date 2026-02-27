@@ -204,29 +204,29 @@ def test_hybrid_ep_correctness(buffer: deep_ep.HybridEPBuffer, ref: TorchRef, us
                     dispatched_scaling_factor_ref, dispatched_scaling_factor
                 ), f"Dispatch scaling_factor mismatch (with_probs={with_probs}, fuse={fuse_permute_dispatch})"
 
-            # # The combine only support bf16
-            # dispatched_hidden = dispatched_hidden.to(torch.bfloat16)
-            # hidden_to_combine = dispatched_hidden
-            # probs_to_combine = dispatched_probs
+            # The combine only support bf16
+            dispatched_hidden = dispatched_hidden.to(torch.bfloat16)
+            hidden_to_combine = dispatched_hidden
+            probs_to_combine = dispatched_probs
 
-            # # The check for the combine
-            # combined_hidden, combined_probs = buffer.combine_with_unpermute(
-            #     hidden=hidden_to_combine,
-            #     probs=probs_to_combine,
-            #     handle=handle,
-            #     pad_multiple=PAD_MULTIPLE,
-            #     fuse_unpermute_combine=fuse_permute_dispatch,
-            # )
+            # The check for the combine
+            combined_hidden, combined_probs = buffer.combine_with_unpermute(
+                hidden=hidden_to_combine,
+                probs=probs_to_combine,
+                handle=handle,
+                pad_multiple=PAD_MULTIPLE,
+                fuse_unpermute_combine=fuse_permute_dispatch,
+            )
 
-            # # The reconstucted value should be TOPK times larger than the input hidden
-            # combined_hidden = combined_hidden / TOPK
+            # The reconstucted value should be TOPK times larger than the input hidden
+            combined_hidden = combined_hidden / TOPK
 
-            # assert torch.allclose(
-            #     combined_hidden, hidden.to(torch.bfloat16), atol=2e-5, rtol=1e-2
-            # ), f"Combine hidden mismatch (with_probs={with_probs}, fuse_permute_dispatch={fuse_permute_dispatch})"
-            # if combined_probs is not None and probs is not None:
-            #     assert bitwise_equal(combined_probs, probs), \
-            #         f"Combine probs mismatch (with_probs={with_probs}, fuse_permute_dispatch={fuse_permute_dispatch})"
+            assert torch.allclose(
+                combined_hidden, hidden.to(torch.bfloat16), atol=2e-5, rtol=1e-2
+            ), f"Combine hidden mismatch (with_probs={with_probs}, fuse_permute_dispatch={fuse_permute_dispatch})"
+            if combined_probs is not None and probs is not None:
+                assert bitwise_equal(combined_probs, probs), \
+                    f"Combine probs mismatch (with_probs={with_probs}, fuse_permute_dispatch={fuse_permute_dispatch})"
 
         dist.barrier()
         if dist.get_rank() == 0:
