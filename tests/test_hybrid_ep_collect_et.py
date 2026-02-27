@@ -87,7 +87,8 @@ def test_main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
 
     stream = torch.cuda.Stream()
     with torch.cuda.stream(stream):
-        et = ExecutionTraceObserver().register_callback(f"rank-{dist.get_rank()}.json")
+        et = ExecutionTraceObserver().register_callback(f"./et/rank-{dist.get_rank()}.json")
+        et.set_extra_resource_collection(True)
         et.start()
 
         buffer = deep_ep.HybridEPBuffer(
@@ -113,6 +114,15 @@ def test_main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
         dispatched_hidden_bf16 = dispatched_hidden.to(torch.bfloat16)
         dispatched_probs = None
         _, _ = buffer.combine(dispatched_hidden_bf16, dispatched_probs, handle)
+
+
+        dispatched_hidden_with_permute, dispatched_probs_with_permute, _, _, handle_with_permute= (
+           buffer.dispatch_with_permute(hidden=hidden, scaling_factor=scaling_factor, routing_map=routing_map, probs=probs, pad_multiple=PAD_MULTIPLE)
+        )
+        dispatched_hidden_bf16_with_permute = dispatched_hidden_with_permute.to(torch.bfloat16)
+
+        combine_with_unpermute_args = {'hidden': dispatched_hidden_bf16_with_permute, 'probs': dispatched_probs_with_permute, 'handle': handle_with_permute, 'pad_multiple': PAD_MULTIPLE}
+        buffer.combine_with_unpermute(**combine_with_unpermute_args)
 
         et.stop()
         et.unregister_callback()
