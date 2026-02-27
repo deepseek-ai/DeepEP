@@ -7,6 +7,7 @@
 #include <cassert>
 #include <cstring>
 #include <stdexcept>
+#include <optional>
 #include "utils.cuh"
 
 // Now we support up to 72(GB200) ranks per node.
@@ -24,7 +25,6 @@ struct BufferConfig {
   int num_of_blocks_preprocessing_api;
   int num_of_blocks_dispatch_api;
   int num_of_blocks_combine_api;
-  int num_of_blocks_permute_api;
   int num_of_tokens_per_chunk_dispatch_api;
   int num_of_tokens_per_chunk_combine_api;
   /** Number of chunks, used for buffer sizing; grow_to on this triggers reallocate when chunk size shrinks. */
@@ -75,7 +75,8 @@ struct HybridEpConfigInstance {
 
   // In standalone permute kernel. it is the number of CUDA blocks running permute kernel.
   // In fused permute-dispatch kernel. it is the number of CUDA blocks for permute part in the fused kernel.
-  int num_of_blocks_permute_api;
+  int num_of_blocks_permute;
+  int num_of_blocks_unpermute;
 
   /*
    *  Dispatch API Config
@@ -96,10 +97,13 @@ struct HybridEpConfigInstance {
    */
   int num_of_stages_g2s_combine_api;
   int num_of_stages_s2g_combine_api;
+  int num_of_stages_g2s_unpermute_block;
+  int num_of_stages_s2g_unpermute_block;
   int num_of_tokens_per_chunk_combine_api;
   int num_of_tokens_per_group_combine_api;
   int num_of_blocks_combine_api;
   int num_of_additional_in_flight_s2g_combine_api;
+  int num_of_additional_in_flight_s2g_unpermute_block_combine_api;
   bool backward_combine_api;
   bool device_side_sync_combine_api = true;
 
@@ -264,6 +268,9 @@ public:
     BufferConfig buffer_config;
     int max_smem_per_block;  // Device max dynamic shared memory per block (optin)
 
+    int num_blocks_permute_;
+    int num_blocks_unpermute_;
+
     Configurer(
         int hidden_dim,
         int max_num_of_tokens_per_rank,
@@ -271,10 +278,11 @@ public:
         int num_of_ranks_per_node,
         int num_of_nodes,
         bool use_fp8 = false,
-        int num_sms_dispatch_api = -1,
-        int num_sms_combine_api = -1,
-        int num_sms_preprocessing_api = -1,
-        int num_blocks_permute_api = -1
+        std::optional<int> num_sms_dispatch_api = std::nullopt,
+        std::optional<int> num_sms_combine_api = std::nullopt,
+        std::optional<int> num_sms_preprocessing_api = std::nullopt,
+        std::optional<int> num_blocks_permute = std::nullopt,
+        std::optional<int> num_blocks_unpermute = std::nullopt
     ) {
         // Auto-detect SM count and max shared memory
         cudaDeviceProp props;
@@ -286,14 +294,14 @@ public:
         CUDA_CHECK(cudaDeviceGetAttribute(&max_smem_per_block,
             cudaDevAttrMaxSharedMemoryPerBlockOptin, device));
 
-        // Apply SM defaults
-        if (num_sms_preprocessing_api < 0) num_sms_preprocessing_api = 108;
-        if (num_blocks_permute_api < 0)    num_blocks_permute_api = sm_count * 16;
-        if (num_sms_dispatch_api < 0)      num_sms_dispatch_api = (num_of_nodes == 1) ? 16 : 8;
-        if (num_sms_combine_api < 0)       num_sms_combine_api = (num_of_nodes == 1) ? 32 : 8;
+        int sms_preprocessing = num_sms_preprocessing_api.value_or(108);
+        int sms_dispatch = num_sms_dispatch_api.value_or((num_of_nodes == 1) ? 16 : 8);
+        int sms_combine = num_sms_combine_api.value_or((num_of_nodes == 1) ? 32 : 8);
+        num_blocks_permute_ = num_blocks_permute.value_or(sm_count * 16);
+        num_blocks_unpermute_ = num_blocks_unpermute.value_or(sm_count * 16);
 
-        assert(sm_count >= num_sms_dispatch_api
-            && sm_count >= num_sms_combine_api);
+        assert(sm_count >= sms_dispatch
+            && sm_count >= sms_combine);
 
         // Fill BufferConfig
         buffer_config.hidden_dim = hidden_dim;
@@ -301,10 +309,9 @@ public:
         buffer_config.num_of_experts_per_rank = num_local_experts;
         buffer_config.num_of_ranks_per_node = num_of_ranks_per_node;
         buffer_config.num_of_nodes = num_of_nodes;
-        buffer_config.num_of_blocks_dispatch_api = num_sms_dispatch_api;
-        buffer_config.num_of_blocks_combine_api = num_sms_combine_api;
-        buffer_config.num_of_blocks_preprocessing_api = num_sms_preprocessing_api;
-        buffer_config.num_of_blocks_permute_api = num_blocks_permute_api;
+        buffer_config.num_of_blocks_dispatch_api = sms_dispatch;
+        buffer_config.num_of_blocks_combine_api = sms_combine;
+        buffer_config.num_of_blocks_preprocessing_api = sms_preprocessing;
         buffer_config.token_data_type = use_fp8 ? APP_TOKEN_DATA_TYPE::UINT8 : APP_TOKEN_DATA_TYPE::UINT16;
         buffer_config.num_of_tokens_per_chunk_dispatch_api = get_env_int("NUM_OF_TOKENS_PER_CHUNK_DISPATCH_API", 128);
         buffer_config.num_of_tokens_per_chunk_combine_api = get_env_int("NUM_OF_TOKENS_PER_CHUNK_COMBINE_API", 128);
@@ -335,7 +342,6 @@ public:
         config.num_of_blocks_preprocessing_api = buffer_config.num_of_blocks_preprocessing_api;
         config.num_of_blocks_dispatch_api = buffer_config.num_of_blocks_dispatch_api;
         config.num_of_blocks_combine_api = buffer_config.num_of_blocks_combine_api;
-        config.num_of_blocks_permute_api = buffer_config.num_of_blocks_permute_api;
         config.token_data_type = buffer_config.token_data_type;
 
         // Env-var defaults (runtime chunk sizes use 64, different from buffer's 32)
@@ -366,7 +372,11 @@ public:
         // If we use the fused permute-dispatch kernel, the number of blocks
         // for the permute part is the same as the number of blocks for the dispatch part.
         if (fuse_permute_dispatch) {
-            config.num_of_blocks_permute_api = 108;
+            config.num_of_blocks_permute = 108;
+            config.num_of_blocks_unpermute = 108;
+        }else{
+            config.num_of_blocks_permute = num_blocks_permute_;
+            config.num_of_blocks_unpermute = num_blocks_unpermute_;
         }
 
         return config;

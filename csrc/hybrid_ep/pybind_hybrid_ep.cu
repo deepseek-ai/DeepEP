@@ -39,7 +39,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         .def_readwrite("num_of_blocks_preprocessing_api", &BufferConfig::num_of_blocks_preprocessing_api)
         .def_readwrite("num_of_blocks_dispatch_api", &BufferConfig::num_of_blocks_dispatch_api)
         .def_readwrite("num_of_blocks_combine_api", &BufferConfig::num_of_blocks_combine_api)
-        .def_readwrite("num_of_blocks_permute_api", &BufferConfig::num_of_blocks_permute_api)
         .def_readwrite("num_of_tokens_per_chunk_dispatch_api", &BufferConfig::num_of_tokens_per_chunk_dispatch_api)
         .def_readwrite("num_of_tokens_per_chunk_combine_api", &BufferConfig::num_of_tokens_per_chunk_combine_api)
         .def_readwrite("num_of_dispatch_chunks", &BufferConfig::num_of_dispatch_chunks)
@@ -56,7 +55,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
                  " num_of_blocks_preprocessing_api=" + std::to_string(config.num_of_blocks_preprocessing_api) + 
                  " num_of_blocks_dispatch_api=" + std::to_string(config.num_of_blocks_dispatch_api) + 
                  " num_of_blocks_combine_api=" + std::to_string(config.num_of_blocks_combine_api) + 
-                 " num_of_blocks_permute_api=" + std::to_string(config.num_of_blocks_permute_api) + 
                  " num_of_tokens_per_chunk_dispatch_api=" + std::to_string(config.num_of_tokens_per_chunk_dispatch_api) + 
                  " num_of_tokens_per_chunk_combine_api=" + std::to_string(config.num_of_tokens_per_chunk_combine_api) + 
                  " num_of_dispatch_chunks=" + std::to_string(config.num_of_dispatch_chunks) +
@@ -82,8 +80,10 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
             &HybridEpConfigInstance::num_of_threads_per_block_preprocessing_api)
         .def_readwrite("num_of_blocks_preprocessing_api",
                        &HybridEpConfigInstance::num_of_blocks_preprocessing_api)
-        .def_readwrite("num_of_blocks_permute_api",
-                       &HybridEpConfigInstance::num_of_blocks_permute_api)
+        .def_readwrite("num_of_blocks_permute",
+                       &HybridEpConfigInstance::num_of_blocks_permute)
+        .def_readwrite("num_of_blocks_unpermute",
+                       &HybridEpConfigInstance::num_of_blocks_unpermute)
         // Dispatch API Config
         .def_readwrite("token_data_type", &HybridEpConfigInstance::token_data_type)
         .def_readwrite("num_of_stages_dispatch_api",
@@ -132,17 +132,20 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         });
 
     pybind11::class_<Configurer>(m, "Configurer")
-        .def(py::init<int, int, int, int, int, bool, int, int, int, int>(),
+        .def(py::init<int, int, int, int, int, bool,
+                      std::optional<int>, std::optional<int>, std::optional<int>,
+                      std::optional<int>, std::optional<int>>(),
             py::arg("hidden_dim"),
             py::arg("max_num_of_tokens_per_rank"),
             py::arg("num_local_experts"),
             py::arg("num_of_ranks_per_node"),
             py::arg("num_of_nodes"),
             py::arg("use_fp8") = false,
-            py::arg("num_sms_dispatch_api") = -1,
-            py::arg("num_sms_combine_api") = -1,
-            py::arg("num_sms_preprocessing_api") = -1,
-            py::arg("num_blocks_permute_api") = -1)
+            py::arg("num_sms_dispatch_api") = std::nullopt,
+            py::arg("num_sms_combine_api") = std::nullopt,
+            py::arg("num_sms_preprocessing_api") = std::nullopt,
+            py::arg("num_blocks_permute") = std::nullopt,
+            py::arg("num_blocks_unpermute") = std::nullopt)
         .def_readwrite("buffer_config", &Configurer::buffer_config)
         .def("get_default_config", &Configurer::get_default_config,
             py::arg("fuse_permute_dispatch") = false)

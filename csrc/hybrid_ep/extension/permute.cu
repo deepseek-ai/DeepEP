@@ -413,7 +413,7 @@
    // Launch the kernel
    constexpr int block_size = 512;
    constexpr int tokens_per_block = block_size / 128;
-   int grid_size = args.num_of_blocks_permute_api;
+   int grid_size = args.num_of_blocks_permute;
    int shared_mem_size = args.num_of_local_experts * tokens_per_block * sizeof(int);
    permute_kernel<<<grid_size, block_size, shared_mem_size, args.stream>>>(
        reinterpret_cast<DType*>(tokens_ptr),
@@ -533,7 +533,7 @@
  
    constexpr int block_size = 512;
    constexpr int tokens_per_block = block_size / 128;
-   int grid_size = args.num_of_blocks_permute_api;
+   int grid_size = args.num_of_blocks_unpermute;
    int shared_mem_size = args.num_of_local_experts * tokens_per_block * sizeof(int);
  
    unpermute_kernel<<<grid_size, block_size, shared_mem_size, args.stream>>>(

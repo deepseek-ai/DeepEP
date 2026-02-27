@@ -329,7 +329,7 @@ void Executor::dispatch_postprocess(HybridEpConfigInstance config, DispatchArgs&
         permute_args.with_probs = config.forward_dispatch_api;
         permute_args.token_options = args.hidden.options();
         permute_args.stream = args.stream;
-        permute_args.num_of_blocks_permute_api = config.num_of_blocks_permute_api;
+        permute_args.num_of_blocks_permute = config.num_of_blocks_permute;
         
         if(config.token_data_type == APP_TOKEN_DATA_TYPE::UINT16) {
             permute_launcher<uint16_t, float, float>(permute_args);
@@ -397,7 +397,7 @@ void Executor::combine_preprocess(HybridEpConfigInstance config, CombineArgs& ar
         unpermute_args.num_ranks_per_node = config.num_of_ranks_per_node;
         unpermute_args.with_probs = config.backward_combine_api;
         unpermute_args.stream = args.stream;
-        unpermute_args.num_of_blocks_permute_api = config.num_of_blocks_permute_api;
+        unpermute_args.num_of_blocks_unpermute = config.num_of_blocks_unpermute;
         
         unpermute_launcher<uint16_t, float>(unpermute_args);
     

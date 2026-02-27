@@ -44,7 +44,8 @@ class HybridEPBuffer:
         num_sms_dispatch_api: int = None,
         num_sms_combine_api: int = None,
         num_sms_preprocessing_api: int = None,
-        num_blocks_permute_api: int = None,
+        num_blocks_permute: int = None,
+        num_blocks_unpermute: int = None,
         # Experimental features
         load_cached_kernels: bool = False,  
         use_shared_buffer: bool = True,
@@ -91,10 +92,11 @@ class HybridEPBuffer:
             num_of_ranks_per_node=self.num_of_hybrid_ep_ranks_per_nvlink_domain,
             num_of_nodes=self.num_of_nodes,
             use_fp8=use_fp8,
-            num_sms_dispatch_api=num_sms_dispatch_api if num_sms_dispatch_api is not None else -1,
-            num_sms_combine_api=num_sms_combine_api if num_sms_combine_api is not None else -1,
-            num_sms_preprocessing_api=num_sms_preprocessing_api if num_sms_preprocessing_api is not None else -1,
-            num_blocks_permute_api=num_blocks_permute_api if num_blocks_permute_api is not None else -1,
+            num_sms_dispatch_api=num_sms_dispatch_api,
+            num_sms_combine_api=num_sms_combine_api,
+            num_sms_preprocessing_api=num_sms_preprocessing_api,
+            num_blocks_permute=num_blocks_permute,
+            num_blocks_unpermute=num_blocks_unpermute,
         )
 
         # Create C++ buffer - this will allocate all buffers during construction
