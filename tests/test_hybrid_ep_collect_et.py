@@ -87,7 +87,15 @@ def test_main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
 
     stream = torch.cuda.Stream()
     with torch.cuda.stream(stream):
-        et = ExecutionTraceObserver().register_callback(f"./et/rank-{dist.get_rank()}.json")
+        hidden, probs, scaling_factor, routing_map, topk_idx, topk_weights = init_tensor(
+            hidden_dim=HIDDEN_DIM,
+            seq_len=NUM_TOKENS_PER_RANK,
+            topk=TOPK,
+            num_of_experts=NUM_OF_EXPERTS,
+            use_fp8=truediv,
+        )
+
+        et = ExecutionTraceObserver().register_callback(f"./et-permute/rank-{dist.get_rank()}.json")
         et.set_extra_resource_collection(True)
         et.start()
 
@@ -99,30 +107,22 @@ def test_main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
             use_fp8=True
         )
 
-        hidden, probs, scaling_factor, routing_map, topk_idx, topk_weights = init_tensor(
-            hidden_dim=HIDDEN_DIM,
-            seq_len=NUM_TOKENS_PER_RANK,
-            topk=TOPK,
-            num_of_experts=NUM_OF_EXPERTS,
-            use_fp8=truediv,
-        )
-
-        dispatched_hidden, dispatched_probs, _, handle = (
-            buffer.dispatch(hidden=hidden, scaling_factor=scaling_factor, topk_idx=topk_idx, topk_weights=topk_weights, num_of_experts=NUM_OF_EXPERTS)
-        )
-        # The combine only support bf16
-        dispatched_hidden_bf16 = dispatched_hidden.to(torch.bfloat16)
-        dispatched_probs = None
-        _, _ = buffer.combine(dispatched_hidden_bf16, dispatched_probs, handle)
+        # dispatched_hidden, dispatched_probs, _, handle = (
+        #     buffer.dispatch(hidden=hidden, scaling_factor=scaling_factor, topk_idx=topk_idx, topk_weights=topk_weights, num_of_experts=NUM_OF_EXPERTS)
+        # )
+        # # The combine only support bf16
+        # dispatched_hidden_bf16 = dispatched_hidden.to(torch.bfloat16)
+        # dispatched_probs = None
+        # _, _ = buffer.combine(dispatched_hidden_bf16, dispatched_probs, handle)
 
 
         dispatched_hidden_with_permute, dispatched_probs_with_permute, _, _, handle_with_permute= (
            buffer.dispatch_with_permute(hidden=hidden, scaling_factor=scaling_factor, routing_map=routing_map, probs=probs, pad_multiple=PAD_MULTIPLE)
         )
-        dispatched_hidden_bf16_with_permute = dispatched_hidden_with_permute.to(torch.bfloat16)
+        # dispatched_hidden_bf16_with_permute = dispatched_hidden_with_permute.to(torch.bfloat16)
 
-        combine_with_unpermute_args = {'hidden': dispatched_hidden_bf16_with_permute, 'probs': dispatched_probs_with_permute, 'handle': handle_with_permute, 'pad_multiple': PAD_MULTIPLE}
-        buffer.combine_with_unpermute(**combine_with_unpermute_args)
+        # combine_with_unpermute_args = {'hidden': dispatched_hidden_bf16_with_permute, 'probs': dispatched_probs_with_permute, 'handle': handle_with_permute, 'pad_multiple': PAD_MULTIPLE}
+        # buffer.combine_with_unpermute(**combine_with_unpermute_args)
 
         et.stop()
         et.unregister_callback()

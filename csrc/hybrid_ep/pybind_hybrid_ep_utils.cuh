@@ -130,6 +130,70 @@ auto hybrid_ep_buffer_combine(Func func) {
     };
 }
 
+// Wrapper for update_buffer (returns bool)
+template<typename Func>
+auto hybrid_ep_buffer_update_buffer(Func func) {
+    return [func](HybridEPBuffer& self, HybridEpConfigInstance config) {
+        auto result = (self.*func)(config);
+        if (at::isRecordFunctionEnabled()) {
+            std::vector<c10::IValue> inputValues;
+            inputValues.reserve(1);
+            inputValues.push_back(to_ivalue(config));
+
+            std::vector<c10::IValue> outputValues;
+            outputValues.push_back(c10::IValue(result));
+
+            std::vector<c10::Argument> args;
+            args.emplace_back("config", c10::AnyType::get());
+            std::vector<c10::Argument> returns;
+            returns.emplace_back("", c10::BoolType::get());
+            c10::FunctionSchema schema(
+                "HybridEPBuffer::update_buffer", "",
+                std::move(args), std::move(returns), false, false);
+            RECORD_FUNCTION_WITH_INPUTS_OUTPUTS(schema, &inputValues, outputValues);
+        }
+        return result;
+    };
+}
+
+// Wrapper for metadata_preprocessing (returns 5-tuple of tensors)
+template<typename Func>
+auto hybrid_ep_buffer_metadata_preprocessing(Func func) {
+    return [func](HybridEPBuffer& self,
+                  HybridEpConfigInstance config,
+                  torch::Tensor routing_map,
+                  int64_t num_of_tokens_per_rank,
+                  bool non_blocking) {
+        auto result = (self.*func)(config, routing_map, num_of_tokens_per_rank, non_blocking);
+        if (at::isRecordFunctionEnabled()) {
+            std::vector<c10::IValue> inputValues;
+            inputValues.reserve(4);
+            inputValues.push_back(to_ivalue(config));
+            inputValues.push_back(to_ivalue(routing_map));
+            inputValues.push_back(to_ivalue(num_of_tokens_per_rank));
+            inputValues.push_back(to_ivalue(non_blocking));
+
+            std::vector<c10::IValue> outputValues;
+            record_result(outputValues, result);
+
+            std::vector<c10::Argument> args;
+            args.emplace_back("config", c10::AnyType::get());
+            args.emplace_back("routing_map", c10::TensorType::get());
+            args.emplace_back("num_of_tokens_per_rank", c10::IntType::get());
+            args.emplace_back("non_blocking", c10::BoolType::get());
+            std::vector<c10::Argument> returns;
+            for (int i = 0; i < 5; ++i) {
+                returns.emplace_back("", c10::TensorType::get());
+            }
+            c10::FunctionSchema schema(
+                "HybridEPBuffer::metadata_preprocessing", "",
+                std::move(args), std::move(returns), false, false);
+            RECORD_FUNCTION_WITH_INPUTS_OUTPUTS(schema, &inputValues, outputValues);
+        }
+        return result;
+    };
+}
+
 // Wrapper for dispatch (returns 3-tuple)
 template<typename Func>
 auto hybrid_ep_buffer_dispatch(Func func) {

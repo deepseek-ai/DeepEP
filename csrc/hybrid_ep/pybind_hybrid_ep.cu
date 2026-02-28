@@ -132,8 +132,11 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
             py::arg("load_cached_kernels") = false,
             py::arg("use_shared_buffer") = true,
             py::arg("enable_custom_allgather") = true)
-        .def("update_buffer", &HybridEPBuffer::update_buffer, py::arg("config"))
-        .def("metadata_preprocessing", &HybridEPBuffer::metadata_preprocessing,
+        .def("update_buffer",
+             hybrid_ep_buffer_update_buffer(&HybridEPBuffer::update_buffer),
+             py::arg("config"))
+        .def("metadata_preprocessing",
+             hybrid_ep_buffer_metadata_preprocessing(&HybridEPBuffer::metadata_preprocessing),
              py::kw_only(), py::arg("config"), py::arg("routing_map"), py::arg("num_of_tokens_per_rank"), py::arg("non_blocking") = false)
         .def("dispatch",
              hybrid_ep_buffer_dispatch(&HybridEPBuffer::dispatch),
