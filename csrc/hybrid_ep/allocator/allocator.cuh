@@ -8,7 +8,7 @@
 #include <cuda_runtime_api.h>
 // #include <torch/torch.h>
 #include <torch/python.h>
-#include <ATen/cuda/CUDAContext.h>
+// #include <ATen/cuda/CUDAContext.h>
 #include <pybind11/pybind11.h>
 #include <pybind11/pytypes.h>
 #include <cstring>

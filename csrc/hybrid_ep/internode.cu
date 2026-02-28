@@ -708,7 +708,7 @@ void RDMACoordinator::exchange_remote_rdma_info(remote_info* dst, remote_info *s
   buffer = buffer.cuda();
 
   // Get world size from process group
-  int world_size = process_group.attr("size")().cast<int>();
+  int world_size = process_group.attr("world_size").cast<int>();
   // Create empty tensors for allgather output
   py::list output_list;
   for (int i = 0; i < world_size; i++) {

@@ -7,20 +7,25 @@
 #include <functional>
 
 std::string get_comm_id(pybind11::object process_group) {
+  printf("get_comm_id\n");
   auto torch = pybind11::module_::import("torch");
   auto torch_distributed = torch.attr("distributed");
 
   // Get the global id of each rank in the process group
   std::vector<int> global_ranks;
-  pybind11::object get_global_rank;
-  if (pybind11::hasattr(torch_distributed, "get_global_rank")) {
-    get_global_rank = torch_distributed.attr("get_global_rank");
-  } 
-  int group_size = process_group.attr("size")().cast<int>();
+  // pybind11::object get_global_rank;
+  // if (pybind11::hasattr(torch_distributed, "get_rank")) {
+  //   get_global_rank = torch_distributed.attr("get_rank");
+  // }
+  int group_id = process_group.attr("id").cast<int>(); 
+  int group_size = process_group.attr("world_size").cast<int>();
+  printf("group_id: %d\n", group_id);
+  printf("group_size: %d\n", group_size);
   global_ranks.reserve(group_size);
   for (int i = 0; i < group_size; ++i) {
-    int g = get_global_rank(process_group, i).cast<int>();
-    global_ranks.push_back(g);
+    // int g = get_global_rank(process_group, i).cast<int>();
+    // global_ranks.push_back(g);
+    global_ranks.push_back(group_id);
   }
 
   // Concatenate the global ranks into a string
@@ -51,10 +56,12 @@ HybridEPBuffer::HybridEPBuffer(
     node_rank(node_rank), 
     group_size(group_size), 
     use_shared_buffer(use_shared_buffer),
-    executor(local_rank, node_rank, base_path, get_comm_id(process_group), load_cached_kernels, enable_custom_allgather) 
+    executor(local_rank, node_rank, base_path, get_comm_id(process_group), process_group.attr("id").cast<int>(), load_cached_kernels, enable_custom_allgather) 
 {
     CUDA_CHECK(cudaGetLastError());
     CUDA_CHECK(cudaDeviceSynchronize());
+
+    printf("goto init ag_obj\n");
     
     // Initialize the allgather object
     allgather_obj.init(
@@ -77,6 +84,7 @@ HybridEPBuffer::HybridEPBuffer(
       assert(false); // inter-node communication is not supported.
 #endif
     }
+    printf("goto allocate_nvl_buffer\n");
     allocate_buffer();
 }
 
@@ -287,10 +295,15 @@ void HybridEPBuffer::allocate_buffer() {
   assert(this->max_num_of_tokens % 4 ==
          0); // The number of tokens for experts should be divisible by 4, this
              // is required by the permute make_row_id_map kernel
+  printf("goto allocate_buffer_for_preprocessing\n");
   allocate_buffer_for_preprocessing();
+  printf("goto allocate_buffer_for_combine\n");
   allocate_buffer_for_combine(); // We should allocate the combine buffer first, because the dispatch could have chance to reuse the combine buffer sometimes.
+  printf("goto allocate_buffer_for_dispatch\n");
   allocate_buffer_for_dispatch();
+  printf("goto exchange_remote_handle\n");
   exchange_remote_handle();
+  printf("goto allocate_ag_buffer\n");
   allgather_obj.allocate_ag_buffer();
 }
 
@@ -300,16 +313,24 @@ void HybridEPBuffer::exchange_remote_handle() {
   
   // Move tensors to CUDA for communication
   // auto dispatch_cuda = dispatch_memory_handles.cuda();
-  MemHandle dispatch_handles[4]
+  MemHandle dispatch_handles[4];
   auto dispatch_cuda = torch::empty({static_cast<int64_t>(sizeof(dispatch_handles))},
-                                        torch::dtype(torch::kUInt8).device(torch::kCUDA));
+                                     torch::dtype(torch::kUInt8).device(torch::kCUDA));
+  CUDA_CHECK(cudaMemcpy(dispatch_cuda.data_ptr(), dispatch_memory_handles.data_ptr(), static_cast<int64_t>(sizeof(dispatch_handles)),
+                        cudaMemcpyHostToDevice));
   // auto combine_cuda = combine_memory_handles.cuda();
   MemHandle combine_handles[3];
-  combine_memory_handles = torch::empty({static_cast<int64_t>(sizeof(combine_handles))},
-                                       torch::dtype(torch::kUInt8).device(torch::kCUDA));
+  auto combine_cuda = torch::empty({static_cast<int64_t>(sizeof(combine_handles))},
+                                    torch::dtype(torch::kUInt8).device(torch::kCUDA));
+  CUDA_CHECK(cudaMemcpy(combine_cuda.data_ptr(), combine_memory_handles.data_ptr(), static_cast<int64_t>(sizeof(combine_handles)),
+                        cudaMemcpyHostToDevice));
   
   // Get world size from process group
-  int world_size = process_group.attr("size")().cast<int>();
+  int world_size = process_group.attr("world_size").cast<int>();
+  // printf("dispatch_memory_handles111: %d\n", (int)(dispatch_memory_handles.data_ptr<uint8_t>()[0]));
+  // printf("dispatch_cuda111: %d\n", (int)(dispatch_cuda.cpu().data_ptr<uint8_t>()[0]));
+  // printf("combine_memory_handles111: %d\n", (int)(combine_memory_handles.data_ptr<uint8_t>()[0]));
+  // printf("combine_cuda111: %d\n", (int)(combine_cuda.cpu().data_ptr<uint8_t>()[0]));
   
   // Create empty tensors for allgather output
   py::list dispatch_output_list;
@@ -319,10 +340,13 @@ void HybridEPBuffer::exchange_remote_handle() {
     dispatch_output_list.append(torch::empty_like(dispatch_cuda));
     combine_output_list.append(torch::empty_like(combine_cuda));
   }
+  printf("world_size: %d\n", (int)world_size);
   
   // Perform allgather using Python API
   torch_distributed.attr("all_gather")(dispatch_output_list, dispatch_cuda, process_group);
   torch_distributed.attr("all_gather")(combine_output_list, combine_cuda, process_group);
+  // printf("dispatch_output_list.size: %d\n", (int)(dispatch_output_list.size()));
+  // printf("combine_output_list.size: %d\n", (int)(combine_output_list.size()));
   
   // Convert back to C++ vectors and move to CPU
   std::vector<torch::Tensor> dispatch_cpu_tensors;
@@ -332,7 +356,15 @@ void HybridEPBuffer::exchange_remote_handle() {
     dispatch_cpu_tensors.push_back(dispatch_output_list[i].cast<torch::Tensor>().cpu());
     combine_cpu_tensors.push_back(combine_output_list[i].cast<torch::Tensor>().cpu());
   }
-  
+  // for (int i = 0; i < world_size; i++) {
+  //   printf("i: %d, dispatch: %d, combine: %d\n",
+  //         i, (int)(dispatch_cpu_tensors[i].data_ptr<uint8_t>()[0]), int(combine_cpu_tensors[i].data_ptr<uint8_t>()[0]));
+  // }
+  // if (true) {
+  //   for (int i = 0; i < sizeof(MemHandle); i++) {
+  //     printf("local_0 intra_node_write_completion_flags_handle: %d\n", (int)(dispatch_cpu_tensors[0].data_ptr<uint8_t>()[sizeof(MemHandle) * 3 + i]));
+  //   }
+  // }
   // Open handles from other ranks
   open_handles_from_other_ranks(dispatch_cpu_tensors, combine_cpu_tensors);
 }
@@ -342,6 +374,8 @@ void HybridEPBuffer::open_handles_from_other_ranks(
     std::vector<torch::Tensor> dispatch_handles,
     std::vector<torch::Tensor> combine_handles) {
   // Malloc the pointer arrays used in the dispatch kernel.
+  // printf("dispatch_handles.size: %d\n", (int)(dispatch_handles.size()));
+  // printf("combine_handles.size: %d\n", (int)(combine_handles.size()));
   dispatch_buffers.expert_output_token_all_ranks =
       (void **)malloc(buffer_config.num_of_ranks_per_node * sizeof(void *));
   dispatch_buffers.expert_output_prob_all_ranks =
@@ -351,7 +385,7 @@ void HybridEPBuffer::open_handles_from_other_ranks(
 
   // Global offset means the position in the multi-node case.
   auto global_offset = node_rank * buffer_config.num_of_ranks_per_node;
-
+  printf("global_offset: %d\n", (int)global_offset);
   // Open the dispatch handles for intra_node_write_completion_flags
   if (local_rank != 0) {
     MemHandle intra_node_write_completion_flags_handle;
@@ -360,6 +394,8 @@ void HybridEPBuffer::open_handles_from_other_ranks(
            dispatch_handles[global_offset].data_ptr<uint8_t>() +
                sizeof(MemHandle) * 3,
            sizeof(MemHandle));
+    uint8_t *tmp = dispatch_handles[global_offset].data_ptr<uint8_t>() +
+               sizeof(MemHandle) * 3;
     remote_allocator.open_handle((void**)(&dispatch_buffers.intra_node_write_completion_flags),
                            &intra_node_write_completion_flags_handle);
   }
@@ -458,10 +494,10 @@ bool HybridEPBuffer::update_buffer(HybridEpConfigInstance config) {
     buffer_config.token_data_type = config.token_data_type;
   }
 
-  if(buffer_config.num_of_nodes > 1 && need_reallocate) {
-    TORCH_WARN("Reallocating HybridEP buffers in multi-node mode is very slow; "
-               "adjust buffer_config to pre-allocate sufficient capacity.");
-  }
+  // if(buffer_config.num_of_nodes > 1 && need_reallocate) {
+  //   TORCH_WARN("Reallocating HybridEP buffers in multi-node mode is very slow; "
+  //              "adjust buffer_config to pre-allocate sufficient capacity.");
+  // }
 
   if(need_reallocate) {
   #ifdef HYBRID_EP_BUILD_MULTINODE_ENABLE
@@ -491,14 +527,14 @@ HybridEPBuffer::metadata_preprocessing(HybridEpConfigInstance config, torch::Ten
   return executor.metadata_preprocess_core(config, preprocessing_tmp, global_routing_map, num_of_tokens_per_rank, non_blocking);
 }
 
-std::tuple<torch::Tensor, c10::optional<torch::Tensor>, c10::optional<torch::Tensor>>
+std::tuple<torch::Tensor, std::optional<torch::Tensor>, std::optional<torch::Tensor>>
 HybridEPBuffer::dispatch(HybridEpConfigInstance config, 
-                 torch::Tensor hidden, c10::optional<torch::Tensor> probs,
-                 c10::optional<torch::Tensor> scaling_factor,
+                 torch::Tensor hidden, std::optional<torch::Tensor> probs,
+                 std::optional<torch::Tensor> scaling_factor,
                  torch::Tensor sparse_to_dense_map,
                  torch::Tensor rdma_to_attn_map, torch::Tensor attn_to_rdma_map,
-                 c10::optional<torch::Tensor> num_dispatched_tokens_tensor,
-                 c10::optional<int64_t> num_dispatched_tokens,
+                 std::optional<torch::Tensor> num_dispatched_tokens_tensor,
+                 std::optional<int64_t> num_dispatched_tokens,
                  int64_t num_of_tokens_per_rank,
                  bool with_probs) {
   // Check the input tensors
@@ -530,6 +566,7 @@ HybridEPBuffer::dispatch(HybridEpConfigInstance config,
   args.num_of_tokens_per_rank = num_of_tokens_per_rank;
   args.enable_permute = false;
   args.stream = at::cuda::getCurrentCUDAStream();
+  // args.stream = calc_ctx->stream();
   
   // Run the full dispatch operation
   config.forward_dispatch_api = with_probs;
@@ -548,7 +585,7 @@ HybridEPBuffer::dispatch(HybridEpConfigInstance config,
 
 std::tuple<torch::Tensor, torch::Tensor>
 HybridEPBuffer::combine(HybridEpConfigInstance config, 
-                torch::Tensor hidden, c10::optional<torch::Tensor> probs,
+                torch::Tensor hidden, std::optional<torch::Tensor> probs,
                 torch::Tensor sparse_to_dense_map,
                 torch::Tensor rdma_to_attn_map, torch::Tensor attn_to_rdma_map,
                 int64_t num_of_tokens_per_rank,
@@ -588,6 +625,7 @@ HybridEPBuffer::combine(HybridEpConfigInstance config,
   args.num_of_tokens_per_rank = num_of_tokens_per_rank;
   args.enable_unpermute = false;
   args.stream = at::cuda::getCurrentCUDAStream();
+  // args.stream = calc_ctx->stream();
 
   // Run the full combine operation
   config.backward_combine_api = with_probs;
@@ -598,18 +636,18 @@ HybridEPBuffer::combine(HybridEpConfigInstance config,
   return std::make_tuple(combined_tokens, combined_probs);
 }
 
-std::tuple<torch::Tensor, c10::optional<torch::Tensor>, c10::optional<torch::Tensor>, torch::Tensor, torch::Tensor, torch::Tensor>
+std::tuple<torch::Tensor, std::optional<torch::Tensor>, std::optional<torch::Tensor>, torch::Tensor, torch::Tensor, torch::Tensor>
 HybridEPBuffer::dispatch_with_permute(HybridEpConfigInstance config, 
-          torch::Tensor hidden, c10::optional<torch::Tensor> probs,
-          c10::optional<torch::Tensor> scaling_factor,
+          torch::Tensor hidden, std::optional<torch::Tensor> probs,
+          std::optional<torch::Tensor> scaling_factor,
           torch::Tensor sparse_to_dense_map, torch::Tensor rdma_to_attn_map,
           torch::Tensor attn_to_rdma_map, 
-          c10::optional<torch::Tensor> num_dispatched_tokens_tensor,
-          c10::optional<torch::Tensor> local_expert_routing_map,
-          c10::optional<torch::Tensor> row_id_map,
-          c10::optional<int64_t> num_permuted_tokens,
+          std::optional<torch::Tensor> num_dispatched_tokens_tensor,
+          std::optional<torch::Tensor> local_expert_routing_map,
+          std::optional<torch::Tensor> row_id_map,
+          std::optional<int64_t> num_permuted_tokens,
           int64_t num_of_tokens_per_rank,
-          c10::optional<int64_t> pad_multiple,
+          std::optional<int64_t> pad_multiple,
           bool non_blocking,
           bool with_probs)
 {
@@ -646,6 +684,7 @@ HybridEPBuffer::dispatch_with_permute(HybridEpConfigInstance config,
  args.num_of_tokens_per_rank = num_of_tokens_per_rank;
  args.enable_permute = true;
  args.stream = at::cuda::getCurrentCUDAStream();
+//  args.stream = calc_ctx->stream();
  
  // Run the full dispatch operation
  config.forward_dispatch_api = with_probs;
@@ -665,12 +704,12 @@ HybridEPBuffer::dispatch_with_permute(HybridEpConfigInstance config,
 
 std::tuple<torch::Tensor, torch::Tensor>
 HybridEPBuffer::combine_with_unpermute(HybridEpConfigInstance config, 
-        torch::Tensor hidden, c10::optional<torch::Tensor> probs,
+        torch::Tensor hidden, std::optional<torch::Tensor> probs,
         torch::Tensor sparse_to_dense_map, torch::Tensor rdma_to_attn_map,
-        torch::Tensor attn_to_rdma_map, c10::optional<torch::Tensor> num_dispatched_tokens_tensor,
-        c10::optional<torch::Tensor> row_id_map,
+        torch::Tensor attn_to_rdma_map, std::optional<torch::Tensor> num_dispatched_tokens_tensor,
+        std::optional<torch::Tensor> row_id_map,
         int64_t num_of_tokens_per_rank,
-        c10::optional<int64_t> pad_multiple,
+        std::optional<int64_t> pad_multiple,
         bool with_probs)
 {
   // Check the input tensors
@@ -709,6 +748,7 @@ HybridEPBuffer::combine_with_unpermute(HybridEpConfigInstance config,
   args.num_of_tokens_per_rank = num_of_tokens_per_rank;
   args.enable_unpermute = true;
   args.stream = at::cuda::getCurrentCUDAStream();
+  // args.stream = calc_ctx->stream();
 
   // Run the full combine operation
   config.backward_combine_api = with_probs;

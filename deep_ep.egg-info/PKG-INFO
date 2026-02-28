@@ -1,6 +1,6 @@
 Metadata-Version: 2.4
 Name: deep_ep
-Version: 1.2.1+eb9cee7
+Version: 1.2.1+a3cead2
 License-File: LICENSE
 Requires-Dist: pynvml
 Dynamic: license-file

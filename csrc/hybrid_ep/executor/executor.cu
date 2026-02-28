@@ -5,7 +5,21 @@
 #include <vector>
 #include <cstdint>
 
-Executor::Executor(int local_rank, int node_rank, std::string base_path, std::string comm_id, bool load_cached_kernels, bool enable_custom_allgather) : local_rank(local_rank), node_rank(node_rank), kernel_cache(node_rank, local_rank, base_path, comm_id, load_cached_kernels), enable_custom_allgather(enable_custom_allgather) {}  
+Executor::Executor(int local_rank, int node_rank, std::string base_path, std::string comm_id, int group_id, bool load_cached_kernels, bool enable_custom_allgather) : local_rank(local_rank), node_rank(node_rank), kernel_cache(node_rank, local_rank, base_path, comm_id, load_cached_kernels), enable_custom_allgather(enable_custom_allgather) {
+    printf("group_id in executor: %d\n", group_id);
+    int device_id;
+    CUDA_CHECK(cudaGetDevice(&device_id));
+    auto map = paddle::distributed::ProcessGroupMapFromGid::getInstance();
+    paddle::distributed::ProcessGroup* pg = map->get(group_id);
+    const auto& place = phi::GPUPlace(device_id);
+    comm_ctx =
+      reinterpret_cast<paddle::distributed::ProcessGroupNCCL*>(pg)
+          ->GetOrCreateCommContext(place, phi::distributed::CommType::ALLTOALL);
+    comm_stream = comm_ctx->GetStream();
+    calc_ctx = reinterpret_cast<phi::GPUContext*>(
+      reinterpret_cast<paddle::distributed::ProcessGroupNCCL*>(pg)
+          ->GetDeviceContext(place, true));
+}  
 
 torch::Tensor Executor::allgather_routing_map(
     CustomAllgather &allgather_obj,
@@ -18,7 +32,7 @@ torch::Tensor Executor::allgather_routing_map(
     auto torch_distributed = py::module_::import("torch.distributed");
     auto num_of_expert = local_routing_map.size(-1);
     auto num_of_tokens_per_rank = local_routing_map.size(-2);
-    auto group_size = process_group.attr("size")().cast<int>();
+    auto group_size = process_group.attr("world_size").cast<int>();
     assert(num_of_expert == config.num_of_experts_per_rank * config.num_of_ranks_per_node * config.num_of_nodes);
 
     torch::Tensor global_routing_map;
@@ -28,9 +42,10 @@ torch::Tensor Executor::allgather_routing_map(
             {num_of_tokens_per_rank * group_size, num_of_expert},
             torch::TensorOptions().dtype(torch::kBool).device(torch::kCUDA)
         );
-        torch_distributed.attr("all_gather_into_tensor")(global_routing_map, local_routing_map, process_group);
+        torch_distributed.attr("all_gather")(global_routing_map, local_routing_map, process_group);
     } else { // At intra-node case, we will use custom allgather
-        allgather_obj.launch(local_routing_map, /*NUM_OF_SMS=*/32, at::cuda::getCurrentCUDAStream());
+        // allgather_obj.launch(local_routing_map, /*NUM_OF_SMS=*/32, at::cuda::getCurrentCUDAStream());
+        allgather_obj.launch(local_routing_map, /*NUM_OF_SMS=*/32, calc_ctx->stream());
         global_routing_map = torch::from_blob(
             allgather_obj.get_output_buffer(), 
             {num_of_tokens_per_rank * group_size, num_of_expert},
@@ -51,6 +66,8 @@ Executor::metadata_preprocess_core(
     bool non_blocking
 ) {
   nvtxRangePushA("metadata_preprocess_core in hybrid-ep");
+  printf("SetAllocatorStreamForGPUContext\n");
+  SetAllocatorStreamForGPUContext(calc_ctx->stream(), calc_ctx);
   // padding for the routing map
   const int rdma_to_attn_map_size_per_node = (((num_of_tokens_per_rank - 1) / 16) + 1) * 16;
 
@@ -77,13 +94,20 @@ Executor::metadata_preprocess_core(
       {num_of_tokens_per_rank * config.num_of_ranks_per_node * config.num_of_nodes, config.num_of_experts_per_rank},
       torch::dtype(torch::kBool).device(torch::kCUDA));
   
+//   kernel_cache.run_proprecess_kernel(
+//       config, global_routing_map.data_ptr<bool>(), preprocessing_tmp,
+//       sparse_to_dense_map.data_ptr<int32_t>(),
+//       rdma_to_attn_map.data_ptr<bool>(), attn_to_rdma_map.data_ptr<bool>(),
+//       num_of_tokens_for_experts.data_ptr<int32_t>(),
+//       local_expert_routing_map.data_ptr<bool>(), static_cast<int>(node_rank),
+//       static_cast<int>(local_rank), num_of_tokens_per_rank, at::cuda::getCurrentCUDAStream());
   kernel_cache.run_proprecess_kernel(
       config, global_routing_map.data_ptr<bool>(), preprocessing_tmp,
       sparse_to_dense_map.data_ptr<int32_t>(),
       rdma_to_attn_map.data_ptr<bool>(), attn_to_rdma_map.data_ptr<bool>(),
       num_of_tokens_for_experts.data_ptr<int32_t>(),
       local_expert_routing_map.data_ptr<bool>(), static_cast<int>(node_rank),
-      static_cast<int>(local_rank), num_of_tokens_per_rank, at::cuda::getCurrentCUDAStream());
+      static_cast<int>(local_rank), num_of_tokens_per_rank, calc_ctx->stream());
 
   nvtxRangePop();  // End of metadata_preprocess_core nvtx range
   return std::make_tuple(sparse_to_dense_map, rdma_to_attn_map, attn_to_rdma_map, num_of_tokens_for_experts, local_expert_routing_map);
@@ -205,15 +229,15 @@ void Executor::dispatch_core(HybridEpConfigInstance config, DispatchBuffers& dis
     nvtxRangePop();  // End of dispatch_core nvtx range
 }
 
-std::tuple<torch::Tensor, c10::optional<torch::Tensor>, c10::optional<torch::Tensor> >
+std::tuple<torch::Tensor, std::optional<torch::Tensor>, std::optional<torch::Tensor> >
 Executor::dispatch_postprocess(HybridEpConfigInstance config, DispatchBuffers& dispatch_buffers, DispatchArgs& args) {
     nvtxRangePushA("dispatch_postprocess in hybrid-ep");
 
     // Create and return output tensors
     // The output tensor of the dispatch kernel.
     torch::Tensor dispatched_tokens;
-    c10::optional<torch::Tensor> dispatched_probs;
-    c10::optional<torch::Tensor> dispatched_scaling_factor;
+    std::optional<torch::Tensor> dispatched_probs;
+    std::optional<torch::Tensor> dispatched_scaling_factor;
 
     if(args.enable_permute) {
         // Use permute kernel to avoid standalone D2D memory copy

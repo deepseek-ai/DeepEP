@@ -7,7 +7,7 @@
 #include "utils.cuh"
 #include "executor/executor.cuh"
 #include "extension/allgather.cuh"
-#include <ATen/cuda/CUDAContext.h>
+// #include <ATen/cuda/CUDAContext.h>
 #include <c10/util/Optional.h>
 // #include <torch/torch.h>
 #include <torch/python.h>
@@ -32,47 +32,47 @@ public:
              torch::Tensor>
   metadata_preprocessing(HybridEpConfigInstance config, torch::Tensor global_routing_map, int64_t num_of_tokens_per_rank, bool non_blocking);
 
-  std::tuple<torch::Tensor, c10::optional<torch::Tensor>, c10::optional<torch::Tensor>>
+  std::tuple<torch::Tensor, std::optional<torch::Tensor>, std::optional<torch::Tensor>>
   dispatch(HybridEpConfigInstance config, 
-           torch::Tensor hidden, c10::optional<torch::Tensor> probs,
-           c10::optional<torch::Tensor> scaling_factor,
+           torch::Tensor hidden, std::optional<torch::Tensor> probs,
+           std::optional<torch::Tensor> scaling_factor,
            torch::Tensor sparse_to_dense_map, torch::Tensor rdma_to_attn_map,
-           torch::Tensor attn_to_rdma_map, c10::optional<torch::Tensor> num_dispatched_tokens_tensor,
-           c10::optional<int64_t> num_dispatched_tokens,
+           torch::Tensor attn_to_rdma_map, std::optional<torch::Tensor> num_dispatched_tokens_tensor,
+           std::optional<int64_t> num_dispatched_tokens,
            int64_t num_of_tokens_per_rank,
            bool with_probs);
 
   std::tuple<torch::Tensor, torch::Tensor>
-  combine(HybridEpConfigInstance config, torch::Tensor hidden, c10::optional<torch::Tensor> probs,
+  combine(HybridEpConfigInstance config, torch::Tensor hidden, std::optional<torch::Tensor> probs,
           torch::Tensor sparse_to_dense_map, torch::Tensor rdma_to_attn_map,
           torch::Tensor attn_to_rdma_map, int64_t num_of_tokens_per_rank,
           bool with_probs);
   
-  std::tuple<torch::Tensor, c10::optional<torch::Tensor>, c10::optional<torch::Tensor>, torch::Tensor, torch::Tensor, torch::Tensor>
+  std::tuple<torch::Tensor, std::optional<torch::Tensor>, std::optional<torch::Tensor>, torch::Tensor, torch::Tensor, torch::Tensor>
   dispatch_with_permute(
             HybridEpConfigInstance config, 
-            torch::Tensor hidden, c10::optional<torch::Tensor> probs,
-            c10::optional<torch::Tensor> scaling_factor,
+            torch::Tensor hidden, std::optional<torch::Tensor> probs,
+            std::optional<torch::Tensor> scaling_factor,
             torch::Tensor sparse_to_dense_map, torch::Tensor rdma_to_attn_map,
             torch::Tensor attn_to_rdma_map, 
-            c10::optional<torch::Tensor> num_dispatched_tokens_tensor,
-            c10::optional<torch::Tensor> local_expert_routing_map,
-            c10::optional<torch::Tensor> row_id_map,
-            c10::optional<int64_t> num_permuted_tokens,
+            std::optional<torch::Tensor> num_dispatched_tokens_tensor,
+            std::optional<torch::Tensor> local_expert_routing_map,
+            std::optional<torch::Tensor> row_id_map,
+            std::optional<int64_t> num_permuted_tokens,
             int64_t num_of_tokens_per_rank,
-            c10::optional<int64_t> pad_multiple,
+            std::optional<int64_t> pad_multiple,
             bool non_blocking,
             bool with_probs);
 
   std::tuple<torch::Tensor, torch::Tensor>
   combine_with_unpermute(
           HybridEpConfigInstance config, 
-          torch::Tensor hidden, c10::optional<torch::Tensor> probs,
+          torch::Tensor hidden, std::optional<torch::Tensor> probs,
           torch::Tensor sparse_to_dense_map, torch::Tensor rdma_to_attn_map,
-          torch::Tensor attn_to_rdma_map, c10::optional<torch::Tensor> num_dispatched_tokens_tensor,
-          c10::optional<torch::Tensor> row_id_map,
+          torch::Tensor attn_to_rdma_map, std::optional<torch::Tensor> num_dispatched_tokens_tensor,
+          std::optional<torch::Tensor> row_id_map,
           int64_t num_of_tokens_per_rank,
-          c10::optional<int64_t> pad_multiple,
+          std::optional<int64_t> pad_multiple,
           bool with_probs);       
 
 private:

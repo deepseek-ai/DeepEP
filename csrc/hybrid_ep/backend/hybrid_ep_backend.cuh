@@ -14,6 +14,11 @@
 #include "infiniband/mlx5dv.h"
 #endif
 
+// #include "paddle/extension.h"
+#include "paddle/phi/backends/all_context.h"
+#include "paddle/phi/core/memory/allocation/allocator_facade.h"
+#include "paddle/fluid/distributed/collective/process_group_nccl.h"
+
 namespace hybrid_ep{
 
 /*enum DATA_TYPE{
@@ -3162,6 +3167,9 @@ public:
     // Init preprocessing_tmp buffers.
     constexpr size_t preprocessing_tmp_sz = NUM_OF_BLOCKS * NUM_OF_RANKS_PER_NODE * sizeof(tmp_state_t);
     CUDA_CHECK(cudaMemsetAsync(preprocessing_tmp, 0, preprocessing_tmp_sz, stream));
+    printf("preprocessing_tmp_sz: %d\n", (int)preprocessing_tmp_sz);
+    printf("node_rank: %d, local_rank: %d, num_of_tokens_per_rank: %d\n", 
+            node_rank, local_rank, num_of_tokens_per_rank);
 
     // Launch the preprocessing kernel to process the global routing map.
     scan<NUM_THREADS_PER_BLOCK, NUM_OF_BLOCKS, NUM_OF_RANKS_PER_NODE, NUM_OF_NODES, NUM_OF_EXPERTS_PER_RANK>

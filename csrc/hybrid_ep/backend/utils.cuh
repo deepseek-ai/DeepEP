@@ -14,6 +14,8 @@
 #include <unordered_set>
 #include <type_traits>
 #include <linux/types.h>
+#include "paddle/phi/core/memory/allocation/allocator_facade.h"
+#include "paddle/fluid/distributed/collective/process_group_nccl.h"
 #define MAX_NUM_OF_RANKS_PER_NODE 72
 
 enum class APP_TOKEN_DATA_TYPE { UINT16, UINT8 };
@@ -291,18 +293,18 @@ inline void print_ptr_info(void* p) {
   }
 }
 
-/* Error type */
-typedef enum {
-  ncclSuccess = 0,
-  ncclUnhandledCudaError = 1,
-  ncclSystemError = 2,
-  ncclInternalError = 3,
-  ncclInvalidArgument = 4,
-  ncclInvalidUsage = 5,
-  ncclRemoteError = 6,
-  ncclInProgress = 7,
-  ncclNumResults = 8
-} ncclResult_t;
+// /* Error type */
+// typedef enum {
+//   ncclSuccess = 0,
+//   ncclUnhandledCudaError = 1,
+//   ncclSystemError = 2,
+//   ncclInternalError = 3,
+//   ncclInvalidArgument = 4,
+//   ncclInvalidUsage = 5,
+//   ncclRemoteError = 6,
+//   ncclInProgress = 7,
+//   ncclNumResults = 8
+// } ncclResult_t;
 
 #define NCCL_CHECK(call)                                                     \
   do {                                                                       \

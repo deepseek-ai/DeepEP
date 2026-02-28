@@ -16,7 +16,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.doc() = "HybridEP, efficiently enable the expert-parallel communication in "
               "the Hopper+ architectures";
     
-    pybind11::class_<ExtendedMemoryAllocator>(m, "ExtendedMemoryAllocator")
+    pybind11::class_<ExtendedMemoryAllocator>(m, "ExtendedMemoryAllocator", py::module_local())
         .def(py::init<>())
         .def("detect_accessible_ranks", &ExtendedMemoryAllocator::detect_accessible_ranks, py::arg("process_group"));
       
@@ -28,7 +28,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         .def("__str__",
              [](const APP_TOKEN_DATA_TYPE &type) { return type_to_string(type); });
   
-    pybind11::class_<BufferConfig>(m, "BufferConfig")
+    pybind11::class_<BufferConfig>(m, "BufferConfig", py::module_local())
         .def(py::init<>())
         .def_readwrite("hidden_dim", &BufferConfig::hidden_dim)
         .def_readwrite("max_num_of_tokens_per_rank", &BufferConfig::max_num_of_tokens_per_rank)
@@ -60,7 +60,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
                  ">";
         });
 
-    pybind11::class_<HybridEpConfigInstance>(m, "HybridEpConfigInstance")
+    pybind11::class_<HybridEpConfigInstance>(m, "HybridEpConfigInstance", py::module_local())
         .def(py::init<>())
         // Hybrid-ep Config
         .def_readwrite("hidden_dim", &HybridEpConfigInstance::hidden_dim)
@@ -120,7 +120,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
                  ">";
         });
   
-    pybind11::class_<HybridEPBuffer>(m, "HybridEPBuffer")
+    pybind11::class_<HybridEPBuffer>(m, "HybridEPBuffer", py::module_local())
         .def(py::init<py::object, BufferConfig, int, int, int, std::string, bool, bool, bool>(),
             py::arg("process_group"),
             py::arg("config"),

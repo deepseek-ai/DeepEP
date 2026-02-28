@@ -1,5 +1,8 @@
 # SPDX-License-Identifier: MIT
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved
+import paddle
+paddle.enable_compat()
+
 import argparse
 import time
 import torch
@@ -10,39 +13,9 @@ import logging
 
 from utils import TorchRef, bench, bench_kineto, init_dist, count_rdma_send_from_routing_map
 
-def setup_logger(local_rank):
-    """为每个GPU进程配置独立的日志文件"""
-    # 1. 创建logger实例，避免多进程日志冲突
-    logger = logging.getLogger(f"gpu_{local_rank}")
-    logger.setLevel(logging.INFO)
-    logger.propagate = False  # 禁止日志向上传播，避免重复输出
-
-    # 2. 清除已存在的处理器，防止重复打印
-    if logger.handlers:
-        logger.handlers.clear()
-
-    # 3. 配置文件处理器：日志输出到对应rank的文件
-    log_file = f"log_rank_{local_rank}"
-    file_handler = logging.FileHandler(log_file, mode="w", encoding="utf-8")
-    file_handler.setLevel(logging.INFO)
-
-    # 4. 配置控制台处理器（可选，同时输出到控制台）
-    console_handler = logging.StreamHandler()
-    console_handler.setLevel(logging.INFO)
-
-    # 5. 设置日志格式（包含时间、rank、日志级别、内容）
-    formatter = logging.Formatter(
-        "%(asctime)s - rank:%(name)s - %(levelname)s - %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S"
-    )
-    file_handler.setFormatter(formatter)
-    console_handler.setFormatter(formatter)
-
-    # 6. 添加处理器到logger
-    logger.addHandler(file_handler)
-    logger.addHandler(console_handler)
-
-    return logger
+import contextlib
+from paddle.distributed import fleet
+from paddle.distributed.communication.group import Group
 
 HIDDEN_DIM = int(os.environ.get("HIDDEN_DIM", 7168))
 MAX_NUM_OF_TOKENS_PER_RANK = int(os.environ.get("MAX_NUM_OF_TOKENS_PER_RANK", 4096))
@@ -60,8 +33,8 @@ USE_MNNVL = os.environ.get("USE_MNNVL", "0").strip().lower() in {"1", "true", "t
 torch.manual_seed(SEED)
 torch.cuda.manual_seed(SEED)
 torch.cuda.manual_seed_all(SEED)
-torch.backends.cudnn.deterministic = True
-torch.backends.cudnn.benchmark = False
+# torch.backends.cudnn.deterministic = True
+# torch.backends.cudnn.benchmark = False
 # Will be set after the process group is initialized
 NUM_OF_RANKS_PER_NODE = None
 NUM_OF_NODES = None
@@ -95,28 +68,27 @@ def init_tensor(
             low=0,
             high=256,
             size=(seq_len, hidden_dim),
-            device="cuda",
-            dtype=torch.uint8,
-        )
+            dtype=torch.int32,
+        ).cuda().cast(torch.uint8)
     else:
-        hidden = torch.randn(seq_len, hidden_dim, device="cuda", dtype=torch.bfloat16)
-    probs = torch.zeros(seq_len, num_of_experts, device="cuda", dtype=torch.float32)
-    topk_idx = torch.zeros(seq_len, topk, device="cuda", dtype=torch.int64)
-    topk_weights = torch.zeros(seq_len, topk, device="cuda", dtype=torch.float32)
+        hidden = torch.randn(seq_len, hidden_dim, dtype=torch.bfloat16).cuda()
+    probs = torch.zeros(seq_len, num_of_experts, dtype=torch.float32).cuda()
+    topk_idx = torch.zeros(seq_len, topk, dtype=torch.int64).cuda()
+    topk_weights = torch.zeros(seq_len, topk, dtype=torch.float32).cuda()
     scaling_factor = torch.randn(
-        seq_len, hidden_dim // 128, device="cuda", dtype=torch.float32
-    )
+        seq_len, hidden_dim // 128, dtype=torch.float32
+    ).cuda()
 
-    routing_map = torch.zeros(seq_len, num_of_experts, device="cuda", dtype=torch.bool)
+    routing_map = torch.zeros(seq_len, num_of_experts, dtype=torch.bool).cuda()
 
     for i in range(seq_len):
         # Force balanced routing for testing
         # selected_experts = torch.tensor([
         #     ((i * topk) % num_of_experts + val) % num_of_experts for val in range(topk)
-        # ], device="cuda")
-        selected_experts = torch.randperm(num_of_experts, device="cuda")[:topk]
+        # ])
+        selected_experts = torch.randperm(num_of_experts).cuda()[:topk]
         topk_idx[i, :] = selected_experts.to(torch.int64)
-        topk_weights[i, :] = torch.ones(topk, device="cuda", dtype=torch.float32)
+        topk_weights[i, :] = torch.ones(topk, dtype=torch.float32).cuda()
         routing_map[i, selected_experts] = True
         probs[i, selected_experts] = topk_weights[i, :]
 
@@ -131,13 +103,12 @@ def test_hybrid_ep_correctness(buffer: deep_ep.HybridEPBuffer, ref: TorchRef, us
         num_of_experts=NUM_OF_EXPERTS,
         use_fp8=use_fp8,
     )
-    logger = setup_logger(dist.get_rank())
-    logger.info(f"hidden: {hidden}, shape: {hidden.shape}")
-    logger.info(f"probs: {probs}, shape: {probs.shape}")
-    logger.info(f"scaling_factor: {scaling_factor}, shape: {scaling_factor.shape}")
-    logger.info(f"routing_map: {routing_map}, shape: {routing_map.shape}")
-    logger.info(f"topk_idx: {topk_idx}, shape: {topk_idx.shape}")
-    logger.info(f"topk_weights: {topk_weights}, shape: {topk_weights.shape}")
+    print(f"hidden: {hidden}, shape: {hidden.shape}")
+    print(f"probs: {probs}, shape: {probs.shape}")
+    print(f"scaling_factor: {scaling_factor}, shape: {scaling_factor.shape}")
+    print(f"routing_map: {routing_map}, shape: {routing_map.shape}")
+    print(f"topk_idx: {topk_idx}, shape: {topk_idx.shape}")
+    print(f"topk_weights: {topk_weights}, shape: {topk_weights.shape}")
 
     # Dispatch correctness check
     for with_probs in [True]:
@@ -159,9 +130,9 @@ def test_hybrid_ep_correctness(buffer: deep_ep.HybridEPBuffer, ref: TorchRef, us
             topk_weights=topk_weights if with_probs else None, 
             num_of_experts=NUM_OF_EXPERTS,
         )
-        logger.info(f"dispatched_hidden: {dispatched_hidden}, shape: {dispatched_hidden.shape}")
-        logger.info(f"dispatched_probs: {dispatched_probs}, shape: {dispatched_probs.shape}")
-        logger.info(f"dispatched_scaling_factor: {dispatched_scaling_factor}, shape: {dispatched_scaling_factor.shape}")
+        print(f"dispatched_hidden: {dispatched_hidden}, shape: {dispatched_hidden.shape}")
+        print(f"dispatched_probs: {dispatched_probs}, shape: {dispatched_probs.shape}")
+        print(f"dispatched_scaling_factor: {dispatched_scaling_factor}, shape: {dispatched_scaling_factor.shape}")
 
         assert bitwise_equal(dispatched_hidden_ref, dispatched_hidden)
         if dispatched_probs is not None and dispatched_probs_ref is not None:
@@ -180,8 +151,8 @@ def test_hybrid_ep_correctness(buffer: deep_ep.HybridEPBuffer, ref: TorchRef, us
 
         _, _, _, num_dispatched_tokens, local_expert_routing_map, _, _ = handle
 
-        logger.info(f"num_dispatched_tokens: {num_dispatched_tokens}, shape: {num_dispatched_tokens.shape}")
-        logger.info(f"local_expert_routing_map: {local_expert_routing_map}, shape: {local_expert_routing_map.shape}")
+        print(f"num_dispatched_tokens: {num_dispatched_tokens}, shape: {num_dispatched_tokens.shape}")
+        print(f"local_expert_routing_map: {local_expert_routing_map}, shape: {local_expert_routing_map.shape}")
         
         num_dispatched_tokens = num_dispatched_tokens.cpu()
         local_expert_routing_map = local_expert_routing_map[
@@ -190,24 +161,24 @@ def test_hybrid_ep_correctness(buffer: deep_ep.HybridEPBuffer, ref: TorchRef, us
         # Simulate the permute and expert and unpermute. The expert is identity op
         copy_times = local_expert_routing_map.sum(dim=1)
         dispatched_hidden = dispatched_hidden.to(torch.bfloat16)  
-        logger.info(f"copy_times: {copy_times}, shape: {copy_times.shape}")
-        logger.info(f"dispatched_hidden: {dispatched_hidden}, shape: {dispatched_hidden.shape}")
+        print(f"copy_times: {copy_times}, shape: {copy_times.shape}")
+        print(f"dispatched_hidden: {dispatched_hidden}, shape: {dispatched_hidden.shape}")
         # The combine only support bf16
         hidden_to_combine = dispatched_hidden * copy_times.unsqueeze(1)
         probs_to_combine = dispatched_probs
-        logger.info(f"hidden_to_combine: {hidden_to_combine}, shape: {hidden_to_combine.shape}")
-        logger.info(f"dispatched_hidden: {probs_to_combine}, shape: {probs_to_combine.shape}")
+        print(f"hidden_to_combine: {hidden_to_combine}, shape: {hidden_to_combine.shape}")
+        print(f"dispatched_hidden: {probs_to_combine}, shape: {probs_to_combine.shape}")
 
         # The check for the combine
         combined_hidden, combined_probs = buffer.combine(
             hidden_to_combine, probs_to_combine, handle
         )
-        logger.info(f"combined_hidden: {combined_hidden}, shape: {combined_hidden.shape}")
-        logger.info(f"combined_probs: {combined_probs}, shape: {combined_probs.shape}")
+        print(f"combined_hidden: {combined_hidden}, shape: {combined_hidden.shape}")
+        print(f"combined_probs: {combined_probs}, shape: {combined_probs.shape}")
 
         # The reconstucted value should be TOPK times larger than the input hidden
         combined_hidden = combined_hidden / TOPK
-        logger.info(f"combined_hidden new: {combined_hidden}, shape new: {combined_hidden.shape}")
+        print(f"combined_hidden new: {combined_hidden}, shape new: {combined_hidden.shape}")
 
         assert torch.allclose(combined_hidden, hidden.to(torch.bfloat16), atol=2e-5, rtol=1e-2)
         if combined_probs is not None and probs is not None:
@@ -297,7 +268,7 @@ def test_hybrid_ep_correctness(buffer: deep_ep.HybridEPBuffer, ref: TorchRef, us
     # print_in_order(f'[rank {dist.get_rank()}] Correctness check passed ({"FP8" if hidden.dtype == torch.uint8 else "BF16"})')
 
 
-def test_hybrid_ep_benchmark(buffer: deep_ep.HybridEPBuffer, group: dist.ProcessGroup, use_fp8: bool, nsys_profile: bool):
+def test_hybrid_ep_benchmark(buffer: deep_ep.HybridEPBuffer, group: Group, use_fp8: bool, nsys_profile: bool):
     hidden, probs, scaling_factor, routing_map, topk_idx, topk_weights = init_tensor(
         hidden_dim=HIDDEN_DIM,
         seq_len=NUM_TOKENS_PER_RANK,
@@ -428,19 +399,21 @@ def test_hybrid_ep_benchmark(buffer: deep_ep.HybridEPBuffer, group: dist.Process
 
 def test_main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
     _, _, group = init_dist(local_rank, num_local_ranks)
+    print("group: ", group.id)
 
     # Set missing global vars
     global NUM_OF_RANKS_PER_NODE, NUM_OF_NODES, NUM_OF_EXPERTS
     if USE_MNNVL:
-        NUM_OF_RANKS_PER_NODE = group.size()
+        NUM_OF_RANKS_PER_NODE = group.world_size
         NUM_OF_NODES = 1
         NUM_OF_EXPERTS = NUM_LOCAL_EXPERTS * NUM_OF_RANKS_PER_NODE * NUM_OF_NODES
     else:
         NUM_OF_RANKS_PER_NODE = args.num_processes
-        NUM_OF_NODES = group.size() // NUM_OF_RANKS_PER_NODE
+        NUM_OF_NODES = group.world_size // NUM_OF_RANKS_PER_NODE
         NUM_OF_EXPERTS = NUM_LOCAL_EXPERTS * NUM_OF_RANKS_PER_NODE * NUM_OF_NODES
         
     for use_fp8 in [True]:
+        print("use_fp8: ", use_fp8)
         buffer = deep_ep.HybridEPBuffer(
             group=group,
             hidden_dim=HIDDEN_DIM,
@@ -450,6 +423,7 @@ def test_main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
             use_mnnvl=USE_MNNVL,
             use_fp8=use_fp8
         )
+        print("buffer: ", buffer)
         
         ref = TorchRef(
             ep_group=group,
@@ -462,6 +436,24 @@ def test_main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
     dist.barrier()
     dist.destroy_process_group()
 
+def init_dist_env(world_size, seed=20):
+    context = contextlib.nullcontext()
+    with context:
+        # start to init distributed env
+        strategy = fleet.DistributedStrategy()
+
+        strategy.hybrid_configs = {
+            "dp_degree": 1,
+            "mp_degree": world_size,
+            "pp_degree": 1,
+            "sharding_degree": 1,
+        }
+
+        # Set control in tensor parallel
+        strategy.tensor_parallel_configs = {"tensor_init_seed": seed}
+
+        fleet.init(is_collective=True, strategy=strategy)
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Test intranode EP kernels')
     parser.add_argument('--num-processes', type=int, default=8,
@@ -469,4 +461,13 @@ if __name__ == "__main__":
     parser.add_argument('--nsys-profile', action='store_true', default=False,
                        help='benchmark with nsys profile or not (default: False)')
     args = parser.parse_args()
-    torch.multiprocessing.spawn(test_main, args=(args.num_processes, args), nprocs=args.num_processes)
+
+    if dist.get_world_size() > 1:
+        init_dist_env(dist.get_world_size())
+
+    rank = dist.get_rank()
+    num_ranks = dist.get_world_size()
+
+    test_main(rank, num_ranks, args)
+
+    # torch.multiprocessing.spawn(test_main, args=(args.num_processes, args), nprocs=args.num_processes)

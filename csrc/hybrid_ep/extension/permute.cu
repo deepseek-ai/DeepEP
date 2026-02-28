@@ -3,10 +3,10 @@
 
 #include "permute.cuh"
 
- template std::tuple<torch::Tensor, c10::optional<torch::Tensor>, c10::optional<torch::Tensor>>
+ template std::tuple<torch::Tensor, std::optional<torch::Tensor>, std::optional<torch::Tensor>>
  permute_launcher<uint16_t, float, float>(PermuteArgs args);
  
- template std::tuple<torch::Tensor, c10::optional<torch::Tensor>, c10::optional<torch::Tensor>>
+ template std::tuple<torch::Tensor, std::optional<torch::Tensor>, std::optional<torch::Tensor>>
  permute_launcher<uint8_t, float, float>(PermuteArgs args);
  
  template void unpermute_launcher<uint16_t, float>(UnpermuteArgs args);
@@ -403,7 +403,7 @@
  }
  
  template <typename DType, typename ProbType = float, typename ScalarType = float>
- std::tuple<torch::Tensor, c10::optional<torch::Tensor>, c10::optional<torch::Tensor>>
+ std::tuple<torch::Tensor, std::optional<torch::Tensor>, std::optional<torch::Tensor>>
  permute_launcher( PermuteArgs args) {
    DType * tokens_ptr = reinterpret_cast<DType*>(args.tokens_ptr);
    // Current only support 8-bits and 16-bits tokens

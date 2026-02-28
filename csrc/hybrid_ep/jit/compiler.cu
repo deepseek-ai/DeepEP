@@ -36,13 +36,17 @@ NVCCCompiler::NVCCCompiler(std::string base_path, std::string comm_id):
     // Init the flags to compiler
     std::string sm_arch_flags = convert_to_nvcc_arch_flags(SM_ARCH);
     std::string flags = "-std=c++17 " + sm_arch_flags +
-            " -O3 --expt-relaxed-constexpr "
-            " -Xcompiler -fPIC -shared ";
+            " -O3 --expt-relaxed-constexpr " +
+            " -I/root/paddlejob/share-storage/gpfs/system-public/lzy/bzz2/nvshmem/include -I/root/paddlejob/share-storage/gpfs/system-public/lzy/eb5_tool/miniconda3/envs/lzy/lib/python3.10/site-packages/paddle/include -I/root/paddlejob/share-storage/gpfs/system-public/lzy/eb5_tool/miniconda3/envs/lzy/lib/python3.10/site-packages/paddle/include/third_party -I/root/paddlejob/share-storage/gpfs/system-public/lzy/eb5_tool/miniconda3/envs/lzy/lib/python3.10/site-packages/paddle/include/paddle/phi/api/include/compat -I/root/paddlejob/share-storage/gpfs/system-public/lzy/eb5_tool/miniconda3/envs/lzy/lib/python3.10/site-packages/paddle/include/paddle/phi/api/include/compat/torch/csrc/api/include -I/usr/local/cuda/include/ -I/usr/local/cuda/include/cccl -I/usr/local/cuda/include/nvtx3 -I/root/paddlejob/share-storage/gpfs/system-public/lzy/eb5_tool/miniconda3/envs/lzy/include/python3.10 -I/root/paddlejob/share-storage/gpfs/system-public/lzy/eb5_tool/miniconda3/envs/lzy/include/python3.10 " +
+            " -lphi_core -lphi_gpu -lphi -w " +
+            " -Xcompiler -fPIC -shared -DPADDLE_WITH_CUDA  ";
     // Add the include path of the hybrid-ep library
     std::string include = " -I" + base_path + "/backend" 
             + " -I" + get_env("CUDA_HOME") + "/include ";
     // Add the library path of the hybrid-ep library
     std::string library = "-L" + get_env("CUDA_HOME") + "/lib64 -lcudart ";
+    include += "-I/root/paddlejob/share-storage/gpfs/system-public/lzy/eb5_tool/miniconda3/envs/lzy/lib/python3.10/site-packages/paddle/include/ ";
+    library += "-L/root/paddlejob/share-storage/gpfs/system-public/lzy/eb5_tool/miniconda3/envs/lzy/lib/python3.10/site-packages/paddle/libs/ -lcuda ";
 
     intra_node_flags = flags + " " + include + " " + library;
 
@@ -101,11 +105,22 @@ std::string NVCCCompiler::build(std::string code, std::string signature, int loc
     remove(output_path.c_str());
     // Choose the flags based on the number of nodes
     std::string compile_command;
+    printf("in build\n");
+    // if(num_of_nodes > 1) {
+    //     compile_command = "/usr/local/cuda/bin/nvcc" + " " + inter_node_flags + " -DPADDLE_WITH_CUDA" + " " + source_path + " " + objs + " -o " + output_path;
+    // }else {
+    //     compile_command = "/usr/local/cuda/bin/nvcc" + " " + intra_node_flags + " -DPADDLE_WITH_CUDA" + " " + source_path + " -o " + output_path;
+    // }
+    printf("nvcc_path: %s\n", nvcc_path.c_str());
+    printf("inter_node_flags: %s\n", inter_node_flags.c_str());
+    printf("source_path: %s\n", source_path.c_str());
+    printf("output_path: %s\n", output_path.c_str());
     if(num_of_nodes > 1) {
         compile_command = nvcc_path + " " + inter_node_flags + " " + source_path + " " + objs + " -o " + output_path;
     }else {
         compile_command = nvcc_path + " " + intra_node_flags + " " + source_path + " -o " + output_path;
     }
+    printf("compile_command: %s\n", compile_command.c_str());
     
     // Run the compile command
     auto ret = std::system(compile_command.c_str());
@@ -114,7 +129,7 @@ std::string NVCCCompiler::build(std::string code, std::string signature, int loc
     }
 
     // Remove the source file after compilation
-    remove(source_path.c_str());
+    // remove(source_path.c_str());
 
     return output_path;
 }

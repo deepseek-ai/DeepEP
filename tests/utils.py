@@ -526,9 +526,10 @@ class TorchRef:
             device=hidden.device,
             dtype=torch.bool,
         )
-        torch.distributed.all_gather_into_tensor(
+        torch.distributed.all_gather(
             global_routing_map, routing_map, self.ep_group
         )
+        print("global_routing_map: ", global_routing_map)
 
         # dispatch the hidden tensor
         global_hidden = torch.empty(
@@ -537,7 +538,8 @@ class TorchRef:
             device=hidden.device,
             dtype=hidden.dtype,
         )
-        torch.distributed.all_gather_into_tensor(global_hidden, hidden, self.ep_group)
+        torch.distributed.all_gather(global_hidden, hidden, self.ep_group)
+        print("global_hidden: ", global_hidden)
 
         # dispatch the probs tensor
         if probs is not None:
@@ -547,7 +549,7 @@ class TorchRef:
                 device=probs.device,
                 dtype=probs.dtype,
             )
-            torch.distributed.all_gather_into_tensor(global_probs, probs, self.ep_group)
+            torch.distributed.all_gather(global_probs, probs, self.ep_group)
         else:
             global_probs = None
 
@@ -559,7 +561,7 @@ class TorchRef:
                 device=scaling_factor.device,
                 dtype=scaling_factor.dtype,
             )
-            torch.distributed.all_gather_into_tensor(
+            torch.distributed.all_gather(
                 global_scaling_factor, scaling_factor, self.ep_group
             )
         else:

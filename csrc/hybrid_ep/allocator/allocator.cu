@@ -174,9 +174,12 @@ bool ExtendedMemoryAllocator::is_accessible(MemHandle* mem_handle) {
 
 int ExtendedMemoryAllocator::detect_accessible_ranks(pybind11::object process_group) {
   auto torch_distributed = py::module_::import("torch.distributed");  
-  int world_size = process_group.attr("size")().cast<int>();
-  int current_rank = process_group.attr("rank")().cast<int>();
+  int world_size = process_group.attr("world_size").cast<int>();
+  int current_rank = process_group.attr("rank").cast<int>();
+  // int world_size = process_group.attr("size")().cast<int>();
+  // int current_rank = process_group.attr("rank")().cast<int>();
   auto stream = at::cuda::getCurrentCUDAStream();
+  // auto stream = calc_ctx->stream();
 
   // Put the test memory handle on a CUDA tensor
   auto opts = torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA);
