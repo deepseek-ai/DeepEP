@@ -365,3 +365,68 @@ If you use this codebase or otherwise find our work valuable, please cite:
       howpublished = {\url{https://github.com/deepseek-ai/DeepEP}},
 }
 ```
+
+## Quick Start Example
+
+### Installation
+```bash
+# Clone the repository
+git clone https://github.com/deepseek-ai/DeepEP.git
+cd DeepEP
+
+# Install in development mode
+pip install -e .
+
+# Verify installation
+python -c "import deep_ep; print(f'DeepEP version: {deep_ep.__version__}')"
+```
+
+### Basic Usage
+```python
+import torch
+import deep_ep
+
+# Initialize DeepEP
+ep = deep_ep.DeepEP()
+
+# Prepare sample data
+batch_size = 1024
+hidden_size = 7168
+num_experts = 8
+
+inputs = torch.randn(batch_size, hidden_size, dtype=torch.float16).cuda()
+indices = torch.randint(0, num_experts, (batch_size,)).cuda()
+
+# Dispatch operation
+dispatched = ep.dispatch(inputs, indices)
+print(f"Dispatched shape: {dispatched.shape}")
+
+# Combine operation
+combined = ep.combine(dispatched, indices)
+print(f"Combined shape: {combined.shape}")
+```
+
+### Performance Tuning
+```python
+# Configure for optimal performance
+config = {
+    "use_fp8": True,           # Use FP8 for better performance
+    "enable_rdma": True,       # Enable RDMA if available
+    "num_streams": 4,          # Number of CUDA streams
+    "cache_size": "2GB"        # Cache size for frequent operations
+}
+
+ep_optimized = deep_ep.DeepEP(config=config)
+```
+
+## Troubleshooting
+
+### Common Issues
+1. **CUDA version mismatch**: Ensure CUDA version matches GPU architecture
+2. **Memory errors**: Reduce batch size or enable gradient checkpointing
+3. **Performance issues**: Check RDMA configuration and network bandwidth
+
+### Getting Help
+- Check existing issues on GitHub
+- Review performance benchmarks in this README
+- Consult the DeepSeek-V3 paper for algorithm details
