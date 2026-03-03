@@ -113,8 +113,8 @@ struct remote_info {
     uint64_t      scaling_factor_vaddr;
 };
 
-static ibv_device *ctx_find_dev(const char *ib_devname);
-static int get_gpu_handler(struct doca_gpu *handler,
+ibv_device *ctx_find_dev(const char *ib_devname);
+int get_gpu_handler(struct doca_gpu *handler,
                            struct ibv_context *ib_context, int local_rank);
 void setup_qp_init_attr(struct doca_gpu_verbs_qp_init_attr_hl *qp_init_attr,
                         struct doca_gpu *gpu_handler, struct ibv_pd *ib_pd,
@@ -122,13 +122,13 @@ void setup_qp_init_attr(struct doca_gpu_verbs_qp_init_attr_hl *qp_init_attr,
 int create_and_place_qps(struct gverbs_context *g_ctx,
                          struct doca_gpu_verbs_qp_init_attr_hl *qp_init_attr,
                          int num_qps);
-static int setup_qp_attr_for_modify(struct ibv_port_attr *port_attr, struct doca_verbs_qp_attr *qp_attr, 
+int setup_qp_attr_for_modify(struct ibv_port_attr *port_attr, struct doca_verbs_qp_attr *qp_attr, 
                                     struct remote_info *l_info, struct remote_info *r_info,
                                     struct ibv_context *ib_context);
 int doca_gpunetio_test_change_qp_state(struct doca_gpu_verbs_qp_hl *qp,
                                        struct doca_verbs_qp_attr *qp_attr,
                                        int attr_mask);
-static int setup_qp_attr_and_set_qp(struct gverbs_context *g_ctx,
+int setup_qp_attr_and_set_qp(struct gverbs_context *g_ctx,
                                     struct ibv_context *ib_context,
                                     struct ibv_port_attr *port_attr,
                                     struct remote_info *rem_dest,

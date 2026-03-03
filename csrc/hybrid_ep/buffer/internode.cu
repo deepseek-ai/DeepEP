@@ -7,7 +7,7 @@
 #include <unordered_map>
 
 // Functions realted to get RDMA context.
-static ibv_device *ctx_find_dev(const char *ib_devname) {
+ibv_device *ctx_find_dev(const char *ib_devname) {
   int num_of_device;
   struct ibv_device **dev_list;
   struct ibv_device *ib_dev = NULL;
@@ -72,7 +72,7 @@ static void get_nic_name(const std::vector<int>& gpu_idx_vec, int local_device_i
 }
 
 // Functions related to initialization of gverbs_context.
-static int get_gpu_handler(struct doca_gpu *handler,
+int get_gpu_handler(struct doca_gpu *handler,
                            struct ibv_context *ib_context, int local_rank) {
   char pciBusId[256];
   int compute_cap_major;
@@ -188,7 +188,7 @@ int create_and_place_qps(struct gverbs_context *g_ctx,
   return status;
 }
 
-static int setup_qp_attr_for_modify(struct ibv_port_attr *port_attr, struct doca_verbs_qp_attr *qp_attr, 
+int setup_qp_attr_for_modify(struct ibv_port_attr *port_attr, struct doca_verbs_qp_attr *qp_attr, 
   struct remote_info *l_info, struct remote_info *r_info,
   struct ibv_context *ib_context) {
   int status = 0;
@@ -282,7 +282,7 @@ int doca_gpunetio_test_change_qp_state(struct doca_gpu_verbs_qp_hl *qp,
   return 0;
 }
 
-static int setup_qp_attr_and_set_qp(struct gverbs_context *g_ctx, struct ibv_context *ib_context, struct ibv_port_attr *port_attr,
+int setup_qp_attr_and_set_qp(struct gverbs_context *g_ctx, struct ibv_context *ib_context, struct ibv_port_attr *port_attr,
   struct remote_info *rem_dest, struct doca_verbs_qp_attr *qp_attr,
   int num_of_blocks, int num_of_nodes, int node_rank, uint32_t qp_cnt) {
   int attr_mask = DOCA_VERBS_QP_ATTR_NEXT_STATE | DOCA_VERBS_QP_ATTR_ALLOW_REMOTE_WRITE |
@@ -741,14 +741,14 @@ void RDMACoordinator::destroy() {
   FREE_CUDA_MEMORY(combine_buffers.expected_rdma_flag_value);
 
   // If we use doca_gpu_verbs_destroy_qp_hl and re-allocate RDMA resources, "part or all of the requested memory range is already mapped" occurs. Do not know why now, so just comment it out.
-  // int num_of_dispatch_qps = (buffer_config.num_of_nodes - 1) * buffer_config.num_of_blocks_dispatch_api;
-  // int num_of_combine_qps = (buffer_config.num_of_nodes - 1) * buffer_config.num_of_blocks_combine_api;
-  // for (int idx = 0; idx < num_of_dispatch_qps; ++idx) {
-  //   doca_gpu_verbs_destroy_qp_hl(dispatch_gverbs_ctx.qp_hls[idx]);
-  // }
-  // for (int idx = 0; idx < num_of_combine_qps; ++idx) {
-  //   doca_gpu_verbs_destroy_qp_hl(combine_gverbs_ctx.qp_hls[idx]);
-  // }
+  int num_of_dispatch_qps = (buffer_config.num_of_nodes - 1) * buffer_config.num_of_blocks_dispatch_api;
+  int num_of_combine_qps = (buffer_config.num_of_nodes - 1) * buffer_config.num_of_blocks_combine_api;
+  for (int idx = 0; idx < num_of_dispatch_qps; ++idx) {
+    doca_gpu_verbs_destroy_qp_hl(dispatch_gverbs_ctx.qp_hls[idx]);
+  }
+  for (int idx = 0; idx < num_of_combine_qps; ++idx) {
+    doca_gpu_verbs_destroy_qp_hl(combine_gverbs_ctx.qp_hls[idx]);
+  }
   FREE_CPU_MEMORY(dispatch_gverbs_ctx.qp_hls);
   FREE_CPU_MEMORY(dispatch_gverbs_ctx.qp_init_attr);
   FREE_CPU_MEMORY(combine_gverbs_ctx.qp_hls);

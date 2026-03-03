@@ -3688,11 +3688,10 @@ inline __device__ void unpermute_red_warp_group_device_function(const int node_r
       outstanding_in_flight_chunk = false;
     }else{  // Otherwise, the current chunks is in-flight.
       outstanding_in_flight_chunk = true;
+      // Update last chunk's id.
+      last_chunk_global_chunk_id = current_flag_id;
+      last_chunk_rank_id = current_rank_id;
     }
-
-    // Update last chunk's id.
-    last_chunk_global_chunk_id = current_flag_id;
-    last_chunk_rank_id = current_rank_id;
   }
   // When all chunks have been processed, we need to check whether the last chunk is still in-flight.
   // If so, wait for it and notify the inter_node_G2S and intra_node_G2S warp groups.

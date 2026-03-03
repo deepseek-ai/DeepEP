@@ -16,7 +16,6 @@ NUM_TOKENS_PER_RANK = int(os.environ.get("NUM_TOKENS_PER_RANK", 4096))
 NUM_LOCAL_EXPERTS = int(os.environ.get("NUM_LOCAL_EXPERTS", 8))
 TOPK = int(os.environ.get("TOPK", 8))
 PAD_MULTIPLE = int(os.environ.get("PAD_MULTIPLE", 32))
-ITERATIONS = int(os.environ.get("ITERATIONS", 100))
 SEED = int(os.environ.get("SEED", 1025))
 USE_MNNVL = os.environ.get("USE_MNNVL", "0").strip().lower() in {"1", "true", "t", "yes", "y", "on"}
 torch.manual_seed(SEED)

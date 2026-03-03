@@ -112,6 +112,8 @@ void HybridEPBuffer::allocate_buffer() {
 #ifdef HYBRID_EP_BUILD_MULTINODE_ENABLE
   executor.set_inter_node_buffers(&rdma_coordinator.dispatch_buffers, &rdma_coordinator.combine_buffers);
 #endif
+
+  CUDA_CHECK(cudaDeviceSynchronize());
 }
 
 bool HybridEPBuffer::update_buffer(HybridEpConfigInstance config) {

@@ -30,6 +30,7 @@ void NVLCoordinator::destroy() {
     }
     free_buffer(dispatch_buffers.expert_output_scaling_factor, true);
     free_buffer(dispatch_buffers.expected_intra_node_flag_value, false);
+    free_buffer(dispatch_buffers.intra_node_flag_parity, false);
     if (local_rank == 0) {
         free_buffer(dispatch_buffers.intra_node_write_completion_flags, true);
     }else{
@@ -70,6 +71,7 @@ void NVLCoordinator::destroy() {
     free_buffer(combine_buffers.expert_input_token, true);
     free_buffer(combine_buffers.expert_input_prob, true);
     free_buffer(combine_buffers.expected_intra_node_flag_value, false);
+    free_buffer(combine_buffers.intra_node_flag_parity, false);
     if (local_rank == 0) {
         free_buffer(combine_buffers.intra_node_write_completion_flags, true);
     }else{
