@@ -13,6 +13,7 @@
 #include "backend/hybrid_ep_backend.cuh"
 #include "backend/ibvcore.h"
 #include "config.cuh"
+#include "coordinator.cuh"
 #include "utils.cuh"
 
 #define RC  (0)
@@ -169,19 +170,21 @@ struct InterNodeCombineBuffers {
     struct combine_memory_region_info_t * mr_info = nullptr;
 };
 
-class RDMACoordinator {
+class RDMACoordinator : public HybridEPCoordinator {
 public:
     RDMACoordinator() = default;
-    ~RDMACoordinator();
+    ~RDMACoordinator() override;
     void init(pybind11::object process_group, int node_rank, int local_rank, BufferConfig config);
-    void update_config(BufferConfig config);
-    void destroy();
-    void allocate_dispatch_buffers();
-    void allocate_combine_buffers();
+    bool grow_buffer_config(const HybridEpConfigInstance& config, BufferConfig& buf_config) override;
+    void update_config(BufferConfig config) override;
+    void allocate_buffers() override;
+    void destroy() override;
     
     InterNodeDispatchBuffers dispatch_buffers;
     InterNodeCombineBuffers combine_buffers;
 private:
+    void allocate_dispatch_buffers();
+    void allocate_combine_buffers();
     int gid_index = 0;
     int node_rank = -1;
     int local_rank = -1;

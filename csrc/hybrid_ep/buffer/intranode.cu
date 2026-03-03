@@ -132,11 +132,49 @@ void NVLCoordinator::init(
     // this is required by the permute make_row_id_map kernel
 }
 
+bool NVLCoordinator::grow_buffer_config(const HybridEpConfigInstance& config, BufferConfig& buf_config) {
+    bool changed = false;
+    changed |= grow_to(buf_config.max_num_of_tokens_per_rank, config.max_num_of_tokens_per_rank);
+    changed |= grow_to(buf_config.hidden_dim, config.hidden_dim);
+    changed |= grow_to(buf_config.num_of_experts_per_rank, config.num_of_experts_per_rank);
+    changed |= grow_to(buf_config.num_of_ranks_per_node, config.num_of_ranks_per_node);
+    changed |= grow_to(buf_config.num_of_nodes, config.num_of_nodes);
+    changed |= grow_to(buf_config.num_of_blocks_preprocessing_api, config.num_of_blocks_preprocessing_api);
+    if (buf_config.num_of_tokens_per_chunk_dispatch_api != config.num_of_tokens_per_chunk_dispatch_api) {
+        changed = true;
+        buf_config.num_of_tokens_per_chunk_dispatch_api = config.num_of_tokens_per_chunk_dispatch_api;
+    }
+    if (buf_config.num_of_tokens_per_chunk_combine_api != config.num_of_tokens_per_chunk_combine_api) {
+        changed = true;
+        buf_config.num_of_tokens_per_chunk_combine_api = config.num_of_tokens_per_chunk_combine_api;
+    }
+    int new_dispatch_chunks = (buf_config.max_num_of_tokens_per_rank - 1)
+        / buf_config.num_of_tokens_per_chunk_dispatch_api + 1;
+    int new_combine_chunks = (buf_config.max_num_of_tokens_per_rank - 1)
+        / buf_config.num_of_tokens_per_chunk_combine_api + 1;
+    changed |= grow_to(buf_config.num_of_dispatch_chunks, new_dispatch_chunks);
+    changed |= grow_to(buf_config.num_of_combine_chunks, new_combine_chunks);
+    if (!use_shared_buffer
+        && get_token_data_type_size(buf_config.token_data_type) < get_token_data_type_size(config.token_data_type)) {
+        changed = true;
+        buf_config.token_data_type = config.token_data_type;
+    }
+    return changed;
+}
+
 void NVLCoordinator::update_config(BufferConfig config) {
     this->buffer_config = config;
     this->max_num_of_tokens = config.max_num_of_tokens_per_rank *
                               config.num_of_ranks_per_node *
                               config.num_of_nodes;
+}
+
+void NVLCoordinator::allocate_buffers() {
+    allocate_preprocessing_buffers();
+    // If use_shared_buffer is true, the combine buffers and dispatch buffers share the same memory. So we need to allocate the combine buffers first.
+    allocate_combine_buffers();
+    allocate_dispatch_buffers();
+    exchange_remote_nvl_info();
 }
 
 void NVLCoordinator::allocate_preprocessing_buffers() {

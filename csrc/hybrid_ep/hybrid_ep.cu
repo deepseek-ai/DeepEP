@@ -90,63 +90,30 @@ void HybridEPBuffer::release_buffer() {
 }
 
 void HybridEPBuffer::allocate_buffer() {
-  // Buffer allocation for intra-node communication
-  nvl_coordinator.allocate_preprocessing_buffers();
-  nvl_coordinator.allocate_combine_buffers(); // We should allocate the combine buffer first, because the dispatch could have chance to reuse the combine buffer sometimes.
-  nvl_coordinator.allocate_dispatch_buffers();
-  nvl_coordinator.exchange_remote_nvl_info();
+  nvl_coordinator.allocate_buffers();
+#ifdef HYBRID_EP_BUILD_MULTINODE_ENABLE
+  if(buffer_config.num_of_nodes > 1) {
+    rdma_coordinator.allocate_buffers();
+  }
+#endif
+  allgather_obj.allocate_buffers();
 
-  // Buffer allocation for inter-node communication
-  #ifdef HYBRID_EP_BUILD_MULTINODE_ENABLE
-    if(buffer_config.num_of_nodes > 1) {
-      rdma_coordinator.allocate_combine_buffers();
-      rdma_coordinator.allocate_dispatch_buffers();
-    }
-  #endif
-
-  // Allocate the allgather buffer
-  allgather_obj.allocate_ag_buffer();
-
-  // Update the executor with the buffers
+  // Set the intra-node and inter-node buffers for the executor
   executor.set_intra_node_buffers(&nvl_coordinator.dispatch_buffers, &nvl_coordinator.combine_buffers);
 #ifdef HYBRID_EP_BUILD_MULTINODE_ENABLE
   executor.set_inter_node_buffers(&rdma_coordinator.dispatch_buffers, &rdma_coordinator.combine_buffers);
 #endif
-
   CUDA_CHECK(cudaDeviceSynchronize());
 }
 
 bool HybridEPBuffer::update_buffer(HybridEpConfigInstance config) {
   // If new config requires bigger buffer, we will release the old buffer and allocate a new one.
   bool need_reallocate = false;
-  
-  need_reallocate |= grow_to(buffer_config.max_num_of_tokens_per_rank, config.max_num_of_tokens_per_rank);
-  need_reallocate |= grow_to(buffer_config.hidden_dim,             config.hidden_dim);
-  need_reallocate |= grow_to(buffer_config.num_of_experts_per_rank,config.num_of_experts_per_rank);
-  need_reallocate |= grow_to(buffer_config.num_of_ranks_per_node,  config.num_of_ranks_per_node);
-  need_reallocate |= grow_to(buffer_config.num_of_nodes,           config.num_of_nodes);
-  need_reallocate |= grow_to(buffer_config.num_of_blocks_preprocessing_api, config.num_of_blocks_preprocessing_api);
-  need_reallocate |= grow_to(buffer_config.num_of_blocks_dispatch_api, config.num_of_blocks_dispatch_api);
-  // Chunk size: any change triggers reallocation (RDMA flag stride must match kernel)
-  if (buffer_config.num_of_tokens_per_chunk_dispatch_api != config.num_of_tokens_per_chunk_dispatch_api) {
-    need_reallocate = true;
-    buffer_config.num_of_tokens_per_chunk_dispatch_api = config.num_of_tokens_per_chunk_dispatch_api;
-  }
-  if (buffer_config.num_of_tokens_per_chunk_combine_api != config.num_of_tokens_per_chunk_combine_api) {
-    need_reallocate = true;
-    buffer_config.num_of_tokens_per_chunk_combine_api = config.num_of_tokens_per_chunk_combine_api;
-  }
-  // Recalculate derived chunk counts
-  buffer_config.num_of_dispatch_chunks = (buffer_config.max_num_of_tokens_per_rank - 1)
-      / buffer_config.num_of_tokens_per_chunk_dispatch_api + 1;
-  buffer_config.num_of_combine_chunks = (buffer_config.max_num_of_tokens_per_rank - 1)
-      / buffer_config.num_of_tokens_per_chunk_combine_api + 1;
-  // Special case for token data type.
-  if(get_token_data_type_size(buffer_config.token_data_type) < get_token_data_type_size(config.token_data_type)
-      && !nvl_coordinator.use_shared_buffer) {
-    need_reallocate = true;
-    buffer_config.token_data_type = config.token_data_type;
-  }
+  need_reallocate |= nvl_coordinator.grow_buffer_config(config, buffer_config);
+#ifdef HYBRID_EP_BUILD_MULTINODE_ENABLE
+  need_reallocate |= rdma_coordinator.grow_buffer_config(config, buffer_config);
+#endif
+  need_reallocate |= allgather_obj.grow_buffer_config(config, buffer_config);
 
   if(buffer_config.num_of_nodes > 1 && need_reallocate) {
     TORCH_WARN("Reallocating HybridEP buffers in multi-node mode is very slow; "
@@ -154,12 +121,11 @@ bool HybridEPBuffer::update_buffer(HybridEpConfigInstance config) {
   }
 
   if(need_reallocate) {
-  #ifdef HYBRID_EP_BUILD_MULTINODE_ENABLE
-    rdma_coordinator.update_config(buffer_config);
-  #endif
     nvl_coordinator.update_config(buffer_config);
-    // Update the allgather object
-    allgather_obj.update(buffer_config);
+#ifdef HYBRID_EP_BUILD_MULTINODE_ENABLE
+    rdma_coordinator.update_config(buffer_config);
+#endif
+    allgather_obj.update_config(buffer_config);
     release_buffer();
     allocate_buffer();
   }

@@ -8,6 +8,7 @@
 #include <torch/torch.h>
 #include "utils.cuh"
 #include "config.cuh"
+#include "coordinator.cuh"
 #include "allocator/allocator.cuh"
 #include "backend/hybrid_ep_backend.cuh"
 
@@ -46,18 +47,16 @@ struct IntraNodeCombineBuffers {
 };
   
 
-class NVLCoordinator {
+class NVLCoordinator : public HybridEPCoordinator {
 public:
     NVLCoordinator() = default;
-    ~NVLCoordinator();
+    ~NVLCoordinator() override;
 
     void init(pybind11::object process_group, int node_rank, int local_rank, int group_size, bool use_shared_buffer, BufferConfig config, ExtendedMemoryAllocator *remote_allocator);
-    void update_config(BufferConfig config);
-    void destroy();
-    void allocate_preprocessing_buffers();
-    void allocate_dispatch_buffers();
-    void allocate_combine_buffers();
-    void exchange_remote_nvl_info();
+    bool grow_buffer_config(const HybridEpConfigInstance& config, BufferConfig& buf_config) override;
+    void update_config(BufferConfig config) override;
+    void allocate_buffers() override;
+    void destroy() override;
 
     IntraNodeDispatchBuffers dispatch_buffers;
     IntraNodeCombineBuffers combine_buffers;
@@ -82,6 +81,10 @@ private:
     torch::Tensor dispatch_memory_handles;
     torch::Tensor combine_memory_handles;
 
+    void allocate_preprocessing_buffers();
+    void allocate_dispatch_buffers();
+    void allocate_combine_buffers();
+    void exchange_remote_nvl_info();
     void open_handles_from_other_ranks(std::vector<torch::Tensor> dispatch_handles,
                                      std::vector<torch::Tensor> combine_handles);
 };
