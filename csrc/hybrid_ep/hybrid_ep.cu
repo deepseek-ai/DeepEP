@@ -276,8 +276,6 @@ HybridEPBuffer::dispatch_with_permute(
           bool with_probs)
 {
  auto config = handle.config;
-
-
  // Check the input tensors
  assert(hidden.device().is_cuda());
  assert(hidden.is_contiguous());
