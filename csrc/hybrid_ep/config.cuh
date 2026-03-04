@@ -42,7 +42,6 @@ struct BufferConfig {
       valid &= (hidden_dim % 16 == 0); // Make TMA work.
     }
     valid &= ((num_of_experts_per_rank * num_of_ranks_per_node) % 4 == 0);
-    valid &= (num_of_ranks_per_node % 2 == 0);
     // TMA requires (num_of_tokens_per_chunk * num_of_ranks_per_node * 4) % 16 == 0
     valid &= ((num_of_tokens_per_chunk_dispatch_api * num_of_ranks_per_node) % 4 == 0);
     if(!valid){
@@ -118,7 +117,6 @@ struct HybridEpConfigInstance {
       valid &= (hidden_dim % 16 == 0); // Make TMA work.
     }
     valid &= ((num_of_experts_per_rank * num_of_ranks_per_node) % 4 == 0);
-    valid &= (num_of_ranks_per_node % 2 == 0);
     // TMA requires (num_of_tokens_per_chunk * num_of_ranks_per_node * 4) % 16 == 0
     valid &= ((num_of_tokens_per_chunk_dispatch_api * num_of_ranks_per_node) % 4 == 0);
     // In fuse mode, all chunk sizes must be the same
@@ -314,7 +312,7 @@ public:
 
         int sms_preprocessing = num_sms_preprocessing_api.value_or(108);
         int sms_dispatch = num_sms_dispatch_api.value_or((num_of_nodes == 1) ? 16 : 8);
-        int sms_combine = num_sms_combine_api.value_or((num_of_nodes == 1) ? 32 : 8);
+        int sms_combine = num_sms_combine_api.value_or((num_of_nodes == 1) ? 16 : 8);
         num_blocks_permute_ = num_blocks_permute.value_or(sm_count * 16);
         num_blocks_unpermute_ = num_blocks_unpermute.value_or(sm_count * 16);
 

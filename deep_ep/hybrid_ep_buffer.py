@@ -57,9 +57,6 @@ class HybridEPBuffer:
         self.group = group
         self.rank = self.group.rank()
         self.group_size = self.group.size()
-        assert (
-            self.group_size > 1
-        ), f"The hybrid-ep kernel should be used with at least 2 ranks, but got {self.group_size}."
 
         allocator = hybrid_ep_cpp.ExtendedMemoryAllocator()
         detected_ranks = allocator.detect_accessible_ranks(self.group)
