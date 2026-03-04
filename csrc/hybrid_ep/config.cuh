@@ -284,6 +284,7 @@ public:
     BufferConfig buffer_config;
     int max_smem_per_block;  // Device max dynamic shared memory per block (optin)
 
+    int sm_count;
     int num_blocks_permute_;
     int num_blocks_unpermute_;
 
@@ -305,14 +306,14 @@ public:
         int device;
         CUDA_CHECK(cudaGetDevice(&device));
         CUDA_CHECK(cudaGetDeviceProperties(&props, device));
-        int sm_count = props.multiProcessorCount;
+        sm_count = props.multiProcessorCount;
         max_smem_per_block = 0;
         CUDA_CHECK(cudaDeviceGetAttribute(&max_smem_per_block,
             cudaDevAttrMaxSharedMemoryPerBlockOptin, device));
 
         int sms_preprocessing = num_sms_preprocessing_api.value_or(108);
-        int sms_dispatch = num_sms_dispatch_api.value_or((num_of_nodes == 1) ? 16 : 8);
-        int sms_combine = num_sms_combine_api.value_or((num_of_nodes == 1) ? 16 : 8);
+        int sms_dispatch = num_sms_dispatch_api.value_or((num_of_nodes == 1) ? 32 : 8);
+        int sms_combine = num_sms_combine_api.value_or((num_of_nodes == 1) ? 32 : 8);
         num_blocks_permute_ = num_blocks_permute.value_or(sm_count * 16);
         num_blocks_unpermute_ = num_blocks_unpermute.value_or(sm_count * 16);
 
@@ -394,8 +395,8 @@ public:
         // If we use the fused permute-dispatch kernel, the number of blocks
         // for the permute part is the same as the number of blocks for the dispatch part.
         if (fuse_permute_dispatch) {
-            config.num_of_blocks_permute = 108;
-            config.num_of_blocks_unpermute = 108;
+            config.num_of_blocks_permute = min(96, sm_count - config.num_of_blocks_dispatch_api);
+            config.num_of_blocks_unpermute = min(96, sm_count - config.num_of_blocks_combine_api);
         }else{
             config.num_of_blocks_permute = num_blocks_permute_;
             config.num_of_blocks_unpermute = num_blocks_unpermute_;
