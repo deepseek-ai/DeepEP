@@ -434,17 +434,6 @@ def test_hybrid_ep_benchmark(buffer: deep_ep.HybridEPBuffer, group: dist.Process
 def test_main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
     _, _, group = init_dist(local_rank, num_local_ranks)
 
-    # Set missing global vars
-    global NUM_OF_RANKS_PER_NODE, NUM_OF_NODES, NUM_OF_EXPERTS
-    if USE_MNNVL:
-        NUM_OF_RANKS_PER_NODE = group.size()
-        NUM_OF_NODES = 1
-        NUM_OF_EXPERTS = NUM_LOCAL_EXPERTS * NUM_OF_RANKS_PER_NODE * NUM_OF_NODES
-    else:
-        NUM_OF_RANKS_PER_NODE = args.num_processes
-        NUM_OF_NODES = group.size() // NUM_OF_RANKS_PER_NODE
-        NUM_OF_EXPERTS = NUM_LOCAL_EXPERTS * NUM_OF_RANKS_PER_NODE * NUM_OF_NODES
-
     stream = torch.cuda.Stream()
     with torch.cuda.stream(stream):
         for use_fp8 in [False, True]:
@@ -455,7 +444,18 @@ def test_main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
                 num_local_experts=NUM_LOCAL_EXPERTS,
                 use_fp8=use_fp8
             )
-            
+
+            # Set missing global vars - use buffer's detected values
+            global NUM_OF_RANKS_PER_NODE, NUM_OF_NODES, NUM_OF_EXPERTS
+            if USE_MNNVL:
+                NUM_OF_RANKS_PER_NODE = buffer.num_of_hybrid_ep_ranks_per_nvlink_domain
+                NUM_OF_NODES = buffer.num_of_nodes
+                NUM_OF_EXPERTS = NUM_LOCAL_EXPERTS * NUM_OF_RANKS_PER_NODE * NUM_OF_NODES
+            else:
+                NUM_OF_RANKS_PER_NODE = args.num_processes
+                NUM_OF_NODES = group.size() // NUM_OF_RANKS_PER_NODE
+                NUM_OF_EXPERTS = NUM_LOCAL_EXPERTS * NUM_OF_RANKS_PER_NODE * NUM_OF_NODES
+
             ref = TorchRef(
                 ep_group=group,
                 num_of_experts=NUM_OF_EXPERTS,

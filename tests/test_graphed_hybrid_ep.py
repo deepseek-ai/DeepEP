@@ -18,6 +18,7 @@ TOPK = int(os.environ.get("TOPK", 8))
 PAD_MULTIPLE = int(os.environ.get("PAD_MULTIPLE", 32))
 ITERATIONS = int(os.environ.get("ITERATIONS", 100))
 SEED = int(os.environ.get("SEED", 42))
+USE_MNNVL = os.environ.get("USE_MNNVL", "0").strip().lower() in {"1", "true", "t", "yes", "y", "on"}
 torch.manual_seed(SEED)
 torch.cuda.manual_seed(SEED)
 torch.cuda.manual_seed_all(SEED)
@@ -86,10 +87,11 @@ def test_hybrid_ep_correctness(buffer: deep_ep.HybridEPBuffer, ref: TorchRef, us
         num_of_experts=NUM_OF_EXPERTS,
         use_fp8=use_fp8,
     )
-    num_permuted_tokens = NUM_TOKENS_PER_RANK * NUM_OF_RANKS_PER_NODE * NUM_OF_NODES * TOPK
     graph = torch.cuda.CUDAGraph()
+    # Pre-allocate buffer size; non_blocking mode requires this upfront
+    num_permuted_tokens = NUM_TOKENS_PER_RANK * NUM_OF_RANKS_PER_NODE * NUM_OF_NODES * TOPK
 
-    # Warm up, and get the preprocessing results
+    # Warm up to get runtime token count
     (
         dispatched_hidden,
         dispatched_probs,
@@ -106,14 +108,8 @@ def test_hybrid_ep_correctness(buffer: deep_ep.HybridEPBuffer, ref: TorchRef, us
         non_blocking=True,
         fuse_permute_dispatch=fused_permute_dispatch,
     )
-    num_dispatched_tokens_tensor = handle[3]
-    local_expert_routing_map = handle[4]
-    num_dispatched_tokens_tensor = num_dispatched_tokens_tensor.cpu()
-    local_expert_routing_map = local_expert_routing_map[
-        : num_dispatched_tokens_tensor.item()
-    ]
     num_permuted_tokens_runtime = tokens_per_expert.sum().item()
-    _, _ = buffer.combine_with_unpermute(
+    buffer.combine_with_unpermute(
         hidden=dispatched_hidden.to(torch.bfloat16),
         probs=dispatched_probs,
         handle=handle,
@@ -121,7 +117,7 @@ def test_hybrid_ep_correctness(buffer: deep_ep.HybridEPBuffer, ref: TorchRef, us
         fuse_unpermute_combine=fused_permute_dispatch,
     )
 
-    # Get the reference
+    # Get the reference (no token_per_expert needed)
     dispatched_hidden_ref, dispatched_probs_ref, dispatched_scaling_factor_ref = ref.dispatch(
         hidden,
         routing_map,
@@ -130,14 +126,6 @@ def test_hybrid_ep_correctness(buffer: deep_ep.HybridEPBuffer, ref: TorchRef, us
         pad_multiple=PAD_MULTIPLE,
         enable_permute=True,
     )
-
-    graph_dispatched_hidden = None
-    graph_dispatched_probs = None
-    graph_dispatched_scaling_factor = None
-    graph_tokens_per_expert = None
-    graph_handle = None
-    graph_combined_hidden = None
-    graph_combined_probs = None
 
     with torch.cuda.graph(graph):
         (
@@ -170,22 +158,27 @@ def test_hybrid_ep_correctness(buffer: deep_ep.HybridEPBuffer, ref: TorchRef, us
     graph.replay()
     torch.cuda.synchronize()
 
-    # Check the correctness
-    assert bitwise_equal(dispatched_hidden_ref, graph_dispatched_hidden[:num_permuted_tokens_runtime,:])
+    # Check correctness
+    assert bitwise_equal(dispatched_hidden_ref, graph_dispatched_hidden[:num_permuted_tokens_runtime, :]), \
+        f"Dispatch hidden mismatch (with_probs={with_probs}, fused={fused_permute_dispatch})"
     if with_probs:
-        assert bitwise_equal(dispatched_probs_ref, graph_dispatched_probs[:num_permuted_tokens_runtime])
+        assert bitwise_equal(dispatched_probs_ref, graph_dispatched_probs[:num_permuted_tokens_runtime]), \
+            f"Dispatch probs mismatch (with_probs={with_probs}, fused={fused_permute_dispatch})"
     if use_fp8:
         assert bitwise_equal(
-            dispatched_scaling_factor_ref, graph_dispatched_scaling_factor[:num_permuted_tokens_runtime,:]
-        )
+            dispatched_scaling_factor_ref, graph_dispatched_scaling_factor[:num_permuted_tokens_runtime, :]
+        ), f"Dispatch scaling_factor mismatch (with_probs={with_probs}, fused={fused_permute_dispatch})"
     reconstructed_hidden = graph_combined_hidden / TOPK
     assert torch.allclose(
         reconstructed_hidden, hidden.to(torch.bfloat16), atol=2e-5, rtol=1e-2
-    )
+    ), f"Combine hidden mismatch (with_probs={with_probs}, fused={fused_permute_dispatch})"
     if with_probs:
-        assert bitwise_equal(graph_combined_probs, probs)
+        assert bitwise_equal(graph_combined_probs, probs), \
+            f"Combine probs mismatch (with_probs={with_probs}, fused={fused_permute_dispatch})"
 
-    print_in_order(f'[rank {dist.get_rank()}] Correctness check passed ({"FP8" if hidden.dtype == torch.uint8 else "BF16"}, with_probs={with_probs})')
+    dtype_str = "FP8" if hidden.dtype == torch.uint8 else "BF16"
+    fused_str = "fused" if fused_permute_dispatch else "non-fused"
+    print_in_order(f'[rank {dist.get_rank()}] Correctness check passed ({dtype_str}, with_probs={with_probs}, {fused_str})')
 
     # Benchmark the graphed hybrid ep in nsys profile
     torch.cuda.profiler.start()
@@ -197,12 +190,6 @@ def test_hybrid_ep_correctness(buffer: deep_ep.HybridEPBuffer, ref: TorchRef, us
 def test_main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
     _, _, group = init_dist(local_rank, num_local_ranks)
 
-    # Set missing global vars
-    global NUM_OF_RANKS_PER_NODE, NUM_OF_NODES, NUM_OF_EXPERTS
-    NUM_OF_RANKS_PER_NODE = args.num_processes
-    NUM_OF_NODES = group.size() // NUM_OF_RANKS_PER_NODE
-    NUM_OF_EXPERTS = NUM_LOCAL_EXPERTS * NUM_OF_RANKS_PER_NODE * NUM_OF_NODES
-
     for use_fp8 in [False, True]:
         for with_probs in [True, False]:
             for fused_permute_dispatch in [False, True]:
@@ -213,13 +200,24 @@ def test_main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
                     num_local_experts=NUM_LOCAL_EXPERTS,
                     use_fp8=use_fp8
                 )
+
+                # Set missing global vars - use buffer's detected values
+                global NUM_OF_RANKS_PER_NODE, NUM_OF_NODES, NUM_OF_EXPERTS
+                if USE_MNNVL:
+                    NUM_OF_RANKS_PER_NODE = buffer.num_of_hybrid_ep_ranks_per_nvlink_domain
+                    NUM_OF_NODES = buffer.num_of_nodes
+                    NUM_OF_EXPERTS = NUM_LOCAL_EXPERTS * NUM_OF_RANKS_PER_NODE * NUM_OF_NODES
+                else:
+                    NUM_OF_RANKS_PER_NODE = args.num_processes
+                    NUM_OF_NODES = group.size() // NUM_OF_RANKS_PER_NODE
+                    NUM_OF_EXPERTS = NUM_LOCAL_EXPERTS * NUM_OF_RANKS_PER_NODE * NUM_OF_NODES
+
                 ref = TorchRef(
                     ep_group=group,
                     num_of_experts=NUM_OF_EXPERTS,
                     num_of_ranks_per_node=NUM_OF_RANKS_PER_NODE,
                 )
-
-            test_hybrid_ep_correctness(buffer, ref, use_fp8, with_probs, fused_permute_dispatch)
+                test_hybrid_ep_correctness(buffer, ref, use_fp8, with_probs, fused_permute_dispatch)
 
     dist.barrier()
     dist.destroy_process_group()
