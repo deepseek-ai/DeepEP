@@ -1180,10 +1180,13 @@ inline __device__ void S2G_warp_group_device_function(const int local_rank,
               // Need a system-scope release memory fence(release sem should be enough) to let all target ranks can observe the side effect of TMA writes of this chunk 
               // before they can observe the update of the flags.
               // This fence is killing performance! It seems that as long as the compiler do not reordered the red before cp_async_bulk_wait_group, no fence is needed.
-              asm volatile("fence.release.sys;"
-                           :
-                           : 
-                           : "memory");
+              // Only enable the fence in inter-node mode where PCIe/RDMA does not guarantee ordering; NVLink intra-node TMA has implicit visibility after wait_group.
+              if constexpr (NUM_OF_NODES > 1) {
+                asm volatile("fence.release.sys;"
+                             :
+                             : 
+                             : "memory");
+              }
               // Notify the permute_G2S warp groups of all target ranks in this node.
               // Atomically reduce add 1 to the u32 flag of the last attn token chunk to all target ranks within the current node.
               for(int m = INTRA_NODE_S2G_GROUP::warp_rank(); m < NUM_OF_SPARSE_TO_DENSE_MAP_LOAD_ITER_PER_INPUT_TOKEN; m += INTRA_NODE_S2G_GROUP::warp_size()){
@@ -1298,10 +1301,13 @@ inline __device__ void S2G_warp_group_device_function(const int local_rank,
           // Need a system-scope release memory fence(release sem should be enough) to let all target ranks can observe the side effect of TMA writes of this chunk 
           // before they can observe the update of the flags.
           // This fence is killing performance! It seems that as long as the compiler do not reordered the red before cp_async_bulk_wait_group, no fence is needed.
-          asm volatile("fence.release.sys;"
-                        :
-                        : 
-                        : "memory");
+          // Only enable the fence in inter-node mode where PCIe/RDMA does not guarantee ordering; NVLink intra-node TMA has implicit visibility after wait_group.
+          if constexpr (NUM_OF_NODES > 1) {
+            asm volatile("fence.release.sys;"
+                          :
+                          : 
+                          : "memory");
+          }
           // Notify the permute_G2S warp groups of all target ranks in this node.
           // Atomically reduce add 1 to the u32 flag of this attn token chunk to all target ranks within the current node.
           for(int k = INTRA_NODE_S2G_GROUP::warp_rank(); k < NUM_OF_SPARSE_TO_DENSE_MAP_LOAD_ITER_PER_INPUT_TOKEN; k += INTRA_NODE_S2G_GROUP::warp_size()){
@@ -1348,10 +1354,13 @@ inline __device__ void S2G_warp_group_device_function(const int local_rank,
       // Need a system-scope release memory fence(release sem should be enough) to let all target ranks can observe the side effect of TMA writes of this chunk 
       // before they can observe the update of the flags.
       // This fence is killing performance! It seems that as long as the compiler do not reordered the red before cp_async_bulk_wait_group, no fence is needed.
-      asm volatile("fence.release.sys;"
-                    :
-                    : 
-                    : "memory");
+      // Only enable the fence in inter-node mode where PCIe/RDMA does not guarantee ordering; NVLink intra-node TMA has implicit visibility after wait_group.
+      if constexpr (NUM_OF_NODES > 1) {
+        asm volatile("fence.release.sys;"
+                      :
+                      : 
+                      : "memory");
+      }
       // Notify the permute_G2S warp groups of all target ranks in this node.
       // Atomically reduce add 1 to the u32 flag of the last attn token chunk to all target ranks within the current node.
       for(int i = INTRA_NODE_S2G_GROUP::warp_rank(); i < NUM_OF_SPARSE_TO_DENSE_MAP_LOAD_ITER_PER_INPUT_TOKEN; i += INTRA_NODE_S2G_GROUP::warp_size()){
@@ -3473,10 +3482,13 @@ inline __device__ void unpermute_red_warp_group_device_function(const int node_r
             // Need a system-scope release memory fence(release sem should be enough) to let all target ranks can observe the side effect of TMA writes of this chunk 
             // before they can observe the update of the flags.
             // This fence is killing performance! It seems that as long as the compiler do not reordered the red before cp_async_bulk_wait_group, no fence is needed.
-            asm volatile("fence.release.sys;"
-                         :
-                         : 
-                         : "memory");
+            // Only enable the fence in inter-node mode where PCIe/RDMA does not guarantee ordering; NVLink intra-node TMA has implicit visibility after wait_group.
+            if constexpr (NUM_OF_NODES > 1) {
+              asm volatile("fence.release.sys;"
+                           :
+                           : 
+                           : "memory");
+            }
             // Notify the inter_node_G2S and intra_node_G2S warp groups on all ranks in this node.
             // Atomically reduce add 1 to the u32 flag of the last token chunk to target flag buffer.
             // Since each unpermute block will have NUM_OF_DATA_PIPELINE_PER_BLOCK pipeline processing the same chunk, 
@@ -3662,10 +3674,13 @@ inline __device__ void unpermute_red_warp_group_device_function(const int node_r
           // Need a system-scope release memory fence(release sem should be enough) to let all target ranks can observe the side effect of TMA writes of this chunk 
           // before they can observe the update of the flags.
           // This fence is killing performance! It seems that as long as the compiler do not reordered the red before cp_async_bulk_wait_group, no fence is needed.
-          asm volatile("fence.release.sys;"
-                          :
-                          : 
-                          : "memory");
+          // Only enable the fence in inter-node mode where PCIe/RDMA does not guarantee ordering; NVLink intra-node TMA has implicit visibility after wait_group.
+          if constexpr (NUM_OF_NODES > 1) {
+            asm volatile("fence.release.sys;"
+                            :
+                            : 
+                            : "memory");
+          }
           // Notify the inter_node_G2S and intra_node_G2S warp groups on all ranks in this node.
           // Atomically reduce add 1 to the u32 flag of the last and current token chunk to target flag buffer.
           // Since each unpermute block will have NUM_OF_DATA_PIPELINE_PER_BLOCK pipeline processing the same chunk, 
@@ -3703,10 +3718,13 @@ inline __device__ void unpermute_red_warp_group_device_function(const int node_r
         // Need a system-scope release memory fence(release sem should be enough) to let all target ranks can observe the side effect of TMA writes of this chunk 
         // before they can observe the update of the flags.
         // This fence is killing performance! It seems that as long as the compiler do not reordered the red before cp_async_bulk_wait_group, no fence is needed.
-        asm volatile("fence.release.sys;"
-                        :
-                        : 
-                        : "memory");
+        // Only enable the fence in inter-node mode where PCIe/RDMA does not guarantee ordering; NVLink intra-node TMA has implicit visibility after wait_group.
+        if constexpr (NUM_OF_NODES > 1) {
+          asm volatile("fence.release.sys;"
+                          :
+                          : 
+                          : "memory");
+        }
         // Notify the inter_node_G2S and intra_node_G2S warp groups on all ranks in this node.
         // Atomically reduce add 1 to the u32 flag of the last token chunk to target flag buffer.
         // Since each unpermute block will have NUM_OF_DATA_PIPELINE_PER_BLOCK pipeline processing the same chunk, 
