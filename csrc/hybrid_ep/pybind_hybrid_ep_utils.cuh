@@ -9,7 +9,10 @@
 #include <iostream>
 #include <tuple>
 #include <type_traits>
+#include <mutex>
+#include <shared_mutex>
 #include <vector>
+#include <optional>
 #include <ATen/core/ivalue.h>
 #include <ATen/core/function_schema.h>
 #include <ATen/core/jit_type.h>
@@ -40,24 +43,56 @@ inline void record_result(std::vector<c10::IValue>& outputList, Result&& result)
     }, result);
 }
 
+// Struct to hold recording data for HybridEPBuffer::__init__ (can be consumed by record_hybrid_ep_buffer_init).
+struct HybridEpBufferInitInfo {
+    std::shared_mutex mutex;
+    std::vector<c10::IValue> inputValues;
+    std::optional<c10::FunctionSchema> schema;
+    bool recorded = false;
+};
+
+HybridEpBufferInitInfo hybrid_ep_buffer_init_info;
+
+// Call this to record HybridEPBuffer::__init__ using data stored in hybrid_ep_buffer_init_info.
+inline void record_hybrid_ep_buffer_init() {
+    {
+        std::shared_lock lock(hybrid_ep_buffer_init_info.mutex);
+        if (hybrid_ep_buffer_init_info.recorded) return;
+    }
+    std::unique_lock lock(hybrid_ep_buffer_init_info.mutex);
+    if (hybrid_ep_buffer_init_info.recorded) return;
+
+    std::vector<c10::IValue> outputValues;
+    RECORD_FUNCTION_WITH_INPUTS_OUTPUTS(
+        hybrid_ep_buffer_init_info.schema.value(),
+        &hybrid_ep_buffer_init_info.inputValues,
+        outputValues);
+    hybrid_ep_buffer_init_info.recorded = true;
+}
+
 inline HybridEPBuffer* hybrid_ep_buffer_init(
     py::object process_group, BufferConfig config, int local_rank, int node_rank,
     int group_size, std::string base_path, bool load_cached_kernels,
     bool use_shared_buffer, bool enable_custom_allgather) {
-    if (at::isRecordFunctionEnabled()) {
-        std::vector<c10::IValue> inputValues;
-        inputValues.reserve(9);
-        inputValues.emplace_back(c10::IValue(process_group.attr("group_name").cast<std::string>()));
-        inputValues.emplace_back(to_ivalue(config));
-        inputValues.emplace_back(to_ivalue(local_rank));
-        inputValues.emplace_back(to_ivalue(node_rank));
-        inputValues.emplace_back(to_ivalue(group_size));
-        inputValues.emplace_back(to_ivalue(base_path));
-        inputValues.emplace_back(to_ivalue(load_cached_kernels));
-        inputValues.emplace_back(to_ivalue(use_shared_buffer));
-        inputValues.emplace_back(to_ivalue(enable_custom_allgather));
 
-        std::vector<c10::IValue> outputValues;
+    // Initializing  HybridEPBuffer may happens before pytorch profiling starts
+    // save the information to record it later when other operators are called. 
+    // It is based on the assumption there is only one HybridEPBuffer instance 
+    // in one process
+    {
+        std::unique_lock lock(hybrid_ep_buffer_init_info.mutex);
+
+        hybrid_ep_buffer_init_info.inputValues.clear();
+        hybrid_ep_buffer_init_info.inputValues.reserve(9);
+        hybrid_ep_buffer_init_info.inputValues.emplace_back(c10::IValue(process_group.attr("group_name").cast<std::string>()));
+        hybrid_ep_buffer_init_info.inputValues.emplace_back(to_ivalue(config));
+        hybrid_ep_buffer_init_info.inputValues.emplace_back(to_ivalue(local_rank));
+        hybrid_ep_buffer_init_info.inputValues.emplace_back(to_ivalue(node_rank));
+        hybrid_ep_buffer_init_info.inputValues.emplace_back(to_ivalue(group_size));
+        hybrid_ep_buffer_init_info.inputValues.emplace_back(to_ivalue(base_path));
+        hybrid_ep_buffer_init_info.inputValues.emplace_back(to_ivalue(load_cached_kernels));
+        hybrid_ep_buffer_init_info.inputValues.emplace_back(to_ivalue(use_shared_buffer));
+        hybrid_ep_buffer_init_info.inputValues.emplace_back(to_ivalue(enable_custom_allgather));
 
         std::vector<c10::Argument> args;
         args.emplace_back("group_name", c10::StringType::get());
@@ -70,12 +105,13 @@ inline HybridEPBuffer* hybrid_ep_buffer_init(
         args.emplace_back("use_shared_buffer", c10::BoolType::get());
         args.emplace_back("enable_custom_allgather", c10::BoolType::get());
         std::vector<c10::Argument> returns;
-        c10::FunctionSchema schema(
+        hybrid_ep_buffer_init_info.schema.emplace(
             "HybridEPBuffer::__init__", "",
             std::move(args), std::move(returns), false, false);
-        //RECORD_FUNCTION_WITH_INPUTS_OUTPUTS("HybridEPBuffer::__init__", &inputValues, outputValues);
-        RECORD_FUNCTION_WITH_INPUTS_OUTPUTS(schema, &inputValues, outputValues);
+
+        hybrid_ep_buffer_init_info.recorded = false;
     }
+
     return new HybridEPBuffer(process_group, config, local_rank, node_rank, group_size,
                               base_path, load_cached_kernels, use_shared_buffer, enable_custom_allgather);
 }
@@ -95,6 +131,8 @@ auto hybrid_ep_buffer_combine(Func func) {
                                    rdma_to_attn_map, attn_to_rdma_map,
                                    num_of_tokens_per_rank, with_probs);
         if (at::isRecordFunctionEnabled()) {
+            record_hybrid_ep_buffer_init();
+
             std::vector<c10::IValue> inputValues;
             inputValues.reserve(8);
             inputValues.push_back(to_ivalue(config));
@@ -136,6 +174,8 @@ auto hybrid_ep_buffer_update_buffer(Func func) {
     return [func](HybridEPBuffer& self, HybridEpConfigInstance config) {
         auto result = (self.*func)(config);
         if (at::isRecordFunctionEnabled()) {
+            record_hybrid_ep_buffer_init();
+
             std::vector<c10::IValue> inputValues;
             inputValues.reserve(1);
             inputValues.push_back(to_ivalue(config));
@@ -166,6 +206,8 @@ auto hybrid_ep_buffer_metadata_preprocessing(Func func) {
                   bool non_blocking) {
         auto result = (self.*func)(config, routing_map, num_of_tokens_per_rank, non_blocking);
         if (at::isRecordFunctionEnabled()) {
+            record_hybrid_ep_buffer_init();
+
             std::vector<c10::IValue> inputValues;
             inputValues.reserve(4);
             inputValues.push_back(to_ivalue(config));
@@ -214,6 +256,8 @@ auto hybrid_ep_buffer_dispatch(Func func) {
                                    num_dispatched_tokens_tensor, num_dispatched_tokens,
                                    num_of_tokens_per_rank, with_probs);
         if (at::isRecordFunctionEnabled()) {
+            record_hybrid_ep_buffer_init();
+
             std::vector<c10::IValue> inputValues;
             inputValues.reserve(11);
             inputValues.push_back(to_ivalue(config));
@@ -280,6 +324,8 @@ auto hybrid_ep_buffer_dispatch_with_permute(Func func) {
                                   num_permuted_tokens, num_of_tokens_per_rank, pad_multiple,
                                   non_blocking, with_probs);
         if (at::isRecordFunctionEnabled()) {
+            record_hybrid_ep_buffer_init();
+
             std::vector<c10::IValue> inputValues;
             inputValues.reserve(15);
             inputValues.push_back(to_ivalue(config));
@@ -353,6 +399,8 @@ auto hybrid_ep_buffer_combine_with_unpermute(Func func) {
                                    num_dispatched_tokens_tensor, row_id_map,
                                    num_of_tokens_per_rank, pad_multiple, with_probs);
         if (at::isRecordFunctionEnabled()) {
+            record_hybrid_ep_buffer_init();
+
             std::vector<c10::IValue> inputValues;
             inputValues.reserve(10);
             inputValues.emplace_back(to_ivalue(config));
