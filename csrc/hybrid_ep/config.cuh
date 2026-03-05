@@ -312,8 +312,8 @@ public:
             cudaDevAttrMaxSharedMemoryPerBlockOptin, device));
 
         int sms_preprocessing = num_sms_preprocessing_api.value_or(108);
-        int sms_dispatch = num_sms_dispatch_api.value_or((num_of_nodes == 1) ? 32 : 8);
-        int sms_combine = num_sms_combine_api.value_or((num_of_nodes == 1) ? 32 : 8);
+        int sms_dispatch = num_sms_dispatch_api.value_or((num_of_nodes == 1) ? 24 : 8);
+        int sms_combine = num_sms_combine_api.value_or((num_of_nodes == 1) ? 24 : 8);
         num_blocks_permute_ = num_blocks_permute.value_or(sm_count * 16);
         num_blocks_unpermute_ = num_blocks_unpermute.value_or(sm_count * 16);
 
@@ -363,7 +363,7 @@ public:
 
         // Env-var defaults (runtime chunk sizes use 64, different from buffer's 32)
         config.num_of_threads_per_block_preprocessing_api = get_env_int("NUM_OF_THREADS_PER_BLOCK_PREPROCESSING_API", 256);
-        int default_chunk_size = fuse_permute_dispatch ? 64 : 128;
+        int default_chunk_size = 64;
         config.num_of_tokens_per_chunk_preprocessing_api  = get_env_int("NUM_OF_TOKENS_PER_CHUNK_PREPROCESSING_API", default_chunk_size);
         config.forward_dispatch_api = true;
         config.device_side_sync_dispatch_api = true;
@@ -391,8 +391,8 @@ public:
         // If we use the fused permute-dispatch kernel, the number of blocks
         // for the permute part is the same as the number of blocks for the dispatch part.
         if (fuse_permute_dispatch) {
-            config.num_of_blocks_permute = min(96, sm_count - config.num_of_blocks_dispatch_api);
-            config.num_of_blocks_unpermute = min(96, sm_count - config.num_of_blocks_combine_api);
+            config.num_of_blocks_permute = min(108, sm_count - config.num_of_blocks_dispatch_api);
+            config.num_of_blocks_unpermute = min(108, sm_count - config.num_of_blocks_combine_api);
         }else{
             config.num_of_blocks_permute = num_blocks_permute_;
             config.num_of_blocks_unpermute = num_blocks_unpermute_;
