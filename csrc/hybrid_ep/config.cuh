@@ -330,8 +330,8 @@ public:
         buffer_config.num_of_blocks_combine_api = sms_combine;
         buffer_config.num_of_blocks_preprocessing_api = sms_preprocessing;
         buffer_config.token_data_type = use_fp8 ? APP_TOKEN_DATA_TYPE::UINT8 : APP_TOKEN_DATA_TYPE::UINT16;
-        buffer_config.num_of_tokens_per_chunk_dispatch_api = get_env_int("NUM_OF_TOKENS_PER_CHUNK_DISPATCH_API", num_of_nodes == 1 ? 128 : 64);
-        buffer_config.num_of_tokens_per_chunk_combine_api = get_env_int("NUM_OF_TOKENS_PER_CHUNK_COMBINE_API", num_of_nodes == 1 ? 128 : 64);
+        buffer_config.num_of_tokens_per_chunk_dispatch_api = get_env_int("NUM_OF_TOKENS_PER_CHUNK_DISPATCH_API", 64);
+        buffer_config.num_of_tokens_per_chunk_combine_api = get_env_int("NUM_OF_TOKENS_PER_CHUNK_COMBINE_API", 64);
         buffer_config.num_of_dispatch_chunks = (buffer_config.max_num_of_tokens_per_rank - 1)
             / buffer_config.num_of_tokens_per_chunk_dispatch_api + 1;
         buffer_config.num_of_combine_chunks = (buffer_config.max_num_of_tokens_per_rank - 1)
@@ -364,9 +364,6 @@ public:
         // Env-var defaults (runtime chunk sizes use 64, different from buffer's 32)
         config.num_of_threads_per_block_preprocessing_api = get_env_int("NUM_OF_THREADS_PER_BLOCK_PREPROCESSING_API", 256);
         int default_chunk_size = fuse_permute_dispatch ? 64 : 128;
-        if(buffer_config.num_of_nodes > 1) {
-            default_chunk_size = 64;
-        }
         config.num_of_tokens_per_chunk_preprocessing_api  = get_env_int("NUM_OF_TOKENS_PER_CHUNK_PREPROCESSING_API", default_chunk_size);
         config.forward_dispatch_api = true;
         config.device_side_sync_dispatch_api = true;
@@ -388,7 +385,6 @@ public:
         config.num_of_tokens_per_group_combine_api = get_env_int("NUM_OF_TOKENS_PER_GROUP_COMBINE_API", 4);
         config.num_of_additional_in_flight_s2g_combine_api = get_env_int("NUM_OF_ADDITIONAL_IN_FLIGHT_S2G_COMBINE_API", 2);
         config.num_of_additional_in_flight_s2g_unpermute_block_combine_api = get_env_int("NUM_OF_ADDITIONAL_IN_FLIGHT_S2G_UNPERMUTE_BLOCK_COMBINE_API", 2);
-        
         
         config.pad_multiple = 1;
 
