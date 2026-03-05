@@ -167,13 +167,6 @@ bool ExtendedMemoryAllocator::is_accessible(MemHandle* mem_handle) {
     accessible = ret == CUDA_SUCCESS;
     if (accessible) {
       cuMemRelease(handle);
-    }else{
-      if (ret != CUDA_SUCCESS) {
-          const char* errStr;
-          cuGetErrorString(ret, &errStr);
-          fprintf(stderr, "[Warning] Failed to import the fabric handle: %s\n", errStr);
-          fflush(stderr);
-      }
     }
   } else {
     // Check if the source hostname is the same as the current hostname
