@@ -1,0 +1,163 @@
+// SPDX-License-Identifier: MIT
+// SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+#pragma once
+
+#ifdef USE_NIXL
+
+#include <memory>
+#include <vector>
+#include <string>
+#include <cuda_runtime.h>
+#include "backend/nixl_types.h"
+
+#define MAX_IP_LENGTH 16
+#define MAX_BOOT_ID_LENGTH 37
+
+// Peer information exchanged between ranks via NIXL notifications
+struct NixlPeerInfo {
+    char ip[MAX_IP_LENGTH];
+    char boot_id[MAX_BOOT_ID_LENGTH];
+    ino_t ipc_namespace_inode;
+    // Dispatch receive buffers
+    void *rdma_buffer_ptr;
+    void *rdma_prob_buffer_ptr;
+    void *rdma_scaling_factor_buffer_ptr;
+    uint64_t *dispatch_flags_ptr;
+    // Combine receive buffers
+    void *combine_rdma_buffer_ptr;
+    void *combine_rdma_prob_buffer_ptr;
+    uint64_t *combine_flags_ptr;
+    // Misc
+    int device_id;
+    int rank;
+};
+
+// NIXL agent information and Memory View management
+struct NixlAgentInfo {
+    std::shared_ptr<nixlAgent> agent;
+    std::string agent_name;
+    nixlBackendH* backend;
+    nixl_xfer_dlist_t src_vram;
+    std::vector<std::string> dst_agent_names;
+    std::vector<bool> wire_up_done;
+    nixl_opt_args_t extra_params;
+
+    nixlMemViewH dispatch_local_mvh;
+    nixlMemViewH dispatch_remote_data_mvh;
+    nixlMemViewH dispatch_remote_signal_mvh;
+    nixlMemViewH combine_local_mvh;
+    nixlMemViewH combine_remote_data_mvh;
+    nixlMemViewH combine_remote_signal_mvh;
+
+    NixlAgentInfo(int num_remote_nodes, int max_num_ranks) :
+        src_vram(VRAM_SEG),
+        dst_agent_names(max_num_ranks),
+        wire_up_done(max_num_ranks, false),
+        dispatch_local_mvh(nullptr),
+        dispatch_remote_data_mvh(nullptr),
+        dispatch_remote_signal_mvh(nullptr),
+        combine_local_mvh(nullptr),
+        combine_remote_data_mvh(nullptr),
+        combine_remote_signal_mvh(nullptr) {}
+};
+
+namespace hybrid_ep {
+
+class HybridEP_NIXLConnector {
+private:
+    int rank_uuid;
+    int local_device_id;
+    int num_ranks;
+    int num_experts_per_rank;
+    int num_nodes;
+    int ranks_per_node;
+    int num_channels;
+
+    std::vector<NixlAgentInfo> nixl_agent_infos;
+    std::vector<NixlPeerInfo> nixl_peer_info;
+    NixlPeerInfo my_peer_info;
+
+    std::vector<int> connected_ranks;
+    bool initialized;
+    bool connected;
+
+    struct BufferSet {
+        void* attn_input_token_d;
+        size_t attn_input_token_sz;
+        void* attn_input_prob_d;
+        size_t attn_input_prob_sz;
+        void* attn_input_token_scaling_factor_d;
+        size_t attn_input_token_scaling_factor_sz;
+        void* rdma_inter_node_group_token_d;
+        size_t rdma_inter_node_group_token_sz;
+        void* rdma_inter_node_group_flags_d;
+        size_t rdma_inter_node_group_flags_sz;
+        void* rdma_inter_node_group_prob_d;
+        size_t rdma_inter_node_group_prob_sz;
+        void* rdma_inter_node_group_scaling_factor_d;
+        size_t rdma_inter_node_group_scaling_factor_sz;
+        void* rdma_intra_node_red_token_d;
+        size_t rdma_intra_node_red_token_sz;
+        void* rdma_intra_node_red_prob_d;
+        size_t rdma_intra_node_red_prob_sz;
+        void* combine_rdma_inter_node_group_token_d;
+        size_t combine_rdma_inter_node_group_token_sz;
+        void* combine_rdma_inter_node_group_flags_d;
+        size_t combine_rdma_inter_node_group_flags_sz;
+        void* combine_rdma_inter_node_group_prob_d;
+        size_t combine_rdma_inter_node_group_prob_sz;
+        bool forward_dispatch;
+        bool backward_combine;
+        bool use_fp8;
+    } buffers;
+
+public:
+    HybridEP_NIXLConnector(int rank_uuid, int local_device_id);
+    ~HybridEP_NIXLConnector();
+
+    void updateMemoryBuffers(
+        int num_ranks,
+        int num_experts_per_rank,
+        int num_nodes,
+        int ranks_per_node,
+        int num_dispatch_blocks,
+        int num_combine_blocks,
+        void* attn_input_token_d, size_t attn_input_token_sz,
+        void* attn_input_prob_d, size_t attn_input_prob_sz,
+        void* attn_input_token_scaling_factor_d, size_t attn_input_token_scaling_factor_sz,
+        void* rdma_inter_node_group_token_d, size_t rdma_inter_node_group_token_sz,
+        void* rdma_inter_node_group_flags_d, size_t rdma_inter_node_group_flags_sz,
+        void* rdma_inter_node_group_prob_d, size_t rdma_inter_node_group_prob_sz,
+        void* rdma_inter_node_group_scaling_factor_d, size_t rdma_inter_node_group_scaling_factor_sz,
+        void* rdma_intra_node_red_token_d, size_t rdma_intra_node_red_token_sz,
+        void* rdma_intra_node_red_prob_d, size_t rdma_intra_node_red_prob_sz,
+        void* combine_rdma_inter_node_group_token_d, size_t combine_rdma_inter_node_group_token_sz,
+        void* combine_rdma_inter_node_group_flags_d, size_t combine_rdma_inter_node_group_flags_sz,
+        void* combine_rdma_inter_node_group_prob_d, size_t combine_rdma_inter_node_group_prob_sz,
+        bool forward_dispatch, bool backward_combine, bool use_fp8);
+
+    void connectRanks(const std::vector<int>& remote_rank_uuids);
+    void disconnectRanks(const std::vector<int>& remote_rank_uuids);
+
+    dispatch_gpu_nixl_ctx* get_dispatch_gpu_ctx();
+    combine_gpu_nixl_ctx* get_combine_gpu_ctx();
+
+private:
+    void _nixl_agents_init(int num_agents);
+    void _register_buffers_with_agents();
+    void _nixl_agents_connect(const std::vector<int>& ranks);
+    void _nixl_agents_wireup(const std::vector<int>& ranks);
+    void _nixl_ucx_wireup(const std::vector<int>& ranks);
+    void _nixl_agents_wiredown(const std::vector<int>& ranks);
+    void _nixl_create_memory_views(const std::vector<int>& ranks);
+    void _nixl_build_gpu_contexts(int num_dispatch_blocks, int num_combine_blocks);
+
+    dispatch_gpu_nixl_ctx *d_dispatch_nixl_ctx;
+    combine_gpu_nixl_ctx *d_combine_nixl_ctx;
+    uint64_t* d_dispatch_flag_counters;
+    uint64_t* d_combine_flag_counters;
+};
+
+}  // namespace hybrid_ep
+
+#endif  // USE_NIXL
