@@ -61,7 +61,11 @@ HybridEPBuffer::HybridEPBuffer(
     // Initialize the rdma coordinator
     if(group_size > buffer_config.num_of_ranks_per_node) {
 #ifdef HYBRID_EP_BUILD_MULTINODE_ENABLE
+#ifdef USE_NIXL
+      nixl_coordinator.init(process_group, node_rank, local_rank, buffer_config);
+#else
       rdma_coordinator.init(process_group, node_rank, local_rank, buffer_config);
+#endif
 #else
       fprintf(stderr, "Inter-node communication is not supported. Please rebuild with HYBRID_EP_MULTINODE flag, group_size=%d, buffer_config.num_of_ranks_per_node=%d.\n", group_size, buffer_config.num_of_ranks_per_node);
       fflush(stderr);
@@ -82,7 +86,11 @@ void HybridEPBuffer::release_buffer() {
 
 #ifdef HYBRID_EP_BUILD_MULTINODE_ENABLE
   if(buffer_config.num_of_nodes > 1) {
+#ifdef USE_NIXL
+    nixl_coordinator.destroy();
+#else
     rdma_coordinator.destroy();
+#endif
   }
 #endif
   nvl_coordinator.destroy();
@@ -93,7 +101,11 @@ void HybridEPBuffer::allocate_buffer() {
   nvl_coordinator.allocate_buffers();
 #ifdef HYBRID_EP_BUILD_MULTINODE_ENABLE
   if(buffer_config.num_of_nodes > 1) {
+#ifdef USE_NIXL
+    nixl_coordinator.allocate_buffers();
+#else
     rdma_coordinator.allocate_buffers();
+#endif
   }
 #endif
   allgather_obj.allocate_buffers();
@@ -101,7 +113,11 @@ void HybridEPBuffer::allocate_buffer() {
   // Set the intra-node and inter-node buffers for the executor
   executor.set_intra_node_buffers(&nvl_coordinator.dispatch_buffers, &nvl_coordinator.combine_buffers);
 #ifdef HYBRID_EP_BUILD_MULTINODE_ENABLE
+#ifdef USE_NIXL
+  executor.set_inter_node_buffers(&nixl_coordinator.dispatch_buffers, &nixl_coordinator.combine_buffers);
+#else
   executor.set_inter_node_buffers(&rdma_coordinator.dispatch_buffers, &rdma_coordinator.combine_buffers);
+#endif
 #endif
   CUDA_CHECK(cudaDeviceSynchronize());
 }
@@ -111,7 +127,11 @@ bool HybridEPBuffer::update_buffer(HybridEpConfigInstance config) {
   bool need_reallocate = false;
   need_reallocate |= nvl_coordinator.grow_buffer_config(config, buffer_config);
 #ifdef HYBRID_EP_BUILD_MULTINODE_ENABLE
+#ifdef USE_NIXL
+  need_reallocate |= nixl_coordinator.grow_buffer_config(config, buffer_config);
+#else
   need_reallocate |= rdma_coordinator.grow_buffer_config(config, buffer_config);
+#endif
 #endif
   need_reallocate |= allgather_obj.grow_buffer_config(config, buffer_config);
 
@@ -123,7 +143,11 @@ bool HybridEPBuffer::update_buffer(HybridEpConfigInstance config) {
   if(need_reallocate) {
     nvl_coordinator.update_config(buffer_config);
 #ifdef HYBRID_EP_BUILD_MULTINODE_ENABLE
+#ifdef USE_NIXL
+    nixl_coordinator.update_config(buffer_config);
+#else
     rdma_coordinator.update_config(buffer_config);
+#endif
 #endif
     allgather_obj.update_config(buffer_config);
     release_buffer();

@@ -290,8 +290,12 @@ void Executor::dispatch_core(HybridEpConfigInstance config, DispatchArgs& args) 
     param.intra_node_flag_parity = intra_node_dispatch_buffers->intra_node_flag_parity;
 #ifdef HYBRID_EP_BUILD_MULTINODE_ENABLE
     param.expected_rdma_flag_value = inter_node_dispatch_buffers->expected_rdma_flag_value;
+#ifdef USE_NIXL
+    param.nixl_gpu_ctx = inter_node_dispatch_buffers->nixl_gpu_ctx;
+#else
     param.d_qps_gpu = reinterpret_cast<void **>(inter_node_dispatch_buffers->d_qps_gpu);
     param.mr_info = reinterpret_cast<void*>(inter_node_dispatch_buffers->mr_info);
+#endif
 #endif
     // Launch kernel
     kernel_cache.run_dispatch_kernel<DType>(config, param, args.fuse_permute_dispatch, args.non_blocking, args.stream);
@@ -481,8 +485,12 @@ void Executor::combine_core(HybridEpConfigInstance config, CombineArgs& args) {
     }
 #ifdef HYBRID_EP_BUILD_MULTINODE_ENABLE
     param.expected_rdma_flag_value = inter_node_combine_buffers->expected_rdma_flag_value;
+#ifdef USE_NIXL
+    param.nixl_gpu_ctx = inter_node_combine_buffers->nixl_gpu_ctx;
+#else
     param.d_qps_gpu = reinterpret_cast<void **>(inter_node_combine_buffers->d_qps_gpu);
     param.mr_info = reinterpret_cast<void*>(inter_node_combine_buffers->mr_info);
+#endif
 #endif
 
     // Launch kernel
