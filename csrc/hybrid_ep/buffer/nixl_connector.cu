@@ -650,6 +650,9 @@ void HybridEP_NIXLConnector::_nixl_build_gpu_contexts(int num_dispatch_blocks, i
     cudaMalloc(&d_dispatch_flag_counters, sizeof(uint64_t) * num_remote_nodes);
     cudaMemset(d_dispatch_flag_counters, 0, sizeof(uint64_t) * num_remote_nodes);
 
+    int dispatch_local_stride = 1 + (int)buffers.forward_dispatch + (int)buffers.use_fp8;
+    int dispatch_remote_stride = dispatch_local_stride;
+
     dispatch_gpu_nixl_ctx h_dispatch_ctx = {};
     h_dispatch_ctx.local_mvh = nixl_agent_infos[agent_idx].dispatch_local_mvh;
     h_dispatch_ctx.remote_data_mvh = nixl_agent_infos[agent_idx].dispatch_remote_data_mvh;
@@ -658,6 +661,8 @@ void HybridEP_NIXLConnector::_nixl_build_gpu_contexts(int num_dispatch_blocks, i
     h_dispatch_ctx.num_remote_nodes = num_remote_nodes;
     h_dispatch_ctx.num_channels = ucx_num_channels;
     h_dispatch_ctx.rank = rank_uuid;
+    h_dispatch_ctx.local_mvh_stride = dispatch_local_stride;
+    h_dispatch_ctx.remote_data_mvh_stride = dispatch_remote_stride;
 
     cudaMalloc(&d_dispatch_nixl_ctx, sizeof(dispatch_gpu_nixl_ctx));
     cudaMemcpy(d_dispatch_nixl_ctx, &h_dispatch_ctx,
@@ -670,6 +675,9 @@ void HybridEP_NIXLConnector::_nixl_build_gpu_contexts(int num_dispatch_blocks, i
     cudaMalloc(&d_combine_flag_counters, sizeof(uint64_t) * num_remote_nodes);
     cudaMemset(d_combine_flag_counters, 0, sizeof(uint64_t) * num_remote_nodes);
 
+    int combine_local_stride = 1 + (int)buffers.backward_combine;
+    int combine_remote_stride = combine_local_stride;
+
     combine_gpu_nixl_ctx h_combine_ctx = {};
     h_combine_ctx.local_mvh = nixl_agent_infos[agent_idx].combine_local_mvh;
     h_combine_ctx.remote_data_mvh = nixl_agent_infos[agent_idx].combine_remote_data_mvh;
@@ -678,6 +686,8 @@ void HybridEP_NIXLConnector::_nixl_build_gpu_contexts(int num_dispatch_blocks, i
     h_combine_ctx.num_remote_nodes = num_remote_nodes;
     h_combine_ctx.num_channels = ucx_num_channels;
     h_combine_ctx.rank = rank_uuid;
+    h_combine_ctx.local_mvh_stride = combine_local_stride;
+    h_combine_ctx.remote_data_mvh_stride = combine_remote_stride;
 
     cudaMalloc(&d_combine_nixl_ctx, sizeof(combine_gpu_nixl_ctx));
     cudaMemcpy(d_combine_nixl_ctx, &h_combine_ctx,
@@ -804,13 +814,6 @@ void HybridEP_NIXLConnector::_register_buffers_with_agents() {
 
     NIXL_LOG("    [Rank %d] _register_buffers_with_agents: registering %d buffers\n", rank_uuid, buffer_count);
     nixl_status_t status = nixl_agent_infos[agent_idx].agent->registerMem(reg_dlist);
-    assert(status == NIXL_SUCCESS);
-
-    size_t signal_size = 0;
-    status = nixl_agent_infos[agent_idx].agent->getGpuSignalSize(signal_size, &nixl_agent_infos[agent_idx].extra_params);
-    assert(status == NIXL_SUCCESS);
-    assert(signal_size == sizeof(uint64_t));
-    status = nixl_agent_infos[agent_idx].agent->prepGpuSignal(reg_dlist, &nixl_agent_infos[agent_idx].extra_params);
     assert(status == NIXL_SUCCESS);
 
     status = nixl_agent_infos[agent_idx].agent->sendLocalMD(&nixl_agent_infos[agent_idx].extra_params);

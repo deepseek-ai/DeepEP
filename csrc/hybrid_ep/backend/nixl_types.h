@@ -20,6 +20,8 @@ struct dispatch_gpu_nixl_ctx {
   int num_remote_nodes;
   int num_channels;
   int rank;
+  int local_mvh_stride;
+  int remote_data_mvh_stride;
 };
 
 struct combine_gpu_nixl_ctx {
@@ -30,6 +32,8 @@ struct combine_gpu_nixl_ctx {
   int num_remote_nodes;
   int num_channels;
   int rank;
+  int local_mvh_stride;
+  int remote_data_mvh_stride;
 };
 
 }  // namespace hybrid_ep

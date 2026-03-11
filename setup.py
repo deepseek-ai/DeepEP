@@ -123,6 +123,9 @@ def get_extension_hybrid_ep_cpp():
             extra_link_args.extend([f"-Wl,-rpath,{nixl_lib}"])
             extra_link_args.append("-l:libnvidia-ml.so.1")
             libraries.extend(["mlx5", "ibverbs"])
+            doca_home = os.getenv("DOCA_HOME", "")
+            if doca_home:
+                include_dirs.append(os.path.join(doca_home, "include"))
             rdma_core_dir = os.getenv("RDMA_CORE_HOME", "")
             if rdma_core_dir:
                 include_dirs.append(os.path.join(rdma_core_dir, "include"))
@@ -261,7 +264,7 @@ def get_extension_deep_ep_cpp():
 
         # CUDA 12 flags
         nvcc_flags.extend(['-rdc=true', '--ptxas-options=--register-usage-level=10'])
-        
+
         # Ensure device linking and CUDA device runtime when RDC is enabled
         if '-rdc=true' in nvcc_flags and '-dlink' not in nvcc_dlink:
             nvcc_dlink.append('-dlink')
