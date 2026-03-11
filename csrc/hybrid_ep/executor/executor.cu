@@ -143,7 +143,7 @@ HandleImpl Executor::metadata_preprocess_core(
       handle.overflow_flag.data_ptr<int>(),
       static_cast<int>(node_rank), static_cast<int>(local_rank), 
       // local_experts_tokens_limit must be a multiple of LOCAL_EXPERTS_PADDING_SIZE (pad_multiple) as required by the scan kernel.
-      static_cast<int>(((max_num_dispatched_tokens + pad_multiple - 1) / pad_multiple) * pad_multiple),
+      static_cast<int>(pad_multiple > 0 ? ((max_num_dispatched_tokens + pad_multiple - 1) / pad_multiple) * pad_multiple : max_num_dispatched_tokens),
       num_of_tokens_per_rank, fuse_permute_dispatch, stream);
 
 
