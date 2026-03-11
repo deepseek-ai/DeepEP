@@ -401,9 +401,10 @@ void RDMACoordinator::allocate_dispatch_buffers(){
                                         * buffer_config.num_of_ranks_per_node);
   auto rdma_inter_node_group_scaling_factor_elts = buffer_config.max_num_of_tokens_per_rank * 
                                                     (buffer_config.num_of_nodes - 1) * (buffer_config.hidden_dim / 128);
-  auto rdma_inter_node_group_flags_elts = ((buffer_config.max_num_of_tokens_per_rank - 1) /
+  size_t rdma_inter_node_group_flags_barrier_idx = (size_t)((buffer_config.max_num_of_tokens_per_rank - 1) /
                                            buffer_config.num_of_tokens_per_chunk_dispatch_api + 1) *
                                           (buffer_config.num_of_nodes - 1);
+  size_t rdma_inter_node_group_flags_elts = rdma_inter_node_group_flags_barrier_idx + 2 * (buffer_config.num_of_nodes - 1);
   // Allocate RDMA buffers
   CUDA_CHECK(cudaMalloc((void**)&dispatch_buffers.attn_input_token,
                         attn_input_token_elts * sizeof_token_data_type));
@@ -492,8 +493,7 @@ void RDMACoordinator::allocate_dispatch_buffers(){
           break;
       }
       curr_info->flag_rkey = dispatch_rdma_inter_node_group_flags_mr->rkey;
-      curr_info->flag_vaddr = (uintptr_t)((uint64_t *)dispatch_rdma_inter_node_group_flags_mr->addr +
-                                          peer_idx * flag_stride);
+      curr_info->flag_vaddr = (uintptr_t)dispatch_rdma_inter_node_group_flags_mr->addr;
       curr_info->prob_rkey = dispatch_rdma_inter_node_group_prob_mr->rkey;
       curr_info->prob_vaddr = (uintptr_t)((float *)dispatch_rdma_inter_node_group_prob_mr->addr +
                                           peer_idx * prob_stride);
@@ -533,10 +533,11 @@ void RDMACoordinator::allocate_dispatch_buffers(){
       data->scaling_factor_lkey = htobe32(attn_input_token_scaling_factor_mr->lkey);
       data->scaling_factor_raddr = dispatch_remote_info_vec[rem_idx].scaling_factor_vaddr;
       data->scaling_factor_rkey = htobe32(dispatch_remote_info_vec[rem_idx].scaling_factor_rkey);
-      data->flag_laddr = (uint64_t)((uint64_t *)attn_input_flags_mr->addr + peer_idx * flag_stride);
+      data->flag_laddr = (uint64_t)attn_input_flags_mr->addr;
       data->flag_lkey = htobe32(attn_input_flags_mr->lkey);
       data->flag_raddr = dispatch_remote_info_vec[rem_idx].flag_vaddr;
       data->flag_rkey = htobe32(dispatch_remote_info_vec[rem_idx].flag_rkey);
+      data->back_sync_barrier_idx = rdma_inter_node_group_flags_barrier_idx;
       data->prob_laddr = (uint64_t)attn_input_prob_mr->addr;
       data->prob_lkey = htobe32(attn_input_prob_mr->lkey);
       data->prob_raddr = dispatch_remote_info_vec[rem_idx].prob_vaddr;
@@ -565,9 +566,10 @@ void RDMACoordinator::allocate_combine_buffers(){
                                           (buffer_config.num_of_nodes - 1) * buffer_config.hidden_dim;
   auto rdma_inter_node_group_prob_elts = buffer_config.max_num_of_tokens_per_rank * (buffer_config.num_of_nodes - 1) *
                                          (buffer_config.num_of_experts_per_rank * buffer_config.num_of_ranks_per_node);
-  auto rdma_inter_node_group_flags_elts = ((buffer_config.max_num_of_tokens_per_rank - 1) /
+  size_t combine_rdma_inter_node_group_flags_barrier_idx = (size_t)((buffer_config.max_num_of_tokens_per_rank - 1) /
                                            buffer_config.num_of_tokens_per_chunk_combine_api + 1) *
                                           (buffer_config.num_of_nodes - 1);
+  size_t rdma_inter_node_group_flags_elts = combine_rdma_inter_node_group_flags_barrier_idx + 2 * (buffer_config.num_of_nodes - 1);
                                     
   // Allocate RDMA buffers
   CUDA_CHECK(cudaMalloc((void**)&combine_buffers.rdma_intra_node_red_token,
@@ -640,8 +642,7 @@ void RDMACoordinator::allocate_combine_buffers(){
       curr_info->token_vaddr = (uintptr_t)((uint16_t *)combine_rdma_inter_node_group_token_mr->addr +
                                            peer_idx * token_stride);
       curr_info->flag_rkey = combine_rdma_inter_node_group_flags_mr->rkey;
-      curr_info->flag_vaddr = (uintptr_t)((uint64_t *)combine_rdma_inter_node_group_flags_mr->addr +
-                                          peer_idx * flag_stride);
+      curr_info->flag_vaddr = (uintptr_t)combine_rdma_inter_node_group_flags_mr->addr;
       curr_info->prob_rkey = combine_rdma_inter_node_group_prob_mr->rkey;
       curr_info->prob_vaddr = (uintptr_t)((float *)combine_rdma_inter_node_group_prob_mr->addr +
                                           peer_idx * prob_stride);
@@ -675,10 +676,11 @@ void RDMACoordinator::allocate_combine_buffers(){
       data->token_lkey = htobe32(rdma_intra_node_red_token_mr->lkey);
       data->token_raddr = combine_remote_info_vec[rem_idx].token_vaddr;
       data->token_rkey = htobe32(combine_remote_info_vec[rem_idx].token_rkey);
-      data->flag_laddr = (uint64_t)((uint64_t *)attn_output_flags_mr->addr + peer_idx * flag_stride);
+      data->flag_laddr = (uint64_t)attn_output_flags_mr->addr;
       data->flag_lkey = htobe32(attn_output_flags_mr->lkey);
       data->flag_raddr = combine_remote_info_vec[rem_idx].flag_vaddr;
       data->flag_rkey = htobe32(combine_remote_info_vec[rem_idx].flag_rkey);
+      data->back_sync_barrier_idx = combine_rdma_inter_node_group_flags_barrier_idx;
       data->prob_laddr = (uint64_t)rdma_intra_node_red_prob_mr->addr;
       data->prob_lkey = htobe32(rdma_intra_node_red_prob_mr->lkey);
       data->prob_raddr = combine_remote_info_vec[rem_idx].prob_vaddr;
