@@ -114,6 +114,8 @@ HandleImpl Executor::metadata_preprocess_core(
   int32_t *dense_chunk_layout_ptr = nullptr;
   int32_t *dense_to_expert_map_ptr = nullptr;
   int32_t *tokens_per_expert_ptr = nullptr;
+  handle.overflow_flag = 
+      torch::empty({1}, torch::dtype(torch::kInt32).device(torch::kCUDA));
   if(fuse_permute_dispatch && enable_permute) {
     int num_of_chunks_per_rank = (num_of_tokens_per_rank - 1) / config.num_of_tokens_per_chunk_dispatch_api + 1;
     handle.dense_chunk_layout = 
@@ -125,8 +127,6 @@ HandleImpl Executor::metadata_preprocess_core(
     // Raw tokens_per_expert on GPU int32, written by scan kernel, read by fuse dispatch kernel.
     handle.tokens_per_expert = 
         torch::empty({config.num_of_experts_per_rank}, torch::dtype(torch::kInt32).device(torch::kCUDA));
-    handle.overflow_flag = 
-        torch::empty({1}, torch::dtype(torch::kInt32).device(torch::kCUDA));
     dense_chunk_layout_ptr = handle.dense_chunk_layout.data_ptr<int32_t>();
     dense_to_expert_map_ptr = handle.dense_to_expert_map.data_ptr<int32_t>();
     tokens_per_expert_ptr = handle.tokens_per_expert.data_ptr<int32_t>();
@@ -140,7 +140,10 @@ HandleImpl Executor::metadata_preprocess_core(
       handle.num_dispatched_tokens_tensor.data_ptr<int32_t>(),
       handle.local_expert_routing_map.data_ptr<bool>(), 
       dense_chunk_layout_ptr, dense_to_expert_map_ptr, tokens_per_expert_ptr, 
+      handle.overflow_flag.data_ptr<int>(),
       static_cast<int>(node_rank), static_cast<int>(local_rank), 
+      // local_experts_tokens_limit must be a multiple of LOCAL_EXPERTS_PADDING_SIZE (pad_multiple) as required by the scan kernel.
+      static_cast<int>(((max_num_dispatched_tokens + pad_multiple - 1) / pad_multiple) * pad_multiple),
       num_of_tokens_per_rank, fuse_permute_dispatch, stream);
 
 

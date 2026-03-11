@@ -260,9 +260,11 @@ void KernelCache::run_preprocess_kernel(
     int32_t* dense_chunk_layout,
     int32_t* dense_to_expert_map,
     int32_t* num_of_local_experts_tokens,
+    int* token_drop_triggered,
     const int node_rank,
     const int local_rank,
-    int num_of_tokens_per_rank,
+    const int local_experts_tokens_limit,
+    const int num_of_tokens_per_rank,
     bool fuse_permute_dispatch,
     cudaStream_t stream
 ){
@@ -289,11 +291,11 @@ void KernelCache::run_preprocess_kernel(
     auto preprocessing_instance = kernel_cache[preprocess_kernel_key];
 
     // Cast the function pointer to the correct type
-    using PreprocessingFuncPtr = void (*)(const bool*, hybrid_ep::tmp_state_t*, hybrid_ep::tmp_state_t*, int32_t*, bool*, bool*, int32_t*, bool*, int32_t*, int32_t*, int32_t*, const int, const int, int, cudaStream_t);
+    using PreprocessingFuncPtr = void (*)(const bool*, hybrid_ep::tmp_state_t*, hybrid_ep::tmp_state_t*, int32_t*, bool*, bool*, int32_t*, bool*, int32_t*, int32_t*, int32_t*, int*, const int, const int, const int, const int, cudaStream_t);
     auto func_ptr = std::any_cast<PreprocessingFuncPtr>(preprocessing_instance);
 
     // Run the kernel
-    func_ptr(input_routing_map, preprocessing_tmp, preprocessing_local_experts_tmp, sparse_to_dense_map, rdma_to_attn_map,attn_to_rdma_map, num_of_tokens_for_experts, local_expert_routing_map, dense_chunk_layout, dense_to_expert_map, num_of_local_experts_tokens, node_rank, local_rank, num_of_tokens_per_rank, stream);
+    func_ptr(input_routing_map, preprocessing_tmp, preprocessing_local_experts_tmp, sparse_to_dense_map, rdma_to_attn_map, attn_to_rdma_map, num_of_tokens_for_experts, local_expert_routing_map, dense_chunk_layout, dense_to_expert_map, num_of_local_experts_tokens, token_drop_triggered, node_rank, local_rank, local_experts_tokens_limit, num_of_tokens_per_rank, stream);
 
 }
 

@@ -81,8 +81,10 @@ public:
         int32_t* dense_chunk_layout,
         int32_t* dense_to_expert_map,
         int32_t* num_of_local_experts_tokens,
+        int* token_drop_triggered,
         const int node_rank,
         const int local_rank,
+        const int local_experts_tokens_limit,
         int num_of_tokens_per_rank,
         bool fuse_permute_dispatch,
         cudaStream_t stream
