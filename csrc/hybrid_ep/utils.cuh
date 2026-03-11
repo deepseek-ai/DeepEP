@@ -57,6 +57,7 @@ struct dispatch_memory_region_info_t {
   uint64_t scaling_factor_raddr;
   uint64_t flag_laddr;
   uint64_t flag_raddr;
+  uint64_t back_sync_barrier_idx;
 } __attribute__((__aligned__(8)));
 
 struct combine_memory_region_info_t {
@@ -72,6 +73,7 @@ struct combine_memory_region_info_t {
   uint64_t prob_raddr;
   uint64_t flag_laddr;
   uint64_t flag_raddr;
+  uint64_t back_sync_barrier_idx;
 } __attribute__((__aligned__(8)));
 #endif
 

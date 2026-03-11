@@ -104,6 +104,7 @@ std::string NVCCCompiler::build(std::string code, std::string signature, int loc
     std::string extra_flags;
     if (enable_permute_fusion) {
         extra_flags += " -DHYBRID_EP_BUILD_PERMUTE_FUSION_ENABLE";
+        extra_flags += " -DHYBRID_EP_BUILD_TOKEN_DROP_ENABLE";
     }
 
     // Choose the flags based on the number of nodes
