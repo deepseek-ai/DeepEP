@@ -151,11 +151,24 @@ export TORCH_CUDA_ARCH_LIST="9.0 10.0"  # Adjust based on your GPU architecture
 pip install .
 ```
 
-#### Multi-node RDMA Installation
-For multi-node support with RDMA, additional configuration is required, make sure RDMA core libraries are properly installed and the path points to the directory containing the RDMA headers and libraries.
+#### Multi-node NIXL Installation (recommended when NIXL is available)
+For multi-node support with NIXL (no DOCA/NCCL required):
 
 ```bash
 export HYBRID_EP_MULTINODE=1
+export USE_NIXL=1
+export NIXL_HOME=/usr/local/nixl  # Adjust if NIXL is installed elsewhere
+export UCX_HOME=/usr              # Adjust if UCX is installed elsewhere
+export TORCH_CUDA_ARCH_LIST="9.0 10.0"  # Adjust based on your GPU architecture
+pip install .
+```
+
+#### Multi-node RDMA (DOCA) Installation
+For multi-node support with DOCA/RDMA, additional configuration is required, make sure RDMA core libraries are properly installed and the path points to the directory containing the RDMA headers and libraries.
+
+```bash
+export HYBRID_EP_MULTINODE=1
+# Do NOT set USE_NIXL - DOCA path requires NCCL submodule + DOCA SDK
 export RDMA_CORE_HOME=/path/to/rdma-core  # Path to your RDMA core installation
 export TORCH_CUDA_ARCH_LIST="9.0 10.0"  # Adjust based on your GPU architecture
 pip install .
@@ -190,6 +203,27 @@ RUN cd DeepEP && \
     apt-get autoremove -y && \
     rm -rf /var/lib/apt/lists/*
 ```
+
+### Troubleshooting
+
+**Error: `No rule to make target '.../doca_gpunetio_device.h', needed by 'lib'`**
+
+This occurs when the DOCA path is used but the DOCA SDK or NCCL build is incomplete. To avoid this, use NIXL instead:
+
+```bash
+export HYBRID_EP_MULTINODE=1
+export USE_NIXL=1
+pip install .
+```
+
+If `USE_NIXL` is not propagated (e.g. with pip build isolation), create a marker file before building:
+
+```bash
+touch .use_nixl
+HYBRID_EP_MULTINODE=1 pip install .
+```
+
+During build, you should see `Multinode enabled: use_nixl=True` and `-> NIXL path: skipping NCCL/DOCA build`. If you see `-> DOCA path` instead, `USE_NIXL` is not being passed (try the `.use_nixl` file).
 
 ### Quick Start
 

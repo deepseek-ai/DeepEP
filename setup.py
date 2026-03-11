@@ -46,6 +46,10 @@ def get_extension_hybrid_ep_cpp():
     current_dir = os.path.dirname(os.path.abspath(__file__))
     enable_multinode = os.getenv("HYBRID_EP_MULTINODE", "0").strip().lower() in {"1", "true", "t", "yes", "y", "on"}
     use_nixl = os.getenv("USE_NIXL", "0").strip().lower() in {"1", "true", "t", "yes", "y", "on"}
+    # Fallback when env may not propagate (e.g. pip build isolation): .use_nixl in project root
+    if enable_multinode and not use_nixl and os.path.isfile(os.path.join(current_dir, ".use_nixl")):
+        use_nixl = True
+        print("Using NIXL (found .use_nixl; DOCA/NCCL build unavailable)")
 
     # Default to Blackwell series
     os.environ['TORCH_CUDA_ARCH_LIST'] = os.getenv('TORCH_CUDA_ARCH_LIST', '10.0')
@@ -98,13 +102,15 @@ def get_extension_hybrid_ep_cpp():
     # Add inter-node dependency
     if enable_multinode:
         compile_args["nvcc"].append("-DHYBRID_EP_BUILD_MULTINODE_ENABLE")
+        print(f'Multinode enabled: use_nixl={use_nixl} (USE_NIXL={os.getenv("USE_NIXL", "0")})')
         if use_nixl:
             # NIXL path: use NIXL connector instead of DOCA
+            print('  -> NIXL path: skipping NCCL/DOCA build')
+            compile_args["nvcc"].append("-DUSE_NIXL")
             sources.extend([
                 "csrc/hybrid_ep/buffer/internode_nixl.cu",
                 "csrc/hybrid_ep/buffer/nixl_connector.cu",
             ])
-            compile_args["nvcc"].append("-DUSE_NIXL")
             nixl_home = os.getenv("NIXL_HOME", "/usr/local/nixl")
             ucx_home = os.getenv("UCX_HOME", "/usr")
             nixl_include = os.path.join(nixl_home, "include")
@@ -122,7 +128,8 @@ def get_extension_hybrid_ep_cpp():
                 include_dirs.append(os.path.join(rdma_core_dir, "include"))
                 library_dirs.append(os.path.join(rdma_core_dir, "lib"))
         else:
-            # DOCA path: use RDMA coordinator
+            # DOCA path: use RDMA coordinator (requires NCCL submodule + DOCA)
+            print('  -> DOCA path: building NCCL/DOCA')
             sources.extend(["csrc/hybrid_ep/buffer/internode.cu"])
             rdma_core_dir = os.getenv("RDMA_CORE_HOME", "")
             nccl_dir = os.path.join(current_dir, "third-party/nccl")
@@ -130,16 +137,22 @@ def get_extension_hybrid_ep_cpp():
             extra_link_args.append(f"-l:libnvidia-ml.so.1")
 
             subprocess.run(["git", "submodule", "update", "--init", "--recursive"], cwd=current_dir)
-            # Generate the inter-node dependency to the python package for JIT compilation
-            subprocess.run(["make", "-j", "src.build", f"NVCC_GENCODE={to_nvcc_gencode(os.environ['TORCH_CUDA_ARCH_LIST'])}"], cwd=nccl_dir, check=True)
-            # Add third-party dependency
+            nccl_make = subprocess.run(
+                ["make", "-j", "src.build", f"NVCC_GENCODE={to_nvcc_gencode(os.environ['TORCH_CUDA_ARCH_LIST'])}"],
+                cwd=nccl_dir,
+            )
+            if nccl_make.returncode != 0:
+                raise SystemExit(
+                    "NCCL/DOCA build failed (missing doca_gpunetio_device.h or DOCA SDK).\n"
+                    "Use NIXL instead: export USE_NIXL=1 HYBRID_EP_MULTINODE=1 && pip install .\n"
+                    "Or create .use_nixl in the project root and rebuild."
+                )
             include_dirs.append(os.path.join(nccl_dir, "src/transport/net_ib/gdaki/doca-gpunetio/include"))
             include_dirs.append(os.path.join(rdma_core_dir, "include"))
             library_dirs.append(os.path.join(rdma_core_dir, "lib"))
             runtime_library_dirs.append(os.path.join(rdma_core_dir, "lib"))
             libraries.append("mlx5")
             libraries.append("ibverbs")
-            # Copy the inter-node dependency to python package
             shutil.copytree(
                 os.path.join(nccl_dir, "src/transport/net_ib/gdaki/doca-gpunetio/include"),
                 os.path.join(current_dir, "deep_ep/backend/nccl/include"),
@@ -150,7 +163,6 @@ def get_extension_hybrid_ep_cpp():
                 os.path.join(current_dir, "deep_ep/backend/nccl/obj"),
                 dirs_exist_ok=True
             )
-            # Set the extra objects
             DOCA_OBJ_PATH = os.path.join(current_dir, "deep_ep/backend/nccl/obj")
             extra_objects = [
                 os.path.join(DOCA_OBJ_PATH, "doca_gpunetio.o"),
