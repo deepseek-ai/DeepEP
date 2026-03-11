@@ -1,20 +1,28 @@
 // SPDX-License-Identifier: MIT
-// SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES.
-// All rights reserved
-#include "internode_nixl.cuh"
+// SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 
+#ifdef USE_NIXL
+
+#include "buffer/internode.cuh"
+#include <pybind11/pybind11.h>
+#include <thread>
+#include <chrono>
+
+NIXLCoordinator::~NIXLCoordinator() {
+    destroy();
+}
 
 void NIXLCoordinator::init(
     pybind11::object process_group,
     int node_rank,
     int local_rank,
     BufferConfig config
-  ) {
-  this->process_group = process_group;
-  this->node_rank = node_rank;
-  this->local_rank = local_rank;
-  this->buffer_config = config;
-  assert(buffer_config.num_of_nodes > 1);
+) {
+    this->process_group = process_group;
+    this->node_rank = node_rank;
+    this->local_rank = local_rank;
+    this->buffer_config = config;
+    assert(buffer_config.num_of_nodes > 1);
 }
 
 bool NIXLCoordinator::grow_buffer_config(const HybridEpConfigInstance& config, BufferConfig& buf_config) {
@@ -27,12 +35,12 @@ bool NIXLCoordinator::grow_buffer_config(const HybridEpConfigInstance& config, B
     changed |= grow_to(buf_config.num_of_blocks_dispatch_api, config.num_of_blocks_dispatch_api);
     changed |= grow_to(buf_config.num_of_blocks_combine_api, config.num_of_blocks_combine_api);
     if (buf_config.num_of_tokens_per_chunk_dispatch_api != config.num_of_tokens_per_chunk_dispatch_api) {
-      changed = true;
-      buf_config.num_of_tokens_per_chunk_dispatch_api = config.num_of_tokens_per_chunk_dispatch_api;
+        changed = true;
+        buf_config.num_of_tokens_per_chunk_dispatch_api = config.num_of_tokens_per_chunk_dispatch_api;
     }
     if (buf_config.num_of_tokens_per_chunk_combine_api != config.num_of_tokens_per_chunk_combine_api) {
-      changed = true;
-      buf_config.num_of_tokens_per_chunk_combine_api = config.num_of_tokens_per_chunk_combine_api;
+        changed = true;
+        buf_config.num_of_tokens_per_chunk_combine_api = config.num_of_tokens_per_chunk_combine_api;
     }
     return changed;
 }
@@ -41,10 +49,195 @@ void NIXLCoordinator::update_config(BufferConfig config) {
     this->buffer_config = config;
 }
 
-void NIXLCoordinator::allocate_buffers() {
-    return;
+void NIXLCoordinator::destroy() {
+    if (!buffer_allocated) return;
+
+    CUDA_CHECK(cudaDeviceSynchronize());
+
+    nixl_connector.reset();
+
+    free_buffers();
+    buffer_allocated = false;
+
+    CUDA_CHECK(cudaDeviceSynchronize());
 }
 
-void NIXLCoordinator::destroy() {
-    return;
+void NIXLCoordinator::free_buffers() {
+    auto free_ptr = [](auto*& p) {
+        if (p) {
+            cudaFree(p);
+            p = nullptr;
+        }
+    };
+
+    free_ptr(dispatch_buffers.attn_input_token);
+    free_ptr(dispatch_buffers.attn_input_prob);
+    free_ptr(dispatch_buffers.attn_input_flags);
+    free_ptr(dispatch_buffers.attn_input_scaling_factor);
+    free_ptr(dispatch_buffers.rdma_inter_node_group_token);
+    free_ptr(dispatch_buffers.rdma_inter_node_group_prob);
+    free_ptr(dispatch_buffers.rdma_inter_node_group_scaling_factor);
+    free_ptr(dispatch_buffers.rdma_inter_node_group_flags);
+    free_ptr(dispatch_buffers.expected_rdma_flag_value);
+
+    free_ptr(combine_buffers.attn_output_flags);
+    free_ptr(combine_buffers.rdma_intra_node_red_token);
+    free_ptr(combine_buffers.rdma_intra_node_red_prob);
+    free_ptr(combine_buffers.rdma_inter_node_group_token);
+    free_ptr(combine_buffers.rdma_inter_node_group_prob);
+    free_ptr(combine_buffers.rdma_inter_node_group_flags);
+    free_ptr(combine_buffers.expected_rdma_flag_value);
 }
+
+void NIXLCoordinator::allocate_dispatch_buffers() {
+    dispatch_buffers.data_type = buffer_config.token_data_type;
+    size_t sizeof_token_data_type = get_token_data_type_size(dispatch_buffers.data_type);
+
+    auto attn_input_token_elts = buffer_config.max_num_of_tokens_per_rank * buffer_config.hidden_dim;
+    auto attn_input_prob_elts = buffer_config.max_num_of_tokens_per_rank
+        * (buffer_config.num_of_experts_per_rank * buffer_config.num_of_ranks_per_node * buffer_config.num_of_nodes);
+    auto attn_input_token_scaling_factor_elts = buffer_config.max_num_of_tokens_per_rank * (buffer_config.hidden_dim / 128);
+    auto rdma_inter_node_group_token_elts = buffer_config.max_num_of_tokens_per_rank *
+        (buffer_config.num_of_nodes - 1) * buffer_config.hidden_dim;
+    auto rdma_inter_node_group_prob_elts = buffer_config.max_num_of_tokens_per_rank
+        * (buffer_config.num_of_nodes - 1)
+        * (buffer_config.num_of_experts_per_rank * buffer_config.num_of_ranks_per_node);
+    auto rdma_inter_node_group_scaling_factor_elts = buffer_config.max_num_of_tokens_per_rank *
+        (buffer_config.num_of_nodes - 1) * (buffer_config.hidden_dim / 128);
+    auto rdma_inter_node_group_flags_elts = ((buffer_config.max_num_of_tokens_per_rank - 1) /
+        buffer_config.num_of_tokens_per_chunk_dispatch_api + 1) * (buffer_config.num_of_nodes - 1);
+
+    CUDA_CHECK(cudaMalloc((void**)&dispatch_buffers.attn_input_token, attn_input_token_elts * sizeof_token_data_type));
+    CUDA_CHECK(cudaMalloc((void**)&dispatch_buffers.attn_input_prob, attn_input_prob_elts * sizeof(float)));
+    CUDA_CHECK(cudaMalloc((void**)&dispatch_buffers.attn_input_scaling_factor,
+        attn_input_token_scaling_factor_elts * sizeof(float)));
+    CUDA_CHECK(cudaMalloc((void**)&dispatch_buffers.rdma_inter_node_group_token,
+        rdma_inter_node_group_token_elts * sizeof_token_data_type));
+    CUDA_CHECK(cudaMalloc((void**)&dispatch_buffers.rdma_inter_node_group_prob,
+        rdma_inter_node_group_prob_elts * sizeof(float)));
+    CUDA_CHECK(cudaMalloc((void**)&dispatch_buffers.rdma_inter_node_group_scaling_factor,
+        rdma_inter_node_group_scaling_factor_elts * sizeof(float)));
+    CUDA_CHECK(cudaMalloc((void**)&dispatch_buffers.rdma_inter_node_group_flags,
+        rdma_inter_node_group_flags_elts * sizeof(uint64_t)));
+    CUDA_CHECK(cudaMemset(dispatch_buffers.rdma_inter_node_group_flags, 0,
+        rdma_inter_node_group_flags_elts * sizeof(uint64_t)));
+    CUDA_CHECK(cudaMalloc((void**)&dispatch_buffers.attn_input_flags,
+        rdma_inter_node_group_flags_elts * sizeof(uint64_t)));
+    CUDA_CHECK(cudaMemset(dispatch_buffers.attn_input_flags, 0,
+        rdma_inter_node_group_flags_elts * sizeof(uint64_t)));
+    CUDA_CHECK(cudaMalloc((void**)&dispatch_buffers.expected_rdma_flag_value, sizeof(uint64_t)));
+    CUDA_CHECK(cudaMemset(dispatch_buffers.expected_rdma_flag_value, 0, sizeof(uint64_t)));
+}
+
+void NIXLCoordinator::allocate_combine_buffers() {
+    auto rdma_intra_node_red_token_elts = buffer_config.max_num_of_tokens_per_rank *
+        (buffer_config.num_of_nodes - 1) * buffer_config.hidden_dim;
+    auto rdma_intra_node_red_prob_elts = buffer_config.max_num_of_tokens_per_rank * (buffer_config.num_of_nodes - 1) *
+        (buffer_config.num_of_experts_per_rank * buffer_config.num_of_ranks_per_node);
+    auto rdma_inter_node_group_token_elts = buffer_config.max_num_of_tokens_per_rank *
+        (buffer_config.num_of_nodes - 1) * buffer_config.hidden_dim;
+    auto rdma_inter_node_group_prob_elts = buffer_config.max_num_of_tokens_per_rank * (buffer_config.num_of_nodes - 1) *
+        (buffer_config.num_of_experts_per_rank * buffer_config.num_of_ranks_per_node);
+    auto rdma_inter_node_group_flags_elts = ((buffer_config.max_num_of_tokens_per_rank - 1) /
+        buffer_config.num_of_tokens_per_chunk_combine_api + 1) * (buffer_config.num_of_nodes - 1);
+
+    CUDA_CHECK(cudaMalloc((void**)&combine_buffers.rdma_intra_node_red_token,
+        rdma_intra_node_red_token_elts * sizeof(uint16_t)));
+    CUDA_CHECK(cudaMalloc((void**)&combine_buffers.rdma_intra_node_red_prob,
+        rdma_intra_node_red_prob_elts * sizeof(float)));
+    CUDA_CHECK(cudaMalloc((void**)&combine_buffers.rdma_inter_node_group_token,
+        rdma_inter_node_group_token_elts * sizeof(uint16_t)));
+    CUDA_CHECK(cudaMalloc((void**)&combine_buffers.rdma_inter_node_group_prob,
+        rdma_inter_node_group_prob_elts * sizeof(float)));
+    CUDA_CHECK(cudaMalloc((void**)&combine_buffers.rdma_inter_node_group_flags,
+        rdma_inter_node_group_flags_elts * sizeof(uint64_t)));
+    CUDA_CHECK(cudaMemset(combine_buffers.rdma_inter_node_group_flags, 0,
+        rdma_inter_node_group_flags_elts * sizeof(uint64_t)));
+    CUDA_CHECK(cudaMalloc((void**)&combine_buffers.attn_output_flags,
+        rdma_inter_node_group_flags_elts * sizeof(uint64_t)));
+    CUDA_CHECK(cudaMemset(combine_buffers.attn_output_flags, 0,
+        rdma_inter_node_group_flags_elts * sizeof(uint64_t)));
+    CUDA_CHECK(cudaMalloc((void**)&combine_buffers.expected_rdma_flag_value, sizeof(uint64_t)));
+    CUDA_CHECK(cudaMemset(combine_buffers.expected_rdma_flag_value, 0, sizeof(uint64_t)));
+}
+
+void NIXLCoordinator::allocate_buffers() {
+    allocate_combine_buffers();
+    allocate_dispatch_buffers();
+
+    int rank_uuid = node_rank * buffer_config.num_of_ranks_per_node + local_rank;
+    int num_ranks = buffer_config.num_of_ranks_per_node * buffer_config.num_of_nodes;
+    bool use_fp8 = (buffer_config.token_data_type == APP_TOKEN_DATA_TYPE::UINT8);
+
+    size_t attn_input_token_sz = buffer_config.max_num_of_tokens_per_rank * buffer_config.hidden_dim *
+        get_token_data_type_size(dispatch_buffers.data_type);
+    size_t attn_input_prob_sz = buffer_config.max_num_of_tokens_per_rank *
+        (buffer_config.num_of_experts_per_rank * buffer_config.num_of_ranks_per_node * buffer_config.num_of_nodes) *
+        sizeof(float);
+    size_t attn_input_token_scaling_factor_sz = buffer_config.max_num_of_tokens_per_rank *
+        (buffer_config.hidden_dim / 128) * sizeof(float);
+    size_t rdma_inter_node_group_token_sz = buffer_config.max_num_of_tokens_per_rank *
+        (buffer_config.num_of_nodes - 1) * buffer_config.hidden_dim *
+        get_token_data_type_size(dispatch_buffers.data_type);
+    size_t rdma_inter_node_group_flags_sz = ((buffer_config.max_num_of_tokens_per_rank - 1) /
+        buffer_config.num_of_tokens_per_chunk_dispatch_api + 1) * (buffer_config.num_of_nodes - 1) * sizeof(uint64_t);
+    size_t rdma_inter_node_group_prob_sz = buffer_config.max_num_of_tokens_per_rank * (buffer_config.num_of_nodes - 1) *
+        (buffer_config.num_of_experts_per_rank * buffer_config.num_of_ranks_per_node) * sizeof(float);
+    size_t rdma_inter_node_group_scaling_factor_sz = buffer_config.max_num_of_tokens_per_rank *
+        (buffer_config.num_of_nodes - 1) * (buffer_config.hidden_dim / 128) * sizeof(float);
+    size_t rdma_intra_node_red_token_sz = buffer_config.max_num_of_tokens_per_rank *
+        (buffer_config.num_of_nodes - 1) * buffer_config.hidden_dim * sizeof(uint16_t);
+    size_t rdma_intra_node_red_prob_sz = buffer_config.max_num_of_tokens_per_rank * (buffer_config.num_of_nodes - 1) *
+        (buffer_config.num_of_experts_per_rank * buffer_config.num_of_ranks_per_node) * sizeof(float);
+    size_t combine_rdma_inter_node_group_token_sz = buffer_config.max_num_of_tokens_per_rank *
+        (buffer_config.num_of_nodes - 1) * buffer_config.hidden_dim * sizeof(uint16_t);
+    size_t combine_rdma_inter_node_group_flags_sz = ((buffer_config.max_num_of_tokens_per_rank - 1) /
+        buffer_config.num_of_tokens_per_chunk_combine_api + 1) * (buffer_config.num_of_nodes - 1) * sizeof(uint64_t);
+    size_t combine_rdma_inter_node_group_prob_sz = buffer_config.max_num_of_tokens_per_rank *
+        (buffer_config.num_of_nodes - 1) *
+        (buffer_config.num_of_experts_per_rank * buffer_config.num_of_ranks_per_node) * sizeof(float);
+
+    nixl_connector = std::make_unique<hybrid_ep::HybridEP_NIXLConnector>(rank_uuid, local_rank);
+
+    nixl_connector->updateMemoryBuffers(
+        num_ranks,
+        buffer_config.num_of_experts_per_rank,
+        buffer_config.num_of_nodes,
+        buffer_config.num_of_ranks_per_node,
+        buffer_config.num_of_blocks_dispatch_api,
+        buffer_config.num_of_blocks_combine_api,
+        dispatch_buffers.attn_input_token, attn_input_token_sz,
+        dispatch_buffers.attn_input_prob, attn_input_prob_sz,
+        dispatch_buffers.attn_input_scaling_factor, attn_input_token_scaling_factor_sz,
+        dispatch_buffers.rdma_inter_node_group_token, rdma_inter_node_group_token_sz,
+        dispatch_buffers.rdma_inter_node_group_flags, rdma_inter_node_group_flags_sz,
+        dispatch_buffers.rdma_inter_node_group_prob, rdma_inter_node_group_prob_sz,
+        dispatch_buffers.rdma_inter_node_group_scaling_factor, rdma_inter_node_group_scaling_factor_sz,
+        combine_buffers.rdma_intra_node_red_token, rdma_intra_node_red_token_sz,
+        combine_buffers.rdma_intra_node_red_prob, rdma_intra_node_red_prob_sz,
+        combine_buffers.rdma_inter_node_group_token, combine_rdma_inter_node_group_token_sz,
+        combine_buffers.rdma_inter_node_group_flags, combine_rdma_inter_node_group_flags_sz,
+        combine_buffers.rdma_inter_node_group_prob, combine_rdma_inter_node_group_prob_sz,
+        true,   // forward_dispatch
+        true,   // backward_combine
+        use_fp8);
+
+    auto torch_distributed = pybind11::module_::import("torch.distributed");
+    torch_distributed.attr("barrier")(this->process_group);
+    std::this_thread::sleep_for(std::chrono::seconds(3));
+
+    std::vector<int> remote_rank_uuids;
+    for (int node_idx = 0; node_idx < buffer_config.num_of_nodes; ++node_idx) {
+        if (node_idx != node_rank) {
+            remote_rank_uuids.push_back(node_idx * buffer_config.num_of_ranks_per_node + local_rank);
+        }
+    }
+    nixl_connector->connectRanks(remote_rank_uuids);
+
+    dispatch_buffers.nixl_gpu_ctx = nixl_connector->get_dispatch_gpu_ctx();
+    combine_buffers.nixl_gpu_ctx = nixl_connector->get_combine_gpu_ctx();
+
+    buffer_allocated = true;
+}
+
+#endif  // USE_NIXL

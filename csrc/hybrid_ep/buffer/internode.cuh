@@ -11,11 +11,16 @@
 #include <dlfcn.h>
 #include "backend/topo_detection.cuh"
 #include "backend/hybrid_ep_backend.cuh"
+#ifndef USE_NIXL
 #include "backend/ibvcore.h"
+#else
+#include "backend/nixl_types.h"
+#endif
 #include "config.cuh"
 #include "coordinator.cuh"
 #include "utils.cuh"
 
+#ifndef USE_NIXL
 #define RC  (0)
 #define UC  (1)
 #define UD  (2)
@@ -136,6 +141,7 @@ int setup_qp_attr_and_set_qp(struct gverbs_context *g_ctx,
                                     struct doca_verbs_qp_attr *qp_attr,
                                     int num_of_blocks, int num_of_nodes,
                                     int node_rank, uint32_t qp_cnt);
+#endif  // !USE_NIXL
 
 struct InterNodeDispatchBuffers {
     APP_TOKEN_DATA_TYPE data_type;
@@ -151,8 +157,12 @@ struct InterNodeDispatchBuffers {
     uint64_t *    rdma_inter_node_group_flags = nullptr;
     uint64_t *    expected_rdma_flag_value = nullptr;
     // qp info and mr info
+#ifndef USE_NIXL
     struct doca_gpu_dev_verbs_qp ** d_qps_gpu = nullptr;
     struct dispatch_memory_region_info_t * mr_info = nullptr;
+#else
+    hybrid_ep::dispatch_gpu_nixl_ctx * nixl_gpu_ctx = nullptr;
+#endif
 };
 
 struct InterNodeCombineBuffers {
@@ -166,10 +176,15 @@ struct InterNodeCombineBuffers {
     uint64_t *    rdma_inter_node_group_flags = nullptr;
     uint64_t *    expected_rdma_flag_value = nullptr;
     // qp info and mr info
+#ifndef USE_NIXL
     struct doca_gpu_dev_verbs_qp ** d_qps_gpu = nullptr;
     struct combine_memory_region_info_t * mr_info = nullptr;
+#else
+    hybrid_ep::combine_gpu_nixl_ctx * nixl_gpu_ctx = nullptr;
+#endif
 };
 
+#ifndef USE_NIXL
 class RDMACoordinator : public HybridEPCoordinator {
 public:
     RDMACoordinator() = default;
@@ -234,3 +249,6 @@ private:
 
     void exchange_remote_rdma_info(remote_info* dst, remote_info *src, int num_of_qps);
 };
+#else
+#include "buffer/internode_nixl.cuh"
+#endif  // !USE_NIXL
