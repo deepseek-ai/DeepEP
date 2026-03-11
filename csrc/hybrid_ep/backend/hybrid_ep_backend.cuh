@@ -3,36 +3,55 @@
 // All rights reserved
 #pragma once
 
-#include "utils.cuh"
+#include "utils.h"
 #include <assert.h>
 #include <cuda_bf16.h>
 #include <cuda/ptx>
 #ifdef HYBRID_EP_BUILD_MULTINODE_ENABLE
+#ifndef USE_NIXL
 #include "doca_gpunetio_host.h"
 #include "doca_gpunetio_device.h"
 #include "infiniband/verbs.h"
 #include "infiniband/mlx5dv.h"
-#endif
+#else
+#include "nixl.h"
+#include "nixl_types.h"
+#include "nixl_device.cuh"
+#endif // USE_NIXL
+#endif // HYBRID_EP_BUILD_MULTINODE_ENABLE
 #ifdef HYBRID_EP_BUILD_PERMUTE_FUSION_ENABLE
 #include <cuda_pipeline_primitives.h>
 #endif
 
 namespace hybrid_ep{
 
-/*enum DATA_TYPE{
-  HYBRID_EP_DATA_TYPE_FP32,
-  HYBRID_EP_DATA_TYPE_FP16,
-  HYBRID_EP_DATA_TYPE_BF16,
-  HYBRID_EP_DATA_TYPE_FP8
-};*/
+#ifdef HYBRID_EP_BUILD_MULTINODE_ENABLE
+#ifdef USE_NIXL
+// GPU-side context for NIXL RDMA transfers.
+// Each memory view is indexed by remote_idx * number of buffers per remote node + buffer index.
+// num_channels maps to UCX_RC_GDA_NUM_CHANNELS for QP channel distribution.
 
-/*template<int NUM_OF_BOOL_TO_REDUCE>
-struct bool_any_reduction_type{};
+struct dispatch_gpu_nixl_ctx {
+  nixlMemViewH local_mvh;                 // Local source buffers (token, prob, scaling_factor)
+  nixlMemViewH remote_data_mvh;           // Remote data buffers indexed by remote_idx
+  nixlMemViewH remote_signal_mvh;         // Remote signal buffers indexed by remote_idx
+  uint64_t *local_flag_counters;          // [num_remote_nodes] Local completion counters
+  int num_remote_nodes;
+  int num_channels;                       // From UCX_RC_GDA_NUM_CHANNELS - used for channel_id distribution
+  int rank;
+};
 
-template<> struct bool_any_reduction_type<8> { using Type = uint64_t; };
-template<> struct bool_any_reduction_type<4> { using Type = uint32_t; };
-template<> struct bool_any_reduction_type<2> { using Type = uint16_t; };
-template<> struct bool_any_reduction_type<1> { using Type = uint8_t; };*/
+struct combine_gpu_nixl_ctx {
+  nixlMemViewH local_mvh;                 // Local source buffers (reduced token, prob)
+  nixlMemViewH remote_data_mvh;           // Remote data buffers indexed by remote_idx
+  nixlMemViewH remote_signal_mvh;         // Remote signal buffers indexed by remote_idx
+  uint64_t *local_flag_counters;          // [num_remote_nodes] Local completion counters
+  int num_remote_nodes;
+  int num_channels;                       // From UCX_RC_GDA_NUM_CHANNELS - used for channel_id distribution
+  int rank;
+};
+#endif /* USE_NIXL */
+#endif /* HYBRID_EP_BUILD_MULTINODE_ENABLE */
 
 template<int NUM_OF_BOOL_TO_REDUCE>
 using Reduce_t =
@@ -75,6 +94,46 @@ struct warp_group{
   __host__ __device__ static int warp_rank(){ return thread_rank() / 32; }
 };
 
+#ifdef HYBRID_EP_BUILD_MULTINODE_ENABLE
+#ifndef USE_NIXL
+struct dispatch_memory_region_info_t {
+  __be32 token_lkey;
+  __be32 token_rkey;
+  __be32 prob_lkey;
+  __be32 prob_rkey;
+  __be32 scaling_factor_lkey;
+  __be32 scaling_factor_rkey;
+  __be32 flag_lkey;
+  __be32 flag_rkey;
+  uint64_t token_laddr;
+  uint64_t token_raddr;
+  uint64_t prob_laddr;
+  uint64_t prob_raddr;
+  uint64_t scaling_factor_laddr;
+  uint64_t scaling_factor_raddr;
+  uint64_t flag_laddr;
+  uint64_t flag_raddr;
+  uint64_t back_sync_barrier_idx;
+} __attribute__((__aligned__(8)));
+
+struct combine_memory_region_info_t {
+  __be32 token_lkey;
+  __be32 token_rkey;
+  __be32 prob_lkey;
+  __be32 prob_rkey;
+  __be32 flag_lkey;
+  __be32 flag_rkey;
+  uint64_t token_laddr;
+  uint64_t token_raddr;
+  uint64_t prob_laddr;
+  uint64_t prob_raddr;
+  uint64_t flag_laddr;
+  uint64_t flag_raddr;
+  uint64_t back_sync_barrier_idx;
+} __attribute__((__aligned__(8)));
+#endif // USE_NIXL
+#endif // HYBRID_EP_BUILD_MULTINODE_ENABLE
+
 template<typename TOKEN_DATA_TYPE,
          int NUM_OF_STAGES,
          int HIDDEN_DIM, 
@@ -109,10 +168,12 @@ struct dispatch_kernel_dynamic_shared_memory_buffer_t<uint8_t, NUM_OF_STAGES, HI
   alignas(8) uint64_t sparse_to_dense_map_mbarrier_buffer[2];
   // Shared memory mbarrier that perform sync within S2G warp group. Should be 8B alignment(natural alignment).
   alignas(8) uint64_t S2G_group_mbarrier_buffer;
-  // Shared memory mr info for dispatch. (Mr info can be cached in shared memory, while qp info can't be cached.)
+#ifndef USE_NIXL
+  // Shared memory mr info for dispatch. (Mr info can be cached in shared memory, while qp info can't be cached.) DOCA only.
   alignas(8) dispatch_memory_region_info_t dispatch_memory_region_info[NUM_OF_NODES - 1];
-  // Num of tx messages.
+  // Num of tx messages. DOCA only.
   uint32_t inter_node_num_of_write_per_node[NUM_OF_NODES - 1];
+#endif // USE_NIXL
 };
 
 template<int NUM_OF_STAGES,
@@ -136,10 +197,12 @@ struct dispatch_kernel_dynamic_shared_memory_buffer_t<uint16_t, NUM_OF_STAGES, H
   alignas(8) uint64_t sparse_to_dense_map_mbarrier_buffer[2];
   // Shared memory mbarrier that perform sync within S2G warp group. Should be 8B alignment(natural alignment).
   alignas(8) uint64_t S2G_group_mbarrier_buffer;
-  // Shared memory mr info for dispatch. (Mr info can be cached in shared memory, while qp info can't be cached.)
+#ifndef USE_NIXL
+  // Shared memory mr info for dispatch. (Mr info can be cached in shared memory, while qp info can't be cached.) DOCA only.
   alignas(8) dispatch_memory_region_info_t dispatch_memory_region_info[NUM_OF_NODES - 1];
-  // Num of tx messages.
+  // Num of tx messages. DOCA only.
   uint32_t inter_node_num_of_write_per_node[NUM_OF_NODES - 1];
+#endif // USE_NIXL
 };
 
 template<int NUM_OF_STAGES,
@@ -163,10 +226,12 @@ struct dispatch_kernel_dynamic_shared_memory_buffer_t<uint8_t, NUM_OF_STAGES, HI
   alignas(8) uint64_t sparse_to_dense_map_mbarrier_buffer[2];
   // Shared memory mbarrier that perform sync within S2G warp group. Should be 8B alignment(natural alignment).
   alignas(8) uint64_t S2G_group_mbarrier_buffer;
-  // Shared memory mr info for dispatch. (Mr info can be cached in shared memory, while qp info can't be cached.)
+#ifndef USE_NIXL
+  // Shared memory mr info for dispatch. (Mr info can be cached in shared memory, while qp info can't be cached.) DOCA only.
   alignas(8) dispatch_memory_region_info_t dispatch_memory_region_info[NUM_OF_NODES - 1];
-  // Num of tx messages.
+  // Num of tx messages. DOCA only.
   uint32_t inter_node_num_of_write_per_node[NUM_OF_NODES - 1];
+#endif // USE_NIXL
 };
 
 template<int NUM_OF_STAGES,
@@ -187,13 +252,15 @@ struct dispatch_kernel_dynamic_shared_memory_buffer_t<uint16_t, NUM_OF_STAGES, H
   // Shared memory mbarrier that protect sparse_to_dense map. Should be 8B alignment(natural alignment).
   alignas(8) uint64_t sparse_to_dense_map_mbarrier_buffer[2];
   // Shared memory mbarrier that perform sync within S2G warp group. Should be 8B alignment(natural alignment).
-  alignas(8) uint64_t S2G_group_mbarrier_buffer; 
-  // Shared memory mr info for dispatch. (Mr info can be cached in shared memory, while qp info can't be cached.)
+  alignas(8) uint64_t S2G_group_mbarrier_buffer;
+#ifndef USE_NIXL
+  // Shared memory mr info for dispatch. (Mr info can be cached in shared memory, while qp info can't be cached.) DOCA only.
   alignas(8) dispatch_memory_region_info_t dispatch_memory_region_info[NUM_OF_NODES - 1];
-  // Num of tx messages.
+  // Num of tx messages. DOCA only.
   uint32_t inter_node_num_of_write_per_node[NUM_OF_NODES - 1];
+#endif // USE_NIXL
 };
-#endif
+#endif // HYBRID_EP_BUILD_MULTINODE_ENABLE
 
 template<int NUM_OF_STAGES,
          int HIDDEN_DIM,
@@ -214,7 +281,7 @@ struct dispatch_kernel_dynamic_shared_memory_buffer_t<uint8_t, NUM_OF_STAGES, HI
   // Shared memory mbarrier that protect sparse_to_dense map. Should be 8B alignment(natural alignment).
   alignas(8) uint64_t sparse_to_dense_map_mbarrier_buffer[2];
   // Shared memory mbarrier that perform sync within S2G warp group. Should be 8B alignment(natural alignment).
-  alignas(8) uint64_t S2G_group_mbarrier_buffer; 
+  alignas(8) uint64_t S2G_group_mbarrier_buffer;
 };
 
 template<int NUM_OF_STAGES,
@@ -232,7 +299,7 @@ struct dispatch_kernel_dynamic_shared_memory_buffer_t<uint16_t, NUM_OF_STAGES, H
   // Shared memory mbarrier that protect token entry, 1st for producer->consumer, 2nd for consumer->producer. Should be 8B alignment(natural alignment).
   alignas(8) uint64_t intra_node_mbarrier_buffer[NUM_OF_STAGES][2]; 
   // Shared memory mbarrier that protect sparse_to_dense map. Should be 8B alignment(natural alignment).
-  alignas(8) uint64_t sparse_to_dense_map_mbarrier_buffer[2]; 
+  alignas(8) uint64_t sparse_to_dense_map_mbarrier_buffer[2];
   // Shared memory mbarrier that perform sync within S2G warp group. Should be 8B alignment(natural alignment).
   alignas(8) uint64_t S2G_group_mbarrier_buffer;
 };
@@ -388,11 +455,12 @@ struct combine_kernel_dynamic_shared_memory_buffer_t<NUM_OF_STAGES_G2S, NUM_OF_S
   // Shared memory mbarrier that maintain producer->consumer relationship between intra-node red warp group and rdma warp group. 1 per chunk, Should be 8B alignment(natural alignment).
   alignas(8) uint64_t intra_node_to_rdma_mbarrier_buffer[NUM_OF_NODES - 1][MAX_NUM_OF_TOKENS_PER_RANK / NUM_OF_TOKENS_PER_CHUNK];
 
-  // Shared memory mr info for combine. (Mr info can be cached in shared memory, while qp info can't be cached.)
+#ifndef USE_NIXL
+  // Shared memory mr info for combine. (Mr info can be cached in shared memory, while qp info can't be cached.) DOCA only.
   alignas(8) combine_memory_region_info_t combine_memory_region_info[NUM_OF_NODES - 1];
-
-  // Num of tx messages.
+  // Num of tx messages. DOCA only.
   uint32_t inter_node_num_of_write_per_node[NUM_OF_NODES - 1];
+#endif // USE_NIXL
 
   // Endgroup flag for each token entry in G2S buffer. true means that this token is the last token of a intra-node reduction group, otherwise not.
   bool intra_node_flag_G2S_buffer[NUM_OF_STAGES_G2S];
@@ -455,11 +523,12 @@ struct combine_kernel_dynamic_shared_memory_buffer_t<NUM_OF_STAGES_G2S, NUM_OF_S
   // Shared memory mbarrier that maintain producer->consumer relationship between intra-node red warp group and rdma warp group. 1 per chunk, Should be 8B alignment(natural alignment).
   alignas(8) uint64_t intra_node_to_rdma_mbarrier_buffer[NUM_OF_NODES - 1][MAX_NUM_OF_TOKENS_PER_RANK / NUM_OF_TOKENS_PER_CHUNK];
 
-  // Shared memory mr info for combine. (Mr info can be cached in shared memory, while qp info can't be cached.)
+#ifndef USE_NIXL
+  // Shared memory mr info for combine. (Mr info can be cached in shared memory, while qp info can't be cached.) DOCA only.
   alignas(8) combine_memory_region_info_t combine_memory_region_info[NUM_OF_NODES - 1];
-
-  // Num of tx messages.
+  // Num of tx messages. DOCA only.
   uint32_t inter_node_num_of_write_per_node[NUM_OF_NODES - 1];
+#endif // USE_NIXL
 
   // Endgroup flag for each token entry in G2S buffer. true means that this token is the last token of a intra-node reduction group, otherwise not.
   bool intra_node_flag_G2S_buffer[NUM_OF_STAGES_G2S];
@@ -545,16 +614,17 @@ struct combine_kernel_unpermute_block_dynamic_shared_memory_buffer_t<NUM_OF_STAG
 #endif
 
 // Data structure for kernel parameter for dispatch kernel.
-template<typename TOKEN_DATA_TYPE>
+template<typename TOKEN_DATA_TYPE,
+         int NUM_OF_RANKS_PER_NODE>
 struct dispatch_kernel_param_t{
   // Input buffers. These buffers are local buffers.
   const TOKEN_DATA_TYPE* attn_input_token;
   const float* attn_input_prob; // Needed by expert layer, so only valid in forward dispatch.
   const float* attn_input_token_scaling_factor; // If input token is FP8 dtype, we need scaling factor for tokens.
   // Output buffers. These buffers are both local and remote buffers.
-  TOKEN_DATA_TYPE* expert_output_token[MAX_NUM_OF_RANKS_PER_NODE];
-  float* expert_output_prob[MAX_NUM_OF_RANKS_PER_NODE]; // Only valid in forward dispatch.
-  float* expert_output_scaling_factor[MAX_NUM_OF_RANKS_PER_NODE]; // Only valid for FP8 token type.
+  TOKEN_DATA_TYPE* expert_output_token[NUM_OF_RANKS_PER_NODE];
+  float* expert_output_prob[NUM_OF_RANKS_PER_NODE]; // Only valid in forward dispatch.
+  float* expert_output_scaling_factor[NUM_OF_RANKS_PER_NODE]; // Only valid for FP8 token type.
   TOKEN_DATA_TYPE* local_expert_output_token;
   float* local_expert_output_prob;
   float* local_expert_output_scaling_factor;
@@ -564,7 +634,7 @@ struct dispatch_kernel_param_t{
   const float* rdma_inter_node_group_scaling_factor; // Only valid for FP8 token type.
   uint64_t* rdma_inter_node_group_flags; // For RDMA Atomic flags.
   uint32_t* intra_node_write_completion_flags; // For intra-node S2G write completion notification. Need 2 flags for different parity for dispatch kernel.
-  uint32_t* intra_node_expert_output_chunk_flags[MAX_NUM_OF_RANKS_PER_NODE]; // For intra-node S2G -> permute_G2S chunk write completion notification.
+  uint32_t* intra_node_expert_output_chunk_flags[NUM_OF_RANKS_PER_NODE]; // For intra-node S2G -> permute_G2S chunk write completion notification.
   // Metadata buffers. These buffers are local buffers.
   const bool* rdma_to_attn_map;
   const bool* attn_to_rdma_map;
@@ -581,17 +651,23 @@ struct dispatch_kernel_param_t{
   // The number of token output by attn layer on a rank/GPU.
   int num_of_tokens_per_rank;
 #ifdef HYBRID_EP_BUILD_MULTINODE_ENABLE
-  // qp info and mr info
-  void **d_qps_gpu;
-  void *mr_info;
-#endif
+#ifndef USE_NIXL
+  // qp info and mr info (DOCA only)
+  struct doca_gpu_dev_verbs_qp **d_qps_gpu;
+  struct dispatch_memory_region_info_t *mr_info;
+#else // USE_NIXL
+  // NIXL GPU context for device-side RDMA operations
+  struct dispatch_gpu_nixl_ctx *nixl_gpu_ctx;
+#endif // USE_NIXL
+#endif // HYBRID_EP_BUILD_MULTINODE_ENABLE
 };
 
 // Data structure for kernel parameter for combine kernel.
+template<int NUM_OF_RANKS_PER_NODE>
 struct combine_kernel_param_t{
   // Input buffers. These buffers are both local and remote buffers.
-  uint16_t* expert_input_token[MAX_NUM_OF_RANKS_PER_NODE];
-  float* expert_input_prob[MAX_NUM_OF_RANKS_PER_NODE];
+  uint16_t* expert_input_token[NUM_OF_RANKS_PER_NODE];
+  float* expert_input_prob[NUM_OF_RANKS_PER_NODE];
   const uint16_t* local_expert_input_token;
   const float* local_expert_input_prob;
   // Output buffers. These buffers are local buffers.
@@ -604,7 +680,7 @@ struct combine_kernel_param_t{
   const float* rdma_inter_node_group_prob;
   uint64_t* rdma_inter_node_group_flags;
   uint32_t* intra_node_write_completion_flags; // For intra-node src ready notification. Need 2 flags for different parity for combine kernel.
-  uint32_t* intra_node_expert_input_chunk_flags[MAX_NUM_OF_RANKS_PER_NODE]; // For unpermute red -> intra_node_G2S and inter_node_G2S chunk write completion notification.
+  uint32_t* intra_node_expert_input_chunk_flags[NUM_OF_RANKS_PER_NODE]; // For unpermute red -> intra_node_G2S and inter_node_G2S chunk write completion notification.
   // Metadata buffers. These buffers are local buffers.
   const bool* rdma_to_attn_map;
   const bool* attn_to_rdma_map;
@@ -620,10 +696,15 @@ struct combine_kernel_param_t{
   // The number of token output by attn layer on a rank/GPU.
   int num_of_tokens_per_rank;
 #ifdef HYBRID_EP_BUILD_MULTINODE_ENABLE
-  // qp info and mr info
-  void **d_qps_gpu;
-  void *mr_info;
-#endif
+#ifndef USE_NIXL
+  // qp info and mr info (DOCA only)
+  struct doca_gpu_dev_verbs_qp **d_qps_gpu;
+  struct combine_memory_region_info_t *mr_info;
+#else // USE_NIXL
+  // NIXL GPU context for device-side RDMA operations
+  struct combine_gpu_nixl_ctx *nixl_gpu_ctx;
+#endif // USE_NIXL
+#endif // HYBRID_EP_BUILD_MULTINODE_ENABLE
 };
 
 // Each CUDA block has sixteen named barriers numbered 0..15.
@@ -636,6 +717,244 @@ inline __device__ void arrive_and_wait(uint32_t num_threads, uint32_t barrier_id
 }
 
 #ifdef HYBRID_EP_BUILD_MULTINODE_ENABLE
+#ifdef USE_NIXL
+// NIXL inter-node dispatch warp function (1 warp per CUDA block).
+// Transfers: tokens, probs (FORWARD_DISPATCH), scaling factors (FP8).
+// All puts use no-flush; the final atomic signal flushes everything in one doorbell.
+template<typename INTER_NODE_GROUP,
+         typename TOKEN_DATA_TYPE,
+         typename SMEM_TYPE,
+         int NUM_OF_STAGES,
+         int HIDDEN_DIM,
+         int NUM_OF_TOKENS_PER_CHUNK,
+         int NUM_OF_EXPERTS_PER_RANK,
+         int NUM_OF_RANKS_PER_NODE,
+         int NUM_OF_NODES,
+         int NUM_OF_BLOCKS,
+         bool FORWARD_DISPATCH>
+inline __device__ void N2N_warp_group_device_function(const int node_rank,
+                                                      const int num_of_tokens_per_rank,
+                                                      const bool *attn_to_rdma_map,
+                                                      struct dispatch_gpu_nixl_ctx *nixl_ctx,
+                                                      SMEM_TYPE* smem_buffer_ptr)
+{
+  static_assert(INTER_NODE_GROUP::size() == 32, "INTER_NODE_GROUP should be 1 warp.");
+
+  const int NUM_OF_CHUNKS_PER_RANK = (num_of_tokens_per_rank - 1) / NUM_OF_TOKENS_PER_CHUNK + 1;
+  constexpr size_t token_size = HIDDEN_DIM * sizeof(TOKEN_DATA_TYPE);
+  bool *smem_attn_to_rdma_map_ptr = smem_buffer_ptr->attn_to_rdma_map_buffer;
+  
+  constexpr size_t dst_mvh_stride = 1 + (int)FORWARD_DISPATCH + (int)std::is_same<TOKEN_DATA_TYPE, uint8_t>::value;
+
+  for (int chunk_idx = blockIdx.x; chunk_idx < NUM_OF_CHUNKS_PER_RANK; chunk_idx += NUM_OF_BLOCKS) {
+    const int chunk_base_token_idx = chunk_idx * NUM_OF_TOKENS_PER_CHUNK;
+    int token_range = min(NUM_OF_TOKENS_PER_CHUNK, num_of_tokens_per_rank - chunk_base_token_idx);
+
+    // Load routing map to shared memory.
+    for (int m = INTER_NODE_GROUP::thread_rank(); m < token_range * (NUM_OF_NODES - 1); m += INTER_NODE_GROUP::size())
+      smem_attn_to_rdma_map_ptr[m] = attn_to_rdma_map[chunk_base_token_idx * (NUM_OF_NODES - 1) + m];
+    __syncwarp();
+
+    for (int idx = 0; idx < NUM_OF_NODES - 1; ++idx) {
+      const int remote_idx = (idx + node_rank) % (NUM_OF_NODES - 1);
+      const int actual_remote_node_rank = remote_idx < node_rank ? remote_idx : (remote_idx + 1);
+      const int my_node_rank_in_remote = (node_rank < actual_remote_node_rank) ? node_rank : (node_rank - 1);
+      const size_t flag_offset = (my_node_rank_in_remote * NUM_OF_CHUNKS_PER_RANK + chunk_idx) * sizeof(uint64_t);
+      int total_tokens = 0;
+
+      for (int t = INTER_NODE_GROUP::thread_rank(); t < NUM_OF_TOKENS_PER_CHUNK; t += INTER_NODE_GROUP::size()) {
+        const int token_idx = t + chunk_base_token_idx;
+        const bool need_write = (t < token_range) && smem_attn_to_rdma_map_ptr[remote_idx + t * (NUM_OF_NODES - 1)];
+        total_tokens += __popc(__ballot_sync(0xffffffff, need_write));
+
+        if (need_write) {
+          unsigned channel_id = blockIdx.x % nixl_ctx->num_channels;
+          constexpr unsigned NODELAY_FLAG = 1;  // UCP_DEVICE_FLAG_NODELAY
+
+          unsigned long buffer_sub_idx = 0;
+          
+          {
+            size_t local_offset = token_idx * HIDDEN_DIM * sizeof(TOKEN_DATA_TYPE);
+            size_t remote_offset = token_idx * HIDDEN_DIM * sizeof(TOKEN_DATA_TYPE);
+            constexpr size_t token_size = HIDDEN_DIM * sizeof(TOKEN_DATA_TYPE);
+            
+            // Build nixlMemViewElement for source (local) and destination (remote)
+            nixlMemViewElement src_desc{nixl_ctx->local_mvh, buffer_sub_idx, local_offset};
+            nixlMemViewElement dst_desc{nixl_ctx->remote_data_mvh, (size_t)remote_idx * dst_mvh_stride + buffer_sub_idx, remote_offset};
+            
+            // Flush puts periodically (every 4th iteration) to push data to the network
+            unsigned put_flags = 0;
+            
+            nixl_status_t status = nixlPut<nixl_gpu_level_t::THREAD>(
+              src_desc, dst_desc, token_size, channel_id, put_flags);
+            assert(status == NIXL_SUCCESS || status == NIXL_IN_PROG);
+          }
+
+          if constexpr (FORWARD_DISPATCH) {
+            buffer_sub_idx +=1;
+            size_t local_offset = (token_idx * NUM_OF_NODES + actual_remote_node_rank) * (NUM_OF_EXPERTS_PER_RANK * NUM_OF_RANKS_PER_NODE) * sizeof(float);
+            size_t remote_offset = token_idx * (NUM_OF_EXPERTS_PER_RANK * NUM_OF_RANKS_PER_NODE) * sizeof(float);
+            constexpr size_t prob_size = (NUM_OF_EXPERTS_PER_RANK * NUM_OF_RANKS_PER_NODE) * sizeof(float);
+          
+            // Build nixlMemViewElement for source (local) and destination (remote)
+            nixlMemViewElement src_desc{nixl_ctx->local_mvh, buffer_sub_idx, local_offset};
+            nixlMemViewElement dst_desc{nixl_ctx->remote_data_mvh, (size_t)remote_idx * dst_mvh_stride + buffer_sub_idx, remote_offset};
+            
+            // Flush puts periodically (every 4th iteration) to push data to the network
+            unsigned put_flags = 0;
+            
+            nixl_status_t status = nixlPut<nixl_gpu_level_t::THREAD>(
+              src_desc, dst_desc, prob_size, channel_id, put_flags);
+            assert(status == NIXL_SUCCESS || status == NIXL_IN_PROG);
+          }
+
+          if constexpr (std::is_same<TOKEN_DATA_TYPE, uint8_t>::value) {
+            buffer_sub_idx +=1;
+            size_t local_offset = token_idx * (HIDDEN_DIM / 128) * sizeof(float);
+            size_t remote_offset = token_idx * (HIDDEN_DIM / 128) * sizeof(float);
+            constexpr size_t sf_size = (HIDDEN_DIM / 128) * sizeof(float);
+  
+            nixlMemViewElement src_desc{nixl_ctx->local_mvh, buffer_sub_idx, local_offset};
+            nixlMemViewElement dst_desc{nixl_ctx->remote_data_mvh, (size_t)remote_idx * dst_mvh_stride + buffer_sub_idx, remote_offset};
+  
+            unsigned put_flags = 0;
+            
+            nixl_status_t status = nixlPut<nixl_gpu_level_t::THREAD>(
+              src_desc, dst_desc, sf_size, channel_id, put_flags);
+            assert(status == NIXL_SUCCESS || status == NIXL_IN_PROG);
+  
+          }
+        }
+      }
+      
+      // CRITICAL: Sync warp to ensure ALL threads have issued their puts before flushing
+      // Without this, thread 0 might flush before other threads issue their operations!
+      __syncwarp();
+      if (total_tokens > 0 && INTER_NODE_GROUP::thread_rank() == 0) {
+        const unsigned channel_id = blockIdx.x % nixl_ctx->num_channels;
+        nixlMemViewElement sig{nixl_ctx->remote_signal_mvh, (size_t)remote_idx, flag_offset};
+        assert(nixlAtomicAdd<nixl_gpu_level_t::THREAD>(1, sig, channel_id, /*NODELAY=*/1) >= NIXL_SUCCESS);
+        atomicAdd((unsigned long long*)&nixl_ctx->local_flag_counters[remote_idx], 1ULL);
+      }
+    }
+  }
+}
+
+// NIXL inter-node combine warp function (1 warp per CUDA block).
+// Transfers: tokens, probs (BACKWARD_COMBINE).
+// All puts use no-flush; the final atomic signal flushes everything in one doorbell.
+template<typename INTER_NODE_RDMA_GROUP,
+         typename SMEM_TYPE,
+         int NUM_OF_STAGES_S2G,
+         int HIDDEN_DIM,
+         int NUM_OF_TOKENS_PER_CHUNK,
+         int MAX_NUM_OF_TOKENS_PER_RANK,
+         int NUM_OF_EXPERTS_PER_RANK,
+         int NUM_OF_RANKS_PER_NODE,
+         int NUM_OF_NODES,
+         int NUM_OF_BLOCKS,
+         bool BACKWARD_COMBINE>
+inline __device__ void inter_node_N2N_warp_group_device_function(
+    const int node_rank,
+    const int num_of_tokens_per_rank,
+    const bool *rdma_to_attn_map,
+    struct combine_gpu_nixl_ctx *nixl_ctx,
+    SMEM_TYPE* smem_buffer_ptr)
+{
+  static_assert(INTER_NODE_RDMA_GROUP::size() == 32, "INTER_NODE_RDMA_GROUP should be 1 warp.");
+  static_assert(NUM_OF_TOKENS_PER_CHUNK % INTER_NODE_RDMA_GROUP::size() == 0, "NUM_OF_TOKENS_PER_CHUNK must be multiple of 32.");
+
+  constexpr size_t dst_mvh_stride = BACKWARD_COMBINE ? 2 : 1;
+  
+  int NUM_OF_CHUNKS_PER_RANK = (num_of_tokens_per_rank - 1) / NUM_OF_TOKENS_PER_CHUNK + 1;
+  int TOTAL_NUM_OF_CHUNKS = (NUM_OF_NODES - 1) * NUM_OF_CHUNKS_PER_RANK;
+  
+  const int rdma_to_attn_map_size_per_node = (((num_of_tokens_per_rank - 1) / 16) + 1) * 16;
+  constexpr size_t token_size = HIDDEN_DIM * sizeof(uint16_t);
+
+  uint32_t token_consumer_parity = 0;
+  uint64_t (*mbarrier_ptr)[MAX_NUM_OF_TOKENS_PER_RANK / NUM_OF_TOKENS_PER_CHUNK] = nullptr;
+  if constexpr(NUM_OF_NODES != 1)
+    mbarrier_ptr = smem_buffer_ptr->intra_node_to_rdma_mbarrier_buffer;
+
+  for (int i = blockIdx.x; i < TOTAL_NUM_OF_CHUNKS; i += NUM_OF_BLOCKS) {
+    const int node_id = (i % (NUM_OF_NODES - 1) + (node_rank + 1)) % NUM_OF_NODES;
+    const int chunk_id = i / (NUM_OF_NODES - 1);
+    const int rdma_remote_node_id = node_id > node_rank ? node_id - 1 : node_id;
+    const int remote_idx = rdma_remote_node_id;
+    const int my_node_rank_in_remote = (node_rank < node_id) ? node_rank : (node_rank - 1);
+    const int chunk_base_token_idx = node_id * rdma_to_attn_map_size_per_node + chunk_id * NUM_OF_TOKENS_PER_CHUNK;
+    const int token_range = min(NUM_OF_TOKENS_PER_CHUNK, num_of_tokens_per_rank - chunk_id * NUM_OF_TOKENS_PER_CHUNK);
+
+    // Wait for intra-node reduction to complete.
+    while (!cuda::ptx::mbarrier_try_wait_parity(&mbarrier_ptr[rdma_remote_node_id][chunk_id], token_consumer_parity)) {}
+
+    int total_tokens = 0;
+    for (int t = INTER_NODE_RDMA_GROUP::thread_rank(); t < NUM_OF_TOKENS_PER_CHUNK; t += INTER_NODE_RDMA_GROUP::size()) {
+      const int token_idx = t + chunk_id * NUM_OF_TOKENS_PER_CHUNK;
+      const int local_token_idx = rdma_remote_node_id * MAX_NUM_OF_TOKENS_PER_RANK + token_idx;
+      const bool need_write = (t < token_range) && rdma_to_attn_map[t + chunk_base_token_idx];
+      total_tokens += __popc(__ballot_sync(0xffffffff, need_write));
+
+      if (need_write) {
+        unsigned channel_id = blockIdx.x % nixl_ctx->num_channels;
+        constexpr unsigned NODELAY_FLAG = 1;
+        unsigned long buffer_sub_idx = 0;
+
+        {
+          size_t local_offset = local_token_idx * HIDDEN_DIM * sizeof(uint16_t);
+          size_t remote_offset = token_idx * HIDDEN_DIM * sizeof(uint16_t);
+          constexpr size_t token_size = HIDDEN_DIM * sizeof(uint16_t);
+          
+          // Build nixlMemViewElement for source (local) and destination (remote)
+          nixlMemViewElement src_desc{nixl_ctx->local_mvh, 0, local_offset};
+          nixlMemViewElement dst_desc{nixl_ctx->remote_data_mvh, (size_t)remote_idx * dst_mvh_stride + 0, remote_offset};
+          
+          unsigned put_flags = 0;
+          
+          nixl_status_t status = nixlPut<nixl_gpu_level_t::THREAD>(
+            src_desc, dst_desc, token_size, channel_id, put_flags);
+          assert(status == NIXL_SUCCESS || status == NIXL_IN_PROG);
+        }
+        if constexpr(BACKWARD_COMBINE) {
+          buffer_sub_idx++;
+          size_t local_offset = local_token_idx * (NUM_OF_EXPERTS_PER_RANK * NUM_OF_RANKS_PER_NODE) * sizeof(float);
+          size_t remote_offset = token_idx * (NUM_OF_EXPERTS_PER_RANK * NUM_OF_RANKS_PER_NODE) * sizeof(float);
+          constexpr size_t prob_size = (NUM_OF_EXPERTS_PER_RANK * NUM_OF_RANKS_PER_NODE) * sizeof(float);
+
+          nixlMemViewElement src_desc{nixl_ctx->local_mvh, 1, local_offset};
+          nixlMemViewElement dst_desc{nixl_ctx->remote_data_mvh, (size_t)remote_idx * dst_mvh_stride + 1, remote_offset};
+          
+          unsigned put_flags = 0;
+          
+          nixl_status_t status = nixlPut<nixl_gpu_level_t::THREAD>(
+            src_desc, dst_desc, prob_size, channel_id, put_flags);
+          assert(status == NIXL_SUCCESS || status == NIXL_IN_PROG);
+
+        }
+
+      }
+    }
+    
+    // CRITICAL: Sync warp to ensure ALL threads have issued their puts before flushing
+    // Without this, thread 0 might flush before other threads issue their operations!
+    __syncwarp();
+    if (total_tokens > 0 && INTER_NODE_RDMA_GROUP::thread_rank() == 0) {
+      const size_t flag_offset = (my_node_rank_in_remote * NUM_OF_CHUNKS_PER_RANK + chunk_id) * sizeof(uint64_t);
+      const unsigned channel_id = blockIdx.x % nixl_ctx->num_channels;
+      nixlMemViewElement sig{nixl_ctx->remote_signal_mvh, (size_t)remote_idx, flag_offset};
+      assert(nixlAtomicAdd<nixl_gpu_level_t::THREAD>(1, sig, channel_id, /*NODELAY=*/1) >= NIXL_SUCCESS);
+      atomicAdd((unsigned long long*)&nixl_ctx->local_flag_counters[remote_idx], 1ULL);
+    }
+  }
+
+  token_consumer_parity ^= 1;
+}
+#endif // USE_NIXL
+#endif // HYBRID_EP_BUILD_MULTINODE_ENABLE
+
+#ifdef HYBRID_EP_BUILD_MULTINODE_ENABLE
+#ifndef USE_NIXL
 // Device function for inter-node node2node(RDMA) warp for dispatch kernel. There can be only 1 inter-node warp per CUDA block!
 template<typename INTER_NODE_GROUP,
          typename TOKEN_DATA_TYPE,
@@ -643,6 +962,7 @@ template<typename INTER_NODE_GROUP,
          int NUM_OF_STAGES,
          int HIDDEN_DIM,
          int NUM_OF_TOKENS_PER_CHUNK,
+         int MAX_NUM_OF_TOKENS_PER_RANK,
          int NUM_OF_EXPERTS_PER_RANK,
          int NUM_OF_RANKS_PER_NODE,
          int NUM_OF_NODES,
@@ -658,6 +978,7 @@ inline __device__ void N2N_warp_group_device_function(const int node_rank,
   // Load attn_to_rdma_map using LDG.128. Each token will need 1 bool from this map.
   // using attn_to_rdma_map_load_t = uint4;
   int NUM_OF_CHUNKS_PER_RANK = (num_of_tokens_per_rank - 1) / NUM_OF_TOKENS_PER_CHUNK + 1;
+  int MAX_NUM_OF_CHUNKS_PER_RANK = (MAX_NUM_OF_TOKENS_PER_RANK - 1) / NUM_OF_TOKENS_PER_CHUNK + 1;
   constexpr int WQE_NUM_RATIO = 1 + std::is_same<TOKEN_DATA_TYPE, uint8_t>::value + FORWARD_DISPATCH;
   // constexpr int NUN_OF_ATTN_TO_RDMA_MAP_LOAD_PER_CHUNK = NUM_OF_TOKENS_PER_CHUNK * (NUM_OF_NODES - 1) / sizeof(attn_to_rdma_map_load_t);
   static_assert(INTER_NODE_GROUP::size() == 32, "INTER_NODE_GROUP should be 1 warp.");
@@ -700,6 +1021,7 @@ inline __device__ void N2N_warp_group_device_function(const int node_rank,
     // For each remote.
     for (int idx = 0; idx < NUM_OF_NODES - 1; ++idx) {
       int remote_idx = (idx + node_rank) % (NUM_OF_NODES - 1);
+      int rank_in_remote = remote_idx < node_rank ? (node_rank - 1) : node_rank;
       // Queue pair for the current block to the current remote.
       struct doca_gpu_dev_verbs_qp *qp = d_qps_gpu[remote_idx + block_offset];
       // Real remote node rank.
@@ -741,9 +1063,9 @@ inline __device__ void N2N_warp_group_device_function(const int node_rank,
           doca_gpu_dev_verbs_wqe_prepare_write(qp, token_wqe_ptr, my_wqe_idx,
                                                     DOCA_GPUNETIO_IB_MLX5_OPCODE_RDMA_WRITE,
                                                     DOCA_GPUNETIO_IB_MLX5_WQE_CTRL_CQ_UPDATE, 0,
-                                                    smem_mr_info_ptr[remote_idx].token_raddr + token_idx * static_cast<int64_t>(HIDDEN_DIM) * sizeof(TOKEN_DATA_TYPE),
+                                                    smem_mr_info_ptr[remote_idx].token_raddr + token_idx * HIDDEN_DIM * sizeof(TOKEN_DATA_TYPE),
                                                     smem_mr_info_ptr[remote_idx].token_rkey,
-                                                    smem_mr_info_ptr[remote_idx].token_laddr + token_idx * static_cast<int64_t>(HIDDEN_DIM) * sizeof(TOKEN_DATA_TYPE),
+                                                    smem_mr_info_ptr[remote_idx].token_laddr + token_idx * HIDDEN_DIM * sizeof(TOKEN_DATA_TYPE),
                                                     smem_mr_info_ptr[remote_idx].token_lkey,
                                                     HIDDEN_DIM * sizeof(TOKEN_DATA_TYPE));
           // Constructing wqes for probs.
@@ -775,16 +1097,18 @@ inline __device__ void N2N_warp_group_device_function(const int node_rank,
         }
         curr_wqe_idx += write_cnt * WQE_NUM_RATIO;
         __syncwarp(0xffffffff);
-      }
+       }
       if (INTER_NODE_GROUP::thread_rank() == 0) {
         // Construct wqe for flag.
         struct doca_gpu_dev_verbs_wqe *flag_wqe_ptr = doca_gpu_dev_verbs_get_wqe_ptr(qp, curr_wqe_idx);
+        uint64_t offset_flag_laddr = smem_mr_info_ptr[remote_idx].flag_laddr + remote_idx * MAX_NUM_OF_CHUNKS_PER_RANK * sizeof(uint64_t);
+        uint64_t offset_flag_raddr = smem_mr_info_ptr[remote_idx].flag_raddr + rank_in_remote * MAX_NUM_OF_CHUNKS_PER_RANK * sizeof(uint64_t);
         doca_gpu_dev_verbs_wqe_prepare_atomic(qp, flag_wqe_ptr, curr_wqe_idx,
                                                    DOCA_GPUNETIO_IB_MLX5_OPCODE_ATOMIC_FA,
                                                    DOCA_GPUNETIO_IB_MLX5_WQE_CTRL_CQ_UPDATE,
-                                                   smem_mr_info_ptr[remote_idx].flag_raddr + chunk_idx * sizeof(uint64_t),
+                                                   offset_flag_raddr + chunk_idx * sizeof(uint64_t),
                                                    smem_mr_info_ptr[remote_idx].flag_rkey,
-                                                   smem_mr_info_ptr[remote_idx].flag_laddr + chunk_idx * sizeof(uint64_t),
+                                                   offset_flag_laddr + chunk_idx * sizeof(uint64_t),
                                                    smem_mr_info_ptr[remote_idx].flag_lkey,
                                                    sizeof(uint64_t), 1, 0);
         // Post send and poll cqs.
@@ -808,7 +1132,8 @@ inline __device__ void N2N_warp_group_device_function(const int node_rank,
     }
   }
 }
-#endif
+#endif // USE_NIXL
+#endif // HYBRID_EP_BUILD_MULTINODE_ENABLE
 
 // Device function for intra-node G2S warp for dispatch kernel. There can be only 1 intra-node G2S warp per CUDA block!
 template<typename INTRA_NODE_G2S_GROUP,
@@ -855,7 +1180,7 @@ inline __device__ void G2S_warp_group_device_function(const int node_rank,
   uint32_t consumer_parity = 1;
 
   // Only 1 thread within the G2S warp will be active, other threads will just exit.
-  if (elect_sync(~0)) {
+  if (cuda::ptx::elect_sync(~0)) {
     // Loop through all data chunk. Data(chunk) parallel between multiple CUDA blocks.
     for(int i = blockIdx.x; i < num_of_chunks_per_rank; i += NUM_OF_BLOCKS){
       // How many rdma_to_attn load iter for this chunk.
@@ -899,7 +1224,7 @@ inline __device__ void G2S_warp_group_device_function(const int node_rank,
         // For this node's attn token and properties, read from attn input buffers.
         if(node_id != node_rank){
           int chunk_first_token_id = rdma_buffer_tile_id * MAX_NUM_OF_TOKENS_PER_RANK + i * NUM_OF_TOKENS_PER_CHUNK;
-          token_load_base_addr = rdma_inter_node_group_token + chunk_first_token_id * static_cast<int64_t>(HIDDEN_DIM);
+          token_load_base_addr = rdma_inter_node_group_token + chunk_first_token_id * HIDDEN_DIM;
           if constexpr(FORWARD_DISPATCH){
             prob_load_base_addr = rdma_inter_node_group_prob + chunk_first_token_id * (NUM_OF_EXPERTS_PER_RANK * NUM_OF_RANKS_PER_NODE);
           }
@@ -908,7 +1233,7 @@ inline __device__ void G2S_warp_group_device_function(const int node_rank,
           }
         }else{
           int chunk_first_token_id = i * NUM_OF_TOKENS_PER_CHUNK;
-          token_load_base_addr = attn_input_token + chunk_first_token_id * static_cast<int64_t>(HIDDEN_DIM);
+          token_load_base_addr = attn_input_token + chunk_first_token_id * HIDDEN_DIM;
           if constexpr(FORWARD_DISPATCH){
             prob_load_base_addr = attn_input_prob + chunk_first_token_id * (NUM_OF_EXPERTS_PER_RANK * NUM_OF_RANKS_PER_NODE * NUM_OF_NODES);
           }
@@ -937,7 +1262,7 @@ inline __device__ void G2S_warp_group_device_function(const int node_rank,
               cuda::ptx::cp_async_bulk(cuda::ptx::space_shared,
                                        cuda::ptx::space_global,
                                        reinterpret_cast<void*>(&smem_buffer_ptr->intra_node_token_buffer[stage][0]),
-                                       reinterpret_cast<const void*>(token_load_base_addr + (current_token_id * static_cast<int64_t>(HIDDEN_DIM))),
+                                       reinterpret_cast<const void*>(token_load_base_addr + (current_token_id * HIDDEN_DIM)),
                                        (uint32_t)(HIDDEN_DIM * sizeof(TOKEN_DATA_TYPE)),
                                        &smem_buffer_ptr->intra_node_mbarrier_buffer[stage][0]);
 
@@ -1065,7 +1390,7 @@ inline __device__ void S2G_warp_group_device_function(const int local_rank,
 #endif
 
   // Only 1 thread per warp within the S2G warp group will be active, other threads will just exit.
-  if(elect_sync(~0)){
+  if(cuda::ptx::elect_sync(~0)){
     // First warp(thread) will load the sparse_to_dense map for the first chunk for this CUDA block if any.
     if(INTRA_NODE_S2G_GROUP::warp_rank() == 0){
       if((int)blockIdx.x < num_of_chunks_per_rank){
@@ -1177,16 +1502,15 @@ inline __device__ void S2G_warp_group_device_function(const int local_rank,
             if(outstanding_in_flight_chunk && (additional_in_flight_s2g == NUM_OF_ADDITIONAL_IN_FLIGHT_S2G)){
               // Wait for previous chunk's token entry S2G finish.
               cuda::ptx::cp_async_bulk_wait_group(cuda::ptx::n32_t<NUM_OF_ADDITIONAL_IN_FLIGHT_S2G>{});
+#ifdef HYBRID_EP_BUILD_MULTINODE_ENABLE
               // Need a system-scope release memory fence(release sem should be enough) to let all target ranks can observe the side effect of TMA writes of this chunk 
               // before they can observe the update of the flags.
-              // This fence is killing performance! It seems that as long as the compiler do not reordered the red before cp_async_bulk_wait_group, no fence is needed.
-              // Only enable the fence in inter-node mode where PCIe/RDMA does not guarantee ordering; NVLink intra-node TMA has implicit visibility after wait_group.
-              if constexpr (NUM_OF_NODES > 1) {
-                asm volatile("fence.release.sys;"
-                             :
-                             : 
-                             : "memory");
-              }
+              // This fence is killing some NVLink performance and is only needed for inter-node communication(i.e. for memory consistency for third-party PCIe device).
+              asm volatile("fence.release.sys;"
+                           :
+                           : 
+                           : "memory");
+#endif
               // Notify the permute_G2S warp groups of all target ranks in this node.
               // Atomically reduce add 1 to the u32 flag of the last attn token chunk to all target ranks within the current node.
               for(int m = INTRA_NODE_S2G_GROUP::warp_rank(); m < NUM_OF_SPARSE_TO_DENSE_MAP_LOAD_ITER_PER_INPUT_TOKEN; m += INTRA_NODE_S2G_GROUP::warp_size()){
@@ -1230,7 +1554,7 @@ inline __device__ void S2G_warp_group_device_function(const int local_rank,
                   if(output_buffer_index != -1){
                     int remote_rank_id = m * NUM_OF_OUTPUT_TOKENS_PER_LOAD_ITER + t;
                     // Store the token from shared to remote global.
-                    TOKEN_DATA_TYPE* remote_token_addr = remote_expert_output_token[remote_rank_id] + (output_buffer_index * static_cast<int64_t>(HIDDEN_DIM));
+                    TOKEN_DATA_TYPE* remote_token_addr = remote_expert_output_token[remote_rank_id] + (output_buffer_index * HIDDEN_DIM);
                     cuda::ptx::cp_async_bulk(cuda::ptx::space_global,
                                              cuda::ptx::space_shared,
                                              reinterpret_cast<void*>(remote_token_addr),
@@ -1298,16 +1622,15 @@ inline __device__ void S2G_warp_group_device_function(const int local_rank,
         if(outstanding_in_flight_chunk){
           // Wait for all previous chunk's(i.e. previous and current chunk) S2G finish.
           cuda::ptx::cp_async_bulk_wait_group(cuda::ptx::n32_t<0>{});
+#ifdef HYBRID_EP_BUILD_MULTINODE_ENABLE
           // Need a system-scope release memory fence(release sem should be enough) to let all target ranks can observe the side effect of TMA writes of this chunk 
           // before they can observe the update of the flags.
-          // This fence is killing performance! It seems that as long as the compiler do not reordered the red before cp_async_bulk_wait_group, no fence is needed.
-          // Only enable the fence in inter-node mode where PCIe/RDMA does not guarantee ordering; NVLink intra-node TMA has implicit visibility after wait_group.
-          if constexpr (NUM_OF_NODES > 1) {
-            asm volatile("fence.release.sys;"
-                          :
-                          : 
-                          : "memory");
-          }
+          // This fence is killing some NVLink performance and is only needed for inter-node communication(i.e. for memory consistency for third-party PCIe device).
+          asm volatile("fence.release.sys;"
+                        :
+                        : 
+                        : "memory");
+#endif
           // Notify the permute_G2S warp groups of all target ranks in this node.
           // Atomically reduce add 1 to the u32 flag of this attn token chunk to all target ranks within the current node.
           for(int k = INTRA_NODE_S2G_GROUP::warp_rank(); k < NUM_OF_SPARSE_TO_DENSE_MAP_LOAD_ITER_PER_INPUT_TOKEN; k += INTRA_NODE_S2G_GROUP::warp_size()){
@@ -1351,16 +1674,15 @@ inline __device__ void S2G_warp_group_device_function(const int local_rank,
     if(outstanding_in_flight_chunk){
       // Wait for the last chunk's S2G finish.
       cuda::ptx::cp_async_bulk_wait_group(cuda::ptx::n32_t<0>{});
+#ifdef HYBRID_EP_BUILD_MULTINODE_ENABLE
       // Need a system-scope release memory fence(release sem should be enough) to let all target ranks can observe the side effect of TMA writes of this chunk 
       // before they can observe the update of the flags.
-      // This fence is killing performance! It seems that as long as the compiler do not reordered the red before cp_async_bulk_wait_group, no fence is needed.
-      // Only enable the fence in inter-node mode where PCIe/RDMA does not guarantee ordering; NVLink intra-node TMA has implicit visibility after wait_group.
-      if constexpr (NUM_OF_NODES > 1) {
-        asm volatile("fence.release.sys;"
-                      :
-                      : 
-                      : "memory");
-      }
+      // This fence is killing some NVLink performance and is only needed for inter-node communication(i.e. for memory consistency for third-party PCIe device).
+      asm volatile("fence.release.sys;"
+                    :
+                    : 
+                    : "memory");
+#endif
       // Notify the permute_G2S warp groups of all target ranks in this node.
       // Atomically reduce add 1 to the u32 flag of the last attn token chunk to all target ranks within the current node.
       for(int i = INTRA_NODE_S2G_GROUP::warp_rank(); i < NUM_OF_SPARSE_TO_DENSE_MAP_LOAD_ITER_PER_INPUT_TOKEN; i += INTRA_NODE_S2G_GROUP::warp_size()){
@@ -1420,7 +1742,7 @@ inline __device__ void permute_G2S_warp_group_device_function(const int node_ran
   uint32_t consumer_parity = 1;
 
   // Only 1 thread within the permute G2S warp will be active, other threads will just exit if no residue flag need to updated.
-  if(elect_sync(~0)){
+  if(cuda::ptx::elect_sync(~0)){
     // Loop through all data chunk. Data(chunk) parallel between multiple permute CUDA blocks.
     // We flatten the global chunk id of all attn chunks.
     // Need to take the dispatch block's offset into account.
@@ -1479,7 +1801,7 @@ inline __device__ void permute_G2S_warp_group_device_function(const int node_ran
                       : "memory");
       }while(intra_node_chunk_flag != *expected_flag_value);
 
-      const TOKEN_DATA_TYPE* token_load_base_addr = remote_expert_output_token + current_chunk_starting_location_within_expert_output_buffer * static_cast<int64_t>(HIDDEN_DIM);
+      const TOKEN_DATA_TYPE* token_load_base_addr = remote_expert_output_token + current_chunk_starting_location_within_expert_output_buffer * HIDDEN_DIM;
       const float* prob_load_base_addr;
       const float* scaling_factor_load_base_addr;
       if constexpr(FORWARD_DISPATCH){
@@ -1502,7 +1824,7 @@ inline __device__ void permute_G2S_warp_group_device_function(const int node_ran
         cuda::ptx::cp_async_bulk(cuda::ptx::space_shared,
                                  cuda::ptx::space_global,
                                  reinterpret_cast<void*>(&smem_buffer_ptr->permute_token_buffer[stage][0]),
-                                 reinterpret_cast<const void*>(token_load_base_addr + (j * static_cast<int64_t>(HIDDEN_DIM))),
+                                 reinterpret_cast<const void*>(token_load_base_addr + (j * HIDDEN_DIM)),
                                  (uint32_t)(HIDDEN_DIM * sizeof(TOKEN_DATA_TYPE)),
                                  &smem_buffer_ptr->permute_mbarrier_buffer[stage][0]);
 
@@ -1664,7 +1986,7 @@ inline __device__ void permute_S2G_warp_group_device_function(const int local_ra
     }
 
     // Divide padding token into init unit and assigned them to all permute_S2G threads.
-    token_init_t* padding_token_base_addr = reinterpret_cast<token_init_t*>(local_expert_output_token + padding_token_index * static_cast<int64_t>(HIDDEN_DIM));
+    token_init_t* padding_token_base_addr = reinterpret_cast<token_init_t*>(local_expert_output_token + padding_token_index * HIDDEN_DIM);
     for(int j = PERMUTE_S2G_GROUP::thread_rank(); j < NUM_OF_INIT_ITER_PER_PADDING_TOKEN; j += PERMUTE_S2G_GROUP::size()){
       padding_token_base_addr[j] = make_uint4(0, 0, 0, 0);
     }
@@ -1687,7 +2009,7 @@ inline __device__ void permute_S2G_warp_group_device_function(const int local_ra
   }
 
   // Only 1 thread per warp within the permute S2G warp group will be active, other threads will just exit.
-  if(elect_sync(~0)){
+  if(cuda::ptx::elect_sync(~0)){
     // Loop through all data chunk. Data(chunk) parallel between multiple permute CUDA blocks.
     // We flatten the global chunk id of all attn chunks.
     // Need to take the dispatch block's offset into account.
@@ -1747,7 +2069,7 @@ inline __device__ void permute_S2G_warp_group_device_function(const int local_ra
             // Only unicast to this local expert if it need the current token.
             if(output_buffer_index != -1){
               // Store the token from shared to local global(local expert output buffers).
-              TOKEN_DATA_TYPE* local_expert_token_addr = local_expert_output_token + (output_buffer_index * static_cast<int64_t>(HIDDEN_DIM));
+              TOKEN_DATA_TYPE* local_expert_token_addr = local_expert_output_token + (output_buffer_index * HIDDEN_DIM);
               cuda::ptx::cp_async_bulk(cuda::ptx::space_global,
                                        cuda::ptx::space_shared,
                                        reinterpret_cast<void*>(local_expert_token_addr),
@@ -1859,7 +2181,7 @@ inline __device__ void intra_node_G2S_warp_group_device_function(const int node_
   uint32_t token_consumer_parity = 1;
 
   // Only 1 thread within the intra-node G2S warp will be active, other threads will just exit.
-  if(elect_sync(~0)){
+  if(cuda::ptx::elect_sync(~0)){
     // Iterate through all chunks assigned to this block.
     for(int i = blockIdx.x; i < total_num_of_chunks; i += NUM_OF_BLOCKS){
       // Which node this chunk will be sent to.
@@ -1959,7 +2281,7 @@ inline __device__ void intra_node_G2S_warp_group_device_function(const int node_
                   cuda::ptx::cp_async_bulk(cuda::ptx::space_shared,
                                            cuda::ptx::space_global,
                                            reinterpret_cast<void*>(&smem_buffer_ptr->intra_node_token_G2S_buffer[token_stage][0]),
-                                           reinterpret_cast<const void*>(remote_expert_input_token[current_src_token_id] + (sparse_to_dense_map_value * static_cast<int64_t>(HIDDEN_DIM))),
+                                           reinterpret_cast<const void*>(remote_expert_input_token[current_src_token_id] + (sparse_to_dense_map_value * HIDDEN_DIM)),
                                            (uint32_t)(HIDDEN_DIM * sizeof(uint16_t)),
                                            &smem_buffer_ptr->intra_node_mbarrier_G2S_buffer[token_stage][0]);
 
@@ -2100,7 +2422,7 @@ inline __device__ void intra_node_red_warp_group_device_function(const int node_
     const rdma_to_attn_map_load_t* rdma_to_attn_map_load_base_addr = reinterpret_cast<const rdma_to_attn_map_load_t*>(rdma_to_attn_map + 
                                                                       (node_id * rdma_to_attn_map_size_per_node + chunk_id * NUM_OF_TOKENS_PER_CHUNK));
 
-    uint16_t* rdma_intra_node_red_token_base_ptr = rdma_intra_node_red_token + rdma_intra_node_red_id * static_cast<int64_t>(HIDDEN_DIM);
+    uint16_t* rdma_intra_node_red_token_base_ptr = rdma_intra_node_red_token + rdma_intra_node_red_id * HIDDEN_DIM;
     float* rdma_intra_node_red_prob_base_ptr;
     if constexpr(BACKWARD_COMBINE){
       rdma_intra_node_red_prob_base_ptr = rdma_intra_node_red_prob + rdma_intra_node_red_id * (NUM_OF_EXPERTS_PER_RANK * NUM_OF_RANKS_PER_NODE);
@@ -2117,7 +2439,7 @@ inline __device__ void intra_node_red_warp_group_device_function(const int node_
         // If so, wait for previous chunk's S2G finish and notify the RDMA warp groups.
         if(outstanding_in_flight_chunk && (additional_in_flight_s2g == NUM_OF_ADDITIONAL_IN_FLIGHT_S2G)){
           if(INTRA_NODE_RED_GROUP::warp_rank() == 0){
-            if(elect_sync(~0)){
+            if(cuda::ptx::elect_sync(~0)){
               // Wait for previous chunk's S2G finish.
               cuda::ptx::cp_async_bulk_wait_group(cuda::ptx::n32_t<NUM_OF_ADDITIONAL_IN_FLIGHT_S2G>{});
               // Notify the rdma warp group.
@@ -2166,7 +2488,7 @@ inline __device__ void intra_node_red_warp_group_device_function(const int node_
 
             // Wait until current src token ready in shared memory.
             if(INTRA_NODE_RED_GROUP::warp_rank() == 0){
-              if(elect_sync(~0)){
+              if(cuda::ptx::elect_sync(~0)){
                 while(!cuda::ptx::mbarrier_try_wait_parity(&smem_buffer_ptr->intra_node_mbarrier_G2S_buffer[token_stage][0], token_producer_parity)){}
               }
             }
@@ -2202,7 +2524,7 @@ inline __device__ void intra_node_red_warp_group_device_function(const int node_
             // Then notify the producer warp to load next token entry to the shared memory as the shared memory can be reused.
             arrive_and_wait(INTRA_NODE_RED_GROUP::size(), 1);
             if(INTRA_NODE_RED_GROUP::warp_rank() == 0){
-              if(elect_sync(~0)){
+              if(cuda::ptx::elect_sync(~0)){
                 cuda::ptx::mbarrier_arrive(&smem_buffer_ptr->intra_node_mbarrier_G2S_buffer[token_stage][1]);
               }
             }
@@ -2225,7 +2547,7 @@ inline __device__ void intra_node_red_warp_group_device_function(const int node_
 
           // Let the TMA thread to wait for previously issued TMA S2G operations finish reading this entry.
           if(INTRA_NODE_RED_GROUP::warp_rank() == 0){
-            if(elect_sync(~0)){
+            if(cuda::ptx::elect_sync(~0)){
               cuda::ptx::cp_async_bulk_wait_group_read(cuda::ptx::n32_t<NUM_OF_STAGES_S2G - 1>{});
             }
           }
@@ -2261,8 +2583,8 @@ inline __device__ void intra_node_red_warp_group_device_function(const int node_
 
           // Let the TMA thread to issue S2G TMA operations for current token entry.
           if(INTRA_NODE_RED_GROUP::warp_rank() == 0){
-            if(elect_sync(~0)){
-              uint16_t* current_token_addr = rdma_intra_node_red_token_base_ptr + (j * NUM_OF_TOKENS_PER_RDMA_TO_ATTN_LOAD_ITER + k) * static_cast<int64_t>(HIDDEN_DIM);
+            if(cuda::ptx::elect_sync(~0)){
+              uint16_t* current_token_addr = rdma_intra_node_red_token_base_ptr + (j * NUM_OF_TOKENS_PER_RDMA_TO_ATTN_LOAD_ITER + k) * HIDDEN_DIM;
               // Store the token from shared to global.
               cuda::ptx::cp_async_bulk(cuda::ptx::space_global,
                                        cuda::ptx::space_shared,
@@ -2300,7 +2622,7 @@ inline __device__ void intra_node_red_warp_group_device_function(const int node_
     // We need to wait for both previous and current chunks' dst token entry S2G to finish and notify the RDMA warp group.
     if(outstanding_in_flight_chunk){
       if(INTRA_NODE_RED_GROUP::warp_rank() == 0){
-        if(elect_sync(~0)){
+        if(cuda::ptx::elect_sync(~0)){
           // Wait for all previous chunk's(i.e. previous and current chunk) S2G finish.
           cuda::ptx::cp_async_bulk_wait_group(cuda::ptx::n32_t<0>{});
           // Notify the rdma warp group.
@@ -2324,7 +2646,7 @@ inline __device__ void intra_node_red_warp_group_device_function(const int node_
   // If so, wait for it and notify RDMA warp group.
   if(outstanding_in_flight_chunk){
     if(INTRA_NODE_RED_GROUP::warp_rank() == 0){
-      if(elect_sync(~0)){
+      if(cuda::ptx::elect_sync(~0)){
         // Wait for the last chunk's S2G finish.
         cuda::ptx::cp_async_bulk_wait_group(cuda::ptx::n32_t<0>{});
         // Notify the rdma warp group.
@@ -2337,6 +2659,7 @@ inline __device__ void intra_node_red_warp_group_device_function(const int node_
 }
 
 #ifdef HYBRID_EP_BUILD_MULTINODE_ENABLE
+#ifndef USE_NIXL
 // Device function for inter-node node2node(RDMA) warp for combine kernel. There can be only 1 inter-node warp per CUDA block!
 template<typename INTER_NODE_RDMA_GROUP,
          typename SMEM_TYPE,
@@ -2382,6 +2705,7 @@ inline __device__ void inter_node_N2N_warp_group_device_function(const int node_
   __syncwarp();
   // Total number of chunks to produce for RDMA warps to consume.
   int NUM_OF_CHUNKS_PER_RANK = (num_of_tokens_per_rank - 1) / NUM_OF_TOKENS_PER_CHUNK + 1;
+  int MAX_NUM_OF_CHUNKS_PER_RANK = (MAX_NUM_OF_TOKENS_PER_RANK - 1) / NUM_OF_TOKENS_PER_CHUNK + 1;
   int TOTAL_NUM_OF_CHUNKS = (NUM_OF_NODES - 1) * NUM_OF_CHUNKS_PER_RANK;
   // The rdma_to_attn_map need to be paded to multiple of rdma_to_attn_map_load_t per node.
   // The largest size of rdma_to_attn_map_load_t allowed in all Hybrid-EP kernels are 16B(16 bools), so need to be paded to 16B per node.
@@ -2397,6 +2721,7 @@ inline __device__ void inter_node_N2N_warp_group_device_function(const int node_
     // What is the chunk id of this chunk for the node it will be sent to.
     int chunk_id = i / (NUM_OF_NODES - 1);
     int rdma_remote_node_id = node_id > node_rank ? node_id - 1 : node_id;
+    int rank_in_remote = rdma_remote_node_id < node_rank ? (node_rank - 1) : node_rank;
     int chunk_base_token_idx = node_id * rdma_to_attn_map_size_per_node + chunk_id * NUM_OF_TOKENS_PER_CHUNK;
     int token_range = NUM_OF_TOKENS_PER_CHUNK;
     if (chunk_id * NUM_OF_TOKENS_PER_CHUNK + token_range > num_of_tokens_per_rank) {
@@ -2444,9 +2769,9 @@ inline __device__ void inter_node_N2N_warp_group_device_function(const int node_
         doca_gpu_dev_verbs_wqe_prepare_write(qp, token_wqe_ptr, my_wqe_idx,
                                                   DOCA_GPUNETIO_IB_MLX5_OPCODE_RDMA_WRITE,
                                                   DOCA_GPUNETIO_IB_MLX5_WQE_CTRL_CQ_UPDATE, 0,
-                                                  smem_mr_info_ptr[rdma_remote_node_id].token_raddr + token_idx * static_cast<int64_t>(HIDDEN_DIM) * sizeof(uint16_t),
+                                                  smem_mr_info_ptr[rdma_remote_node_id].token_raddr + token_idx * HIDDEN_DIM * sizeof(uint16_t),
                                                   smem_mr_info_ptr[rdma_remote_node_id].token_rkey,
-                                                  smem_mr_info_ptr[rdma_remote_node_id].token_laddr + local_token_idx * static_cast<int64_t>(HIDDEN_DIM) * sizeof(uint16_t),
+                                                  smem_mr_info_ptr[rdma_remote_node_id].token_laddr + local_token_idx * HIDDEN_DIM * sizeof(uint16_t),
                                                   smem_mr_info_ptr[rdma_remote_node_id].token_lkey,
                                                   HIDDEN_DIM * sizeof(uint16_t));
         if constexpr(BACKWARD_COMBINE) {
@@ -2468,12 +2793,14 @@ inline __device__ void inter_node_N2N_warp_group_device_function(const int node_
     if (INTER_NODE_RDMA_GROUP::thread_rank() == 0) {
       // Construct wqe for flag.
       struct doca_gpu_dev_verbs_wqe *flag_wqe_ptr = doca_gpu_dev_verbs_get_wqe_ptr(qp, curr_wqe_idx);
+      uint64_t offset_flag_laddr = smem_mr_info_ptr[rdma_remote_node_id].flag_laddr + rdma_remote_node_id * MAX_NUM_OF_CHUNKS_PER_RANK * sizeof(uint64_t);
+      uint64_t offset_flag_raddr = smem_mr_info_ptr[rdma_remote_node_id].flag_raddr + rank_in_remote * MAX_NUM_OF_CHUNKS_PER_RANK * sizeof(uint64_t);
       doca_gpu_dev_verbs_wqe_prepare_atomic(qp, flag_wqe_ptr, curr_wqe_idx,
                                                  DOCA_GPUNETIO_IB_MLX5_OPCODE_ATOMIC_FA,
                                                  DOCA_GPUNETIO_IB_MLX5_WQE_CTRL_CQ_UPDATE,
-                                                 smem_mr_info_ptr[rdma_remote_node_id].flag_raddr + chunk_id * sizeof(uint64_t),
+                                                 offset_flag_raddr + chunk_id * sizeof(uint64_t),
                                                  smem_mr_info_ptr[rdma_remote_node_id].flag_rkey,
-                                                 smem_mr_info_ptr[rdma_remote_node_id].flag_laddr + chunk_id * sizeof(uint64_t),
+                                                 offset_flag_laddr + chunk_id * sizeof(uint64_t),
                                                  smem_mr_info_ptr[rdma_remote_node_id].flag_lkey,
                                                  sizeof(uint64_t), 1, 0);
       // Post send and poll cqs.
@@ -2497,7 +2824,8 @@ inline __device__ void inter_node_N2N_warp_group_device_function(const int node_
   }
   token_consumer_parity ^= 1;
 }
-#endif
+#endif // USE_NIXL
+#endif // HYBRID_EP_BUILD_MULTINODE_ENABLE
 
 // Device function for inter-node G2S warp for combine kernel.
 template<typename SMEM_TYPE,
@@ -2570,7 +2898,7 @@ inline __device__ void inter_node_G2S_warp_group_device_function(const int node_
   uint32_t token_consumer_parity = 1;
 
   // Only 1 thread within each inter-node G2S warp will be active, other threads will just exit.
-  if(elect_sync(~0)){
+  if(cuda::ptx::elect_sync(~0)){
     // Iterate through all chunks. All chunks will assign to all CUDA block.
     for(int i = 0; i < total_num_of_chunks; i++){
       // How many rdma_to_attn load iter(a.k.a token group) for this chunk.
@@ -2676,7 +3004,7 @@ inline __device__ void inter_node_G2S_warp_group_device_function(const int node_
                   cuda::ptx::cp_async_bulk(cuda::ptx::space_shared,
                                            cuda::ptx::space_global,
                                            reinterpret_cast<void*>(&smem_buffer_ptr->inter_node_token_G2S_buffer[token_stage][0]),
-                                           reinterpret_cast<const void*>(remote_expert_input_token[current_src_token_id] + (sparse_to_dense_map_value * static_cast<int64_t>(HIDDEN_DIM))),
+                                           reinterpret_cast<const void*>(remote_expert_input_token[current_src_token_id] + (sparse_to_dense_map_value * HIDDEN_DIM)),
                                            (uint32_t)(HIDDEN_DIM * sizeof(uint16_t)),
                                            &smem_buffer_ptr->inter_node_mbarrier_G2S_buffer[token_stage][0]);
 
@@ -2739,7 +3067,6 @@ inline __device__ void inter_node_G2S_warp_group_device_function(const int node_
                               : "l"(__cvta_generic_to_global(flag_location))
                               : "memory");
                 }while(rdma_flag != *expected_flag_value);
-            
                 // Mark the chunk from this node(tile) is already clear.
                 rdma_flag_clear[n - 1] = true;
               }
@@ -2750,7 +3077,7 @@ inline __device__ void inter_node_G2S_warp_group_device_function(const int node_
               const uint16_t* rdma_inter_node_group_token_load_addr = rdma_inter_node_group_token + 
                                                                       (rdma_buffer_tile_id * MAX_NUM_OF_TOKENS_PER_RANK + 
                                                                       i * NUM_OF_TOKENS_PER_CHUNK + 
-                                                                      j * NUM_OF_TOKENS_PER_GROUP + k) * static_cast<int64_t>(HIDDEN_DIM);
+                                                                      j * NUM_OF_TOKENS_PER_GROUP + k) * HIDDEN_DIM;
               cuda::ptx::cp_async_bulk(cuda::ptx::space_shared,
                                        cuda::ptx::space_global,
                                        reinterpret_cast<void*>(&smem_buffer_ptr->inter_node_token_G2S_buffer[token_stage][0]),
@@ -2783,7 +3110,6 @@ inline __device__ void inter_node_G2S_warp_group_device_function(const int node_
                                                    cuda::ptx::space_shared,
                                                    &smem_buffer_ptr->inter_node_mbarrier_G2S_buffer[token_stage][0],
                                                    total_tx_size);
-
               // Goto next token entry in shared memory.
               token_stage += 1;
               if(token_stage == ending_G2S_index){
@@ -2905,7 +3231,7 @@ inline __device__ void inter_node_red_warp_group_device_function(const int node_
 
     const bool* rdma_to_attn_map_load_base_addr = rdma_to_attn_map + (node_rank * rdma_to_attn_map_size_per_node + i * NUM_OF_TOKENS_PER_CHUNK);
     const bool* attn_to_rdma_map_load_base_addr = attn_to_rdma_map + (i * NUM_OF_TOKENS_PER_CHUNK) * (NUM_OF_NODES - 1);
-    uint16_t* attn_output_token_base_ptr = attn_output_token + (i * NUM_OF_TOKENS_PER_CHUNK) * static_cast<int64_t>(HIDDEN_DIM);
+    uint16_t* attn_output_token_base_ptr = attn_output_token + (i * NUM_OF_TOKENS_PER_CHUNK) * HIDDEN_DIM;
     float* attn_output_prob_base_ptr;
     if constexpr(BACKWARD_COMBINE){
       attn_output_prob_base_ptr = attn_output_prob + (i * NUM_OF_TOKENS_PER_CHUNK) * (NUM_OF_EXPERTS_PER_RANK * NUM_OF_RANKS_PER_NODE * NUM_OF_NODES);
@@ -2960,7 +3286,7 @@ inline __device__ void inter_node_red_warp_group_device_function(const int node_
 
             // Wait until current src token ready in shared memory.
             if(warp_rank_within_pipeline == 0){
-              if(elect_sync(~0)){
+              if(cuda::ptx::elect_sync(~0)){
                 while(!cuda::ptx::mbarrier_try_wait_parity(&smem_buffer_ptr->inter_node_mbarrier_G2S_buffer[token_stage][0], token_producer_parity)){}
               }
             }
@@ -2996,7 +3322,7 @@ inline __device__ void inter_node_red_warp_group_device_function(const int node_
             // Then notify the producer warp to load next token entry to the shared memory as the shared memory can be reused.
             arrive_and_wait(NUM_OF_THREADS_PER_PIPELINE, 2 + pipeline_rank);
             if(warp_rank_within_pipeline == 0){
-              if(elect_sync(~0)){
+              if(cuda::ptx::elect_sync(~0)){
                 cuda::ptx::mbarrier_arrive(&smem_buffer_ptr->inter_node_mbarrier_G2S_buffer[token_stage][1]);
               }
             }
@@ -3030,7 +3356,7 @@ inline __device__ void inter_node_red_warp_group_device_function(const int node_
             }
             // Wait until current src token ready in shared memory.
             if(warp_rank_within_pipeline == 0){
-              if(elect_sync(~0)){
+              if(cuda::ptx::elect_sync(~0)){
                 while(!cuda::ptx::mbarrier_try_wait_parity(&smem_buffer_ptr->inter_node_mbarrier_G2S_buffer[token_stage][0], token_producer_parity)){}
               }
             }
@@ -3064,7 +3390,7 @@ inline __device__ void inter_node_red_warp_group_device_function(const int node_
             // Then notify the producer warp to load next token entry to the shared memory as the shared memory can be reused.
             arrive_and_wait(NUM_OF_THREADS_PER_PIPELINE, 2 + pipeline_rank);
             if(warp_rank_within_pipeline == 0){
-              if(elect_sync(~0)){
+              if(cuda::ptx::elect_sync(~0)){
                 cuda::ptx::mbarrier_arrive(&smem_buffer_ptr->inter_node_mbarrier_G2S_buffer[token_stage][1]);
               }
             }
@@ -3089,7 +3415,7 @@ inline __device__ void inter_node_red_warp_group_device_function(const int node_
 
         // Select the TMA thread within the pipeline to wait for previously issued TMA S2G operations finish reading this entry.
         if(warp_rank_within_pipeline == 0){
-          if(elect_sync(~0)){
+          if(cuda::ptx::elect_sync(~0)){
             cuda::ptx::cp_async_bulk_wait_group_read(cuda::ptx::n32_t<NUM_OF_STAGES_S2G_PER_PIPELINE - 1>{});
           }
         }
@@ -3130,8 +3456,8 @@ inline __device__ void inter_node_red_warp_group_device_function(const int node_
 
         // Select the TMA thread within the pipeline to issue S2G TMA operations for current token entry.
         if(warp_rank_within_pipeline == 0){
-          if(elect_sync(~0)){
-            uint16_t* current_token_addr = attn_output_token_base_ptr + (j * NUM_OF_TOKENS_PER_GROUP + k) * static_cast<int64_t>(HIDDEN_DIM);
+          if(cuda::ptx::elect_sync(~0)){
+            uint16_t* current_token_addr = attn_output_token_base_ptr + (j * NUM_OF_TOKENS_PER_GROUP + k) * HIDDEN_DIM;
             // Store the token from shared to global output.
             cuda::ptx::cp_async_bulk(cuda::ptx::space_global,
                                      cuda::ptx::space_shared,
@@ -3225,7 +3551,7 @@ inline __device__ void unpermute_G2S_warp_group_device_function(const int node_r
   uint32_t token_consumer_parity = 1;
 
   // Only 1 thread within each unpermute G2S warp will be active, other threads will just exit if no residue flag need to updated.
-  if(elect_sync(~0)){
+  if(cuda::ptx::elect_sync(~0)){
     // Iterate through all chunks. Data(chunk) parallel between multiple unpermute CUDA blocks.
     // We flatten the global chunk id of all attn chunks.
     // Need to take the combine block's offset into account.
@@ -3261,7 +3587,7 @@ inline __device__ void unpermute_G2S_warp_group_device_function(const int node_r
         // Load dense_to_expert map for this dst token(i.e. a row in dense_to_expert map).
         dense_to_expert_map_load_t dense_to_expert_map_data[NUM_OF_DENSE_TO_EXPERT_MAP_LOAD_ITER_PER_OUTPUT_TOKEN];
         // First load dense_to_expert map and decide the last src token within this row.
-        int last_src_token_id = 0;
+        int last_src_token_id = -1;
         #pragma unroll
         for(int k = 0; k < NUM_OF_DENSE_TO_EXPERT_MAP_LOAD_ITER_PER_OUTPUT_TOKEN; k++){
           dense_to_expert_map_data[k] = dense_to_expert_map_load_addr[k];
@@ -3273,6 +3599,33 @@ inline __device__ void unpermute_G2S_warp_group_device_function(const int node_r
             }
           }
         }
+#ifdef HYBRID_EP_BUILD_TOKEN_DROP_ENABLE
+        // This dst token has no src token. This will only happen when token drop is triggered and all src tokens of this dst token have been dropped.
+        // To make unpermute_red_warp_group_device_function work, we need to produce a single dummy src token entry with garbage value for this dst token.
+        // The dummy src token entry has all its data(token, prob, expert_id) left unset as garbage value and the end group flag set as true.
+        if(last_src_token_id == -1){
+          // Wait until current token entry within the shared memory has been consumed.
+          while(!cuda::ptx::mbarrier_try_wait_parity(&smem_buffer_ptr->unpermute_mbarrier_G2S_buffer[token_stage][1], token_consumer_parity)){}
+
+          smem_buffer_ptr->unpermute_flag_G2S_buffer[token_stage] = true;
+          // Directly mark the producer to consumer mbarrier clear for this src token entry to let unpermute_red_warp_group_device_function consume this dummy src token entry.
+          if constexpr(BACKWARD_COMBINE){
+            // When BACKWARD_COMBINE is true, arrive twice as the mbarrier will be init to 2. Otherwise, arrive once.
+            cuda::ptx::mbarrier_arrive(&smem_buffer_ptr->unpermute_mbarrier_G2S_buffer[token_stage][0]);
+          }
+          cuda::ptx::mbarrier_arrive(&smem_buffer_ptr->unpermute_mbarrier_G2S_buffer[token_stage][0]);
+
+          // Goto next token entry in shared memory.
+          token_stage += 1;
+          if(token_stage == ending_G2S_index){
+            token_stage = starting_G2S_index;
+            token_consumer_parity ^= 1;
+          }
+        }
+        // This dst token has at least 1 src token. This will happen if no token drop happens or not all src tokens have been dropped for this dst token.
+        // Just go through normal code path.
+        else{
+#endif
         // Then issue all G2S TMA/LDGSTS for this row(dst token).
         #pragma unroll
         for(int k = 0; k < NUM_OF_DENSE_TO_EXPERT_MAP_LOAD_ITER_PER_OUTPUT_TOKEN; k++){
@@ -3288,7 +3641,7 @@ inline __device__ void unpermute_G2S_warp_group_device_function(const int node_r
               cuda::ptx::cp_async_bulk(cuda::ptx::space_shared,
                                        cuda::ptx::space_global,
                                        reinterpret_cast<void*>(&smem_buffer_ptr->unpermute_token_G2S_buffer[token_stage][0]),
-                                       reinterpret_cast<const void*>(local_expert_input_token + (dense_to_expert_map_value * static_cast<int64_t>(HIDDEN_DIM))),
+                                       reinterpret_cast<const void*>(local_expert_input_token + (dense_to_expert_map_value * HIDDEN_DIM)),
                                        (uint32_t)(HIDDEN_DIM * sizeof(uint16_t)),
                                        &smem_buffer_ptr->unpermute_mbarrier_G2S_buffer[token_stage][0]);
 
@@ -3337,6 +3690,9 @@ inline __device__ void unpermute_G2S_warp_group_device_function(const int node_r
             }
           }
         }
+#ifdef HYBRID_EP_BUILD_TOKEN_DROP_ENABLE
+        }
+#endif
       }
     }
   }
@@ -3460,7 +3816,7 @@ inline __device__ void unpermute_red_warp_group_device_function(const int node_r
     int num_of_tokens_for_current_chunk = next_chunk_starting_location_within_expert_input_buffer - current_chunk_starting_location_within_expert_input_buffer;
 
 
-    uint16_t* remote_expert_input_token_base_ptr = remote_expert_input_token + current_chunk_starting_location_within_expert_input_buffer * static_cast<int64_t>(HIDDEN_DIM);
+    uint16_t* remote_expert_input_token_base_ptr = remote_expert_input_token + current_chunk_starting_location_within_expert_input_buffer * HIDDEN_DIM;
     float* remote_expert_input_prob_base_ptr;
     if constexpr(BACKWARD_COMBINE){
       remote_expert_input_prob_base_ptr = remote_expert_input_prob + current_chunk_starting_location_within_expert_input_buffer * (NUM_OF_EXPERTS_PER_RANK * NUM_OF_RANKS_PER_NODE);
@@ -3476,19 +3832,18 @@ inline __device__ void unpermute_red_warp_group_device_function(const int node_r
       // If so, wait for previous chunk's token entry S2G finish and notify the inter_node_G2S and intra_node_G2S warp groups on all ranks.
       if(outstanding_in_flight_chunk && (additional_in_flight_s2g == NUM_OF_ADDITIONAL_IN_FLIGHT_S2G)){
         if(warp_rank_within_pipeline == 0){
-          if(elect_sync(~0)){
+          if(cuda::ptx::elect_sync(~0)){
             // Wait for previous chunk's token entry S2G finish.
             cuda::ptx::cp_async_bulk_wait_group(cuda::ptx::n32_t<NUM_OF_ADDITIONAL_IN_FLIGHT_S2G>{});
+#ifdef HYBRID_EP_BUILD_MULTINODE_ENABLE
             // Need a system-scope release memory fence(release sem should be enough) to let all target ranks can observe the side effect of TMA writes of this chunk 
             // before they can observe the update of the flags.
-            // This fence is killing performance! It seems that as long as the compiler do not reordered the red before cp_async_bulk_wait_group, no fence is needed.
-            // Only enable the fence in inter-node mode where PCIe/RDMA does not guarantee ordering; NVLink intra-node TMA has implicit visibility after wait_group.
-            if constexpr (NUM_OF_NODES > 1) {
-              asm volatile("fence.release.sys;"
-                           :
-                           : 
-                           : "memory");
-            }
+            // This fence is killing some NVLink performance and is only needed for inter-node communication(i.e. for memory consistency for third-party PCIe device).
+            asm volatile("fence.release.sys;"
+                         :
+                         : 
+                         : "memory");
+#endif
             // Notify the inter_node_G2S and intra_node_G2S warp groups on all ranks in this node.
             // Atomically reduce add 1 to the u32 flag of the last token chunk to target flag buffer.
             // Since each unpermute block will have NUM_OF_DATA_PIPELINE_PER_BLOCK pipeline processing the same chunk, 
@@ -3534,7 +3889,7 @@ inline __device__ void unpermute_red_warp_group_device_function(const int node_r
 
         // Wait until current src token ready in shared memory.
         if(warp_rank_within_pipeline == 0){
-          if(elect_sync(~0)){
+          if(cuda::ptx::elect_sync(~0)){
             while(!cuda::ptx::mbarrier_try_wait_parity(&smem_buffer_ptr->unpermute_mbarrier_G2S_buffer[token_stage][0], token_producer_parity)){}
           }
         }
@@ -3571,7 +3926,7 @@ inline __device__ void unpermute_red_warp_group_device_function(const int node_r
         // Then notify the producer warp to load next token entry to the shared memory as the shared memory can be reused.
         arrive_and_wait(NUM_OF_THREADS_PER_PIPELINE, 1 + pipeline_rank);
         if(warp_rank_within_pipeline == 0){
-          if(elect_sync(~0)){
+          if(cuda::ptx::elect_sync(~0)){
             cuda::ptx::mbarrier_arrive(&smem_buffer_ptr->unpermute_mbarrier_G2S_buffer[token_stage][1]);
           }
         }
@@ -3595,7 +3950,7 @@ inline __device__ void unpermute_red_warp_group_device_function(const int node_r
 
       // Select the TMA thread within the pipeline to wait for previously issued TMA S2G operations finish reading this entry.
       if(warp_rank_within_pipeline == 0){
-        if(elect_sync(~0)){
+        if(cuda::ptx::elect_sync(~0)){
           cuda::ptx::cp_async_bulk_wait_group_read(cuda::ptx::n32_t<NUM_OF_STAGES_S2G_PER_PIPELINE - 1>{});
         }
       }
@@ -3631,8 +3986,8 @@ inline __device__ void unpermute_red_warp_group_device_function(const int node_r
 
       // Select the TMA thread within the pipeline to issue S2G TMA operations for current token entry.
       if(warp_rank_within_pipeline == 0){
-        if(elect_sync(~0)){
-          uint16_t* current_token_addr = remote_expert_input_token_base_ptr + j * static_cast<int64_t>(HIDDEN_DIM);
+        if(cuda::ptx::elect_sync(~0)){
+          uint16_t* current_token_addr = remote_expert_input_token_base_ptr + j * HIDDEN_DIM;
           // Store the token from shared to global output.
           cuda::ptx::cp_async_bulk(cuda::ptx::space_global,
                                    cuda::ptx::space_shared,
@@ -3668,19 +4023,18 @@ inline __device__ void unpermute_red_warp_group_device_function(const int node_r
     // We need to wait for both previous and current chunks' S2G entry to finish and notify the inter_node_G2S and intra_node_G2S warp groups.
     if(outstanding_in_flight_chunk){
       if(warp_rank_within_pipeline == 0){
-        if(elect_sync(~0)){
+        if(cuda::ptx::elect_sync(~0)){
           // Wait for all previous chunk's(i.e. previous and current chunk) token entry S2G finish.
           cuda::ptx::cp_async_bulk_wait_group(cuda::ptx::n32_t<0>{});
+#ifdef HYBRID_EP_BUILD_MULTINODE_ENABLE
           // Need a system-scope release memory fence(release sem should be enough) to let all target ranks can observe the side effect of TMA writes of this chunk 
           // before they can observe the update of the flags.
-          // This fence is killing performance! It seems that as long as the compiler do not reordered the red before cp_async_bulk_wait_group, no fence is needed.
-          // Only enable the fence in inter-node mode where PCIe/RDMA does not guarantee ordering; NVLink intra-node TMA has implicit visibility after wait_group.
-          if constexpr (NUM_OF_NODES > 1) {
-            asm volatile("fence.release.sys;"
-                            :
-                            : 
-                            : "memory");
-          }
+          // This fence is killing some NVLink performance and is only needed for inter-node communication(i.e. for memory consistency for third-party PCIe device).
+          asm volatile("fence.release.sys;"
+                        :
+                        : 
+                        : "memory");
+#endif
           // Notify the inter_node_G2S and intra_node_G2S warp groups on all ranks in this node.
           // Atomically reduce add 1 to the u32 flag of the last and current token chunk to target flag buffer.
           // Since each unpermute block will have NUM_OF_DATA_PIPELINE_PER_BLOCK pipeline processing the same chunk, 
@@ -3712,19 +4066,18 @@ inline __device__ void unpermute_red_warp_group_device_function(const int node_r
   // If so, wait for it and notify the inter_node_G2S and intra_node_G2S warp groups.
   if(outstanding_in_flight_chunk){
     if(warp_rank_within_pipeline == 0){
-      if(elect_sync(~0)){
+      if(cuda::ptx::elect_sync(~0)){
         // Wait for the last chunk's S2G finish.
         cuda::ptx::cp_async_bulk_wait_group(cuda::ptx::n32_t<0>{});
+#ifdef HYBRID_EP_BUILD_MULTINODE_ENABLE
         // Need a system-scope release memory fence(release sem should be enough) to let all target ranks can observe the side effect of TMA writes of this chunk 
         // before they can observe the update of the flags.
-        // This fence is killing performance! It seems that as long as the compiler do not reordered the red before cp_async_bulk_wait_group, no fence is needed.
-        // Only enable the fence in inter-node mode where PCIe/RDMA does not guarantee ordering; NVLink intra-node TMA has implicit visibility after wait_group.
-        if constexpr (NUM_OF_NODES > 1) {
-          asm volatile("fence.release.sys;"
-                          :
-                          : 
-                          : "memory");
-        }
+        // This fence is killing some NVLink performance and is only needed for inter-node communication(i.e. for memory consistency for third-party PCIe device).
+        asm volatile("fence.release.sys;"
+                      :
+                      : 
+                      : "memory");
+#endif
         // Notify the inter_node_G2S and intra_node_G2S warp groups on all ranks in this node.
         // Atomically reduce add 1 to the u32 flag of the last token chunk to target flag buffer.
         // Since each unpermute block will have NUM_OF_DATA_PIPELINE_PER_BLOCK pipeline processing the same chunk, 
@@ -3746,13 +4099,13 @@ template<int NUM_OF_RANKS_PER_NODE>
 __launch_bounds__(1, 1)
 __global__ void device_sync_kernel(uint32_t* intra_node_remote_flags, uint32_t* expected_flag_value, uint32_t* parity)
 {
-  __threadfence_system();
-
   // What's the current parity used for this sync.
   uint32_t flag_parity = *parity;
   uint32_t current_parity_expected_flag_value = expected_flag_value[flag_parity] + NUM_OF_RANKS_PER_NODE;
   // Atomically reduce add 1 to the u32 flag on rank #0 in current NVLink domain. 
   // Need a strong system-scope red to make sure all ranks from current NVLink domain can see the side effect.
+  // But no memory fence(i.e. .release) needed since CUDA stream already do that for us.
+  // red.relaxed.sys.global.add.u32          [a], 1; 
   asm volatile("red.relaxed.sys.global.add.u32 [%0], %1;"
                 :
                 : "l"(__cvta_generic_to_global(intra_node_remote_flags + flag_parity)), "n"(1)
@@ -3791,6 +4144,60 @@ __global__ void update_expected_value_kernel(uint64_t* expected_rdma_flag_value,
   (*expected_permute_unpermute_flag_value) += EXPECTED_PERMUTE_UNPERMUTE_FLAG_VALUE_INCREMENT;
 #endif
 }
+
+#ifdef HYBRID_EP_BUILD_MULTINODE_ENABLE
+#ifndef USE_NIXL
+// This kernel will atomic add the flags of the sender by 1, and then verify that all senders have added 1.
+template<typename T>
+__launch_bounds__(1, 1)
+__global__ void rdma_sync_kernel(const int num_of_nodes,
+                                          const int node_rank,
+                                          const uint64_t *expected_flag_value,
+                                          uint64_t* rdma_inter_node_group_flags,
+                                          doca_gpu_dev_verbs_qp **d_qps_gpu,
+                                          T *mr_info) {
+  for (int node_idx = 0; node_idx < num_of_nodes - 1; ++node_idx) {
+    struct doca_gpu_dev_verbs_qp *qp = d_qps_gpu[node_idx];
+    T *curr_mr_info = mr_info + node_idx;
+    int rank_in_remote = node_idx < node_rank ? (node_rank - 1) : node_rank;
+    uint64_t flag_offset = curr_mr_info->back_sync_barrier_idx;
+    uint64_t wqe_idx = doca_gpu_dev_verbs_reserve_wq_slots<DOCA_GPUNETIO_VERBS_RESOURCE_SHARING_MODE_EXCLUSIVE>(qp, 1);
+    struct doca_gpu_dev_verbs_wqe *flag_wqe_ptr = doca_gpu_dev_verbs_get_wqe_ptr(qp, wqe_idx);
+    doca_gpu_dev_verbs_wqe_prepare_atomic(qp, flag_wqe_ptr, wqe_idx,
+                                          DOCA_GPUNETIO_IB_MLX5_OPCODE_ATOMIC_FA,
+                                          DOCA_GPUNETIO_IB_MLX5_WQE_CTRL_CQ_UPDATE,
+                                          curr_mr_info->flag_raddr + (flag_offset + rank_in_remote) * sizeof(uint64_t),
+                                          curr_mr_info->flag_rkey,
+                                          curr_mr_info->flag_laddr + (flag_offset + node_idx) * sizeof(uint64_t),
+                                          curr_mr_info->flag_lkey,
+                                          sizeof(uint64_t), 1, 0);
+    doca_gpu_dev_verbs_mark_wqes_ready<DOCA_GPUNETIO_VERBS_RESOURCE_SHARING_MODE_CTA>(qp, wqe_idx, wqe_idx);
+    doca_gpu_dev_verbs_submit_db<DOCA_GPUNETIO_VERBS_RESOURCE_SHARING_MODE_CTA,
+                                      DOCA_GPUNETIO_VERBS_SYNC_SCOPE_GPU,
+                                      DOCA_GPUNETIO_VERBS_GPU_CODE_OPT_DEFAULT,
+                                      DOCA_GPUNETIO_VERBS_QP_SQ>(qp, (wqe_idx + 1));
+    int status = doca_gpu_dev_verbs_poll_cq<DOCA_GPUNETIO_VERBS_RESOURCE_SHARING_MODE_CTA,
+                                            DOCA_GPUNETIO_VERBS_QP_SQ>(
+                                            doca_gpu_dev_verbs_qp_get_cq_sq(qp), 1);
+    assert(status >= 0);
+  }
+  for (int node_idx = 0; node_idx < num_of_nodes - 1; ++node_idx) {
+    T *curr_mr_info = mr_info + node_idx;
+    uint64_t flag_offset = curr_mr_info->back_sync_barrier_idx;
+    const uint64_t* flag_location = rdma_inter_node_group_flags + flag_offset + node_idx;
+    uint64_t rdma_flag = 0;
+    do {
+      rdma_flag = 0;
+      // Need a strong system-scope load to observe external RDMA Atomic result.
+      asm volatile("ld.relaxed.sys.global.b64 %0, [%1];"
+                   : "=l"(rdma_flag)
+                   : "l"(__cvta_generic_to_global(flag_location))
+                   : "memory");
+    } while(rdma_flag != *expected_flag_value);
+  }
+}
+#endif
+#endif
 
 template<typename TOKEN_DATA_TYPE, 
          // This type represent inter-node warp group.
@@ -3836,7 +4243,7 @@ template<typename TOKEN_DATA_TYPE,
 // The dispatch block still follow the previous warp group layout, the permute block has 2 warp groups and has the following layout:
 // 1. permute G2S warp group(1 warp). 2. permute S2G warp group(3 warps). Total 4 warps per CUDA block/SM, same as dispatch blocks.
 __launch_bounds__(INTER_NODE_GROUP::size() + INTRA_NODE_G2S_GROUP::size() + INTRA_NODE_S2G_GROUP::size(), 1)
-__global__ void dispatch_kernel(const __grid_constant__ dispatch_kernel_param_t<TOKEN_DATA_TYPE> param)
+__global__ void dispatch_kernel(const __grid_constant__ dispatch_kernel_param_t<TOKEN_DATA_TYPE, NUM_OF_RANKS_PER_NODE> param)
 {
   // Compile-time check.
 #ifdef HYBRID_EP_BUILD_MULTINODE_ENABLE
@@ -3941,7 +4348,7 @@ __global__ void dispatch_kernel(const __grid_constant__ dispatch_kernel_param_t<
       if constexpr(NUM_OF_NODES != 1){
         N2N_warp_group_device_function
         <INTER_NODE_GROUP, TOKEN_DATA_TYPE, cur_smem_t, NUM_OF_STAGES, HIDDEN_DIM, NUM_OF_TOKENS_PER_CHUNK, NUM_OF_EXPERTS_PER_RANK, NUM_OF_RANKS_PER_NODE, NUM_OF_NODES, NUM_OF_BLOCKS, FORWARD_DISPATCH>
-        (param.node_rank, param.num_of_tokens_per_rank, param.attn_to_rdma_map, reinterpret_cast<doca_gpu_dev_verbs_qp**>(param.d_qps_gpu), reinterpret_cast<dispatch_memory_region_info_t*>(param.mr_info), smem_buffer_ptr);
+        (param.node_rank, param.num_of_tokens_per_rank, param.attn_to_rdma_map, param.d_qps_gpu, param.mr_info, smem_buffer_ptr);
       }
 #endif
     }else if(threadIdx_x_int < INTER_NODE_GROUP::size() + INTRA_NODE_G2S_GROUP::size()){
@@ -3988,11 +4395,20 @@ __global__ void dispatch_kernel(const __grid_constant__ dispatch_kernel_param_t<
 #ifdef HYBRID_EP_BUILD_MULTINODE_ENABLE
     // Inter-node warps groups.
     if constexpr(NUM_OF_NODES != 1){
+#ifdef USE_NIXL
+      // Use NIXL for inter-node communication
       N2N_warp_group_device_function
       <INTER_NODE_GROUP, TOKEN_DATA_TYPE, cur_smem_t, NUM_OF_STAGES, HIDDEN_DIM, NUM_OF_TOKENS_PER_CHUNK, NUM_OF_EXPERTS_PER_RANK, NUM_OF_RANKS_PER_NODE, NUM_OF_NODES, NUM_OF_BLOCKS, FORWARD_DISPATCH>
-      (param.node_rank, param.num_of_tokens_per_rank, param.attn_to_rdma_map, reinterpret_cast<doca_gpu_dev_verbs_qp**>(param.d_qps_gpu), reinterpret_cast<dispatch_memory_region_info_t*>(param.mr_info), smem_buffer_ptr);
+      (param.node_rank, param.num_of_tokens_per_rank, param.attn_to_rdma_map, param.nixl_gpu_ctx, smem_buffer_ptr);
+#else
+      // Use DOCA for inter-node communication
+      N2N_warp_group_device_function
+      <INTER_NODE_GROUP, TOKEN_DATA_TYPE, cur_smem_t, NUM_OF_STAGES, HIDDEN_DIM, NUM_OF_TOKENS_PER_CHUNK,
+       MAX_NUM_OF_TOKENS_PER_RANK, NUM_OF_EXPERTS_PER_RANK, NUM_OF_RANKS_PER_NODE, NUM_OF_NODES, NUM_OF_BLOCKS, FORWARD_DISPATCH>
+      (param.node_rank, param.num_of_tokens_per_rank, param.attn_to_rdma_map, param.d_qps_gpu, param.mr_info, smem_buffer_ptr);
+#endif // USE_NIXL
     }
-#endif
+#endif // HYBRID_EP_BUILD_MULTINODE_ENABLE
   }else if(threadIdx_x_int < INTER_NODE_GROUP::size() + INTRA_NODE_G2S_GROUP::size()){
     // Intra-node G2S warp groups.
     G2S_warp_group_device_function
@@ -4066,7 +4482,7 @@ template<// This type represent intra-node reduction warp group.
 // 1. unpermute G2S warp group(1 warp for multinode scenario, 2 warps otherwise, 1 warp per pipeline). 2. unpermute reduction warp group(4 warps, 1 pipeline for multinode scenario, 2 pipeline otherwise). 
 // Total 6(single-node) or 5(multi-node) warps per CUDA block/SM, same as inter-node G2S and reduction warp group.
 __launch_bounds__(INTRA_NODE_RED_GROUP::size() + INTER_NODE_RED_GROUP::size() + INTRA_NODE_G2S_GROUP::size() + INTER_NODE_G2S_GROUP::size() + INTER_NODE_RDMA_GROUP::size(), 1)
-__global__ void combine_kernel(const __grid_constant__ combine_kernel_param_t param)
+__global__ void combine_kernel(const __grid_constant__ combine_kernel_param_t<NUM_OF_RANKS_PER_NODE> param)
 {
   // Compile-time check.
 #ifdef HYBRID_EP_BUILD_MULTINODE_ENABLE
@@ -4218,7 +4634,7 @@ __global__ void combine_kernel(const __grid_constant__ combine_kernel_param_t pa
       if constexpr(NUM_OF_NODES != 1){
         inter_node_N2N_warp_group_device_function
         <INTER_NODE_RDMA_GROUP, cur_smem_t, NUM_OF_STAGES_S2G, HIDDEN_DIM, NUM_OF_TOKENS_PER_CHUNK, MAX_NUM_OF_TOKENS_PER_RANK, NUM_OF_EXPERTS_PER_RANK, NUM_OF_RANKS_PER_NODE, NUM_OF_NODES, NUM_OF_BLOCKS, BACKWARD_COMBINE>
-        (param.node_rank, param.num_of_tokens_per_rank, param.rdma_to_attn_map, reinterpret_cast<doca_gpu_dev_verbs_qp**>(param.d_qps_gpu), reinterpret_cast<combine_memory_region_info_t*>(param.mr_info), smem_buffer_ptr);
+        (param.node_rank, param.num_of_tokens_per_rank, param.rdma_to_attn_map, param.d_qps_gpu, param.mr_info, smem_buffer_ptr);
       }
 #endif
     }else{
@@ -4281,11 +4697,19 @@ __global__ void combine_kernel(const __grid_constant__ combine_kernel_param_t pa
     // Inter-node rdma warp group.
 #ifdef HYBRID_EP_BUILD_MULTINODE_ENABLE
     if constexpr(NUM_OF_NODES != 1){
+#ifdef USE_NIXL
+      // Use NIXL for inter-node communication
       inter_node_N2N_warp_group_device_function
       <INTER_NODE_RDMA_GROUP, cur_smem_t, NUM_OF_STAGES_S2G, HIDDEN_DIM, NUM_OF_TOKENS_PER_CHUNK, MAX_NUM_OF_TOKENS_PER_RANK, NUM_OF_EXPERTS_PER_RANK, NUM_OF_RANKS_PER_NODE, NUM_OF_NODES, NUM_OF_BLOCKS, BACKWARD_COMBINE>
-      (param.node_rank, param.num_of_tokens_per_rank, param.rdma_to_attn_map, reinterpret_cast<doca_gpu_dev_verbs_qp**>(param.d_qps_gpu), reinterpret_cast<combine_memory_region_info_t*>(param.mr_info), smem_buffer_ptr);
+      (param.node_rank, param.num_of_tokens_per_rank, param.rdma_to_attn_map, param.nixl_gpu_ctx, smem_buffer_ptr);
+#else
+      // Use DOCA for inter-node communication
+      inter_node_N2N_warp_group_device_function
+      <INTER_NODE_RDMA_GROUP, cur_smem_t, NUM_OF_STAGES_S2G, HIDDEN_DIM, NUM_OF_TOKENS_PER_CHUNK, MAX_NUM_OF_TOKENS_PER_RANK, NUM_OF_EXPERTS_PER_RANK, NUM_OF_RANKS_PER_NODE, NUM_OF_NODES, NUM_OF_BLOCKS, BACKWARD_COMBINE>
+      (param.node_rank, param.num_of_tokens_per_rank, param.rdma_to_attn_map, param.d_qps_gpu, param.mr_info, smem_buffer_ptr);
+#endif // USE_NIXL
     }
-#endif
+#endif // HYBRID_EP_BUILD_MULTINODE_ENABLE
   }else{
     // Too many threads, should not goes here.
   }
@@ -4311,8 +4735,10 @@ __global__ void scan(const bool* input_routing_map,
                      int32_t* dense_chunk_layout,
                      int32_t* dense_to_expert_map,
                      int32_t* num_of_local_experts_tokens,
+                     int* token_drop_triggered,
                      const int node_rank,
                      const int local_rank,
+                     const int local_experts_tokens_limit, // This size MUST be multiple of LOCAL_EXPERTS_PADDING_SIZE!
                      const int num_of_tokens_per_rank)
 {
   // Calculate the warps per block.
@@ -4642,11 +5068,11 @@ __global__ void scan(const bool* input_routing_map,
 
 #ifdef HYBRID_EP_BUILD_PERMUTE_FUSION_ENABLE 
   // Load sum of all blocks' local experts' routing info to produce the accumulation of previous local experts' routing info. 
-  int32_t thread_local_all_block_local_experts_sum[NUM_OF_EXPERTS_PER_RANK - 1];
+  int32_t thread_local_all_block_local_experts_sum[NUM_OF_EXPERTS_PER_RANK];
   // Only threads which will participate in accumulation will need to load the data from the shared memory.
   if(threadIdx.x < NUM_OF_EXPERTS_PER_RANK){
     #pragma unroll
-    for(int i = 0; i < NUM_OF_EXPERTS_PER_RANK - 1; i++){
+    for(int i = 0; i < NUM_OF_EXPERTS_PER_RANK; i++){
       thread_local_all_block_local_experts_sum[i] = all_block_local_experts_sum[i];
     }
   }
@@ -4655,6 +5081,23 @@ __global__ void scan(const bool* input_routing_map,
   for(int i = threadIdx.x; i < NUM_OF_EXPERTS_PER_RANK; i += NUM_THREADS_PER_BLOCK){
     int32_t current_expert_previous_block_sum = previous_block_local_experts_sum[i];
     int32_t previous_experts_acc = 0;
+#ifdef HYBRID_EP_BUILD_TOKEN_DROP_ENABLE
+    int32_t previous_experts_acc_plus_current_expert_valid_tokens;
+    int32_t current_expert_valid_tokens;
+    #pragma unroll
+    for(int j = 0; j < NUM_OF_EXPERTS_PER_RANK; j++){
+      if(j < i){
+        // local experts sum can be >= zero, so need to handle the corner case.
+        int num_of_padding_tile = (thread_local_all_block_local_experts_sum[j] % LOCAL_EXPERTS_PADDING_SIZE == 0) ? (thread_local_all_block_local_experts_sum[j] / LOCAL_EXPERTS_PADDING_SIZE)
+                                                                                                                  : (thread_local_all_block_local_experts_sum[j] / LOCAL_EXPERTS_PADDING_SIZE + 1);
+        int32_t local_expert_sum_with_padding = num_of_padding_tile * LOCAL_EXPERTS_PADDING_SIZE;
+        previous_experts_acc += local_expert_sum_with_padding;
+      }else if(j == i){
+        current_expert_valid_tokens = thread_local_all_block_local_experts_sum[j];
+        previous_experts_acc_plus_current_expert_valid_tokens = previous_experts_acc + thread_local_all_block_local_experts_sum[j];
+      }
+    }
+#else
     #pragma unroll
     for(int j = 0; j < NUM_OF_EXPERTS_PER_RANK - 1; j++){
       if(j < i){
@@ -4665,19 +5108,55 @@ __global__ void scan(const bool* input_routing_map,
         previous_experts_acc += local_expert_sum_with_padding;
       }
     }
+#endif
     previous_block_local_experts_sum[i] = current_expert_previous_block_sum + previous_experts_acc;
+#ifdef HYBRID_EP_BUILD_TOKEN_DROP_ENABLE
+    // First block will need to save all local experts' sum back to output buffer subject to token drop conditions.
+    // First block also need to determine whether token drop is triggered.
+    if(blockIdx.x == 0){
+      int32_t num_of_current_experts_tokens;
+      if(local_experts_tokens_limit > previous_experts_acc){
+        // If previous local experts have not already fully occupied the local expert buffer, at least some valid tokens from current experts can be stored to the buffer.
+        // This code path ONLY work when local_experts_tokens_limit is guarantee to be multiple of LOCAL_EXPERTS_PADDING_SIZE!
+        if(local_experts_tokens_limit >= previous_experts_acc_plus_current_expert_valid_tokens){
+          // If the local expert buffer's capacity can hold all the valid tokens from current expert, all valid tokens from current expert can be stored to the buffer.
+          num_of_current_experts_tokens = current_expert_valid_tokens;
+        }else{
+          // If the local expert buffer's capacity cannot hold all the valid tokens from current expert, only partial of valid tokens can be strored to the buffer.
+          num_of_current_experts_tokens = local_experts_tokens_limit - previous_experts_acc;
+        }
+      }else{
+        // If all tokens from previous local experts(including both valid tokens and padding tokens) already exceed local expert buffer capacity, no more space for current local expert.
+        num_of_current_experts_tokens = 0;
+      }
+      num_of_local_experts_tokens[i] = num_of_current_experts_tokens;
+
+      // The thread which process the last local expert should determine whether token drop is triggered.
+      if(i == NUM_OF_EXPERTS_PER_RANK - 1){
+        // If all tokens from all local experts(including both valid tokens and padding tokens) do not exceed local expert buffer capacity, token drop is not triggered. Otherwise triggered.
+        // We can use the following condition to determine whether token drop is triggered ONLY when local_experts_tokens_limit is guarantee to be multiple of LOCAL_EXPERTS_PADDING_SIZE!
+        if(previous_experts_acc_plus_current_expert_valid_tokens <= local_experts_tokens_limit){
+          *token_drop_triggered = 0;
+        }else{
+          *token_drop_triggered = 1;
+        }
+      }
+    }
+#endif
   }
 
   // Sync within a CUDA block to make sure all the final accumulated previous blocks' local experts' routing info have been produced to the shared memory 
   // before any thread can consume them in scan operation.
   __syncthreads();
 
+#ifndef HYBRID_EP_BUILD_TOKEN_DROP_ENABLE
   // First block will need to save all local experts' sum back to output buffer.
   if(blockIdx.x == 0){
     for(int i = threadIdx.x; i < NUM_OF_EXPERTS_PER_RANK; i += NUM_THREADS_PER_BLOCK){
       num_of_local_experts_tokens[i] = all_block_local_experts_sum[i];
     }
   }
+#endif
 #endif
 
   // Step 2: Each warp scan the sub-chunk assigned to them(the same sub-chunk as step 0) and produce sparse_to_dense_map, local_expert_routing_map and num_of_tokens_for_experts.
@@ -4869,6 +5348,11 @@ __global__ void scan(const bool* input_routing_map,
           int32_t local_expert_temp_sum = __popc(local_expert_vote_result);
           int32_t local_expert_temp_scan = __popc(local_expert_vote_result << (WARP_SIZE - lane_id));
           final_local_experts_ex_scan[k] = token_needed_by_this_local_expert ? previous_token_local_experts_sum[k] + local_expert_temp_scan : -1;
+#ifdef HYBRID_EP_BUILD_TOKEN_DROP_ENABLE
+          if(final_local_experts_ex_scan[k] >= local_experts_tokens_limit){
+            final_local_experts_ex_scan[k] = -1;
+          }
+#endif
           previous_token_local_experts_sum[k] += local_expert_temp_sum;
         }
         // Then save the ex-scan back to dense_to_expert map if the current token is needed by local rank.
@@ -5049,8 +5533,10 @@ public:
                                      int32_t* dense_chunk_layout,
                                      int32_t* dense_to_expert_map,
                                      int32_t* num_of_local_experts_tokens,
+                                     int* token_drop_triggered,
                                      const int node_rank,
                                      const int local_rank,
+                                     const int local_experts_tokens_limit, // This size MUST be multiple of LOCAL_EXPERTS_PADDING_SIZE!
                                      const int num_of_tokens_per_rank,
                                      cudaStream_t stream)
   {
@@ -5078,7 +5564,7 @@ public:
     scan<NUM_THREADS_PER_BLOCK, NUM_OF_BLOCKS, LOCAL_EXPERTS_PADDING_SIZE, NUM_OF_TOKENS_PER_CHUNK, NUM_OF_RANKS_PER_NODE, NUM_OF_NODES, NUM_OF_EXPERTS_PER_RANK>
     <<<NUM_OF_BLOCKS, NUM_THREADS_PER_BLOCK, 0, stream>>>
     (input_routing_map, preprocessing_tmp, preprocessing_local_experts_tmp, sparse_to_dense_map, rdma_to_attn_map, attn_to_rdma_map, num_of_tokens_for_experts, local_expert_routing_map, 
-    dense_chunk_layout, dense_to_expert_map, num_of_local_experts_tokens, node_rank, local_rank, num_of_tokens_per_rank);
+    dense_chunk_layout, dense_to_expert_map, num_of_local_experts_tokens, token_drop_triggered, node_rank, local_rank, local_experts_tokens_limit, num_of_tokens_per_rank);
 
     // Check if there is any CUDA error.
     CUDA_CHECK(cudaGetLastError());
@@ -5109,7 +5595,7 @@ public:
            bool FORWARD_DISPATCH,
            // Whether the dispatch kernel need device-side sync before exit. 
            bool DEVICE_SIDE_SYNC>
-  static void dispatch(dispatch_kernel_param_t<TOKEN_DATA_TYPE> param, cudaStream_t stream)
+  static void dispatch(dispatch_kernel_param_t<TOKEN_DATA_TYPE, NUM_OF_RANKS_PER_NODE> param, cudaStream_t stream)
   {
     // The warp groups data type for dispatch kernel, must match the warp groups layout required by the dispatch kernel.
 #ifdef HYBRID_EP_BUILD_MULTINODE_ENABLE
@@ -5147,7 +5633,14 @@ public:
 #else
     constexpr int SMEM_SIZE = sizeof(dispatch_kernel_smem_t);
 #endif
-    CUDA_CHECK(cudaFuncSetAttribute(dispatch_kernel_ptr, cudaFuncAttributeMaxDynamicSharedMemorySize, SMEM_SIZE));
+    // The dispatch kernel only need to be configured once.
+    static bool config_completed = false;
+    if(!config_completed){
+      // If the dynamic shared memory requested is too large, we may need to modify the carveout.
+      //CUDA_CHECK(cudaFuncSetAttribute(dispatch_kernel_ptr, cudaFuncAttributePreferredSharedMemoryCarveout, 100));
+      CUDA_CHECK(cudaFuncSetAttribute(dispatch_kernel_ptr, cudaFuncAttributeMaxDynamicSharedMemorySize, SMEM_SIZE));
+      config_completed = true;
+    }
 
     // Launch update_expected_value_kernel to update expected flag value.
     update_expected_value_kernel<NUM_OF_NODES, 1, 1>
@@ -5175,7 +5668,13 @@ public:
     if constexpr(DEVICE_SIDE_SYNC){
       device_sync_kernel<NUM_OF_RANKS_PER_NODE><<<1, 1, 0, stream>>>(param.intra_node_write_completion_flags, param.expected_intra_node_flag_value, param.intra_node_flag_parity);
     }
-
+#ifdef HYBRID_EP_BUILD_MULTINODE_ENABLE
+#ifndef USE_NIXL
+    // RDMA sync is needed.
+    rdma_sync_kernel<<<1, 1, 0, stream>>>(NUM_OF_NODES, param.node_rank, param.expected_rdma_flag_value,
+                                                   param.rdma_inter_node_group_flags, param.d_qps_gpu, param.mr_info);
+#endif
+#endif
     // Check if there is any CUDA error.
     CUDA_CHECK(cudaGetLastError());
   }
@@ -5205,7 +5704,7 @@ public:
            bool BACKWARD_COMBINE,
            // Whether the combine kernel need device-side sync before launch.
            bool DEVICE_SIDE_SYNC>
-  static void combine(combine_kernel_param_t param, cudaStream_t stream)
+  static void combine(combine_kernel_param_t<NUM_OF_RANKS_PER_NODE> param, cudaStream_t stream)
   {
     // The warp groups data type for combine kernel, must match the warp groups layout required by the combine kernel.
 #ifdef HYBRID_EP_BUILD_MULTINODE_ENABLE
@@ -5263,7 +5762,13 @@ public:
     constexpr int SMEM_SIZE = sizeof(combine_kernel_smem_t);
 #endif
     // The combine kernel only need to be configured once.
-    CUDA_CHECK(cudaFuncSetAttribute(combine_kernel_ptr, cudaFuncAttributeMaxDynamicSharedMemorySize, SMEM_SIZE));
+    static bool config_completed = false;
+    if(!config_completed){
+      // If the dynamic shared memory requested is too large, we may need to modify the carveout.
+      //CUDA_CHECK(cudaFuncSetAttribute(combine_kernel_ptr, cudaFuncAttributePreferredSharedMemoryCarveout, 100));
+      CUDA_CHECK(cudaFuncSetAttribute(combine_kernel_ptr, cudaFuncAttributeMaxDynamicSharedMemorySize, SMEM_SIZE));
+      config_completed = true;
+    }
 
     // Launch update_expected_value_kernel to update expected flag value.
     update_expected_value_kernel<NUM_OF_NODES, 1, NUM_OF_DATA_PIPELINE_PER_BLOCK>
@@ -5292,6 +5797,13 @@ public:
       device_sync_kernel<NUM_OF_RANKS_PER_NODE><<<1, 1, 0, stream>>>(param.intra_node_write_completion_flags, param.expected_intra_node_flag_value, param.intra_node_flag_parity);
     }
 
+    // RDMA sync is needed for inter-node scenario.
+#ifdef HYBRID_EP_BUILD_MULTINODE_ENABLE
+#ifndef USE_NIXL
+    rdma_sync_kernel<<<1, 1, 0, stream>>>(NUM_OF_NODES, param.node_rank, param.expected_rdma_flag_value,
+                                                   param.rdma_inter_node_group_flags, param.d_qps_gpu, param.mr_info);
+#endif
+#endif
     // Check if there is any CUDA error.
     CUDA_CHECK(cudaGetLastError());
   }
