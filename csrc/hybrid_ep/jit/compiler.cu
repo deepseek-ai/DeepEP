@@ -2,8 +2,11 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 
 #include "compiler.cuh"
+#include <any>
 #include <unistd.h>
 #include <pwd.h>
+#include <sys/types.h>
+#include <stdexcept>
 
 inline std::string get_env(std::string name) {
     const char* env = std::getenv(name.c_str());
@@ -24,7 +27,13 @@ std::string get_jit_dir() {
             cache_dir = "/tmp";  // Fallback 
         }
     }
-    return cache_dir + "/.deepep/hybrid_ep/jit";
+    // Use process-specific subdirectory to avoid race conditions when multiple
+    // processes compile kernels concurrently (e.g., torch.multiprocessing.spawn).
+    // Without this, one process could overwrite key.so while another loads it,
+    // causing "bad any_cast" when the wrong kernel type is loaded.
+    std::string base_jit = cache_dir + "/.deepep/hybrid_ep/jit";
+    std::string proc_jit = base_jit + "/proc-" + std::to_string(getpid());
+    return proc_jit;
 }
 
 NVCCCompiler::NVCCCompiler(std::string base_path, std::string comm_id): 
@@ -365,7 +374,15 @@ void KernelCache::run_dispatch_kernel(
     // Cast the function pointer to the correct type
     using DispatchFuncPtr = void (*)(
         hybrid_ep::dispatch_kernel_param_t<DATA_TYPE>, cudaStream_t);
-    auto func_ptr = std::any_cast<DispatchFuncPtr>(dispatch_instance);
+    DispatchFuncPtr func_ptr;
+    try {
+        func_ptr = std::any_cast<DispatchFuncPtr>(dispatch_instance);
+    } catch (const std::bad_any_cast& e) {
+        throw std::runtime_error(
+            "Kernel cache type mismatch for dispatch (key=" + dispatch_kernel_key +
+            "): expected " + (sizeof(DATA_TYPE) == 1 ? "uint8_t" : "uint16_t") +
+            " kernel. Original error: " + std::string(e.what()));
+    }
 
     // Run the kernel
     func_ptr(param, stream);
