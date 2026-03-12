@@ -49,7 +49,7 @@ class HybridEPBuffer:
         # Experimental features
         load_cached_kernels: bool = False,  
         use_shared_buffer: bool = True,
-        enable_custom_allgather: bool = False,
+        enable_custom_allgather: bool = True,
         # Deprecated parameters
         num_of_hybrid_ep_ranks_per_nvlink_domain: int = None,
         use_mnnvl: bool = None
@@ -351,7 +351,11 @@ class HybridEPBuffer:
                         topk_idx, topk_weights, num_of_tokens_per_rank, num_of_experts
                     )
             if non_blocking:
-                assert num_permuted_tokens >= 0, "The num_permuted_tokens is required for non-blocking mode."
+                assert num_permuted_tokens is not None and num_permuted_tokens >= 0, \
+                    "The num_permuted_tokens is required for non-blocking mode."
+                if pad_multiple is not None and pad_multiple > 0:
+                    assert num_permuted_tokens % pad_multiple == 0, \
+                        f"num_permuted_tokens ({num_permuted_tokens}) must be a multiple of pad_multiple ({pad_multiple}) in non-blocking mode."
 
             if handle is None:
                 assert hidden.size(0) == routing_map.size(

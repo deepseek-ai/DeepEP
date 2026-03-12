@@ -76,7 +76,7 @@ NVCCCompiler::NVCCCompiler(std::string base_path, std::string comm_id):
 }
   
 
-std::string NVCCCompiler::build(std::string code, std::string signature, int local_rank, int node_rank, int num_of_nodes, bool enable_permute_fusion) {
+std::string NVCCCompiler::build(std::string code, std::string signature, int local_rank, int node_rank, int num_of_nodes, bool enable_permute_fusion, bool enable_token_drop) {
     // Create the source directory
     std::filesystem::create_directories(jit_dir);
 
@@ -104,6 +104,8 @@ std::string NVCCCompiler::build(std::string code, std::string signature, int loc
     std::string extra_flags;
     if (enable_permute_fusion) {
         extra_flags += " -DHYBRID_EP_BUILD_PERMUTE_FUSION_ENABLE";
+    }
+    if (enable_token_drop) {
         extra_flags += " -DHYBRID_EP_BUILD_TOKEN_DROP_ENABLE";
     }
 
@@ -267,9 +269,11 @@ void KernelCache::run_preprocess_kernel(
     const int local_experts_tokens_limit,
     const int num_of_tokens_per_rank,
     bool fuse_permute_dispatch,
+    bool non_blocking,
     cudaStream_t stream
 ){
     // Generate the unique key to search the kernel in the cache
+    bool enable_token_drop = fuse_permute_dispatch && non_blocking;
     std::string preprocess_kernel_key = get_key(
         config.hidden_dim,
         config.max_num_of_tokens_per_rank,
@@ -280,13 +284,14 @@ void KernelCache::run_preprocess_kernel(
         config.num_of_tokens_per_chunk_preprocessing_api,
         config.num_of_threads_per_block_preprocessing_api,
         config.num_of_blocks_preprocessing_api,
-        fuse_permute_dispatch
+        fuse_permute_dispatch,
+        non_blocking
     );
     
     auto it = kernel_cache.find(preprocess_kernel_key);
     if (it == kernel_cache.end()) {
         auto preprocessing_code = nvcc_compiler.get_metadata_preprocessing_code(config);
-        auto preprocessing_path = nvcc_compiler.build(preprocessing_code, preprocess_kernel_key, local_rank, node_rank, config.num_of_nodes, fuse_permute_dispatch);
+        auto preprocessing_path = nvcc_compiler.build(preprocessing_code, preprocess_kernel_key, local_rank, node_rank, config.num_of_nodes, fuse_permute_dispatch, enable_token_drop);
         kernel_cache[preprocess_kernel_key] = nvcc_compiler.get_instance(preprocessing_path, preprocess_kernel_key);
     }
     auto preprocessing_instance = kernel_cache[preprocess_kernel_key];
@@ -304,6 +309,7 @@ template void KernelCache::run_dispatch_kernel<uint8_t>(
     HybridEpConfigInstance config, 
     hybrid_ep::dispatch_kernel_param_t<uint8_t> param,
     bool fuse_permute_dispatch,
+    bool non_blocking,
     cudaStream_t stream
 );
 
@@ -311,6 +317,7 @@ template void KernelCache::run_dispatch_kernel<uint16_t>(
     HybridEpConfigInstance config, 
     hybrid_ep::dispatch_kernel_param_t<uint16_t> param,
     bool fuse_permute_dispatch,
+    bool non_blocking,
     cudaStream_t stream
 );
 
@@ -319,9 +326,11 @@ void KernelCache::run_dispatch_kernel(
     HybridEpConfigInstance config, 
     hybrid_ep::dispatch_kernel_param_t<DATA_TYPE> param,
     bool fuse_permute_dispatch,
+    bool non_blocking,
     cudaStream_t stream
 ){
     // Generate the unique key to search the kernel in the cache
+    bool enable_token_drop = fuse_permute_dispatch && non_blocking;
     std::string dispatch_kernel_key = get_key(
         config.hidden_dim,
         config.max_num_of_tokens_per_rank,
@@ -340,14 +349,15 @@ void KernelCache::run_dispatch_kernel(
         config.num_of_blocks_permute,
         config.forward_dispatch_api,
         config.device_side_sync_dispatch_api,
-        fuse_permute_dispatch
+        fuse_permute_dispatch,
+        non_blocking
     );
 
     auto it = kernel_cache.find(dispatch_kernel_key);
     if (it == kernel_cache.end()) {
         // JIT Compile the kernel
         auto dispatch_code = nvcc_compiler.get_dispatch_code(config);
-        auto dispatch_path = nvcc_compiler.build(dispatch_code, dispatch_kernel_key, local_rank, node_rank, config.num_of_nodes, fuse_permute_dispatch);
+        auto dispatch_path = nvcc_compiler.build(dispatch_code, dispatch_kernel_key, local_rank, node_rank, config.num_of_nodes, fuse_permute_dispatch, enable_token_drop);
         kernel_cache[dispatch_kernel_key] = nvcc_compiler.get_instance(dispatch_path, dispatch_kernel_key);
     }
     auto dispatch_instance = kernel_cache[dispatch_kernel_key];
@@ -365,9 +375,11 @@ void KernelCache::run_combine_kernel(
     HybridEpConfigInstance config, 
     hybrid_ep::combine_kernel_param_t param,
     bool fuse_unpermute_combine,
+    bool non_blocking,
     cudaStream_t stream
 ){
     // Generate the unique key to search the kernel in the cache
+    bool enable_token_drop = fuse_unpermute_combine && non_blocking;
     std::string combine_kernel_key = get_key(
         config.hidden_dim,
         config.max_num_of_tokens_per_rank,
@@ -386,14 +398,15 @@ void KernelCache::run_combine_kernel(
         config.num_of_additional_in_flight_s2g_unpermute_block_combine_api,
         config.backward_combine_api,
         config.device_side_sync_combine_api,
-        fuse_unpermute_combine
+        fuse_unpermute_combine,
+        non_blocking
     );
 
     auto it = kernel_cache.find(combine_kernel_key);
     if (it == kernel_cache.end()) {
         // JIT Compile the kernel
         auto combine_code = nvcc_compiler.get_combine_code(config);
-        auto combine_path = nvcc_compiler.build(combine_code, combine_kernel_key, local_rank, node_rank, config.num_of_nodes, fuse_unpermute_combine);
+        auto combine_path = nvcc_compiler.build(combine_code, combine_kernel_key, local_rank, node_rank, config.num_of_nodes, fuse_unpermute_combine, enable_token_drop);
         kernel_cache[combine_kernel_key] = nvcc_compiler.get_instance(combine_path, combine_kernel_key);
     }
     auto combine_instance = kernel_cache[combine_kernel_key];

@@ -160,8 +160,9 @@
     */
    for (int i = threadIdx.x; i < num_of_local_experts; i += block_size) {
      tokens_per_expert_shmem[i] = static_cast<int>(tokens_per_expert[i]);
-     tokens_per_expert_prefix_sum[i] =
-         (tokens_per_expert_shmem[i] + pad_multiple - 1) / pad_multiple * pad_multiple;
+     tokens_per_expert_prefix_sum[i] = pad_multiple > 0
+         ? (tokens_per_expert_shmem[i] + pad_multiple - 1) / pad_multiple * pad_multiple
+         : tokens_per_expert_shmem[i];
    }
    __syncthreads();
    int value = threadIdx.x < num_of_local_experts ? tokens_per_expert_prefix_sum[threadIdx.x] : 0;

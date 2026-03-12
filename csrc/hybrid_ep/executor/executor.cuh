@@ -105,6 +105,7 @@ public:
         int pad_multiple;  // Used in the padding case of unpermute
         bool enable_unpermute = false;
         bool fuse_unpermute_combine = false;
+        bool non_blocking = false; // If enable this, the HYBRID_EP_BUILD_TOKEN_DROP_ENABLE will be enabled on the fused combine-unpermute kernel.
         int64_t num_of_tokens_per_rank;  // Dynamic sequence length
         cudaStream_t stream;
     };

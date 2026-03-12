@@ -142,9 +142,8 @@ HandleImpl Executor::metadata_preprocess_core(
       dense_chunk_layout_ptr, dense_to_expert_map_ptr, tokens_per_expert_ptr, 
       handle.overflow_flag.data_ptr<int>(),
       static_cast<int>(node_rank), static_cast<int>(local_rank), 
-      // local_experts_tokens_limit must be a multiple of LOCAL_EXPERTS_PADDING_SIZE (pad_multiple) as required by the scan kernel.
-      static_cast<int>(pad_multiple > 0 ? ((handle.num_permuted_tokens + pad_multiple - 1) / pad_multiple) * pad_multiple : handle.num_permuted_tokens),
-      num_of_tokens_per_rank, fuse_permute_dispatch, stream);
+      static_cast<int>(handle.num_permuted_tokens),
+      num_of_tokens_per_rank, fuse_permute_dispatch, non_blocking, stream);
 
 
   if(!fuse_permute_dispatch && enable_permute) {
@@ -295,7 +294,7 @@ void Executor::dispatch_core(HybridEpConfigInstance config, DispatchArgs& args) 
     param.mr_info = reinterpret_cast<void*>(inter_node_dispatch_buffers->mr_info);
 #endif
     // Launch kernel
-    kernel_cache.run_dispatch_kernel<DType>(config, param, args.fuse_permute_dispatch, args.stream);
+    kernel_cache.run_dispatch_kernel<DType>(config, param, args.fuse_permute_dispatch, args.non_blocking, args.stream);
     nvtxRangePop();  // End of dispatch_core nvtx range
 }
 
@@ -487,7 +486,7 @@ void Executor::combine_core(HybridEpConfigInstance config, CombineArgs& args) {
 #endif
 
     // Launch kernel
-    kernel_cache.run_combine_kernel(config, param, args.fuse_unpermute_combine, args.stream);
+    kernel_cache.run_combine_kernel(config, param, args.fuse_unpermute_combine, args.non_blocking, args.stream);
 
     nvtxRangePop();  // End of combine_core nvtx range
 }
