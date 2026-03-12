@@ -467,8 +467,6 @@ void RDMACoordinator::allocate_dispatch_buffers(){
   dispatch_remote_info_vec = static_cast<remote_info *>(calloc(buffer_config.num_of_nodes * num_of_dispatch_qps, sizeof(remote_info)));
   remote_info *my_dispatch_info = static_cast<remote_info *>(calloc(num_of_dispatch_qps, sizeof(remote_info)));
   int token_stride = buffer_config.max_num_of_tokens_per_rank * buffer_config.hidden_dim;
-  // TODO: should be the real dynamic num_of_tokens_per_rank
-  int flag_stride = (buffer_config.max_num_of_tokens_per_rank - 1) / buffer_config.num_of_tokens_per_chunk_dispatch_api + 1;
   int prob_stride = buffer_config.max_num_of_tokens_per_rank * buffer_config.num_of_experts_per_rank * buffer_config.num_of_ranks_per_node;
   int scaling_factor_stride = buffer_config.max_num_of_tokens_per_rank * (buffer_config.hidden_dim / 128);
   // For each queue pair to the same remote. 
@@ -624,7 +622,6 @@ void RDMACoordinator::allocate_combine_buffers(){
   combine_remote_info_vec = static_cast<remote_info *>(calloc(buffer_config.num_of_nodes * num_of_combine_qps, sizeof(remote_info)));
   remote_info *my_combine_info = static_cast<remote_info *>(calloc(num_of_combine_qps, sizeof(remote_info)));
   int token_stride = buffer_config.max_num_of_tokens_per_rank * buffer_config.hidden_dim;
-  int flag_stride = (buffer_config.max_num_of_tokens_per_rank - 1) / buffer_config.num_of_tokens_per_chunk_combine_api + 1;
   int prob_stride = buffer_config.max_num_of_tokens_per_rank * buffer_config.num_of_experts_per_rank * buffer_config.num_of_ranks_per_node;
   // For each queue pair to the same remote. 
   for (int qp_idx = 0; qp_idx < buffer_config.num_of_blocks_combine_api; ++qp_idx) {
