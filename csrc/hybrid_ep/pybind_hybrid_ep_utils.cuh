@@ -16,7 +16,9 @@
 #include <ATen/core/ivalue.h>
 #include <ATen/core/function_schema.h>
 #include <ATen/core/jit_type.h>
-#include <ATen/record_function.h>
+#include <torch/csrc/autograd/profiler_kineto.h>
+
+using namespace torch::autograd::profiler;
 
 namespace py = pybind11;
 
@@ -130,7 +132,7 @@ auto hybrid_ep_buffer_combine(Func func) {
         auto result = (self.*func)(config, hidden, probs, sparse_to_dense_map,
                                    rdma_to_attn_map, attn_to_rdma_map,
                                    num_of_tokens_per_rank, with_probs);
-        if (at::isRecordFunctionEnabled()) {
+        if (isProfilerEnabledInMainThread()) {
             record_hybrid_ep_buffer_init();
 
             std::vector<c10::IValue> inputValues;
@@ -173,7 +175,7 @@ template<typename Func>
 auto hybrid_ep_buffer_update_buffer(Func func) {
     return [func](HybridEPBuffer& self, HybridEpConfigInstance config) {
         auto result = (self.*func)(config);
-        if (at::isRecordFunctionEnabled()) {
+        if (isProfilerEnabledInMainThread()) {
             record_hybrid_ep_buffer_init();
 
             std::vector<c10::IValue> inputValues;
@@ -205,7 +207,7 @@ auto hybrid_ep_buffer_metadata_preprocessing(Func func) {
                   int64_t num_of_tokens_per_rank,
                   bool non_blocking) {
         auto result = (self.*func)(config, routing_map, num_of_tokens_per_rank, non_blocking);
-        if (at::isRecordFunctionEnabled()) {
+        if (isProfilerEnabledInMainThread()) {
             record_hybrid_ep_buffer_init();
 
             std::vector<c10::IValue> inputValues;
@@ -255,7 +257,7 @@ auto hybrid_ep_buffer_dispatch(Func func) {
                                    sparse_to_dense_map, rdma_to_attn_map, attn_to_rdma_map,
                                    num_dispatched_tokens_tensor, num_dispatched_tokens,
                                    num_of_tokens_per_rank, with_probs);
-        if (at::isRecordFunctionEnabled()) {
+        if (isProfilerEnabledInMainThread()) {
             record_hybrid_ep_buffer_init();
 
             std::vector<c10::IValue> inputValues;
@@ -323,7 +325,7 @@ auto hybrid_ep_buffer_dispatch_with_permute(Func func) {
                                   num_dispatched_tokens_tensor, local_expert_routing_map, row_id_map,
                                   num_permuted_tokens, num_of_tokens_per_rank, pad_multiple,
                                   non_blocking, with_probs);
-        if (at::isRecordFunctionEnabled()) {
+        if (isProfilerEnabledInMainThread()) {
             record_hybrid_ep_buffer_init();
 
             std::vector<c10::IValue> inputValues;
@@ -398,7 +400,7 @@ auto hybrid_ep_buffer_combine_with_unpermute(Func func) {
                                    rdma_to_attn_map, attn_to_rdma_map,
                                    num_dispatched_tokens_tensor, row_id_map,
                                    num_of_tokens_per_rank, pad_multiple, with_probs);
-        if (at::isRecordFunctionEnabled()) {
+        if (isProfilerEnabledInMainThread()) {
             record_hybrid_ep_buffer_init();
 
             std::vector<c10::IValue> inputValues;

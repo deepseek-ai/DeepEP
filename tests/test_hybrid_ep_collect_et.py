@@ -108,8 +108,8 @@ def test_main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
         
         prof = torch.profiler.profile(
             schedule=torch.profiler.schedule(
-                wait=0,
-                warmup=0,
+                wait=1,
+                warmup=2,
                 active=1,
                 repeat=1,
             ),
@@ -120,8 +120,6 @@ def test_main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
         prof.start()
 
         for i in range(5):
-
-
             dispatched_hidden, dispatched_probs, _, handle = (
                 buffer.dispatch(hidden=hidden, scaling_factor=scaling_factor, topk_idx=topk_idx, topk_weights=topk_weights, num_of_experts=NUM_OF_EXPERTS)
             )
