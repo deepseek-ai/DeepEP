@@ -16,9 +16,30 @@
     attr[1].val.clusterDim.y = 1; \
     attr[1].val.clusterDim.z = 1; \
     cfg.attrs = attr; \
-    cfg.numAttrs = 2
+    cfg.numAttrs = 2;
 #else
 #define SETUP_LAUNCH_CONFIG(sms, threads, stream) \
+    int __num_sms = (sms); \
+    int __num_threads = (threads); \
+    auto __stream = (stream)
+#endif
+#endif
+
+#ifndef SETUP_OVERLAP_LAUNCH_CONFIG
+#ifndef DISABLE_SM90_FEATURES
+#define SETUP_OVERLAP_LAUNCH_CONFIG(num_sms, num_threads, stream) \
+    cudaLaunchConfig_t cfg = {(num_sms), (num_threads), 0, stream, nullptr, 0}; \
+    cudaLaunchAttribute attr[2]; \
+    attr[0].id = cudaLaunchAttributeClusterDimension; \
+    attr[0].val.clusterDim.x = (num_sms % 2 == 0 ? 2 : 1); \
+    attr[0].val.clusterDim.y = 1; \
+    attr[0].val.clusterDim.z = 1; \
+    attr[1].id = cudaLaunchAttributeNvlinkUtilCentricScheduling; \
+    attr[1].val.nvlinkUtilCentricScheduling = 1; \
+    cfg.attrs = attr; \
+    cfg.numAttrs = 2;
+#else
+#define SETUP_OVERLAP_LAUNCH_CONFIG(sms, threads, stream) \
     int __num_sms = (sms); \
     int __num_threads = (threads); \
     auto __stream = (stream)

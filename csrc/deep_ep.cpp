@@ -394,7 +394,7 @@ Buffer::get_dispatch_layout(const torch::Tensor& topk_idx, int num_experts,
     auto is_token_in_rank = torch::empty({num_tokens, num_ranks}, dtype(torch::kBool).device(torch::kCUDA));
     if (is_internode_available())
         num_tokens_per_rdma_rank = torch::empty({num_rdma_ranks}, dtype(torch::kInt32).device(torch::kCUDA));
-    
+
     layout::get_dispatch_layout(topk_idx.data_ptr<int64_t>(),
                                 num_tokens_per_rank.data_ptr<int>(),
                                 num_tokens_per_rdma_rank.has_value() ? num_tokens_per_rdma_rank.value().data_ptr<int>() : nullptr,
@@ -822,7 +822,7 @@ Buffer::internode_dispatch(const torch::Tensor& x, const std::optional<torch::Te
     const int num_channels = config.num_sms / 2;
     EP_HOST_ASSERT(config.num_sms % 2 == 0);
     EP_HOST_ASSERT(0 < get_num_rdma_ranks() and get_num_rdma_ranks() <= NUM_MAX_RDMA_PEERS);
-    
+
     bool cached_mode = cached_rdma_channel_prefix_matrix.has_value();
     if (cached_mode) {
         EP_HOST_ASSERT(cached_rdma_channel_prefix_matrix.has_value());
@@ -1042,7 +1042,7 @@ Buffer::internode_dispatch(const torch::Tensor& x, const std::optional<torch::Te
                         buffer_ptrs_gpu, config.num_max_nvl_chunked_send_tokens, config.num_max_nvl_chunked_recv_tokens,
                         rank, num_ranks, cached_mode,
                         comm_stream, num_channels, low_latency_mode);
-    
+
 
     // Wait streams
     std::optional<EventHandle> event;
@@ -1072,7 +1072,7 @@ Buffer::internode_dispatch(const torch::Tensor& x, const std::optional<torch::Te
     // Switch back compute stream
     if (allocate_on_comm_stream)
         at::cuda::setCurrentCUDAStream(compute_stream);
-    
+
     // Return values
     return {recv_x, recv_x_scales, recv_topk_idx, recv_topk_weights, num_recv_tokens_per_expert_list,
             rdma_channel_prefix_matrix, gbl_channel_prefix_matrix,
@@ -1241,8 +1241,9 @@ void Buffer::clean_low_latency_buffer(int num_max_dispatch_tokens_per_rank, int 
 #endif
 }
 
-std::tuple<torch::Tensor, std::optional<torch::Tensor>, torch::Tensor, torch::Tensor, torch::Tensor, std::optional<EventHandle>, std::optional<std::function<void()>>>
+std::tuple<torch::Tensor, std::optional<torch::Tensor>, torch::Tensor, torch::Tensor, torch::Tensor, std::optional<torch::Tensor>, std::optional<torch::Tensor>, std::optional<EventHandle>, std::optional<std::function<void()>>>
 Buffer::low_latency_dispatch(const torch::Tensor& x, const torch::Tensor& topk_idx,
+                             const std::optional<torch::Tensor>& topk_weights,
                              const std::optional<torch::Tensor>& cumulative_local_expert_recv_stats,
                              const std::optional<torch::Tensor>& dispatch_wait_recv_cost_stats,
                              const std::optional<torch::Tensor>& x_global_scale,
@@ -1260,6 +1261,10 @@ Buffer::low_latency_dispatch(const torch::Tensor& x, const torch::Tensor& topk_i
     EP_HOST_ASSERT(topk_idx.dim() == 2 and topk_idx.is_contiguous());
     EP_HOST_ASSERT(x.size(0) == topk_idx.size(0) and x.size(0) <= num_max_dispatch_tokens_per_rank);
     EP_HOST_ASSERT(topk_idx.scalar_type() == torch::kInt64);
+    if (topk_weights.has_value()) {
+        EP_HOST_ASSERT(topk_weights->dim() == 2 and topk_weights->is_contiguous());
+        EP_HOST_ASSERT(topk_weights->size(0) == topk_idx.size(0) and topk_weights->size(1) == topk_idx.size(1));
+    }
     EP_HOST_ASSERT(num_experts % num_ranks == 0);
 
     // Diagnosis tensors
@@ -1296,6 +1301,8 @@ Buffer::low_latency_dispatch(const torch::Tensor& x, const torch::Tensor& topk_i
     auto packed_recv_x = torch::empty({num_local_experts, num_ranks * num_max_dispatch_tokens_per_rank, use_nvfp4 ? hidden / 2 : hidden},
                                       x.options().dtype(use_nvfp4 ? torch::kUInt8 : (use_fp8 ? torch::kFloat8_e4m3fn: torch::kBFloat16)));
     auto packed_recv_src_info = torch::empty({num_local_experts, num_ranks * num_max_dispatch_tokens_per_rank}, torch::dtype(torch::kInt32).device(torch::kCUDA));
+    auto packed_recv_topk_weights = topk_weights.has_value() ? std::optional<torch::Tensor>(torch::empty({num_local_experts, num_ranks * num_max_dispatch_tokens_per_rank}, torch::dtype(torch::kFloat32).device(torch::kCUDA))) : std::nullopt;
+    auto packed_recv_rank_info = topk_weights.has_value() ? std::optional<torch::Tensor>(torch::empty({num_local_experts, num_ranks * num_max_dispatch_tokens_per_rank}, torch::dtype(torch::kInt32).device(torch::kCUDA))) : std::nullopt;
     auto packed_recv_layout_range = torch::empty({num_local_experts, num_ranks}, torch::dtype(torch::kInt64).device(torch::kCUDA));
     auto packed_recv_count = torch::empty({num_local_experts}, torch::dtype(torch::kInt32).device(torch::kCUDA));
 
@@ -1341,7 +1348,7 @@ Buffer::low_latency_dispatch(const torch::Tensor& x, const torch::Tensor& topk_i
         // After permute, the logical shape is (32, 4, rm, 4, rk, l)
         packed_recv_x_scales = packed_recv_x_scales.value().permute({3, 4, 1, 5, 2, 0});
 
-        // The physical layout is (l, m, k // 2). 
+        // The physical layout is (l, m, k // 2).
         // After permute, the logical shape is (m, k // 2, l).
         packed_recv_x = packed_recv_x.permute({1, 2, 0});
 
@@ -1355,12 +1362,15 @@ Buffer::low_latency_dispatch(const torch::Tensor& x, const torch::Tensor& topk_i
         internode_ll::dispatch(packed_recv_x.data_ptr(), packed_recv_x_scales_ptr,
                                packed_recv_src_info.data_ptr<int>(), packed_recv_layout_range.data_ptr<int64_t>(),
                                packed_recv_count.data_ptr<int>(),
+                               packed_recv_topk_weights.has_value() ? packed_recv_topk_weights->data_ptr<float>() : nullptr,
+                               packed_recv_rank_info.has_value() ? packed_recv_rank_info->data_ptr<int>() : nullptr,
                                cumulative_local_expert_recv_stats.has_value() ? cumulative_local_expert_recv_stats->data_ptr<int>() : nullptr,
                                dispatch_wait_recv_cost_stats.has_value() ? dispatch_wait_recv_cost_stats->data_ptr<int64_t>() : nullptr,
                                x_global_scale.has_value() ? x_global_scale->data_ptr<float>() : nullptr,
                                buffer.dispatch_rdma_recv_data_buffer, buffer.dispatch_rdma_recv_count_buffer,
                                buffer.dispatch_rdma_send_buffer,
                                x.data_ptr(), topk_idx.data_ptr<int64_t>(),
+                               topk_weights.has_value() ? topk_weights->data_ptr<float>() : nullptr,
                                next_clean_meta.first, next_clean_meta.second,
                                num_tokens, hidden, num_max_dispatch_tokens_per_rank,
                                num_topk, num_experts, rank, num_ranks,
@@ -1387,7 +1397,7 @@ Buffer::low_latency_dispatch(const torch::Tensor& x, const torch::Tensor& topk_i
         recv_hook = [=]() { launcher(LOW_LATENCY_RECV_PHASE); };
 
     // Return values
-    return {packed_recv_x, packed_recv_x_scales, packed_recv_count, packed_recv_src_info, packed_recv_layout_range, event, recv_hook};
+    return {packed_recv_x, packed_recv_x_scales, packed_recv_count, packed_recv_src_info, packed_recv_layout_range, packed_recv_topk_weights, packed_recv_rank_info, event, recv_hook};
 #else
     EP_HOST_ASSERT(false and "NVSHMEM is disabled during compilation");
     return {};
@@ -1527,13 +1537,13 @@ bool is_sm90_compiled() {
 #endif
 }
 
-std::tuple<torch::Tensor, std::optional<torch::Tensor>, std::optional<torch::Tensor>, 
+std::tuple<torch::Tensor, std::optional<torch::Tensor>, std::optional<torch::Tensor>,
 std::optional<torch::Tensor>,std::vector<int>, torch::Tensor, std::optional<torch::Tensor>, torch::Tensor, std::optional<torch::Tensor>, std::optional<EventHandle>>
 Buffer::dispatch_pcie(const torch::Tensor& x, const std::optional<torch::Tensor>& x_scales,
                       const std::optional<torch::Tensor>& topk_idx, const std::optional<torch::Tensor>& topk_weights,
                       const std::optional<torch::Tensor>& num_tokens_per_rank,
                       const torch::Tensor& is_token_in_rank, const std::optional<torch::Tensor>& num_tokens_per_expert,
-                      int cached_num_recv_tokens, 
+                      int cached_num_recv_tokens,
                       const std::optional<torch::Tensor>& cached_rdma_channel_prefix_matrix, const std::optional<torch::Tensor>& cached_recv_rdma_rank_prefix_sum,
                       int expert_alignment,const Config& config, std::optional<EventHandle>& previous_event, bool async, bool allocate_on_comm_stream) {
 #ifndef DISABLE_NVSHMEM
@@ -1547,12 +1557,12 @@ Buffer::dispatch_pcie(const torch::Tensor& x, const std::optional<torch::Tensor>
     bool cached_mode = cached_rdma_channel_prefix_matrix.has_value();
     if (cached_mode) {
         EP_HOST_ASSERT(cached_rdma_channel_prefix_matrix.has_value());
-        EP_HOST_ASSERT(cached_recv_rdma_rank_prefix_sum.has_value());    
+        EP_HOST_ASSERT(cached_recv_rdma_rank_prefix_sum.has_value());
     } else {
         EP_HOST_ASSERT(num_tokens_per_rank.has_value());
         EP_HOST_ASSERT(num_tokens_per_expert.has_value());
     }
-    
+
     // Type Check
     if (cached_mode) {
         EP_HOST_ASSERT(cached_rdma_channel_prefix_matrix->scalar_type() == torch::kInt32);
@@ -1575,7 +1585,7 @@ Buffer::dispatch_pcie(const torch::Tensor& x, const std::optional<torch::Tensor>
         EP_HOST_ASSERT(num_tokens_per_expert->dim() == 1 and num_tokens_per_expert->is_contiguous());
         EP_HOST_ASSERT(num_tokens_per_rank->size(0) == num_ranks);
         EP_HOST_ASSERT(num_tokens_per_expert->size(0) % num_ranks == 0);
-        EP_HOST_ASSERT(num_tokens_per_expert->size(0) / num_ranks <= NUM_MAX_LOCAL_EXPERTS);    
+        EP_HOST_ASSERT(num_tokens_per_expert->size(0) / num_ranks <= NUM_MAX_LOCAL_EXPERTS);
     }
 
     auto num_tokens = static_cast<int>(x.size(0));
@@ -1657,9 +1667,9 @@ Buffer::dispatch_pcie(const torch::Tensor& x, const std::optional<torch::Tensor>
         *moe_recv_counter = -1, *moe_recv_rdma_counter = -1;
         for (int i = 0; i < num_local_experts; ++ i)
             moe_recv_expert_counter[i] = -1;
-        
+
         pcie::notify_dispatch_pcie(num_tokens_per_rank->data_ptr<int>(), moe_recv_counter_mapped, num_ranks,
-                                    num_tokens_per_expert->data_ptr<int>(), 
+                                    num_tokens_per_expert->data_ptr<int>(),
                                     moe_recv_expert_counter_mapped, num_experts,
                                     is_token_in_rank.data_ptr<bool>(), num_tokens, num_channels,
                                     hidden_int4, num_scales, num_topk, expert_alignment,
@@ -1695,7 +1705,7 @@ Buffer::dispatch_pcie(const torch::Tensor& x, const std::optional<torch::Tensor>
     auto recv_topk_idx = std::optional<torch::Tensor>(), recv_topk_weights = std::optional<torch::Tensor>(), recv_x_scales = std::optional<torch::Tensor>();
     auto recv_rdma_channel_prefix_matrix = std::optional<torch::Tensor>();
     auto send_rdma_head = std::optional<torch::Tensor>();
-    
+
     // not cache mode
     if (not cached_mode) {
         recv_rdma_channel_prefix_matrix = torch::empty({num_ranks, num_channels}, dtype(torch::kInt32).device(torch::kCUDA));
@@ -1719,14 +1729,14 @@ Buffer::dispatch_pcie(const torch::Tensor& x, const std::optional<torch::Tensor>
                         torch::empty({num_recv_tokens, num_scales}, x_scales->options());
         recv_x_scales_ptr = static_cast<float*>(recv_x_scales->data_ptr());
     }
-    
+
     // Launch Kernel
     pcie::dispatch_pcie(
-        recv_x.data_ptr(), recv_x_scales_ptr, recv_topk_idx_ptr, recv_topk_weights_ptr, 
+        recv_x.data_ptr(), recv_x_scales_ptr, recv_topk_idx_ptr, recv_topk_weights_ptr,
         x.data_ptr(), x_scales_ptr, topk_idx_ptr, topk_weights_ptr,
         rdma_channel_prefix_matrix.data_ptr<int>(),
         recv_rdma_rank_prefix_sum.data_ptr<int>(),
-        cached_mode ? nullptr : recv_rdma_channel_prefix_matrix->data_ptr<int>(), 
+        cached_mode ? nullptr : recv_rdma_channel_prefix_matrix->data_ptr<int>(),
         cached_mode ? nullptr : send_rdma_head->data_ptr<int>(),
         is_token_in_rank.data_ptr<bool>(),
         num_tokens, hidden_int4, num_scales, num_topk, num_experts,num_local_experts,
@@ -1760,7 +1770,7 @@ Buffer::dispatch_pcie(const torch::Tensor& x, const std::optional<torch::Tensor>
         at::cuda::setCurrentCUDAStream(compute_stream);
 
     return {recv_x, recv_x_scales, recv_topk_idx, recv_topk_weights, num_recv_tokens_per_expert_list,
-            rdma_channel_prefix_matrix, 
+            rdma_channel_prefix_matrix,
             recv_rdma_channel_prefix_matrix, recv_rdma_rank_prefix_sum,
             send_rdma_head, event};
 #else
