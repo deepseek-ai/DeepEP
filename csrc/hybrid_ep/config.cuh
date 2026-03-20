@@ -314,8 +314,8 @@ public:
         int sms_preprocessing = num_sms_preprocessing_api.value_or(108);
         int sms_dispatch = num_sms_dispatch_api.value_or((num_of_nodes == 1) ? 24 : 8);
         int sms_combine = num_sms_combine_api.value_or((num_of_nodes == 1) ? 24 : 8);
-        num_blocks_permute_ = num_blocks_permute.value_or(sm_count * 16);
-        num_blocks_unpermute_ = num_blocks_unpermute.value_or(sm_count * 16);
+        num_blocks_permute_ = num_blocks_permute.value_or(-1);
+        num_blocks_unpermute_ = num_blocks_unpermute.value_or(-1);
 
         assert(sm_count >= sms_dispatch
             && sm_count >= sms_combine);
@@ -394,10 +394,15 @@ public:
             config.num_of_blocks_permute = min(108, sm_count - config.num_of_blocks_dispatch_api);
             config.num_of_blocks_unpermute = min(108, sm_count - config.num_of_blocks_combine_api);
         }else{
-            config.num_of_blocks_permute = num_blocks_permute_;
-            config.num_of_blocks_unpermute = num_blocks_unpermute_;
+            config.num_of_blocks_permute = sm_count * 16;
+            config.num_of_blocks_unpermute = sm_count * 16;
         }
 
+        // Update num_of_blocks_permute and num_of_blocks_unpermute with predefined values
+        if (num_blocks_permute_ >= 0) 
+            config.num_of_blocks_permute = num_blocks_permute_;
+        if (num_blocks_unpermute_ >= 0) 
+            config.num_of_blocks_unpermute = num_blocks_unpermute_;
         return config;
     }
 
