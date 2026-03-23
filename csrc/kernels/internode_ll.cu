@@ -251,7 +251,7 @@ __global__ __launch_bounds__(1024, 1) void dispatch(void* packed_recv_x,
             }
             asm volatile("bar.sync 1, %0;" ::"r"(num_threads));
 
-            // Issue IBGDA sends
+            // Stage data for bulk RDMA put (or NVLink direct copy)
             if (dst_expert_idx >= 0) {
                 int slot_idx = lane_id == 0 ? atomicAdd(atomic_counter_per_expert + dst_expert_idx, 1) : 0;
                 slot_idx = __shfl_sync(0xffffffff, slot_idx, 0);
@@ -263,17 +263,21 @@ __global__ __launch_bounds__(1024, 1) void dispatch(void* packed_recv_x,
                     rank * num_max_dispatch_tokens_per_rank * num_bytes_per_msg + slot_idx * num_bytes_per_msg;
                 const auto dst_p2p_ptr = nvshmemi_get_p2p_ptr(dst_ptr, rank, dst_rank);
                 if (not is_rank_masked<true>(mask_buffer_ptr, dst_rank)) {
-                    if (dst_p2p_ptr == 0) {
-                        nvshmemi_ibgda_put_nbi_warp(dst_ptr, src_ptr, num_bytes_per_msg, dst_rank, dst_expert_local_idx, lane_id, slot_idx);
-                    } else {
-                        // NOTES: only 2 load iterations for 7K hidden with 8 unrolls
+                    if (dst_p2p_ptr != 0) {
                         const auto* src_int4_ptr = reinterpret_cast<const int4*>(src_ptr);
                         const auto* dst_int4_ptr = reinterpret_cast<int4*>(dst_p2p_ptr);
                         UNROLLED_WARP_COPY(8, lane_id, num_int4_per_msg, dst_int4_ptr, src_int4_ptr, ld_nc_global, st_na_global);
+                    } else {
+                        // RDMA: copy to per-expert contiguous staging for bulk put
+                        auto* rdma_x_staging = static_cast<uint8_t*>(rdma_x) + (size_t)num_tokens * num_bytes_per_msg;
+                        auto* stage_dst = reinterpret_cast<int4*>(
+                            rdma_x_staging +
+                            (size_t)dst_expert_idx * num_max_dispatch_tokens_per_rank * num_bytes_per_msg +
+                            (size_t)slot_idx * num_bytes_per_msg);
+                        const auto* stage_src = reinterpret_cast<const int4*>(src_ptr);
+                        UNROLLED_WARP_COPY(8, lane_id, num_int4_per_msg, stage_dst, stage_src, ld_nc_global, st_na_global);
                     }
                 }
-
-                // Increase counter after finishing
                 __syncwarp();
                 lane_id == 0 ? atomic_add_release_global(atomic_finish_counter_per_expert + dst_expert_idx, 1) : 0;
             }
@@ -321,22 +325,43 @@ __global__ __launch_bounds__(1024, 1) void dispatch(void* packed_recv_x,
     }
     __syncthreads();
 
-    // Issue count sends
-    if (responsible_expert_idx < num_experts and sub_warp_id == 0 and lane_id == 0) {
+    // Issue bulk RDMA puts + count signals
+    if (responsible_expert_idx < num_experts and sub_warp_id == 0) {
         const auto dst_rank = responsible_expert_idx / num_local_experts;
         const auto dst_expert_local_idx = responsible_expert_idx % num_local_experts;
         const auto num_tokens_sent = shared_num_tokens_sent_per_expert[responsible_expert_idx - sm_id * num_warp_groups];
 
-        // Wait local sends issued and send expert counts
-        while (ld_acquire_global(atomic_finish_counter_per_expert + responsible_expert_idx) != FINISHED_SUM_TAG * 2)
-            ;
-        auto dst_ptr = reinterpret_cast<uint64_t>(rdma_recv_count + dst_expert_local_idx * num_ranks + rank);
-        auto dst_p2p_ptr = nvshmemi_get_p2p_ptr(dst_ptr, rank, dst_rank);
+        // Wait for all data warps to finish staging
+        if (lane_id == 0) {
+            while (ld_acquire_global(atomic_finish_counter_per_expert + responsible_expert_idx) != FINISHED_SUM_TAG * 2)
+                ;
+        }
+        __syncwarp();
+
+        // Bulk RDMA put for this expert (all 32 lanes participate)
         if (not is_rank_masked(mask_buffer_ptr, dst_rank)) {
-            if (dst_p2p_ptr == 0) {
-                nvshmemi_ibgda_amo_nonfetch_add(reinterpret_cast<int*>(dst_ptr), -num_tokens_sent - 1, dst_rank, dst_expert_local_idx);
-            } else {
-                st_release_sys_global(reinterpret_cast<int*>(dst_p2p_ptr), -num_tokens_sent - 1);
+            auto rdma_dst = reinterpret_cast<uint64_t>(rdma_recv_x) +
+                (size_t)dst_expert_local_idx * num_ranks * num_max_dispatch_tokens_per_rank * num_bytes_per_msg +
+                (size_t)rank * num_max_dispatch_tokens_per_rank * num_bytes_per_msg;
+            auto rdma_dst_p2p = nvshmemi_get_p2p_ptr(rdma_dst, rank, dst_rank);
+            if (rdma_dst_p2p == 0 && num_tokens_sent > 0) {
+                auto* rdma_x_staging = static_cast<uint8_t*>(rdma_x) + (size_t)num_tokens * num_bytes_per_msg;
+                auto* bulk_src = rdma_x_staging +
+                    (size_t)responsible_expert_idx * num_max_dispatch_tokens_per_rank * num_bytes_per_msg;
+                nvshmemi_ibgda_put_nbi_warp(
+                    rdma_dst,
+                    reinterpret_cast<uint64_t>(bulk_src),
+                    (size_t)num_tokens_sent * num_bytes_per_msg,
+                    dst_rank, dst_expert_local_idx, lane_id, 0);
+                __syncwarp();
+            }
+            if (lane_id == 0) {
+                auto sig_dst = reinterpret_cast<uint64_t>(rdma_recv_count + dst_expert_local_idx * num_ranks + rank);
+                auto sig_p2p = nvshmemi_get_p2p_ptr(sig_dst, rank, dst_rank);
+                if (sig_p2p == 0)
+                    nvshmemi_ibgda_amo_nonfetch_add(reinterpret_cast<int*>(sig_dst), -num_tokens_sent - 1, dst_rank, dst_expert_local_idx);
+                else
+                    st_release_sys_global(reinterpret_cast<int*>(sig_p2p), -num_tokens_sent - 1);
             }
         }
 
