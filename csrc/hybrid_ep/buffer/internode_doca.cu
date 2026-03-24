@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 // SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES.
 // All rights reserved
-#include "internode.cuh"
+#include "buffer/internode_doca.cuh"
 #include <sstream>
 #include <cstdlib>
 #include <unordered_map>

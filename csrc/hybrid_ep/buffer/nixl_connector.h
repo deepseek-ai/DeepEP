@@ -9,6 +9,7 @@
 #include <string>
 #include <cuda_runtime.h>
 #include "backend/nixl_types.h"
+#include "coordinator.cuh"
 
 #define MAX_IP_LENGTH 16
 #define MAX_BOOT_ID_LENGTH 37
@@ -81,35 +82,11 @@ private:
     bool initialized;
     bool connected;
 
-    struct BufferSet {
-        void* attn_input_token_d;
-        size_t attn_input_token_sz;
-        void* attn_input_prob_d;
-        size_t attn_input_prob_sz;
-        void* attn_input_token_scaling_factor_d;
-        size_t attn_input_token_scaling_factor_sz;
-        void* rdma_inter_node_group_token_d;
-        size_t rdma_inter_node_group_token_sz;
-        void* rdma_inter_node_group_flags_d;
-        size_t rdma_inter_node_group_flags_sz;
-        void* rdma_inter_node_group_prob_d;
-        size_t rdma_inter_node_group_prob_sz;
-        void* rdma_inter_node_group_scaling_factor_d;
-        size_t rdma_inter_node_group_scaling_factor_sz;
-        void* rdma_intra_node_red_token_d;
-        size_t rdma_intra_node_red_token_sz;
-        void* rdma_intra_node_red_prob_d;
-        size_t rdma_intra_node_red_prob_sz;
-        void* combine_rdma_inter_node_group_token_d;
-        size_t combine_rdma_inter_node_group_token_sz;
-        void* combine_rdma_inter_node_group_flags_d;
-        size_t combine_rdma_inter_node_group_flags_sz;
-        void* combine_rdma_inter_node_group_prob_d;
-        size_t combine_rdma_inter_node_group_prob_sz;
-        bool forward_dispatch;
-        bool backward_combine;
-        bool use_fp8;
-    } buffers;
+    InterNodeDispatchBuffers* dispatch_buf = nullptr;
+    InterNodeCombineBuffers* combine_buf = nullptr;
+    bool forward_dispatch = false;
+    bool backward_combine = false;
+    bool use_fp8 = false;
 
 public:
     HybridEP_NIXLConnector(int rank_uuid, int local_device_id);
@@ -122,19 +99,8 @@ public:
         int ranks_per_node,
         int num_dispatch_blocks,
         int num_combine_blocks,
-        void* attn_input_token_d, size_t attn_input_token_sz,
-        void* attn_input_prob_d, size_t attn_input_prob_sz,
-        void* attn_input_token_scaling_factor_d, size_t attn_input_token_scaling_factor_sz,
-        void* rdma_inter_node_group_token_d, size_t rdma_inter_node_group_token_sz,
-        void* rdma_inter_node_group_flags_d, size_t rdma_inter_node_group_flags_sz,
-        void* rdma_inter_node_group_prob_d, size_t rdma_inter_node_group_prob_sz,
-        void* rdma_inter_node_group_scaling_factor_d, size_t rdma_inter_node_group_scaling_factor_sz,
-        void* rdma_intra_node_red_token_d, size_t rdma_intra_node_red_token_sz,
-        void* rdma_intra_node_red_prob_d, size_t rdma_intra_node_red_prob_sz,
-        void* combine_rdma_inter_node_group_token_d, size_t combine_rdma_inter_node_group_token_sz,
-        void* combine_rdma_inter_node_group_flags_d, size_t combine_rdma_inter_node_group_flags_sz,
-        void* combine_rdma_inter_node_group_prob_d, size_t combine_rdma_inter_node_group_prob_sz,
-        bool forward_dispatch, bool backward_combine, bool use_fp8);
+        InterNodeDispatchBuffers& dispatch_buffers,
+        InterNodeCombineBuffers& combine_buffers);
 
     void connectRanks(const std::vector<int>& remote_rank_uuids);
     void disconnectRanks(const std::vector<int>& remote_rank_uuids);

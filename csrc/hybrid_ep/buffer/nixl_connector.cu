@@ -155,19 +155,8 @@ HybridEP_NIXLConnector::~HybridEP_NIXLConnector() {
 void HybridEP_NIXLConnector::updateMemoryBuffers(
     int num_ranks, int num_experts_per_rank, int num_nodes, int ranks_per_node,
     int num_dispatch_blocks, int num_combine_blocks,
-    void* attn_input_token_d, size_t attn_input_token_sz,
-    void* attn_input_prob_d, size_t attn_input_prob_sz,
-    void* attn_input_token_scaling_factor_d, size_t attn_input_token_scaling_factor_sz,
-    void* rdma_inter_node_group_token_d, size_t rdma_inter_node_group_token_sz,
-    void* rdma_inter_node_group_flags_d, size_t rdma_inter_node_group_flags_sz,
-    void* rdma_inter_node_group_prob_d, size_t rdma_inter_node_group_prob_sz,
-    void* rdma_inter_node_group_scaling_factor_d, size_t rdma_inter_node_group_scaling_factor_sz,
-    void* rdma_intra_node_red_token_d, size_t rdma_intra_node_red_token_sz,
-    void* rdma_intra_node_red_prob_d, size_t rdma_intra_node_red_prob_sz,
-    void* combine_rdma_inter_node_group_token_d, size_t combine_rdma_inter_node_group_token_sz,
-    void* combine_rdma_inter_node_group_flags_d, size_t combine_rdma_inter_node_group_flags_sz,
-    void* combine_rdma_inter_node_group_prob_d, size_t combine_rdma_inter_node_group_prob_sz,
-    bool forward_dispatch, bool backward_combine, bool use_fp8) {
+    InterNodeDispatchBuffers& dispatch_buffers,
+    InterNodeCombineBuffers& combine_buffers) {
 
     NIXL_LOG("  [Rank %d] updateMemoryBuffers: Validating parameters...\n", rank_uuid);
     assert(rank_uuid >= 0 && rank_uuid < num_ranks && "Invalid rank_uuid");
@@ -182,44 +171,22 @@ void HybridEP_NIXLConnector::updateMemoryBuffers(
     this->num_channels = std::max(num_dispatch_blocks, num_combine_blocks);
     NIXL_LOG("  [Rank %d] updateMemoryBuffers: num_channels=%d\n", rank_uuid, num_channels);
 
-    my_peer_info.rdma_buffer_ptr = rdma_inter_node_group_token_d;
-    my_peer_info.rdma_prob_buffer_ptr = rdma_inter_node_group_prob_d;
-    my_peer_info.rdma_scaling_factor_buffer_ptr = rdma_inter_node_group_scaling_factor_d;
-    my_peer_info.dispatch_flags_ptr = static_cast<uint64_t*>(rdma_inter_node_group_flags_d);
-    my_peer_info.combine_rdma_buffer_ptr = combine_rdma_inter_node_group_token_d;
-    my_peer_info.combine_rdma_prob_buffer_ptr = combine_rdma_inter_node_group_prob_d;
-    my_peer_info.combine_flags_ptr = static_cast<uint64_t*>(combine_rdma_inter_node_group_flags_d);
+    dispatch_buf = &dispatch_buffers;
+    combine_buf = &combine_buffers;
+    forward_dispatch = true;
+    backward_combine = true;
+    use_fp8 = (dispatch_buffers.data_type == APP_TOKEN_DATA_TYPE::UINT8);
+
+    my_peer_info.rdma_buffer_ptr = dispatch_buffers.rdma_inter_node_group_token;
+    my_peer_info.rdma_prob_buffer_ptr = dispatch_buffers.rdma_inter_node_group_prob;
+    my_peer_info.rdma_scaling_factor_buffer_ptr = dispatch_buffers.rdma_inter_node_group_scaling_factor;
+    my_peer_info.dispatch_flags_ptr = dispatch_buffers.rdma_inter_node_group_flags;
+    my_peer_info.combine_rdma_buffer_ptr = combine_buffers.rdma_inter_node_group_token;
+    my_peer_info.combine_rdma_prob_buffer_ptr = combine_buffers.rdma_inter_node_group_prob;
+    my_peer_info.combine_flags_ptr = combine_buffers.rdma_inter_node_group_flags;
     my_peer_info.device_id = local_device_id;
     my_peer_info.rank = rank_uuid;
     nixl_peer_info.resize(num_ranks);
-
-    buffers.attn_input_token_d = attn_input_token_d;
-    buffers.attn_input_token_sz = attn_input_token_sz;
-    buffers.attn_input_prob_d = attn_input_prob_d;
-    buffers.attn_input_prob_sz = attn_input_prob_sz;
-    buffers.attn_input_token_scaling_factor_d = attn_input_token_scaling_factor_d;
-    buffers.attn_input_token_scaling_factor_sz = attn_input_token_scaling_factor_sz;
-    buffers.rdma_inter_node_group_token_d = rdma_inter_node_group_token_d;
-    buffers.rdma_inter_node_group_token_sz = rdma_inter_node_group_token_sz;
-    buffers.rdma_inter_node_group_flags_d = rdma_inter_node_group_flags_d;
-    buffers.rdma_inter_node_group_flags_sz = rdma_inter_node_group_flags_sz;
-    buffers.rdma_inter_node_group_prob_d = rdma_inter_node_group_prob_d;
-    buffers.rdma_inter_node_group_prob_sz = rdma_inter_node_group_prob_sz;
-    buffers.rdma_inter_node_group_scaling_factor_d = rdma_inter_node_group_scaling_factor_d;
-    buffers.rdma_inter_node_group_scaling_factor_sz = rdma_inter_node_group_scaling_factor_sz;
-    buffers.rdma_intra_node_red_token_d = rdma_intra_node_red_token_d;
-    buffers.rdma_intra_node_red_token_sz = rdma_intra_node_red_token_sz;
-    buffers.rdma_intra_node_red_prob_d = rdma_intra_node_red_prob_d;
-    buffers.rdma_intra_node_red_prob_sz = rdma_intra_node_red_prob_sz;
-    buffers.combine_rdma_inter_node_group_token_d = combine_rdma_inter_node_group_token_d;
-    buffers.combine_rdma_inter_node_group_token_sz = combine_rdma_inter_node_group_token_sz;
-    buffers.combine_rdma_inter_node_group_flags_d = combine_rdma_inter_node_group_flags_d;
-    buffers.combine_rdma_inter_node_group_flags_sz = combine_rdma_inter_node_group_flags_sz;
-    buffers.combine_rdma_inter_node_group_prob_d = combine_rdma_inter_node_group_prob_d;
-    buffers.combine_rdma_inter_node_group_prob_sz = combine_rdma_inter_node_group_prob_sz;
-    buffers.forward_dispatch = forward_dispatch;
-    buffers.backward_combine = backward_combine;
-    buffers.use_fp8 = use_fp8;
 
     initialized = true;
     NIXL_LOG("  [Rank %d] updateMemoryBuffers: All buffer pointers stored\n", rank_uuid);
@@ -393,10 +360,10 @@ void HybridEP_NIXLConnector::_nixl_agents_wireup(const std::vector<int>& ranks) 
 
 void HybridEP_NIXLConnector::_nixl_ucx_wireup(const std::vector<int>& ranks) {
     int agent_idx = 0;
-    assert(buffers.attn_input_token_d != nullptr && "attn_input_token_d required for UCX wireup");
+    assert(dispatch_buf->attn_input_token != nullptr && "attn_input_token required for UCX wireup");
 
     nixl_xfer_dlist_t dummy_src_dlist(VRAM_SEG);
-    dummy_src_dlist.addDesc(nixlBlobDesc((uintptr_t)buffers.attn_input_token_d, sizeof(uint64_t), local_device_id, ""));
+    dummy_src_dlist.addDesc(nixlBlobDesc((uintptr_t)dispatch_buf->attn_input_token, sizeof(uint64_t), local_device_id, ""));
 
     for (int remote_rank : ranks) {
         assert(nixl_peer_info[remote_rank].rdma_buffer_ptr != nullptr && "Remote rdma_buffer_ptr required for UCX wireup");
@@ -458,25 +425,25 @@ void HybridEP_NIXLConnector::_nixl_create_memory_views(const std::vector<int>& r
         assert(found && "Expected remote rank not found in connected ranks list");
     }
 
-    size_t token_stride = buffers.attn_input_token_sz;
+    size_t token_stride = dispatch_buf->attn_input_token_sz;
     NIXL_LOG("    [Rank %d]   Token stride=%zu bytes\n", rank_uuid, token_stride);
 
     // -- Dispatch memory views --
     NIXL_LOG("    [Rank %d]   Creating dispatch memory views...\n", rank_uuid);
     nixl_xfer_dlist_t dispatch_local_descs(VRAM_SEG);
-    if (buffers.attn_input_token_d && buffers.attn_input_token_sz > 0) {
-        dispatch_local_descs.addDesc(nixlBlobDesc((uintptr_t)buffers.attn_input_token_d,
-                                                   buffers.attn_input_token_sz, local_device_id, ""));
+    if (dispatch_buf->attn_input_token && dispatch_buf->attn_input_token_sz > 0) {
+        dispatch_local_descs.addDesc(nixlBlobDesc((uintptr_t)dispatch_buf->attn_input_token,
+                                                   dispatch_buf->attn_input_token_sz, local_device_id, ""));
     }
 
-    if (buffers.attn_input_prob_d && buffers.forward_dispatch) {
-        dispatch_local_descs.addDesc(nixlBlobDesc((uintptr_t)buffers.attn_input_prob_d,
-                                                   buffers.attn_input_prob_sz, local_device_id, ""));
+    if (dispatch_buf->attn_input_prob && forward_dispatch) {
+        dispatch_local_descs.addDesc(nixlBlobDesc((uintptr_t)dispatch_buf->attn_input_prob,
+                                                   dispatch_buf->attn_input_prob_sz, local_device_id, ""));
     }
 
-    if (buffers.attn_input_token_scaling_factor_d && buffers.use_fp8) {
-        dispatch_local_descs.addDesc(nixlBlobDesc((uintptr_t)buffers.attn_input_token_scaling_factor_d,
-                                                   buffers.attn_input_token_scaling_factor_sz, local_device_id, ""));
+    if (dispatch_buf->attn_input_scaling_factor && use_fp8) {
+        dispatch_local_descs.addDesc(nixlBlobDesc((uintptr_t)dispatch_buf->attn_input_scaling_factor,
+                                                   dispatch_buf->attn_input_scaling_factor_sz, local_device_id, ""));
     }
 
     nixl_remote_dlist_t dispatch_remote_data_descs(VRAM_SEG);
@@ -497,8 +464,8 @@ void HybridEP_NIXLConnector::_nixl_create_memory_views(const std::vector<int>& r
             nixl_peer_info[remote_rank].device_id,
             remote_agent_name));
 
-        if (buffers.rdma_inter_node_group_prob_d && buffers.forward_dispatch) {
-            size_t prob_stride = buffers.rdma_inter_node_group_prob_sz/(num_nodes-1);
+        if (dispatch_buf->rdma_inter_node_group_prob && forward_dispatch) {
+            size_t prob_stride = dispatch_buf->rdma_inter_node_group_prob_sz/(num_nodes-1);
             void* remote_dispatch_prob_addr = (uint8_t*)nixl_peer_info[remote_rank].rdma_prob_buffer_ptr +
                                                 my_node_rank_in_remote * prob_stride;
             dispatch_remote_data_descs.addDesc(nixlRemoteDesc(
@@ -508,8 +475,8 @@ void HybridEP_NIXLConnector::_nixl_create_memory_views(const std::vector<int>& r
                 remote_agent_name));
         }
 
-        if (buffers.rdma_inter_node_group_scaling_factor_d && buffers.use_fp8) {
-            size_t sf_stride = buffers.attn_input_token_scaling_factor_sz;
+        if (dispatch_buf->rdma_inter_node_group_scaling_factor && use_fp8) {
+            size_t sf_stride = dispatch_buf->attn_input_scaling_factor_sz;
             void* remote_dispatch_scaling_factor_addr = (uint8_t*)nixl_peer_info[remote_rank].rdma_scaling_factor_buffer_ptr +
                                                 my_node_rank_in_remote * sf_stride;
             dispatch_remote_data_descs.addDesc(nixlRemoteDesc(
@@ -522,7 +489,7 @@ void HybridEP_NIXLConnector::_nixl_create_memory_views(const std::vector<int>& r
         uint64_t* remote_dispatch_flag_addr = nixl_peer_info[remote_rank].dispatch_flags_ptr;
         dispatch_remote_signal_descs.addDesc(nixlRemoteDesc(
             (uintptr_t)remote_dispatch_flag_addr,
-            buffers.rdma_inter_node_group_flags_sz,
+            dispatch_buf->rdma_inter_node_group_flags_sz,
             nixl_peer_info[remote_rank].device_id,
             remote_agent_name));
 
@@ -555,13 +522,13 @@ void HybridEP_NIXLConnector::_nixl_create_memory_views(const std::vector<int>& r
     NIXL_LOG("    [Rank %d]   Creating combine memory views...\n", rank_uuid);
 
     nixl_xfer_dlist_t combine_local_descs(VRAM_SEG);
-    if (buffers.rdma_intra_node_red_token_d && buffers.rdma_intra_node_red_token_sz > 0) {
-        combine_local_descs.addDesc(nixlBlobDesc((uintptr_t)buffers.rdma_intra_node_red_token_d,
-                                                  buffers.rdma_intra_node_red_token_sz, local_device_id, ""));
+    if (combine_buf->rdma_intra_node_red_token && combine_buf->rdma_intra_node_red_token_sz > 0) {
+        combine_local_descs.addDesc(nixlBlobDesc((uintptr_t)combine_buf->rdma_intra_node_red_token,
+                                                  combine_buf->rdma_intra_node_red_token_sz, local_device_id, ""));
     }
-    if (buffers.rdma_intra_node_red_prob_d && buffers.backward_combine) {
-        combine_local_descs.addDesc(nixlBlobDesc((uintptr_t)buffers.rdma_intra_node_red_prob_d,
-                                                  buffers.rdma_intra_node_red_prob_sz, local_device_id, ""));
+    if (combine_buf->rdma_intra_node_red_prob && backward_combine) {
+        combine_local_descs.addDesc(nixlBlobDesc((uintptr_t)combine_buf->rdma_intra_node_red_prob,
+                                                  combine_buf->rdma_intra_node_red_prob_sz, local_device_id, ""));
     }
 
     nixl_remote_dlist_t combine_remote_data_descs(VRAM_SEG);
@@ -573,7 +540,7 @@ void HybridEP_NIXLConnector::_nixl_create_memory_views(const std::vector<int>& r
         int my_node_rank_in_remote = (node_rank < actual_node_rank) ? node_rank : (node_rank - 1);
         std::string remote_agent_name = nixl_agent_infos[agent_idx].dst_agent_names[remote_rank];
 
-        size_t combine_token_stride = buffers.rdma_intra_node_red_token_sz / (num_nodes - 1);
+        size_t combine_token_stride = combine_buf->rdma_intra_node_red_token_sz / (num_nodes - 1);
 
         void* remote_combine_token_addr = (uint8_t*)nixl_peer_info[remote_rank].combine_rdma_buffer_ptr +
                                           my_node_rank_in_remote * combine_token_stride;
@@ -583,8 +550,8 @@ void HybridEP_NIXLConnector::_nixl_create_memory_views(const std::vector<int>& r
             nixl_peer_info[remote_rank].device_id,
             remote_agent_name));
 
-        if (buffers.combine_rdma_inter_node_group_prob_d && buffers.backward_combine) {
-            size_t combine_prob_stride = buffers.rdma_inter_node_group_prob_sz/(num_nodes-1);
+        if (combine_buf->rdma_inter_node_group_prob && backward_combine) {
+            size_t combine_prob_stride = combine_buf->rdma_inter_node_group_prob_sz/(num_nodes-1);
 
             void* remote_combine_prob_addr = (uint8_t*)nixl_peer_info[remote_rank].combine_rdma_prob_buffer_ptr +
                                               my_node_rank_in_remote * combine_prob_stride;
@@ -599,7 +566,7 @@ void HybridEP_NIXLConnector::_nixl_create_memory_views(const std::vector<int>& r
         uint64_t* remote_combine_flag_addr = nixl_peer_info[remote_rank].combine_flags_ptr;
         combine_remote_signal_descs.addDesc(nixlRemoteDesc(
             (uintptr_t)remote_combine_flag_addr,
-            buffers.combine_rdma_inter_node_group_flags_sz,
+            combine_buf->rdma_inter_node_group_flags_sz,
             nixl_peer_info[remote_rank].device_id,
             remote_agent_name));
 
@@ -650,7 +617,7 @@ void HybridEP_NIXLConnector::_nixl_build_gpu_contexts(int num_dispatch_blocks, i
     cudaMalloc(&d_dispatch_flag_counters, sizeof(uint64_t) * num_remote_nodes);
     cudaMemset(d_dispatch_flag_counters, 0, sizeof(uint64_t) * num_remote_nodes);
 
-    int dispatch_local_stride = 1 + (int)buffers.forward_dispatch + (int)buffers.use_fp8;
+    int dispatch_local_stride = 1 + (int)forward_dispatch + (int)use_fp8;
     int dispatch_remote_stride = dispatch_local_stride;
 
     dispatch_gpu_nixl_ctx h_dispatch_ctx = {};
@@ -675,7 +642,7 @@ void HybridEP_NIXLConnector::_nixl_build_gpu_contexts(int num_dispatch_blocks, i
     cudaMalloc(&d_combine_flag_counters, sizeof(uint64_t) * num_remote_nodes);
     cudaMemset(d_combine_flag_counters, 0, sizeof(uint64_t) * num_remote_nodes);
 
-    int combine_local_stride = 1 + (int)buffers.backward_combine;
+    int combine_local_stride = 1 + (int)backward_combine;
     int combine_remote_stride = combine_local_stride;
 
     combine_gpu_nixl_ctx h_combine_ctx = {};
@@ -699,118 +666,35 @@ void HybridEP_NIXLConnector::_nixl_build_gpu_contexts(int num_dispatch_blocks, i
            rank_uuid, ucx_num_channels);
 }
 
+#define NIXL_REGISTER_BUF(ptr, sz, name) do { \
+    if ((ptr) && (sz) > 0) { \
+        buffer_count++; \
+        nixlBlobDesc desc((uintptr_t)(ptr), (sz), local_device_id, (name)); \
+        nixl_agent_infos[agent_idx].src_vram.addDesc(desc); \
+        reg_dlist.addDesc(desc); \
+    } \
+} while (0)
+
 void HybridEP_NIXLConnector::_register_buffers_with_agents() {
     NIXL_LOG("    [Rank %d] _register_buffers_with_agents\n", rank_uuid);
     int agent_idx = 0;
     int buffer_count = 0;
     nixl_reg_dlist_t reg_dlist(VRAM_SEG);
-    if (buffers.attn_input_token_d && buffers.attn_input_token_sz > 0) {
-        buffer_count++;
-        nixlBlobDesc desc((uintptr_t)buffers.attn_input_token_d,
-                         buffers.attn_input_token_sz,
-                         local_device_id, "attn_input_token");
-        nixl_agent_infos[agent_idx].src_vram.addDesc(desc);
-        reg_dlist.addDesc(desc);
-    }
 
-    if (buffers.attn_input_prob_d && buffers.attn_input_prob_sz > 0) {
-        buffer_count++;
-        nixlBlobDesc desc((uintptr_t)buffers.attn_input_prob_d,
-                         buffers.attn_input_prob_sz,
-                         local_device_id, "attn_input_prob");
-        nixl_agent_infos[agent_idx].src_vram.addDesc(desc);
-        reg_dlist.addDesc(desc);
-    }
+    NIXL_REGISTER_BUF(dispatch_buf->attn_input_token, dispatch_buf->attn_input_token_sz, "attn_input_token");
+    NIXL_REGISTER_BUF(dispatch_buf->attn_input_prob, dispatch_buf->attn_input_prob_sz, "attn_input_prob");
+    NIXL_REGISTER_BUF(dispatch_buf->attn_input_scaling_factor, dispatch_buf->attn_input_scaling_factor_sz, "attn_input_token_scaling_factor");
+    NIXL_REGISTER_BUF(dispatch_buf->rdma_inter_node_group_token, dispatch_buf->rdma_inter_node_group_token_sz, "rdma_inter_node_group_token");
+    NIXL_REGISTER_BUF(dispatch_buf->rdma_inter_node_group_flags, dispatch_buf->rdma_inter_node_group_flags_sz, "rdma_inter_node_group_flags");
+    NIXL_REGISTER_BUF(dispatch_buf->rdma_inter_node_group_prob, dispatch_buf->rdma_inter_node_group_prob_sz, "rdma_inter_node_group_prob");
+    NIXL_REGISTER_BUF(dispatch_buf->rdma_inter_node_group_scaling_factor, dispatch_buf->rdma_inter_node_group_scaling_factor_sz, "rdma_inter_node_group_scaling_factor");
+    NIXL_REGISTER_BUF(combine_buf->rdma_intra_node_red_token, combine_buf->rdma_intra_node_red_token_sz, "rdma_intra_node_red_token");
+    NIXL_REGISTER_BUF(combine_buf->rdma_intra_node_red_prob, combine_buf->rdma_intra_node_red_prob_sz, "rdma_intra_node_red_prob");
+    NIXL_REGISTER_BUF(combine_buf->rdma_inter_node_group_token, combine_buf->rdma_inter_node_group_token_sz, "combine_rdma_inter_node_group_token");
+    NIXL_REGISTER_BUF(combine_buf->rdma_inter_node_group_flags, combine_buf->rdma_inter_node_group_flags_sz, "combine_rdma_inter_node_group_flags");
+    NIXL_REGISTER_BUF(combine_buf->rdma_inter_node_group_prob, combine_buf->rdma_inter_node_group_prob_sz, "combine_rdma_inter_node_group_prob");
 
-    if (buffers.attn_input_token_scaling_factor_d && buffers.attn_input_token_scaling_factor_sz > 0) {
-        buffer_count++;
-        nixlBlobDesc desc((uintptr_t)buffers.attn_input_token_scaling_factor_d,
-                         buffers.attn_input_token_scaling_factor_sz,
-                         local_device_id, "attn_input_token_scaling_factor");
-        nixl_agent_infos[agent_idx].src_vram.addDesc(desc);
-        reg_dlist.addDesc(desc);
-    }
-
-    if (buffers.rdma_inter_node_group_token_d && buffers.rdma_inter_node_group_token_sz > 0) {
-        buffer_count++;
-        nixlBlobDesc desc((uintptr_t)buffers.rdma_inter_node_group_token_d,
-                         buffers.rdma_inter_node_group_token_sz,
-                         local_device_id, "rdma_inter_node_group_token");
-        nixl_agent_infos[agent_idx].src_vram.addDesc(desc);
-        reg_dlist.addDesc(desc);
-    }
-
-    if (buffers.rdma_inter_node_group_flags_d && buffers.rdma_inter_node_group_flags_sz > 0) {
-        buffer_count++;
-        nixlBlobDesc desc((uintptr_t)buffers.rdma_inter_node_group_flags_d,
-                         buffers.rdma_inter_node_group_flags_sz,
-                         local_device_id, "rdma_inter_node_group_flags");
-        nixl_agent_infos[agent_idx].src_vram.addDesc(desc);
-        reg_dlist.addDesc(desc);
-    }
-
-    if (buffers.rdma_inter_node_group_prob_d && buffers.rdma_inter_node_group_prob_sz > 0) {
-        buffer_count++;
-        nixlBlobDesc desc((uintptr_t)buffers.rdma_inter_node_group_prob_d,
-                         buffers.rdma_inter_node_group_prob_sz,
-                         local_device_id, "rdma_inter_node_group_prob");
-        nixl_agent_infos[agent_idx].src_vram.addDesc(desc);
-        reg_dlist.addDesc(desc);
-    }
-
-    if (buffers.rdma_inter_node_group_scaling_factor_d && buffers.rdma_inter_node_group_scaling_factor_sz > 0) {
-        buffer_count++;
-        nixlBlobDesc desc((uintptr_t)buffers.rdma_inter_node_group_scaling_factor_d,
-                         buffers.rdma_inter_node_group_scaling_factor_sz,
-                         local_device_id, "rdma_inter_node_group_scaling_factor");
-        nixl_agent_infos[agent_idx].src_vram.addDesc(desc);
-        reg_dlist.addDesc(desc);
-    }
-
-    if (buffers.rdma_intra_node_red_token_d && buffers.rdma_intra_node_red_token_sz > 0) {
-        buffer_count++;
-        nixlBlobDesc desc((uintptr_t)buffers.rdma_intra_node_red_token_d,
-                         buffers.rdma_intra_node_red_token_sz,
-                         local_device_id, "rdma_intra_node_red_token");
-        nixl_agent_infos[agent_idx].src_vram.addDesc(desc);
-        reg_dlist.addDesc(desc);
-    }
-
-    if (buffers.rdma_intra_node_red_prob_d && buffers.rdma_intra_node_red_prob_sz > 0) {
-        buffer_count++;
-        nixlBlobDesc desc((uintptr_t)buffers.rdma_intra_node_red_prob_d,
-                         buffers.rdma_intra_node_red_prob_sz,
-                         local_device_id, "rdma_intra_node_red_prob");
-        nixl_agent_infos[agent_idx].src_vram.addDesc(desc);
-        reg_dlist.addDesc(desc);
-    }
-
-    if (buffers.combine_rdma_inter_node_group_token_d && buffers.combine_rdma_inter_node_group_token_sz > 0) {
-        buffer_count++;
-        nixlBlobDesc desc((uintptr_t)buffers.combine_rdma_inter_node_group_token_d,
-                         buffers.combine_rdma_inter_node_group_token_sz,
-                         local_device_id, "combine_rdma_inter_node_group_token");
-        nixl_agent_infos[agent_idx].src_vram.addDesc(desc);
-        reg_dlist.addDesc(desc);
-    }
-
-    if (buffers.combine_rdma_inter_node_group_flags_d && buffers.combine_rdma_inter_node_group_flags_sz > 0) {
-        buffer_count++;
-        nixlBlobDesc desc((uintptr_t)buffers.combine_rdma_inter_node_group_flags_d,
-                         buffers.combine_rdma_inter_node_group_flags_sz,
-                         local_device_id, "combine_rdma_inter_node_group_flags");
-        nixl_agent_infos[agent_idx].src_vram.addDesc(desc);
-        reg_dlist.addDesc(desc);
-    }
-
-    if (buffers.combine_rdma_inter_node_group_prob_d && buffers.combine_rdma_inter_node_group_prob_sz > 0) {
-        buffer_count++;
-        nixlBlobDesc desc((uintptr_t)buffers.combine_rdma_inter_node_group_prob_d,
-                         buffers.combine_rdma_inter_node_group_prob_sz,
-                         local_device_id, "combine_rdma_inter_node_group_prob");
-        nixl_agent_infos[agent_idx].src_vram.addDesc(desc);
-        reg_dlist.addDesc(desc);
-    }
+#undef NIXL_REGISTER_BUF
 
     NIXL_LOG("    [Rank %d] _register_buffers_with_agents: registering %d buffers\n", rank_uuid, buffer_count);
     nixl_status_t status = nixl_agent_infos[agent_idx].agent->registerMem(reg_dlist);

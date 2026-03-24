@@ -133,7 +133,7 @@ def get_extension_hybrid_ep_cpp():
         else:
             # DOCA path: use RDMA coordinator (requires NCCL submodule + DOCA)
             print('  -> DOCA path: building NCCL/DOCA')
-            sources.extend(["csrc/hybrid_ep/buffer/internode.cu"])
+            sources.extend(["csrc/hybrid_ep/buffer/internode_doca.cu"])
             rdma_core_dir = os.getenv("RDMA_CORE_HOME", "")
             nccl_dir = os.path.join(current_dir, "third-party/nccl")
             compile_args["nvcc"].append(f"-DRDMA_CORE_HOME=\"{rdma_core_dir}\"")

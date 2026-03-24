@@ -11,6 +11,7 @@
 #include <c10/util/Optional.h>
 #include <torch/torch.h>
 #include <vector>
+#include <memory>
 #include <algorithm>
 #include <string>
 
