@@ -2,6 +2,19 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #pragma once
 
+// HybridEP_NIXLConnector manages the lifecycle of NIXL-based inter-node GPU
+// communication for the Hybrid-EP dispatch and combine kernels.
+//
+// Lifecycle:
+//   1. Constructor:          Collects local peer info (IP, boot_id, device_id).
+//   2. updateMemoryBuffers:  Creates a NIXL agent, registers GPU buffers with
+//                            the agent, and publishes local metadata to etcd.
+//   3. connectRanks:         Fetches remote metadata, exchanges peer info via
+//                            NIXL notifications, performs UCX wireup, creates
+//                            memory views, and builds GPU contexts.
+//   4. disconnectRanks:      Invalidates remote metadata for graceful teardown.
+//   5. Destructor:           Disconnects peers, destroys agents, frees GPU memory.
+
 #ifdef USE_NIXL
 
 #include <memory>

@@ -60,7 +60,6 @@ NVCCCompiler::NVCCCompiler(std::string base_path, std::string comm_id):
     // Add the dependency of the inter-node jit
     flags += " -DHYBRID_EP_BUILD_MULTINODE_ENABLE";
 #ifdef USE_NIXL
-    fprintf(stderr, "[HybridEP JIT] Inter-node: using NIXL\n");
     flags += " -DUSE_NIXL";
     std::string nixl_home = get_env("NIXL_HOME");
     if (nixl_home.empty()) nixl_home = "/usr/local/nixl";
@@ -69,14 +68,10 @@ NVCCCompiler::NVCCCompiler(std::string base_path, std::string comm_id):
     include += " -I" + nixl_home + "/include ";
     include += " -I" + nixl_home + "/include/gpu/ucx ";
     include += " -I" + ucx_home + "/include ";
-    std::string doca_home = get_env("DOCA_HOME");
-    if (!doca_home.empty())
-        include += " -I" + doca_home + "/include ";
     std::string nixl_lib = nixl_home + "/lib/x86_64-linux-gnu";
     library += " -L" + nixl_lib + " -lnixl -lnixl_build -lnixl_common ";
     library += " -Xlinker -rpath -Xlinker " + nixl_lib + " ";
 #else
-    fprintf(stderr, "[HybridEP JIT] Inter-node: using DOCA/RDMA\n");
     std::string rdma_core_home = RDMA_CORE_HOME;
     if (!rdma_core_home.empty()) {
         include += " -I" + rdma_core_home + "/include ";

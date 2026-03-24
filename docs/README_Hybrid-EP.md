@@ -152,13 +152,17 @@ pip install .
 ```
 
 #### Multi-node NIXL Installation (recommended when NIXL is available)
-For multi-node support with NIXL (no DOCA/NCCL required):
+For multi-node support with NIXL. NIXL replaces DOCA for inter-node GPU data transfers, so the DOCA SDK and NCCL submodule are not needed at build time. Note that NCCL may still be used at runtime by `torch.distributed` for collective metadata operations.
+
+**Prerequisites:**
+- **NIXL** ([ai-computing/nixl](https://github.com/ai-computing/nixl)) — GPU-aware inter-node communication library. Install from source; see the NIXL README for build instructions.
+- **UCX** ([openucx/ucx](https://github.com/openucx/ucx)) — typically already present in NVIDIA container images or available via `apt install libucx-dev`. UCX v1.17+ is recommended.
 
 ```bash
 export HYBRID_EP_MULTINODE=1
 export USE_NIXL=1
-export NIXL_HOME=/usr/local/nixl  # Adjust if NIXL is installed elsewhere
-export UCX_HOME=/usr              # Adjust if UCX is installed elsewhere
+export NIXL_HOME=/usr/local/nixl  # Path to NIXL install prefix (contains include/ and lib/)
+export UCX_HOME=/usr              # Path to UCX install prefix (contains include/ and lib/)
 export TORCH_CUDA_ARCH_LIST="9.0 10.0"  # Adjust based on your GPU architecture
 pip install .
 ```

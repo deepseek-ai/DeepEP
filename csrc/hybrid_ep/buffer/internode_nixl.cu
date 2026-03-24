@@ -5,8 +5,6 @@
 
 #include "buffer/internode.cuh"
 #include <pybind11/pybind11.h>
-#include <thread>
-#include <chrono>
 
 NIXLCoordinator::~NIXLCoordinator() {
     destroy();
@@ -180,7 +178,6 @@ void NIXLCoordinator::allocate_buffers() {
 
     auto torch_distributed = pybind11::module_::import("torch.distributed");
     torch_distributed.attr("barrier")(this->process_group);
-    std::this_thread::sleep_for(std::chrono::seconds(3));
 
     std::vector<int> remote_rank_uuids;
     for (int node_idx = 0; node_idx < buffer_config.num_of_nodes; ++node_idx) {

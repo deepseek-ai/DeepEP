@@ -121,6 +121,12 @@ HybridEP_NIXLConnector::~HybridEP_NIXLConnector() {
 
     cudaDeviceSynchronize();
 
+    if (connected && !connected_ranks.empty()) {
+        NIXL_LOG("  [Rank %d] ~HybridEP_NIXLConnector: Disconnecting %zu ranks...\n", rank_uuid, connected_ranks.size());
+        disconnectRanks(connected_ranks);
+        connected = false;
+    }
+
     NIXL_LOG("  [Rank %d] ~HybridEP_NIXLConnector: Destroying NIXL agents...\n", rank_uuid);
     for (auto& agent_info : nixl_agent_infos) {
         agent_info.agent.reset();
