@@ -7,7 +7,7 @@
 #ifdef HYBRID_EP_BUILD_MULTINODE_ENABLE
 #include "utils.cuh"
 #ifdef USE_NIXL
-#include "backend/nixl_types.h"
+namespace hybrid_ep { struct dispatch_gpu_nixl_ctx; struct combine_gpu_nixl_ctx; }
 #else
 struct doca_gpu_dev_verbs_qp;
 #endif

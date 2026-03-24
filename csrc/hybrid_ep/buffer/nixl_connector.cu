@@ -4,6 +4,7 @@
 #ifdef USE_NIXL
 
 #include "buffer/nixl_connector.h"
+#include "backend/hybrid_ep_backend.cuh"
 #include <fstream>
 #include <thread>
 #include <chrono>

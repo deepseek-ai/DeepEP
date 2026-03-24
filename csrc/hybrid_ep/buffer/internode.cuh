@@ -9,7 +9,6 @@
 #include "backend/hybrid_ep_backend.cuh"
 
 #ifdef USE_NIXL
-#include "backend/nixl_types.h"
 #include "buffer/internode_nixl.cuh"
 #else
 #include "buffer/internode_doca.cuh"

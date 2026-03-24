@@ -8,7 +8,7 @@
 #include <vector>
 #include <string>
 #include <cuda_runtime.h>
-#include "backend/nixl_types.h"
+#include "nixl.h"
 #include "coordinator.cuh"
 
 #define MAX_IP_LENGTH 16
