@@ -579,14 +579,11 @@ struct dispatch_kernel_param_t{
   int node_rank;
   // The number of token output by attn layer on a rank/GPU.
   int num_of_tokens_per_rank;
-#ifdef HYBRID_EP_BUILD_MULTINODE_ENABLE
-#ifdef USE_NIXL
-  hybrid_ep::dispatch_gpu_nixl_ctx *nixl_gpu_ctx;
-#else
-  void **d_qps_gpu;
-  void *mr_info;
-#endif
-#endif
+  // Multinode context: always same layout to avoid param_t ABI mismatch between runtime and JIT.
+  // NIXL: multinode_ctx_ptr = dispatch_gpu_nixl_ctx*, multinode_aux_ptr = nullptr.
+  // DOCA: multinode_ctx_ptr = d_qps_gpu (void**), multinode_aux_ptr = mr_info.
+  void *multinode_ctx_ptr;
+  void *multinode_aux_ptr;
 };
 
 // Data structure for kernel parameter for combine kernel.
@@ -621,14 +618,11 @@ struct combine_kernel_param_t{
   int node_rank;
   // The number of token output by attn layer on a rank/GPU.
   int num_of_tokens_per_rank;
-#ifdef HYBRID_EP_BUILD_MULTINODE_ENABLE
-#ifdef USE_NIXL
-  hybrid_ep::combine_gpu_nixl_ctx *nixl_gpu_ctx;
-#else
-  void **d_qps_gpu;
-  void *mr_info;
-#endif
-#endif
+  // Multinode context: always same layout to avoid param_t ABI mismatch between runtime and JIT.
+  // NIXL: multinode_ctx_ptr = combine_gpu_nixl_ctx*, multinode_aux_ptr = nullptr.
+  // DOCA: multinode_ctx_ptr = d_qps_gpu (void**), multinode_aux_ptr = mr_info.
+  void *multinode_ctx_ptr;
+  void *multinode_aux_ptr;
 };
 
 // Each CUDA block has sixteen named barriers numbered 0..15.
@@ -4029,11 +4023,11 @@ __global__ void dispatch_kernel(const __grid_constant__ dispatch_kernel_param_t<
 #ifdef USE_NIXL
         N2N_warp_group_device_function
         <INTER_NODE_GROUP, TOKEN_DATA_TYPE, cur_smem_t, NUM_OF_STAGES, HIDDEN_DIM, NUM_OF_TOKENS_PER_CHUNK, NUM_OF_EXPERTS_PER_RANK, NUM_OF_RANKS_PER_NODE, NUM_OF_NODES, NUM_OF_BLOCKS, FORWARD_DISPATCH>
-        (param.node_rank, param.num_of_tokens_per_rank, param.attn_to_rdma_map, param.nixl_gpu_ctx, smem_buffer_ptr);
+        (param.node_rank, param.num_of_tokens_per_rank, param.attn_to_rdma_map, reinterpret_cast<dispatch_gpu_nixl_ctx*>(param.multinode_ctx_ptr), smem_buffer_ptr);
 #else
         N2N_warp_group_device_function
         <INTER_NODE_GROUP, TOKEN_DATA_TYPE, cur_smem_t, NUM_OF_STAGES, HIDDEN_DIM, NUM_OF_TOKENS_PER_CHUNK, MAX_NUM_OF_TOKENS_PER_RANK, NUM_OF_EXPERTS_PER_RANK, NUM_OF_RANKS_PER_NODE, NUM_OF_NODES, NUM_OF_BLOCKS, FORWARD_DISPATCH>
-        (param.node_rank, param.num_of_tokens_per_rank, param.attn_to_rdma_map, reinterpret_cast<doca_gpu_dev_verbs_qp**>(param.d_qps_gpu), reinterpret_cast<dispatch_memory_region_info_t*>(param.mr_info), smem_buffer_ptr);
+        (param.node_rank, param.num_of_tokens_per_rank, param.attn_to_rdma_map, reinterpret_cast<doca_gpu_dev_verbs_qp**>(param.multinode_ctx_ptr), reinterpret_cast<dispatch_memory_region_info_t*>(param.multinode_aux_ptr), smem_buffer_ptr);
 #endif
       }
 #endif
@@ -4084,12 +4078,12 @@ __global__ void dispatch_kernel(const __grid_constant__ dispatch_kernel_param_t<
 #ifdef USE_NIXL
       N2N_warp_group_device_function
       <INTER_NODE_GROUP, TOKEN_DATA_TYPE, cur_smem_t, NUM_OF_STAGES, HIDDEN_DIM, NUM_OF_TOKENS_PER_CHUNK, NUM_OF_EXPERTS_PER_RANK, NUM_OF_RANKS_PER_NODE, NUM_OF_NODES, NUM_OF_BLOCKS, FORWARD_DISPATCH>
-      (param.node_rank, param.num_of_tokens_per_rank, param.attn_to_rdma_map, param.nixl_gpu_ctx, smem_buffer_ptr);
+      (param.node_rank, param.num_of_tokens_per_rank, param.attn_to_rdma_map, reinterpret_cast<dispatch_gpu_nixl_ctx*>(param.multinode_ctx_ptr), smem_buffer_ptr);
 #else
       N2N_warp_group_device_function
       <INTER_NODE_GROUP, TOKEN_DATA_TYPE, cur_smem_t, NUM_OF_STAGES, HIDDEN_DIM, NUM_OF_TOKENS_PER_CHUNK,
        MAX_NUM_OF_TOKENS_PER_RANK, NUM_OF_EXPERTS_PER_RANK, NUM_OF_RANKS_PER_NODE, NUM_OF_NODES, NUM_OF_BLOCKS, FORWARD_DISPATCH>
-      (param.node_rank, param.num_of_tokens_per_rank, param.attn_to_rdma_map, reinterpret_cast<doca_gpu_dev_verbs_qp**>(param.d_qps_gpu), reinterpret_cast<dispatch_memory_region_info_t*>(param.mr_info), smem_buffer_ptr);
+      (param.node_rank, param.num_of_tokens_per_rank, param.attn_to_rdma_map, reinterpret_cast<doca_gpu_dev_verbs_qp**>(param.multinode_ctx_ptr), reinterpret_cast<dispatch_memory_region_info_t*>(param.multinode_aux_ptr), smem_buffer_ptr);
 #endif
     }
 #endif // HYBRID_EP_BUILD_MULTINODE_ENABLE
@@ -4319,11 +4313,11 @@ __global__ void combine_kernel(const __grid_constant__ combine_kernel_param_t pa
 #ifdef USE_NIXL
         inter_node_N2N_warp_group_device_function
         <INTER_NODE_RDMA_GROUP, cur_smem_t, NUM_OF_STAGES_S2G, HIDDEN_DIM, NUM_OF_TOKENS_PER_CHUNK, MAX_NUM_OF_TOKENS_PER_RANK, NUM_OF_EXPERTS_PER_RANK, NUM_OF_RANKS_PER_NODE, NUM_OF_NODES, NUM_OF_BLOCKS, BACKWARD_COMBINE>
-        (param.node_rank, param.num_of_tokens_per_rank, param.rdma_to_attn_map, param.nixl_gpu_ctx, smem_buffer_ptr);
+        (param.node_rank, param.num_of_tokens_per_rank, param.rdma_to_attn_map, reinterpret_cast<combine_gpu_nixl_ctx*>(param.multinode_ctx_ptr), smem_buffer_ptr);
 #else
         inter_node_N2N_warp_group_device_function
         <INTER_NODE_RDMA_GROUP, cur_smem_t, NUM_OF_STAGES_S2G, HIDDEN_DIM, NUM_OF_TOKENS_PER_CHUNK, MAX_NUM_OF_TOKENS_PER_RANK, NUM_OF_EXPERTS_PER_RANK, NUM_OF_RANKS_PER_NODE, NUM_OF_NODES, NUM_OF_BLOCKS, BACKWARD_COMBINE>
-        (param.node_rank, param.num_of_tokens_per_rank, param.rdma_to_attn_map, reinterpret_cast<doca_gpu_dev_verbs_qp**>(param.d_qps_gpu), reinterpret_cast<combine_memory_region_info_t*>(param.mr_info), smem_buffer_ptr);
+        (param.node_rank, param.num_of_tokens_per_rank, param.rdma_to_attn_map, reinterpret_cast<doca_gpu_dev_verbs_qp**>(param.multinode_ctx_ptr), reinterpret_cast<combine_memory_region_info_t*>(param.multinode_aux_ptr), smem_buffer_ptr);
 #endif
       }
 #endif
@@ -4390,11 +4384,11 @@ __global__ void combine_kernel(const __grid_constant__ combine_kernel_param_t pa
 #ifdef USE_NIXL
       inter_node_N2N_warp_group_device_function
       <INTER_NODE_RDMA_GROUP, cur_smem_t, NUM_OF_STAGES_S2G, HIDDEN_DIM, NUM_OF_TOKENS_PER_CHUNK, MAX_NUM_OF_TOKENS_PER_RANK, NUM_OF_EXPERTS_PER_RANK, NUM_OF_RANKS_PER_NODE, NUM_OF_NODES, NUM_OF_BLOCKS, BACKWARD_COMBINE>
-      (param.node_rank, param.num_of_tokens_per_rank, param.rdma_to_attn_map, param.nixl_gpu_ctx, smem_buffer_ptr);
+      (param.node_rank, param.num_of_tokens_per_rank, param.rdma_to_attn_map, reinterpret_cast<combine_gpu_nixl_ctx*>(param.multinode_ctx_ptr), smem_buffer_ptr);
 #else
       inter_node_N2N_warp_group_device_function
       <INTER_NODE_RDMA_GROUP, cur_smem_t, NUM_OF_STAGES_S2G, HIDDEN_DIM, NUM_OF_TOKENS_PER_CHUNK, MAX_NUM_OF_TOKENS_PER_RANK, NUM_OF_EXPERTS_PER_RANK, NUM_OF_RANKS_PER_NODE, NUM_OF_NODES, NUM_OF_BLOCKS, BACKWARD_COMBINE>
-      (param.node_rank, param.num_of_tokens_per_rank, param.rdma_to_attn_map, reinterpret_cast<doca_gpu_dev_verbs_qp**>(param.d_qps_gpu), reinterpret_cast<combine_memory_region_info_t*>(param.mr_info), smem_buffer_ptr);
+      (param.node_rank, param.num_of_tokens_per_rank, param.rdma_to_attn_map, reinterpret_cast<doca_gpu_dev_verbs_qp**>(param.multinode_ctx_ptr), reinterpret_cast<combine_memory_region_info_t*>(param.multinode_aux_ptr), smem_buffer_ptr);
 #endif
     }
 #endif // HYBRID_EP_BUILD_MULTINODE_ENABLE
@@ -5353,7 +5347,7 @@ public:
 #ifndef USE_NIXL
     // RDMA sync is needed.
     rdma_sync_kernel<<<1, 1, 0, stream>>>(NUM_OF_NODES, param.node_rank, param.expected_rdma_flag_value,
-                                                   param.rdma_inter_node_group_flags, reinterpret_cast<doca_gpu_dev_verbs_qp**>(param.d_qps_gpu), reinterpret_cast<dispatch_memory_region_info_t*>(param.mr_info));
+                                                   param.rdma_inter_node_group_flags, reinterpret_cast<doca_gpu_dev_verbs_qp**>(param.multinode_ctx_ptr), reinterpret_cast<dispatch_memory_region_info_t*>(param.multinode_aux_ptr));
 #endif
 #endif
     // Check if there is any CUDA error.
@@ -5475,7 +5469,7 @@ public:
 #ifdef HYBRID_EP_BUILD_MULTINODE_ENABLE
 #ifndef USE_NIXL
     rdma_sync_kernel<<<1, 1, 0, stream>>>(NUM_OF_NODES, param.node_rank, param.expected_rdma_flag_value,
-                                                   param.rdma_inter_node_group_flags, reinterpret_cast<doca_gpu_dev_verbs_qp**>(param.d_qps_gpu), reinterpret_cast<combine_memory_region_info_t*>(param.mr_info));
+                                                   param.rdma_inter_node_group_flags, reinterpret_cast<doca_gpu_dev_verbs_qp**>(param.multinode_ctx_ptr), reinterpret_cast<combine_memory_region_info_t*>(param.multinode_aux_ptr));
 #endif
 #endif
     // Check if there is any CUDA error.

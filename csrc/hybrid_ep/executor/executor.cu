@@ -223,6 +223,8 @@ void Executor::dispatch_core(HybridEpConfigInstance config, DispatchArgs& args) 
     nvtxRangePushA("dispatch_core in hybrid-ep");
 
     hybrid_ep::dispatch_kernel_param_t<DType> param;
+    param.multinode_ctx_ptr = nullptr;
+    param.multinode_aux_ptr = nullptr;
     // Setup input pointers
     if(config.num_of_nodes > 1) {
 #ifdef HYBRID_EP_BUILD_MULTINODE_ENABLE
@@ -291,10 +293,11 @@ void Executor::dispatch_core(HybridEpConfigInstance config, DispatchArgs& args) 
 #ifdef HYBRID_EP_BUILD_MULTINODE_ENABLE
     param.expected_rdma_flag_value = inter_node_dispatch_buffers->expected_rdma_flag_value;
 #ifdef USE_NIXL
-    param.nixl_gpu_ctx = inter_node_dispatch_buffers->nixl_gpu_ctx;
+    param.multinode_ctx_ptr = inter_node_dispatch_buffers->nixl_gpu_ctx;
+    param.multinode_aux_ptr = nullptr;
 #else
-    param.d_qps_gpu = reinterpret_cast<void **>(inter_node_dispatch_buffers->d_qps_gpu);
-    param.mr_info = reinterpret_cast<void*>(inter_node_dispatch_buffers->mr_info);
+    param.multinode_ctx_ptr = reinterpret_cast<void*>(inter_node_dispatch_buffers->d_qps_gpu);
+    param.multinode_aux_ptr = reinterpret_cast<void*>(inter_node_dispatch_buffers->mr_info);
 #endif
 #endif
     // Launch kernel
@@ -430,7 +433,9 @@ void Executor::combine_preprocess(HybridEpConfigInstance config, CombineArgs& ar
 void Executor::combine_core(HybridEpConfigInstance config, CombineArgs& args) {
     nvtxRangePushA("combine_core in hybrid-ep");
     hybrid_ep::combine_kernel_param_t param;
-    
+    param.multinode_ctx_ptr = nullptr;
+    param.multinode_aux_ptr = nullptr;
+
     // Setup input pointers
     if(args.fuse_unpermute_combine) {
         param.local_expert_input_token = reinterpret_cast<uint16_t*>(args.hidden.data_ptr());
@@ -486,10 +491,11 @@ void Executor::combine_core(HybridEpConfigInstance config, CombineArgs& args) {
 #ifdef HYBRID_EP_BUILD_MULTINODE_ENABLE
     param.expected_rdma_flag_value = inter_node_combine_buffers->expected_rdma_flag_value;
 #ifdef USE_NIXL
-    param.nixl_gpu_ctx = inter_node_combine_buffers->nixl_gpu_ctx;
+    param.multinode_ctx_ptr = inter_node_combine_buffers->nixl_gpu_ctx;
+    param.multinode_aux_ptr = nullptr;
 #else
-    param.d_qps_gpu = reinterpret_cast<void **>(inter_node_combine_buffers->d_qps_gpu);
-    param.mr_info = reinterpret_cast<void*>(inter_node_combine_buffers->mr_info);
+    param.multinode_ctx_ptr = reinterpret_cast<void*>(inter_node_combine_buffers->d_qps_gpu);
+    param.multinode_aux_ptr = reinterpret_cast<void*>(inter_node_combine_buffers->mr_info);
 #endif
 #endif
 
