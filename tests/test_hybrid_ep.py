@@ -17,6 +17,16 @@ NUM_LOCAL_EXPERTS = int(os.environ.get("NUM_LOCAL_EXPERTS", 8))
 TOPK = int(os.environ.get("TOPK", 8))
 PAD_MULTIPLE = int(os.environ.get("PAD_MULTIPLE", 32))
 SEED = int(os.environ.get("SEED", 1025))
+
+def _optional_int(env_key):
+    v = os.environ.get(env_key, "").strip()
+    return int(v) if v else None
+
+NUM_SMS_DISPATCH     = _optional_int("NUM_SMS_DISPATCH")
+NUM_SMS_COMBINE      = _optional_int("NUM_SMS_COMBINE")
+NUM_BLOCKS_PERMUTE   = _optional_int("NUM_BLOCKS_PERMUTE")
+NUM_BLOCKS_UNPERMUTE = _optional_int("NUM_BLOCKS_UNPERMUTE")
+
 USE_MNNVL = os.environ.get("USE_MNNVL", "0").strip().lower() in {"1", "true", "t", "yes", "y", "on"}
 torch.manual_seed(SEED)
 torch.cuda.manual_seed(SEED)
@@ -442,7 +452,11 @@ def test_main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
                 hidden_dim=HIDDEN_DIM,
                 max_num_of_tokens_per_rank=MAX_NUM_OF_TOKENS_PER_RANK,
                 num_local_experts=NUM_LOCAL_EXPERTS,
-                use_fp8=use_fp8
+                use_fp8=use_fp8,
+                num_sms_dispatch_api=NUM_SMS_DISPATCH,
+                num_sms_combine_api=NUM_SMS_COMBINE,
+                num_blocks_permute=NUM_BLOCKS_PERMUTE,
+                num_blocks_unpermute=NUM_BLOCKS_UNPERMUTE,
             )
 
             # Set missing global vars - use buffer's detected values

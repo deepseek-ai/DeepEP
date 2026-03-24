@@ -417,6 +417,15 @@ public:
         auto clamp_below = [](int& val, int limit) {
             if (val >= limit) val = limit - 1;
         };
+        // Snap val down to the nearest multiple of align, but not below floor.
+        // combine/unpermute g2s and s2g stages must satisfy:
+        //   % NUM_OF_DATA_PIPELINE_PER_BLOCK == 0  (always 2)
+        //   % warp_group::warp_size() == 0          (always 2)
+        // so align = 2 covers both constraints.
+        constexpr int STAGE_ALIGN = 2;
+        auto align_down = [](int& val, int align, int floor) {
+            val = std::max(floor, (val / align) * align);
+        };
         // Effective dispatch smem: in fuse mode, take max of dispatch and permute_block
         auto dispatch_smem = [&]() -> int64_t {
             auto s = compute_smem_sizes(config);
@@ -454,6 +463,9 @@ public:
                 config.num_of_stages_s2g_combine_api--;
             reduce_g2s = !reduce_g2s;
         }
+        // Snap to nearest legal multiple (must be divisible by 2)
+        align_down(config.num_of_stages_g2s_combine_api, STAGE_ALIGN, MIN_STAGES);
+        align_down(config.num_of_stages_s2g_combine_api, STAGE_ALIGN, MIN_STAGES);
         clamp_below(config.num_of_additional_in_flight_s2g_combine_api,
                     config.num_of_stages_s2g_combine_api);
 
@@ -469,6 +481,9 @@ public:
                     config.num_of_stages_s2g_unpermute_block--;
                 reduce_g2s_up = !reduce_g2s_up;
             }
+            // Snap to nearest legal multiple (must be divisible by 2)
+            align_down(config.num_of_stages_g2s_unpermute_block, STAGE_ALIGN, MIN_STAGES);
+            align_down(config.num_of_stages_s2g_unpermute_block, STAGE_ALIGN, MIN_STAGES);
             clamp_below(config.num_of_additional_in_flight_s2g_unpermute_block_combine_api,
                         config.num_of_stages_s2g_unpermute_block);
         }
