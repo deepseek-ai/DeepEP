@@ -3788,15 +3788,13 @@ inline __device__ void unpermute_red_warp_group_device_function(const int node_r
           if(elect_sync(~0)){
             // Wait for previous chunk's token entry S2G finish.
             cuda::ptx::cp_async_bulk_wait_group(cuda::ptx::n32_t<NUM_OF_ADDITIONAL_IN_FLIGHT_S2G>{});
-#ifdef HYBRID_EP_BUILD_MULTINODE_ENABLE
-            // Need a system-scope release memory fence(release sem should be enough) to let all target ranks can observe the side effect of TMA writes of this chunk 
+            // Need a system-scope release memory fence to let all target ranks can observe the side effect of TMA writes of this chunk
             // before they can observe the update of the flags.
-            // This fence is killing some NVLink performance and is only needed for inter-node communication(i.e. for memory consistency for third-party PCIe device).
+            // Required for both intra-node (NVLink peer memory) and inter-node communication.
             asm volatile("fence.release.sys;"
                          :
-                         : 
+                         :
                          : "memory");
-#endif
             // Notify the inter_node_G2S and intra_node_G2S warp groups on all ranks in this node.
             // Atomically reduce add 1 to the u32 flag of the last token chunk to target flag buffer.
             // Since each unpermute block will have NUM_OF_DATA_PIPELINE_PER_BLOCK pipeline processing the same chunk, 
@@ -3979,18 +3977,16 @@ inline __device__ void unpermute_red_warp_group_device_function(const int node_r
         if(elect_sync(~0)){
           // Wait for all previous chunk's(i.e. previous and current chunk) token entry S2G finish.
           cuda::ptx::cp_async_bulk_wait_group(cuda::ptx::n32_t<0>{});
-#ifdef HYBRID_EP_BUILD_MULTINODE_ENABLE
-          // Need a system-scope release memory fence(release sem should be enough) to let all target ranks can observe the side effect of TMA writes of this chunk 
+          // Need a system-scope release memory fence to let all target ranks can observe the side effect of TMA writes of this chunk
           // before they can observe the update of the flags.
-          // This fence is killing some NVLink performance and is only needed for inter-node communication(i.e. for memory consistency for third-party PCIe device).
+          // Required for both intra-node (NVLink peer memory) and inter-node communication.
           asm volatile("fence.release.sys;"
                         :
-                        : 
+                        :
                         : "memory");
-#endif
           // Notify the inter_node_G2S and intra_node_G2S warp groups on all ranks in this node.
           // Atomically reduce add 1 to the u32 flag of the last and current token chunk to target flag buffer.
-          // Since each unpermute block will have NUM_OF_DATA_PIPELINE_PER_BLOCK pipeline processing the same chunk, 
+          // Since each unpermute block will have NUM_OF_DATA_PIPELINE_PER_BLOCK pipeline processing the same chunk,
           // the expected value of this chunk's flag should atomicAdd NUM_OF_DATA_PIPELINE_PER_BLOCK not 1.
           uint32_t* last_chunk_flag_addr = intra_node_expert_input_chunk_flags[last_chunk_rank_id] + last_chunk_global_chunk_id;
           uint32_t* current_chunk_flag_addr = intra_node_expert_input_chunk_flags[current_rank_id] + current_flag_id;
@@ -4022,18 +4018,16 @@ inline __device__ void unpermute_red_warp_group_device_function(const int node_r
       if(elect_sync(~0)){
         // Wait for the last chunk's S2G finish.
         cuda::ptx::cp_async_bulk_wait_group(cuda::ptx::n32_t<0>{});
-#ifdef HYBRID_EP_BUILD_MULTINODE_ENABLE
-        // Need a system-scope release memory fence(release sem should be enough) to let all target ranks can observe the side effect of TMA writes of this chunk 
+        // Need a system-scope release memory fence to let all target ranks can observe the side effect of TMA writes of this chunk
         // before they can observe the update of the flags.
-        // This fence is killing some NVLink performance and is only needed for inter-node communication(i.e. for memory consistency for third-party PCIe device).
+        // Required for both intra-node (NVLink peer memory) and inter-node communication.
         asm volatile("fence.release.sys;"
                       :
-                      : 
+                      :
                       : "memory");
-#endif
         // Notify the inter_node_G2S and intra_node_G2S warp groups on all ranks in this node.
         // Atomically reduce add 1 to the u32 flag of the last token chunk to target flag buffer.
-        // Since each unpermute block will have NUM_OF_DATA_PIPELINE_PER_BLOCK pipeline processing the same chunk, 
+        // Since each unpermute block will have NUM_OF_DATA_PIPELINE_PER_BLOCK pipeline processing the same chunk,
         // the expected value of this chunk's flag should atomicAdd NUM_OF_DATA_PIPELINE_PER_BLOCK not 1.
         uint32_t* last_chunk_flag_addr = intra_node_expert_input_chunk_flags[last_chunk_rank_id] + last_chunk_global_chunk_id;
         // Need a strong system-scope red to make sure all ranks can observe the update of the flag,
