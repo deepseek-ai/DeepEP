@@ -15,8 +15,7 @@ flowchart LR
 ## Choose your language
 
 - [English documentation](en/README.md)
-
-Chinese documentation will be added in a follow-up commit on the same `doc-260401` branch.
+- [中文文档](zh/README.md)
 
 ## What is covered
 

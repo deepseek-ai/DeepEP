@@ -15,6 +15,7 @@ For a source-driven learning path that breaks the system down from architecture 
 
 - [Documentation index](docs/README.md)
 - [English docs](docs/en/README.md)
+- [中文文档](docs/zh/README.md)
 
 ## Performance
 
