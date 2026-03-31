@@ -161,6 +161,7 @@ void ExtendedMemoryAllocator::close_handle(void* ptr) {
 
 bool ExtendedMemoryAllocator::is_accessible(MemHandle* mem_handle) {
   bool accessible = false;
+  bool same_host = strncmp(mem_handle->src_hostname, hostname_, sizeof(hostname_)) == 0;
   if (support_fabric_) {
     CUmemGenericAllocationHandle handle;
     auto ret = cuMemImportFromShareableHandle(&handle, &mem_handle->inner.cu_mem_fabric_handle, CU_MEM_HANDLE_TYPE_FABRIC);
@@ -168,9 +169,10 @@ bool ExtendedMemoryAllocator::is_accessible(MemHandle* mem_handle) {
     if (accessible) {
       cuMemRelease(handle);
     }
+    // MNNVL makes fabric handles importable across nodes; restrict to same host.
+    accessible = accessible && same_host;
   } else {
-    // Check if the source hostname is the same as the current hostname
-    accessible = strncmp(mem_handle->src_hostname, hostname_, sizeof(hostname_)) == 0;
+    accessible = same_host;
   }
   return accessible;
 }
