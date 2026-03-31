@@ -8,6 +8,14 @@ For latency-sensitive inference decoding, DeepEP includes a set of low-latency k
 
 Notice: the implementation in this library may have some slight differences from the [DeepSeek-V3](https://github.com/deepseek-ai/DeepSeek-V3) paper.
 
+
+## Documentation
+
+For a source-driven learning path that breaks the system down from architecture to tuning, see:
+
+- [Documentation index](docs/README.md)
+- [English docs](docs/en/README.md)
+
 ## Performance
 
 ### Normal kernels with NVLink and RDMA forwarding
