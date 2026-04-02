@@ -99,7 +99,7 @@ def get_extension_hybrid_ep_cpp():
         os.path.join(current_dir, "csrc/hybrid_ep/utils.cuh"),
         os.path.join(current_dir, "deep_ep/backend/utils.cuh")
     )
-    # Add inter-node dependency
+    # Add inter-node dependency 
     if enable_multinode:
         compile_args["nvcc"].append("-DHYBRID_EP_BUILD_MULTINODE_ENABLE")
         print(f'Multinode enabled: use_nixl={use_nixl} (USE_NIXL={os.getenv("USE_NIXL", "0")})')
@@ -264,7 +264,7 @@ def get_extension_deep_ep_cpp():
 
         # CUDA 12 flags
         nvcc_flags.extend(['-rdc=true', '--ptxas-options=--register-usage-level=10'])
-
+        
         # Ensure device linking and CUDA device runtime when RDC is enabled
         if '-rdc=true' in nvcc_flags and '-dlink' not in nvcc_dlink:
             nvcc_dlink.append('-dlink')

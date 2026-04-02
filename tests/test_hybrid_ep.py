@@ -444,47 +444,42 @@ def test_hybrid_ep_benchmark(buffer: deep_ep.HybridEPBuffer, group: dist.Process
 def test_main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
     _, _, group = init_dist(local_rank, num_local_ranks)
 
-    try:
-        stream = torch.cuda.Stream()
-        with torch.cuda.stream(stream):
-            for use_fp8 in [False, True]:
-                buffer = deep_ep.HybridEPBuffer(
-                    group=group,
-                    hidden_dim=HIDDEN_DIM,
-                    max_num_of_tokens_per_rank=MAX_NUM_OF_TOKENS_PER_RANK,
-                    num_local_experts=NUM_LOCAL_EXPERTS,
-                    use_fp8=use_fp8,
-                    num_sms_dispatch_api=NUM_SMS_DISPATCH,
-                    num_sms_combine_api=NUM_SMS_COMBINE,
-                    num_blocks_permute=NUM_BLOCKS_PERMUTE,
-                    num_blocks_unpermute=NUM_BLOCKS_UNPERMUTE,
-                )
+    stream = torch.cuda.Stream()
+    with torch.cuda.stream(stream):
+        for use_fp8 in [False, True]:
+            buffer = deep_ep.HybridEPBuffer(
+                group=group,
+                hidden_dim=HIDDEN_DIM,
+                max_num_of_tokens_per_rank=MAX_NUM_OF_TOKENS_PER_RANK,
+                num_local_experts=NUM_LOCAL_EXPERTS,
+                use_fp8=use_fp8,
+                num_sms_dispatch_api=NUM_SMS_DISPATCH,
+                num_sms_combine_api=NUM_SMS_COMBINE,
+                num_blocks_permute=NUM_BLOCKS_PERMUTE,
+                num_blocks_unpermute=NUM_BLOCKS_UNPERMUTE,
+            )
 
-                # Set missing global vars - use buffer's detected values
-                global NUM_OF_RANKS_PER_NODE, NUM_OF_NODES, NUM_OF_EXPERTS
-                if USE_MNNVL:
-                    NUM_OF_RANKS_PER_NODE = buffer.num_of_hybrid_ep_ranks_per_nvlink_domain
-                    NUM_OF_NODES = buffer.num_of_nodes
-                    NUM_OF_EXPERTS = NUM_LOCAL_EXPERTS * NUM_OF_RANKS_PER_NODE * NUM_OF_NODES
-                else:
-                    NUM_OF_RANKS_PER_NODE = args.num_processes
-                    NUM_OF_NODES = group.size() // NUM_OF_RANKS_PER_NODE
-                    NUM_OF_EXPERTS = NUM_LOCAL_EXPERTS * NUM_OF_RANKS_PER_NODE * NUM_OF_NODES
+            # Set missing global vars - use buffer's detected values
+            global NUM_OF_RANKS_PER_NODE, NUM_OF_NODES, NUM_OF_EXPERTS
+            if USE_MNNVL:
+                NUM_OF_RANKS_PER_NODE = buffer.num_of_hybrid_ep_ranks_per_nvlink_domain
+                NUM_OF_NODES = buffer.num_of_nodes
+                NUM_OF_EXPERTS = NUM_LOCAL_EXPERTS * NUM_OF_RANKS_PER_NODE * NUM_OF_NODES
+            else:
+                NUM_OF_RANKS_PER_NODE = args.num_processes
+                NUM_OF_NODES = group.size() // NUM_OF_RANKS_PER_NODE
+                NUM_OF_EXPERTS = NUM_LOCAL_EXPERTS * NUM_OF_RANKS_PER_NODE * NUM_OF_NODES
 
-                ref = TorchRef(
-                    ep_group=group,
-                    num_of_experts=NUM_OF_EXPERTS,
-                    num_of_ranks_per_node=NUM_OF_RANKS_PER_NODE,
-                )
+            ref = TorchRef(
+                ep_group=group,
+                num_of_experts=NUM_OF_EXPERTS,
+                num_of_ranks_per_node=NUM_OF_RANKS_PER_NODE,
+            )
 
-                test_hybrid_ep_correctness(buffer, ref, use_fp8)
-                test_hybrid_ep_benchmark(buffer, group, use_fp8, args.nsys_profile)
-        dist.barrier()
-    finally:
-        # Always destroy process group to avoid resource leaks and the
-        # "destroy_process_group() was not called before program exit" warning
-        if dist.is_initialized():
-            dist.destroy_process_group()
+            test_hybrid_ep_correctness(buffer, ref, use_fp8)
+            test_hybrid_ep_benchmark(buffer, group, use_fp8, args.nsys_profile)
+    dist.barrier()
+    dist.destroy_process_group()
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Test intranode EP kernels')

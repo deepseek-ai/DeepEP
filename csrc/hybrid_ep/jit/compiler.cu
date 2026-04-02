@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: MIT 
 // SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 
 #include "compiler.cuh"
@@ -25,7 +25,7 @@ std::string get_jit_dir() {
             cache_dir = pw->pw_dir;
         }
         if (cache_dir.empty()) {
-            cache_dir = "/tmp";  // Fallback
+            cache_dir = "/tmp";  // Fallback 
         }
     }
     // Use process-specific subdirectory to avoid race conditions when multiple
@@ -37,7 +37,7 @@ std::string get_jit_dir() {
     return proc_jit;
 }
 
-NVCCCompiler::NVCCCompiler(std::string base_path, std::string comm_id):
+NVCCCompiler::NVCCCompiler(std::string base_path, std::string comm_id): 
     base_path(base_path), comm_id(comm_id) {
     jit_dir = get_jit_dir();
 
@@ -49,7 +49,7 @@ NVCCCompiler::NVCCCompiler(std::string base_path, std::string comm_id):
             " -O3 --expt-relaxed-constexpr "
             " -Xcompiler -fPIC -shared ";
     // Add the include path of the hybrid-ep library
-    std::string include = " -I" + base_path + "/backend"
+    std::string include = " -I" + base_path + "/backend" 
             + " -I" + get_env("CUDA_HOME") + "/include ";
     // Add the library path of the hybrid-ep library
     std::string library = "-L" + get_env("CUDA_HOME") + "/lib64 -lcudart ";
@@ -98,7 +98,7 @@ NVCCCompiler::NVCCCompiler(std::string base_path, std::string comm_id):
 
     inter_node_flags = flags + " " + include + " " + library;
 }
-
+  
 
 std::string NVCCCompiler::build(std::string code, std::string signature, int local_rank, int node_rank, int num_of_nodes, bool enable_permute_fusion, bool enable_token_drop) {
     // Create the source directory
@@ -144,7 +144,7 @@ std::string NVCCCompiler::build(std::string code, std::string signature, int loc
     }else {
         compile_command = nvcc_path + " " + intra_node_flags + extra_flags + " " + source_path + " -o " + output_path;
     }
-
+    
     // Run the compile command
     auto ret = std::system(compile_command.c_str());
     if (ret != 0) {
@@ -181,7 +181,7 @@ std::any NVCCCompiler::get_instance(std::string library_path, std::string kernel
     std::string unique_library_path = jit_dir + "/" + kernel_key + ".so";
     if (library_path != unique_library_path) {
         std::error_code ec;
-        std::filesystem::rename(library_path, unique_library_path, ec);
+        std::filesystem::rename(library_path, unique_library_path, ec); 
         if (ec) {
             // If rename failed, the comm should not be blocked, so we just print a warning message
             printf("[Warning] Failed to unique the library: %s -> %s, err: %s\n",
@@ -200,7 +200,7 @@ std::string NVCCCompiler::get_metadata_preprocessing_code(HybridEpConfigInstance
   return R"(
         #include "hybrid_ep_backend.cuh"
         #include <any>
-
+        
         extern "C" {
           std::any get_function_ptr() {
             std::any func_ptr = &hybrid_ep::hybrid_ep<)" +
@@ -222,7 +222,7 @@ std::string NVCCCompiler::get_dispatch_code(HybridEpConfigInstance config) {
   return R"(
         #include "hybrid_ep_backend.cuh"
         #include <any>
-
+        
         extern "C" {
           std::any get_function_ptr() {
             std::any func_ptr = &hybrid_ep::hybrid_ep<)" +
@@ -263,7 +263,7 @@ std::string NVCCCompiler::get_combine_code(HybridEpConfigInstance config) {
       )";
 }
 
-KernelCache::KernelCache(int node_rank, int local_rank, std::string base_path, std::string comm_id, bool load_cached_kernels):
+KernelCache::KernelCache(int node_rank, int local_rank, std::string base_path, std::string comm_id, bool load_cached_kernels): 
 node_rank(node_rank), local_rank(local_rank), nvcc_compiler(base_path, comm_id) {
     // Load all cached kernels from the cache directory
     jit_dir = get_jit_dir();
@@ -279,7 +279,7 @@ node_rank(node_rank), local_rank(local_rank), nvcc_compiler(base_path, comm_id) 
 }
 
 void KernelCache::run_preprocess_kernel(
-    HybridEpConfigInstance config,
+    HybridEpConfigInstance config, 
     const bool* input_routing_map,
     hybrid_ep::tmp_state_t* preprocessing_tmp,
     hybrid_ep::tmp_state_t* preprocessing_local_experts_tmp,
@@ -315,7 +315,7 @@ void KernelCache::run_preprocess_kernel(
         fuse_permute_dispatch,
         non_blocking
     );
-
+    
     auto it = kernel_cache.find(preprocess_kernel_key);
     if (it == kernel_cache.end()) {
         auto preprocessing_code = nvcc_compiler.get_metadata_preprocessing_code(config);
@@ -334,7 +334,7 @@ void KernelCache::run_preprocess_kernel(
 }
 
 template void KernelCache::run_dispatch_kernel<uint8_t>(
-    HybridEpConfigInstance config,
+    HybridEpConfigInstance config, 
     hybrid_ep::dispatch_kernel_param_t<uint8_t> param,
     bool fuse_permute_dispatch,
     bool non_blocking,
@@ -342,7 +342,7 @@ template void KernelCache::run_dispatch_kernel<uint8_t>(
 );
 
 template void KernelCache::run_dispatch_kernel<uint16_t>(
-    HybridEpConfigInstance config,
+    HybridEpConfigInstance config, 
     hybrid_ep::dispatch_kernel_param_t<uint16_t> param,
     bool fuse_permute_dispatch,
     bool non_blocking,
@@ -351,7 +351,7 @@ template void KernelCache::run_dispatch_kernel<uint16_t>(
 
 template<typename DATA_TYPE>
 void KernelCache::run_dispatch_kernel(
-    HybridEpConfigInstance config,
+    HybridEpConfigInstance config, 
     hybrid_ep::dispatch_kernel_param_t<DATA_TYPE> param,
     bool fuse_permute_dispatch,
     bool non_blocking,
@@ -408,7 +408,7 @@ void KernelCache::run_dispatch_kernel(
 }
 
 void KernelCache::run_combine_kernel(
-    HybridEpConfigInstance config,
+    HybridEpConfigInstance config, 
     hybrid_ep::combine_kernel_param_t param,
     bool fuse_unpermute_combine,
     bool non_blocking,
@@ -446,7 +446,7 @@ void KernelCache::run_combine_kernel(
         kernel_cache[combine_kernel_key] = nvcc_compiler.get_instance(combine_path, combine_kernel_key);
     }
     auto combine_instance = kernel_cache[combine_kernel_key];
-
+    
     // Cast the function pointer to the correct type
     using CombineFuncPtr = void (*)(hybrid_ep::combine_kernel_param_t, cudaStream_t);
     auto func_ptr = std::any_cast<CombineFuncPtr>(combine_instance);

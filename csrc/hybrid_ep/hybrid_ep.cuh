@@ -71,9 +71,9 @@ private:
   ExtendedMemoryAllocator remote_allocator;
 #ifdef HYBRID_EP_BUILD_MULTINODE_ENABLE
 #ifdef USE_NIXL
-  NIXLCoordinator nixl_coordinator;
+  NIXLCoordinator internode_coordinator;
 #else
-  RDMACoordinator rdma_coordinator;
+  RDMACoordinator internode_coordinator;
 #endif
 #endif
   NVLCoordinator nvl_coordinator;
