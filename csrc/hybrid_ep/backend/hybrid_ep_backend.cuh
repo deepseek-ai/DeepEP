@@ -8,7 +8,12 @@
 #include <cuda_bf16.h>
 #include <cuda/ptx>
 #ifdef HYBRID_EP_BUILD_MULTINODE_ENABLE
-#ifdef USE_NIXL
+#ifndef USE_NIXL
+#include "doca_gpunetio_host.h"
+#include "doca_gpunetio_device.h"
+#include "infiniband/verbs.h"
+#include "infiniband/mlx5dv.h"
+#else
 #include "nixl.h"
 #include "nixl_device.cuh"
 
@@ -39,13 +44,8 @@ struct combine_gpu_nixl_ctx {
 };
 
 } // namespace hybrid_ep
-#else
-#include "doca_gpunetio_host.h"
-#include "doca_gpunetio_device.h"
-#include "infiniband/verbs.h"
-#include "infiniband/mlx5dv.h"
-#endif
-#endif
+#endif // USE_NIXL
+#endif // HYBRID_EP_BUILD_MULTINODE_ENABLE
 #ifdef HYBRID_EP_BUILD_PERMUTE_FUSION_ENABLE
 #include <cuda_pipeline_primitives.h>
 #endif
@@ -248,13 +248,13 @@ template<int NUM_OF_STAGES,
          int NUM_OF_TOKENS_PER_CHUNK,
          int NUM_OF_EXPERTS_PER_RANK,
          int NUM_OF_RANKS_PER_NODE> 
-struct dispatch_kernel_dynamic_shared_memory_buffer_t<uint8_t, NUM_OF_STAGES, HIDDEN_DIM, NUM_OF_TOKENS_PER_CHUNK, NUM_OF_EXPERTS_PER_RANK, NUM_OF_RANKS_PER_NODE, 1, false>{
+struct dispatch_kernel_dynamic_shared_memory_buffer_t<uint16_t, NUM_OF_STAGES, HIDDEN_DIM, NUM_OF_TOKENS_PER_CHUNK, NUM_OF_EXPERTS_PER_RANK, NUM_OF_RANKS_PER_NODE, 1, true>{
   // Shared memory token buffer. Should be 128B alignment for optimal perf for TMA.
-  alignas(128) uint8_t intra_node_token_buffer[NUM_OF_STAGES][HIDDEN_DIM];
+  alignas(128) uint16_t intra_node_token_buffer[NUM_OF_STAGES][HIDDEN_DIM];
   // Shared memory ping-pong buffer for sparse_to_dense map for token data chunks. Should be 128B alignment for optimal perf for TMA.
   alignas(128) int32_t sparse_to_dense_map_buffer[2][NUM_OF_TOKENS_PER_CHUNK][NUM_OF_RANKS_PER_NODE];
-  // Shared memory scaling factor buffer. Only when using FP8 token. Should be 16B alignment so can be used with TMA. 128B is too strict.
-  alignas(16) float intra_node_scaling_factor_buffer[NUM_OF_STAGES][HIDDEN_DIM / 128];
+  // Shared memory Prob buffer. Only used in FW dispatch. Should be 16B alignment so can be used with TMA. 128B is too strict.
+  alignas(16) float intra_node_prob_buffer[NUM_OF_STAGES][NUM_OF_EXPERTS_PER_RANK * NUM_OF_RANKS_PER_NODE];
   // Shared memory mbarrier that protect token entry, 1st for producer->consumer, 2nd for consumer->producer. Should be 8B alignment(natural alignment).
   alignas(8) uint64_t intra_node_mbarrier_buffer[NUM_OF_STAGES][2]; 
   // Shared memory mbarrier that protect sparse_to_dense map. Should be 8B alignment(natural alignment).
@@ -268,13 +268,13 @@ template<int NUM_OF_STAGES,
          int NUM_OF_TOKENS_PER_CHUNK,
          int NUM_OF_EXPERTS_PER_RANK,
          int NUM_OF_RANKS_PER_NODE> 
-struct dispatch_kernel_dynamic_shared_memory_buffer_t<uint16_t, NUM_OF_STAGES, HIDDEN_DIM, NUM_OF_TOKENS_PER_CHUNK, NUM_OF_EXPERTS_PER_RANK, NUM_OF_RANKS_PER_NODE, 1, true>{
+struct dispatch_kernel_dynamic_shared_memory_buffer_t<uint8_t, NUM_OF_STAGES, HIDDEN_DIM, NUM_OF_TOKENS_PER_CHUNK, NUM_OF_EXPERTS_PER_RANK, NUM_OF_RANKS_PER_NODE, 1, false>{
   // Shared memory token buffer. Should be 128B alignment for optimal perf for TMA.
-  alignas(128) uint16_t intra_node_token_buffer[NUM_OF_STAGES][HIDDEN_DIM];
+  alignas(128) uint8_t intra_node_token_buffer[NUM_OF_STAGES][HIDDEN_DIM];
   // Shared memory ping-pong buffer for sparse_to_dense map for token data chunks. Should be 128B alignment for optimal perf for TMA.
   alignas(128) int32_t sparse_to_dense_map_buffer[2][NUM_OF_TOKENS_PER_CHUNK][NUM_OF_RANKS_PER_NODE];
-  // Shared memory Prob buffer. Only used in FW dispatch. Should be 16B alignment so can be used with TMA. 128B is too strict.
-  alignas(16) float intra_node_prob_buffer[NUM_OF_STAGES][NUM_OF_EXPERTS_PER_RANK * NUM_OF_RANKS_PER_NODE];
+  // Shared memory scaling factor buffer. Only when using FP8 token. Should be 16B alignment so can be used with TMA. 128B is too strict.
+  alignas(16) float intra_node_scaling_factor_buffer[NUM_OF_STAGES][HIDDEN_DIM / 128];
   // Shared memory mbarrier that protect token entry, 1st for producer->consumer, 2nd for consumer->producer. Should be 8B alignment(natural alignment).
   alignas(8) uint64_t intra_node_mbarrier_buffer[NUM_OF_STAGES][2]; 
   // Shared memory mbarrier that protect sparse_to_dense map. Should be 8B alignment(natural alignment).

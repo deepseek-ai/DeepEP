@@ -155,8 +155,8 @@ pip install .
 For multi-node support with NIXL. NIXL replaces DOCA for inter-node GPU data transfers, so the DOCA SDK and NCCL submodule are not needed at build time. Note that NCCL may still be used at runtime by `torch.distributed` for collective metadata operations.
 
 **Prerequisites:**
-- **NIXL** ([ai-computing/nixl](https://github.com/ai-computing/nixl)) — GPU-aware inter-node communication library. Install from source; see the NIXL README for build instructions.
-- **UCX** ([openucx/ucx](https://github.com/openucx/ucx)) — typically already present in NVIDIA container images or available via `apt install libucx-dev`. UCX v1.17+ is recommended.
+- **NIXL** ([ai-dynamo/nixl](https://github.com/ai-dynamo/nixl)) — GPU-aware inter-node communication library. Install from source; see the NIXL README for build instructions.
+- **UCX** ([openucx/ucx](https://github.com/openucx/ucx)) — UCX v1.17+ is recommended. Pre-installed in NVIDIA NGC PyTorch containers (e.g. `nvcr.io/nvidia/pytorch:24.12-py3` and later), as well as the NGC TensorFlow and Triton inference containers. If your image does not include UCX, install from source or via `apt install libucx-dev`.
 
 ```bash
 export HYBRID_EP_MULTINODE=1
@@ -165,6 +165,27 @@ export NIXL_HOME=/usr/local/nixl  # Path to NIXL install prefix (contains includ
 export UCX_HOME=/usr              # Path to UCX install prefix (contains include/ and lib/)
 export TORCH_CUDA_ARCH_LIST="9.0 10.0"  # Adjust based on your GPU architecture
 pip install .
+```
+
+**Dockerfile example (based on NGC PyTorch image):**
+
+```dockerfile
+FROM nvcr.io/nvidia/pytorch:24.12-py3
+
+# Build NIXL from source
+RUN git clone https://github.com/ai-dynamo/nixl.git /opt/nixl && \
+    cd /opt/nixl && mkdir build && cd build && \
+    cmake .. -DCMAKE_INSTALL_PREFIX=/usr/local/nixl && \
+    make -j$(nproc) && make install
+ENV NIXL_HOME=/usr/local/nixl
+
+# Build DeepEP with NIXL
+WORKDIR /workspace
+RUN git clone -b hybrid_ep https://github.com/deepseek-ai/DeepEP.git
+ENV HYBRID_EP_MULTINODE=1
+ENV USE_NIXL=1
+RUN cd DeepEP && \
+    TORCH_CUDA_ARCH_LIST="9.0 10.0" MAX_JOBS=8 pip install --no-build-isolation .
 ```
 
 #### Multi-node RDMA (DOCA) Installation
