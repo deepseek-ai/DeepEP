@@ -676,6 +676,12 @@ Buffer::intranode_dispatch(const torch::Tensor& x,
         recv_x_scales_ptr = static_cast<float*>(recv_x_scales->data_ptr());
     }
 
+    // Ensure comm_stream observes all compute_stream work above this point,
+    // including any fill kernels launched by torch::empty() allocations.
+    // Placed immediately before the kernel launch so future allocations are also covered.
+    if (!allocate_on_comm_stream)
+        stream_wait(comm_stream, compute_stream);
+
     // Dispatch
     EP_HOST_ASSERT(
         num_ranks * num_ranks * sizeof(int) +                                                                     // Size prefix matrix
@@ -827,7 +833,7 @@ std::tuple<torch::Tensor, std::optional<torch::Tensor>, std::optional<EventHandl
         EP_HOST_ASSERT(topk_weights->scalar_type() == torch::kFloat32);
         num_topk = static_cast<int>(topk_weights->size(1));
         topk_weights_ptr = topk_weights->data_ptr<float>();
-        recv_topk_weights = torch::empty({num_recv_tokens, num_topk}, topk_weights->options());
+        recv_topk_weights = torch::empty({num_recv_tokens, num_topk}, topk_weights->options());  // fill covered by stream_wait below
         recv_topk_weights_ptr = recv_topk_weights->data_ptr<float>();
     }
 
@@ -857,6 +863,13 @@ std::tuple<torch::Tensor, std::optional<torch::Tensor>, std::optional<EventHandl
 
     // Combine data
     auto recv_x = torch::empty({num_recv_tokens, hidden}, x.options());
+
+    // Ensure comm_stream observes all compute_stream work above this point,
+    // including any fill kernels launched by torch::empty() allocations.
+    // Placed immediately before the kernel launch so future allocations are also covered.
+    if (!allocate_on_comm_stream)
+        stream_wait(comm_stream, compute_stream);
+
     EP_HOST_ASSERT(num_channels * num_ranks * sizeof(int) * 2 +  // Queue head and tail
                        num_channels * num_ranks * config.num_max_nvl_chunked_recv_tokens * hidden * x.element_size() +  // Data buffer
                        num_channels * num_ranks * config.num_max_nvl_chunked_recv_tokens * sizeof(int) +             // Source index buffer
@@ -1199,6 +1212,12 @@ Buffer::internode_dispatch(const torch::Tensor& x,
         recv_x_scales_ptr = static_cast<float*>(recv_x_scales->data_ptr());
     }
 
+    // Ensure comm_stream observes all compute_stream work above this point,
+    // including any fill kernels launched by torch::empty() allocations.
+    // Placed immediately before the kernel launch so future allocations are also covered.
+    if (!allocate_on_comm_stream)
+        stream_wait(comm_stream, compute_stream);
+
     // Launch data dispatch
     // NOTES: the buffer size checks are moved into the `.cu` file
     internode::dispatch(recv_x.data_ptr(),
@@ -1381,7 +1400,7 @@ std::tuple<torch::Tensor, std::optional<torch::Tensor>, std::optional<EventHandl
         EP_HOST_ASSERT(topk_weights->scalar_type() == torch::kFloat32);
         num_topk = static_cast<int>(topk_weights->size(1));
         topk_weights_ptr = topk_weights->data_ptr<float>();
-        combined_topk_weights = torch::empty({num_combined_tokens, num_topk}, topk_weights->options());
+        combined_topk_weights = torch::empty({num_combined_tokens, num_topk}, topk_weights->options());  // fill covered by stream_wait below
         combined_topk_weights_ptr = combined_topk_weights->data_ptr<float>();
     }
 
@@ -1427,6 +1446,13 @@ std::tuple<torch::Tensor, std::optional<torch::Tensor>, std::optional<EventHandl
 
     // Launch data combine
     auto combined_x = torch::empty({num_combined_tokens, hidden}, x.options());
+
+    // Ensure comm_stream observes all compute_stream work above this point,
+    // including any fill kernels launched by torch::empty() allocations.
+    // Placed immediately before the kernel launch so future allocations are also covered.
+    if (!allocate_on_comm_stream)
+        stream_wait(comm_stream, compute_stream);
+
     internode::combine(at::cuda::ScalarTypeToCudaDataType(x.scalar_type()),
                        combined_x.data_ptr(),
                        combined_topk_weights_ptr,
