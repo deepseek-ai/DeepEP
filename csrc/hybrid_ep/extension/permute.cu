@@ -408,6 +408,8 @@
       assert(args.hidden_size % 8 == 0);
    }
    assert(args.num_permuted_token >= 0);
+   // No tokens to permute — skip kernel launch
+   if(args.num_permuted_token == 0) return;
    // Output buffers must be pre-allocated by caller
    assert(args.output_tokens_ptr != nullptr);
  
