@@ -15,8 +15,10 @@
 #include <net/if.h>
 #include <sys/stat.h>
 #include <cstring>
+#include <cstdlib>
 #include <cassert>
 #include <algorithm>
+#include <stdexcept>
 
 #define NIXL_ETCD_WATCH_TIMEOUT std::chrono::microseconds(1000000000)  // 1000 seconds
 
@@ -35,6 +37,95 @@ namespace hybrid_ep {
 
 static void sleep_ms(int milliseconds) {
     std::this_thread::sleep_for(std::chrono::milliseconds(milliseconds));
+}
+
+// getenv("NAME") parsed as int; returns default_val if unset or invalid.
+static int getenv_int(const char* name, int default_val) {
+    const char* s = std::getenv(name);
+    if (!s || !*s) {
+        return default_val;
+    }
+    char* end = nullptr;
+    long v = std::strtol(s, &end, 10);
+    if (end == s) {
+        return default_val;
+    }
+    return static_cast<int>(v);
+}
+
+// makeConnection can return NOT_FOUND until the comm thread finishes applying remote UCX
+// connection info; at multi-node scale that may lag slightly after checkRemoteMD succeeds.
+static bool nixl_wireup_status_retriable(nixl_status_t s) {
+    return s == NIXL_ERR_NOT_FOUND || s == NIXL_ERR_BACKEND;
+}
+
+static bool prep_mem_view_status_retriable(nixl_status_t s) {
+    return s == NIXL_ERR_NOT_FOUND || s == NIXL_ERR_BACKEND;
+}
+
+// Local prepMemView can briefly fail while local VRAM registration is still settling.
+static nixl_status_t prep_local_mem_view_retry(std::shared_ptr<nixlAgent> agent,
+                                               const nixl_xfer_dlist_t& dlist,
+                                               nixlMemViewH& mvh,
+                                               nixl_opt_args_t* extra_params,
+                                               int rank_uuid,
+                                               const char* what) {
+    const int max_retries = std::max(1, getenv_int("DEEPEP_NIXL_PREPMV_MAX_RETRIES", 5000));
+    const int retry_ms = std::max(1, getenv_int("DEEPEP_NIXL_PREPMV_RETRY_MS", 20));
+    nixl_status_t status = NIXL_ERR_UNKNOWN;
+    for (int attempt = 0; attempt < max_retries; ++attempt) {
+        status = agent->prepMemView(dlist, mvh, extra_params);
+        if (status == NIXL_SUCCESS) {
+            return NIXL_SUCCESS;
+        }
+        if (!prep_mem_view_status_retriable(status)) {
+            break;
+        }
+        if (attempt == 0 || (attempt + 1) % 100 == 0) {
+            NIXL_LOG_CRITICAL(
+                "  [Rank %d] prepMemView(local) %s: pending (%s), attempt %d/%d\n",
+                rank_uuid,
+                what,
+                nixlEnumStrings::statusStr(status).c_str(),
+                attempt + 1,
+                max_retries);
+        }
+        sleep_ms(retry_ms);
+    }
+    return status;
+}
+
+// Remote prepMemView can fail with NOT_FOUND until remoteSections + UCX rkeys fully match
+// the descriptors (comm thread / etcd lag at scale). Retry similarly to makeConnection.
+static nixl_status_t prep_remote_mem_view_retry(std::shared_ptr<nixlAgent> agent,
+                                                const nixl_remote_dlist_t& dlist,
+                                                nixlMemViewH& mvh,
+                                                nixl_opt_args_t* extra_params,
+                                                int rank_uuid,
+                                                const char* what) {
+    const int max_retries = std::max(1, getenv_int("DEEPEP_NIXL_PREPMV_MAX_RETRIES", 5000));
+    const int retry_ms = std::max(1, getenv_int("DEEPEP_NIXL_PREPMV_RETRY_MS", 20));
+    nixl_status_t status = NIXL_ERR_UNKNOWN;
+    for (int attempt = 0; attempt < max_retries; ++attempt) {
+        status = agent->prepMemView(dlist, mvh, extra_params);
+        if (status == NIXL_SUCCESS) {
+            return NIXL_SUCCESS;
+        }
+        if (!prep_mem_view_status_retriable(status)) {
+            break;
+        }
+        if (attempt == 0 || (attempt + 1) % 100 == 0) {
+            NIXL_LOG_CRITICAL(
+                "  [Rank %d] prepMemView(remote) %s: pending (%s), attempt %d/%d\n",
+                rank_uuid,
+                what,
+                nixlEnumStrings::statusStr(status).c_str(),
+                attempt + 1,
+                max_retries);
+        }
+        sleep_ms(retry_ms);
+    }
+    return status;
 }
 
 static std::string get_local_ip() {
@@ -305,7 +396,8 @@ void HybridEP_NIXLConnector::_nixl_agents_connect(const std::vector<int>& ranks)
 
         NIXL_LOG("    [Rank %d] _nixl_agents_connect: Fetching metadata for remote agent '%s'...\n",
                rank_uuid, remote_agent_name.c_str());
-        nixl_status_t fetch_status = nixl_agent_infos[agent_idx].agent->fetchRemoteMD(remote_agent_name);
+        nixl_status_t fetch_status = nixl_agent_infos[agent_idx].agent->fetchRemoteMD(
+            remote_agent_name, &nixl_agent_infos[agent_idx].extra_params);
         assert(fetch_status == NIXL_SUCCESS);
 
         nixl_xfer_dlist_t empty_descs(VRAM_SEG);
@@ -367,37 +459,44 @@ void HybridEP_NIXLConnector::_nixl_agents_wireup(const std::vector<int>& ranks) 
 
 void HybridEP_NIXLConnector::_nixl_ucx_wireup(const std::vector<int>& ranks) {
     int agent_idx = 0;
-    assert(dispatch_buf->attn_input_token != nullptr && "attn_input_token required for UCX wireup");
-
-    nixl_xfer_dlist_t dummy_src_dlist(VRAM_SEG);
-    dummy_src_dlist.addDesc(nixlBlobDesc((uintptr_t)dispatch_buf->attn_input_token, sizeof(uint64_t), local_device_id, ""));
+    const int max_retries = std::max(1, getenv_int("DEEPEP_NIXL_WIREUP_MAX_RETRIES", 2000));
+    const int retry_ms = std::max(1, getenv_int("DEEPEP_NIXL_WIREUP_RETRY_MS", 10));
 
     for (int remote_rank : ranks) {
-        assert(nixl_peer_info[remote_rank].rdma_buffer_ptr != nullptr && "Remote rdma_buffer_ptr required for UCX wireup");
+        std::string remote_agent_name = std::to_string(remote_rank);
 
-        nixl_xfer_dlist_t dummy_dst_dlist(VRAM_SEG);
-        dummy_dst_dlist.addDesc(nixlBlobDesc((uintptr_t)nixl_peer_info[remote_rank].rdma_buffer_ptr,
-                                             sizeof(uint64_t),
-                                             nixl_peer_info[remote_rank].device_id, ""));
-
-        nixl_opt_args_t wireup_params = {};
-        wireup_params.backends.push_back(nixl_agent_infos[agent_idx].backend);
-
-        nixlXferReqH* wireup_req = nullptr;
-        nixl_status_t status = nixl_agent_infos[agent_idx].agent->createXferReq(
-            NIXL_WRITE, dummy_src_dlist, dummy_dst_dlist,
-            std::to_string(remote_rank), wireup_req, &wireup_params);
-        assert(status == NIXL_SUCCESS);
-
-        status = nixl_agent_infos[agent_idx].agent->postXferReq(wireup_req);
-        assert(status == NIXL_SUCCESS || status == NIXL_IN_PROG);
-        while ((status = nixl_agent_infos[agent_idx].agent->getXferStatus(wireup_req)) == NIXL_IN_PROG) {
-            sleep_ms(1);
+        nixl_status_t status = NIXL_ERR_UNKNOWN;
+        for (int attempt = 0; attempt < max_retries; ++attempt) {
+            status = nixl_agent_infos[agent_idx].agent->makeConnection(
+                remote_agent_name, &nixl_agent_infos[agent_idx].extra_params);
+            if (status == NIXL_SUCCESS) {
+                break;
+            }
+            if (!nixl_wireup_status_retriable(status)) {
+                break;
+            }
+            if (attempt == 0 || (attempt + 1) % 100 == 0) {
+                NIXL_LOG_CRITICAL(
+                    "  [Rank %d] _nixl_ucx_wireup: makeConnection to agent %s pending (%s), "
+                    "attempt %d/%d\n",
+                    rank_uuid,
+                    remote_agent_name.c_str(),
+                    nixlEnumStrings::statusStr(status).c_str(),
+                    attempt + 1,
+                    max_retries);
+            }
+            sleep_ms(retry_ms);
         }
-        assert(status == NIXL_SUCCESS);
 
-        status = nixl_agent_infos[agent_idx].agent->releaseXferReq(wireup_req);
-        assert(status == NIXL_SUCCESS);
+        if (status != NIXL_SUCCESS) {
+            std::string msg = std::string("HybridEP NIXL: makeConnection failed for remote agent ") +
+                remote_agent_name + ": " + nixlEnumStrings::statusStr(status) +
+                " (code " + std::to_string(static_cast<int>(status)) + "). "
+                "Try increasing DEEPEP_NIXL_WIREUP_MAX_RETRIES or DEEPEP_NIXL_WIREUP_RETRY_MS "
+                "if etcd/UCX is slow at scale.";
+            NIXL_LOG_CRITICAL("%s\n", msg.c_str());
+            throw std::runtime_error(msg);
+        }
 
         NIXL_LOG("    [Rank %d] _nixl_ucx_wireup: Connected to rank %d\n", rank_uuid, remote_rank);
     }
@@ -409,7 +508,7 @@ void HybridEP_NIXLConnector::_nixl_agents_wiredown(const std::vector<int>& ranks
     for (int remote_rank : ranks) {
         nixl_status_t status = nixl_agent_infos[agent_idx].agent->invalidateRemoteMD(
             nixl_agent_infos[agent_idx].dst_agent_names[remote_rank]);
-        if (status != NIXL_SUCCESS) {
+        if (status != NIXL_SUCCESS && status != NIXL_ERR_NOT_FOUND) {
             fprintf(stderr, "WARNING: Failed to invalidate remote metadata for rank %d\n", remote_rank);
         }
         nixl_agent_infos[agent_idx].dst_agent_names[remote_rank].clear();
@@ -461,7 +560,8 @@ void HybridEP_NIXLConnector::_nixl_create_memory_views(const std::vector<int>& r
         int remote_rank = actual_node_rank * ranks_per_node + local_nvl_rank;
 
         int my_node_rank_in_remote = (node_rank < actual_node_rank) ? node_rank : (node_rank - 1);
-        std::string remote_agent_name = nixl_agent_infos[agent_idx].dst_agent_names[remote_rank];
+        // Must match NIXL agent id strings (same as fetchRemoteMD / etcd), not a cached copy.
+        const std::string remote_agent_name = std::to_string(remote_rank);
 
         void* remote_dispatch_token_addr = (uint8_t*)nixl_peer_info[remote_rank].rdma_buffer_ptr +
                                            my_node_rank_in_remote * token_stride;
@@ -505,23 +605,59 @@ void HybridEP_NIXLConnector::_nixl_create_memory_views(const std::vector<int>& r
     }
 
     nixl_status_t status;
-    status = nixl_agent_infos[agent_idx].agent->prepMemView(
+    status = prep_local_mem_view_retry(
+        nixl_agent_infos[agent_idx].agent,
         dispatch_local_descs,
         nixl_agent_infos[agent_idx].dispatch_local_mvh,
-        &nixl_agent_infos[agent_idx].extra_params);
-    assert(status == NIXL_SUCCESS && "Failed to create dispatch local memory view");
+        &nixl_agent_infos[agent_idx].extra_params,
+        rank_uuid,
+        "dispatch_local");
+    if (status != NIXL_SUCCESS) {
+        throw std::runtime_error(
+            "HybridEP NIXL: prepMemView dispatch local failed: " +
+            nixlEnumStrings::statusStr(status) + " (code " +
+            std::to_string(static_cast<int>(status)) + ").");
+    }
 
-    status = nixl_agent_infos[agent_idx].agent->prepMemView(
+    {
+        const int pre_delay = getenv_int("DEEPEP_NIXL_PREPMV_INITIAL_DELAY_MS", 0);
+        if (pre_delay > 0) {
+            NIXL_LOG_CRITICAL(
+                "  [Rank %d] DEEPEP_NIXL_PREPMV_INITIAL_DELAY_MS: sleeping %d ms before remote views\n",
+                rank_uuid,
+                pre_delay);
+            sleep_ms(pre_delay);
+        }
+    }
+
+    status = prep_remote_mem_view_retry(
+        nixl_agent_infos[agent_idx].agent,
         dispatch_remote_data_descs,
         nixl_agent_infos[agent_idx].dispatch_remote_data_mvh,
-        &nixl_agent_infos[agent_idx].extra_params);
-    assert(status == NIXL_SUCCESS && "Failed to create dispatch remote data memory view");
+        &nixl_agent_infos[agent_idx].extra_params,
+        rank_uuid,
+        "dispatch_remote_data");
+    if (status != NIXL_SUCCESS) {
+        throw std::runtime_error(
+            "HybridEP NIXL: prepMemView dispatch remote data failed: " +
+            nixlEnumStrings::statusStr(status) + " (code " +
+            std::to_string(static_cast<int>(status)) +
+            "). Increase DEEPEP_NIXL_PREPMV_MAX_RETRIES / DEEPEP_NIXL_PREPMV_RETRY_MS if etcd is slow.");
+    }
 
-    status = nixl_agent_infos[agent_idx].agent->prepMemView(
+    status = prep_remote_mem_view_retry(
+        nixl_agent_infos[agent_idx].agent,
         dispatch_remote_signal_descs,
         nixl_agent_infos[agent_idx].dispatch_remote_signal_mvh,
-        &nixl_agent_infos[agent_idx].extra_params);
-    assert(status == NIXL_SUCCESS && "Failed to create dispatch remote signal memory view");
+        &nixl_agent_infos[agent_idx].extra_params,
+        rank_uuid,
+        "dispatch_remote_signal");
+    if (status != NIXL_SUCCESS) {
+        throw std::runtime_error(
+            "HybridEP NIXL: prepMemView dispatch remote signal failed: " +
+            nixlEnumStrings::statusStr(status) + " (code " +
+            std::to_string(static_cast<int>(status)) + ").");
+    }
 
     NIXL_LOG("    [Rank %d]   Dispatch memory views created\n", rank_uuid);
 
@@ -545,7 +681,7 @@ void HybridEP_NIXLConnector::_nixl_create_memory_views(const std::vector<int>& r
         int actual_node_rank = peer_idx < node_rank ? peer_idx : (peer_idx + 1);
         int remote_rank = actual_node_rank * ranks_per_node + local_nvl_rank;
         int my_node_rank_in_remote = (node_rank < actual_node_rank) ? node_rank : (node_rank - 1);
-        std::string remote_agent_name = nixl_agent_infos[agent_idx].dst_agent_names[remote_rank];
+        const std::string remote_agent_name = std::to_string(remote_rank);
 
         size_t combine_token_stride = combine_buf->rdma_intra_node_red_token_sz / (num_nodes - 1);
 
@@ -581,23 +717,47 @@ void HybridEP_NIXLConnector::_nixl_create_memory_views(const std::vector<int>& r
                rank_uuid, peer_idx, remote_rank, remote_combine_token_addr, (void*)remote_combine_flag_addr);
     }
 
-    status = nixl_agent_infos[agent_idx].agent->prepMemView(
+    status = prep_local_mem_view_retry(
+        nixl_agent_infos[agent_idx].agent,
         combine_local_descs,
         nixl_agent_infos[agent_idx].combine_local_mvh,
-        &nixl_agent_infos[agent_idx].extra_params);
-    assert(status == NIXL_SUCCESS && "Failed to create combine local memory view");
+        &nixl_agent_infos[agent_idx].extra_params,
+        rank_uuid,
+        "combine_local");
+    if (status != NIXL_SUCCESS) {
+        throw std::runtime_error(
+            "HybridEP NIXL: prepMemView combine local failed: " +
+            nixlEnumStrings::statusStr(status) + " (code " +
+            std::to_string(static_cast<int>(status)) + ").");
+    }
 
-    status = nixl_agent_infos[agent_idx].agent->prepMemView(
+    status = prep_remote_mem_view_retry(
+        nixl_agent_infos[agent_idx].agent,
         combine_remote_data_descs,
         nixl_agent_infos[agent_idx].combine_remote_data_mvh,
-        &nixl_agent_infos[agent_idx].extra_params);
-    assert(status == NIXL_SUCCESS && "Failed to create combine remote data memory view");
+        &nixl_agent_infos[agent_idx].extra_params,
+        rank_uuid,
+        "combine_remote_data");
+    if (status != NIXL_SUCCESS) {
+        throw std::runtime_error(
+            "HybridEP NIXL: prepMemView combine remote data failed: " +
+            nixlEnumStrings::statusStr(status) + " (code " +
+            std::to_string(static_cast<int>(status)) + ").");
+    }
 
-    status = nixl_agent_infos[agent_idx].agent->prepMemView(
+    status = prep_remote_mem_view_retry(
+        nixl_agent_infos[agent_idx].agent,
         combine_remote_signal_descs,
         nixl_agent_infos[agent_idx].combine_remote_signal_mvh,
-        &nixl_agent_infos[agent_idx].extra_params);
-    assert(status == NIXL_SUCCESS && "Failed to create combine remote signal memory view");
+        &nixl_agent_infos[agent_idx].extra_params,
+        rank_uuid,
+        "combine_remote_signal");
+    if (status != NIXL_SUCCESS) {
+        throw std::runtime_error(
+            "HybridEP NIXL: prepMemView combine remote signal failed: " +
+            nixlEnumStrings::statusStr(status) + " (code " +
+            std::to_string(static_cast<int>(status)) + ").");
+    }
 
     NIXL_LOG("    [Rank %d]   Combine memory views created\n", rank_uuid);
 
@@ -705,10 +865,37 @@ void HybridEP_NIXLConnector::_register_buffers_with_agents() {
 
     NIXL_LOG("    [Rank %d] _register_buffers_with_agents: registering %d buffers\n", rank_uuid, buffer_count);
     nixl_status_t status = nixl_agent_infos[agent_idx].agent->registerMem(reg_dlist);
-    assert(status == NIXL_SUCCESS);
+    if (status != NIXL_SUCCESS) {
+        throw std::runtime_error(
+            "HybridEP NIXL: registerMem failed: " +
+            nixlEnumStrings::statusStr(status) + " (code " +
+            std::to_string(static_cast<int>(status)) + ").");
+    }
+
+    nixl_agent_infos[agent_idx].agent->invalidateLocalMD(&nixl_agent_infos[agent_idx].extra_params);
 
     status = nixl_agent_infos[agent_idx].agent->sendLocalMD(&nixl_agent_infos[agent_idx].extra_params);
-    assert(status == NIXL_SUCCESS);
+    if (status != NIXL_SUCCESS) {
+        throw std::runtime_error(
+            "HybridEP NIXL: sendLocalMD failed: " +
+            nixlEnumStrings::statusStr(status) + " (code " +
+            std::to_string(static_cast<int>(status)) + ").");
+    }
+
+    // invalidateLocalMD + sendLocalMD are asynchronous (enqueued to the NIXL comm
+    // thread).  If stale metadata from a prior run is still in etcd when a remote
+    // agent fetches, the remote loads the stale data and later prepMemView fails
+    // because buffer addresses have changed.  Sleep briefly to let the comm thread
+    // flush the queue to etcd before any barrier lets remote agents start fetching.
+    {
+        const int flush_ms = getenv_int("DEEPEP_NIXL_MD_FLUSH_DELAY_MS", 2000);
+        if (flush_ms > 0) {
+            NIXL_LOG("    [Rank %d] _register_buffers_with_agents: waiting %d ms for etcd flush\n",
+                     rank_uuid, flush_ms);
+            sleep_ms(flush_ms);
+        }
+    }
+
     NIXL_LOG("    [Rank %d] _register_buffers_with_agents: done (%d buffers)\n", rank_uuid, buffer_count);
 }
 
