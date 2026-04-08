@@ -283,7 +283,7 @@ if __name__ == '__main__':
             include=['deep_ep']
         ),
         install_requires=[
-            'pynvml',
+            'nvidia-ml-py>=12.0.0',
         ],
         ext_modules=[
             get_extension_deep_ep_cpp(),
