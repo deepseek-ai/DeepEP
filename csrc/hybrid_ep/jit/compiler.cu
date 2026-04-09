@@ -24,7 +24,13 @@ std::string get_jit_dir() {
             cache_dir = "/tmp";  // Fallback 
         }
     }
-    return cache_dir + "/.deepep/hybrid_ep/jit";
+    // Use process-specific subdirectory to avoid race conditions when multiple
+    // processes compile kernels concurrently (e.g., torch.multiprocessing.spawn).
+    // Without this, one process could overwrite key.so while another loads it,
+    // causing "bad any_cast" when the wrong kernel type is loaded.
+    std::string base_jit = cache_dir + "/.deepep/hybrid_ep/jit";
+    std::string proc_jit = base_jit + "/proc-" + std::to_string(getpid());
+    return proc_jit;
 }
 
 NVCCCompiler::NVCCCompiler(std::string base_path, std::string comm_id): 
