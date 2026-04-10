@@ -3,6 +3,17 @@
 ## Overview
 This document introduces the Hybrid Expert Parallel (Hybrid-EP) implementation to the DeepEP library, developed by NVIDIA as an optimized solution for large-scale MoE (Mixture of Experts) model all-to-all communication. This implementation is specifically designed to leverage NVIDIA GPU hardware capabilities, significantly reducing Streaming Multiprocessor (SM) resource usage while dramatically improving communication efficiency and overall throughput. This implementation maintains full backward compatibility with DeepEP. Users can seamlessly integrate Hybrid-EP into existing workflows without code modifications.
 
+### NIXL Integration (Experimental)
+
+> **⚠️ Experimental**: NIXL-based inter-node communication is an experimental feature. Performance may not be ideal compared to the DOCA/RDMA path in all configurations. We welcome feedback and contributions to improve it.
+
+Hybrid-EP supports [NIXL](https://github.com/ai-dynamo/nixl) (NVIDIA Inter-node eXchange Library) as an alternative inter-node communication backend alongside the existing DOCA/RDMA path. NIXL uses UCX for GPU-to-GPU RDMA transfers and does not require the NCCL submodule or DOCA SDK at build time, simplifying deployment in environments where DOCA is unavailable.
+
+**Key points:**
+- Build with `USE_NIXL=1` to select the NIXL path; the default (`USE_NIXL=0`) preserves the DOCA path with no behavior change
+- NIXL code is fully guarded by `#ifdef USE_NIXL`; no NIXL symbols are linked when building with DOCA
+- A complete example Dockerfile is provided at [`docs/Dockerfile.nixl`](Dockerfile.nixl)
+
 ## 🎯 Design Goals
 
 1. **Maximize Network Bandwidth Utilization** - Achieve optimal network bandwidth usage for large-scale distributed training
@@ -167,25 +178,10 @@ export TORCH_CUDA_ARCH_LIST="9.0 10.0"  # Adjust based on your GPU architecture
 pip install .
 ```
 
-**Dockerfile example (based on NGC PyTorch image):**
+**Dockerfile example:** A complete, ready-to-build Dockerfile (based on the NGC PyTorch 26.03 image) that builds UCX, etcd-cpp-apiv3, NIXL, rdma-core, and DeepEP from source is provided at [`docs/Dockerfile.nixl`](Dockerfile.nixl). To build:
 
-```dockerfile
-FROM nvcr.io/nvidia/pytorch:24.12-py3
-
-# Build NIXL from source
-RUN git clone https://github.com/ai-dynamo/nixl.git /opt/nixl && \
-    cd /opt/nixl && mkdir build && cd build && \
-    cmake .. -DCMAKE_INSTALL_PREFIX=/usr/local/nixl && \
-    make -j$(nproc) && make install
-ENV NIXL_HOME=/usr/local/nixl
-
-# Build DeepEP with NIXL
-WORKDIR /workspace
-RUN git clone -b hybrid_ep https://github.com/deepseek-ai/DeepEP.git
-ENV HYBRID_EP_MULTINODE=1
-ENV USE_NIXL=1
-RUN cd DeepEP && \
-    TORCH_CUDA_ARCH_LIST="9.0 10.0" MAX_JOBS=8 pip install --no-build-isolation .
+```bash
+docker build -f docs/Dockerfile.nixl -t deepep-nixl .
 ```
 
 #### Multi-node RDMA (DOCA) Installation

@@ -294,6 +294,16 @@ For two-micro-batch overlapping, you can refer to the following figure. With our
 
 ![low-latency](figures/low-latency.png)
 
+## Hybrid-EP with NIXL Integration (Experimental)
+
+Hybrid-EP is an optimized implementation developed by NVIDIA that uses TMA instructions and warp-level pipeline parallelism to minimize SM usage while maximizing network bandwidth. It supports both intra-node (NVLink) and inter-node (RDMA) communication. For full details, see the [Hybrid-EP documentation](docs/README_Hybrid-EP.md).
+
+As an alternative to the DOCA/RDMA inter-node path, Hybrid-EP now experimentally supports [NIXL](https://github.com/ai-dynamo/nixl) (NVIDIA Inter-node eXchange Library), which uses UCX for GPU-to-GPU transfers and does not require the DOCA SDK or NCCL submodule at build time.
+
+> **⚠️ Experimental**: The NIXL integration is experimental. Performance may not be ideal compared to the DOCA/RDMA path in all configurations.
+
+A complete example Dockerfile for building DeepEP with NIXL is provided at [`docs/Dockerfile.nixl`](docs/Dockerfile.nixl).
+
 ## Roadmap
 
 - [x] AR support

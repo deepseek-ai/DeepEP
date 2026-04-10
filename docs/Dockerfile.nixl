@@ -1,0 +1,164 @@
+FROM nvcr.io/nvidia/pytorch:26.03-py3
+
+ARG DEBIAN_FRONTEND=noninteractive
+
+# ---------------------------------------------------------------------------
+# 1. Base packages: remove conflicting IB libs, install build deps + DOCA SDK
+# ---------------------------------------------------------------------------
+RUN apt-get update && \
+    apt-get remove -y --purge libibverbs1 librdmacm1 librdmacm-dev && \
+    apt-get install -y wget && \
+    wget -q https://www.mellanox.com/downloads/DOCA/DOCA_v3.2.1/host/doca-host_3.2.1-044000-25.10-ubuntu2404_amd64.deb && \
+    dpkg -i doca-host_3.2.1-044000-25.10-ubuntu2404_amd64.deb && \
+    rm -f doca-host_3.2.1-044000-25.10-ubuntu2404_amd64.deb && \
+    apt-get update && \
+    apt-get install -y \
+        autoconf automake libtool python3 python3-pip git cmake pkg-config \
+        libgrpc-dev libgrpc++-dev libprotobuf-dev protobuf-compiler protobuf-compiler-grpc \
+        libibverbs1 librdmacm1 librdmacm-dev libibverbs-dev rdma-core libz-dev libiberty-dev \
+        numactl libnuma-dev ninja-build pybind11-dev \
+        doca-sdk-gpunetio libdoca-sdk-gpunetio-dev libdoca-sdk-verbs-dev openmpi \
+        libc-ares-dev libre2-dev libcpprest-dev libaio-dev && \
+    pip install --no-cache-dir --break-system-packages 'meson>=0.64.0' && \
+    rm -rf /var/lib/apt/lists/*
+
+# ---------------------------------------------------------------------------
+# 2. Build UCX with CUDA + multi-thread support
+# ---------------------------------------------------------------------------
+RUN cd /opt && git clone --depth 1 https://github.com/openucx/ucx.git && \
+    cd ucx && ./autogen.sh && \
+    mkdir build && cd build && \
+    ../contrib/configure-release \
+        --prefix=/opt/ucx/install \
+        --with-cuda=/usr/local/cuda \
+        --enable-mt \
+        --with-nvcc-gencode="-gencode=arch=compute_103,code=sm_103" && \
+    make -j"$(nproc)" && make install && \
+    cd /opt && rm -rf ucx/build
+
+# ---------------------------------------------------------------------------
+# 3. Build etcd-cpp-apiv3 (core-only, no cpprestsdk dependency)
+# ---------------------------------------------------------------------------
+RUN cd /opt && git clone --depth 1 https://github.com/etcd-cpp-apiv3/etcd-cpp-apiv3.git && \
+    cd etcd-cpp-apiv3 && \
+    sed -i '/^find_dependency(cpprestsdk)$/d' etcd-cpp-api-config.in.cmake && \
+    mv /usr/bin/protoc-25.3.0 /tmp/protoc-25.3.0.bak 2>/dev/null; true && \
+    mv /usr/lib/cmake/protobuf /tmp/.protobuf-backup 2>/dev/null; true && \
+    mkdir -p build && cd build && \
+    cmake .. -DCMAKE_BUILD_TYPE=Release -DBUILD_ETCD_CORE_ONLY=ON \
+             -DCMAKE_INSTALL_PREFIX=/opt/etcd/install && \
+    make -j"$(nproc)" && make install && \
+    mv /tmp/protoc-25.3.0.bak /usr/bin/protoc-25.3.0 2>/dev/null; true && \
+    mv /tmp/.protobuf-backup /usr/lib/cmake/protobuf 2>/dev/null; true && \
+    cd /opt/etcd/install/lib && ln -sf libetcd-cpp-api-core.so libetcd-cpp-api.so && \
+    cd /opt && rm -rf etcd-cpp-apiv3
+
+# Create pkg-config file for etcd-cpp-api
+RUN mkdir -p /opt/etcd/install/lib/pkgconfig && \
+    cat > /opt/etcd/install/lib/pkgconfig/etcd-cpp-api.pc <<'EOF'
+prefix=/opt/etcd/install
+exec_prefix=${prefix}
+libdir=${exec_prefix}/lib
+includedir=${prefix}/include
+
+Name: etcd-cpp-api
+Description: C++ client library for etcd
+Version: 0.15.4
+Libs: -L${libdir} -letcd-cpp-api
+Cflags: -I${includedir}
+EOF
+
+# ---------------------------------------------------------------------------
+# 4. Build NIXL (split into layers for faster iteration)
+# ---------------------------------------------------------------------------
+RUN apt-get update && apt-get remove -y libabsl-dev && rm -rf /var/lib/apt/lists/*
+RUN cd /opt && git clone --depth 1 https://github.com/ai-dynamo/nixl.git
+# Some DOCA releases place doca_ctx.h under include/doca/.
+# Create a compatibility symlink and fail fast if the header is still missing.
+RUN if [ -f /opt/mellanox/doca/include/doca/doca_ctx.h ] && [ ! -f /opt/mellanox/doca/include/doca_ctx.h ]; then \
+      ln -s /opt/mellanox/doca/include/doca/doca_ctx.h /opt/mellanox/doca/include/doca_ctx.h; \
+    fi && \
+    if [ ! -f /opt/mellanox/doca/include/doca_ctx.h ]; then \
+      echo "ERROR: missing /opt/mellanox/doca/include/doca_ctx.h"; \
+      echo "Hint: install the DOCA core/common dev package for this DOCA release."; \
+      ls -al /opt/mellanox/doca/include || true; \
+      ls -al /opt/mellanox/doca/include/doca || true; \
+      exit 1; \
+    fi
+RUN cd /opt/nixl && \
+    PKG_CONFIG_PATH="/opt/etcd/install/lib/pkgconfig:${PKG_CONFIG_PATH}" \
+    CPATH="/opt/mellanox/doca/include:/opt/mellanox/doca/include/doca:${CPATH}" \
+    LIBRARY_PATH="/opt/mellanox/doca/lib/x86_64-linux-gnu:${LIBRARY_PATH}" \
+    meson setup build \
+        -Ducx_path=/opt/ucx/install \
+        -Dprefix=/opt/nixl/install \
+        --buildtype=release \
+        -Dc_args="-I/opt/mellanox/doca/include -I/opt/mellanox/doca/include/doca" \
+        -Dcpp_args="-I/opt/mellanox/doca/include -I/opt/mellanox/doca/include/doca"
+RUN cd /opt/nixl && \
+    PKG_CONFIG_PATH="/opt/etcd/install/lib/pkgconfig:${PKG_CONFIG_PATH}" \
+    CPATH="/opt/mellanox/doca/include:/opt/mellanox/doca/include/doca:${CPATH}" \
+    LIBRARY_PATH="/opt/mellanox/doca/lib/x86_64-linux-gnu:${LIBRARY_PATH}" \
+    ninja -C build install
+RUN rm -rf /opt/nixl/build
+
+# ---------------------------------------------------------------------------
+# 5. Build rdma-core v60.0
+# ---------------------------------------------------------------------------
+RUN cd /opt && git clone --depth 1 --branch v60.0 https://github.com/linux-rdma/rdma-core.git && \
+    cd rdma-core && sh build.sh
+
+# ---------------------------------------------------------------------------
+# 6. Environment variables
+# ---------------------------------------------------------------------------
+ENV HYBRID_EP_MULTINODE=1 \
+    USE_NIXL=1 \
+    TORCH_CUDA_ARCH_LIST="10.3" \
+    CUDA_HOME=/usr/local/cuda \
+    RDMA_CORE_HOME=/opt/rdma-core/build \
+    DOCA_HOME=/opt/mellanox/doca \
+    UCX_HOME=/opt/ucx/install \
+    GDR_INC=/usr/local/include \
+    GDR_LIB=/usr/local/lib \
+    GDRCOPY=/usr/local \
+    NIXL_HOME=/opt/nixl/install \
+    ETCD_HOME=/opt/etcd/install \
+    MPI_PATH=/usr/mpi/gcc/openmpi-4.1.9a1 \
+    CUDA_INC=/usr/local/cuda/include \
+    CUDA_LIB64=/usr/local/cuda/lib64
+
+ENV RDMA_INC=${RDMA_CORE_HOME}/include \
+    RDMA_LIB=${RDMA_CORE_HOME}/lib \
+    NIXL_INCLUDE_PATHS=${NIXL_HOME}/include \
+    NIXL_PLUGIN_DIR=${NIXL_HOME}/lib/x86_64-linux-gnu/plugins
+
+ENV CPATH="${ETCD_HOME}/include:${CUDA_INC}:${DOCA_HOME}/include:${DOCA_HOME}/include/doca:${RDMA_CORE_HOME}/include:${GDR_INC}:${UCX_HOME}/include:${CPATH:-}" \
+    LD_LIBRARY_PATH="${NIXL_HOME}/lib/x86_64-linux-gnu:${NIXL_HOME}/lib/x86_64-linux-gnu/plugins:${MPI_PATH}/lib:${ETCD_HOME}/lib:${UCX_HOME}/lib:${RDMA_CORE_HOME}/lib:${DOCA_HOME}/lib/x86_64-linux-gnu:${CUDA_LIB64}:${GDR_LIB}:${LD_LIBRARY_PATH:-}" \
+    PKG_CONFIG_PATH="${ETCD_HOME}/lib/pkgconfig:${RDMA_CORE_HOME}/lib/pkgconfig:${UCX_HOME}/lib/pkgconfig:${DOCA_HOME}/lib/x86_64-linux-gnu/pkgconfig:${PKG_CONFIG_PATH:-}" \
+    PATH="${MPI_PATH}/bin:${PATH}"
+
+ENV LDFLAGS="-L${MPI_PATH}/lib -L${ETCD_HOME}/lib -L${UCX_HOME}/lib -L${RDMA_CORE_HOME}/lib -L${DOCA_HOME}/lib/x86_64-linux-gnu -L${CUDA_LIB64}" \
+    CFLAGS="-I${ETCD_HOME}/include -I${UCX_HOME}/include -I${RDMA_CORE_HOME}/include -I${GDR_INC} -I${DOCA_HOME}/include -I${DOCA_HOME}/include/doca -I${CUDA_INC}" \
+    CPPFLAGS="-I${ETCD_HOME}/include -I${UCX_HOME}/include -I${RDMA_CORE_HOME}/include -I${GDR_INC} -I${DOCA_HOME}/include -I${DOCA_HOME}/include/doca -I${CUDA_INC}" \
+    CXXFLAGS="-I${ETCD_HOME}/include -I${UCX_HOME}/include -I${RDMA_CORE_HOME}/include -I${GDR_INC} -I${DOCA_HOME}/include -I${DOCA_HOME}/include/doca -I${CUDA_INC}"
+
+# ---------------------------------------------------------------------------
+# 7. Clone and install DeepEP
+# ---------------------------------------------------------------------------
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends libnvidia-ml-dev
+RUN cd /opt && \
+    git clone --recursive --branch hybrid-ep https://github.com/deepseek-ai/DeepEP.git && \
+    cd DeepEP && \
+    pip install --no-build-isolation --no-cache-dir --force-reinstall -e .
+
+# ---------------------------------------------------------------------------
+# 8. Install etcd server binary
+# ---------------------------------------------------------------------------
+RUN cd /tmp && \
+    wget https://github.com/etcd-io/etcd/releases/download/v3.5.17/etcd-v3.5.17-linux-amd64.tar.gz && \
+    tar xzf etcd-v3.5.17-linux-amd64.tar.gz && \
+    mv etcd-v3.5.17-linux-amd64/etcd etcd-v3.5.17-linux-amd64/etcdctl /usr/local/bin/ && \
+    rm -rf etcd-v3.5.17-linux-amd64*
+
+WORKDIR /opt/DeepEP
