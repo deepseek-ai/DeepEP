@@ -225,6 +225,30 @@ RUN cd DeepEP && \
     rm -rf /var/lib/apt/lists/*
 ```
 
+### NIXL Runtime Configuration
+
+When using the NIXL inter-node path (`USE_NIXL=1`), the following environment variables can be used to tune performance and reliability. All variables are optional and have sensible defaults.
+
+#### Performance Tuning
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `DEEPEP_NIXL_GDA_NUM_CHANNELS` | `1` | Number of GPU Direct Async (GDA) channels per UCX endpoint. More channels can increase throughput by allowing the GPU to post more concurrent RDMA operations through the NIC. Start with 1 and increase (e.g., 2 or 4) while monitoring for diminishing returns. The optimal value depends on the NIC capabilities and number of remote peers. |
+
+#### Connection & Metadata
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `DEEPEP_NIXL_RUN_ID` | *(auto)* | Unique identifier for this run, used to prevent etcd key collisions between successive invocations. If unset, falls back to `SLURM_STEP_ID` then `SLURM_JOB_ID` automatically. Only set this if you are not using Slurm and experience stale-metadata errors across runs. |
+| `DEEPEP_NIXL_FETCH_RETRY_INTERVAL` | `200` | Number of 10 ms polling iterations before invalidating and re-fetching a remote agent's metadata. |
+| `DEEPEP_NIXL_FETCH_MAX_RETRIES` | `50` | Maximum number of invalidate-and-re-fetch cycles when remote metadata is unavailable. |
+| `DEEPEP_NIXL_WIREUP_MAX_RETRIES` | `2000` | Maximum retry iterations for `makeConnection` during UCX wire-up. Increase at large scale or on slow networks. |
+| `DEEPEP_NIXL_WIREUP_RETRY_MS` | `10` | Sleep duration (ms) between `makeConnection` retries. |
+| `DEEPEP_NIXL_PREPMV_MAX_RETRIES` | `5000` | Maximum retry iterations for `prepRemoteMemView`. |
+| `DEEPEP_NIXL_PREPMV_RETRY_MS` | `20` | Sleep duration (ms) between `prepRemoteMemView` retries. |
+| `DEEPEP_NIXL_PREPMV_INITIAL_DELAY_MS` | `0` | Optional initial delay (ms) before creating remote memory views. Useful as a debugging aid; not normally needed. |
+| `NIXL_ETCD_ENDPOINTS` | `http://localhost:2379` | etcd endpoint(s) used by NIXL for metadata exchange. |
+
 ### Troubleshooting
 
 **Error: `No rule to make target '.../doca_gpunetio_device.h', needed by 'lib'`**

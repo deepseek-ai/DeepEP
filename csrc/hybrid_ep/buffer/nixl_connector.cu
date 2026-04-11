@@ -53,6 +53,14 @@ static int getenv_int(const char* name, int default_val) {
     return static_cast<int>(v);
 }
 
+static std::string get_nixl_run_id() {
+    for (const char* var : {"DEEPEP_NIXL_RUN_ID", "SLURM_STEP_ID", "SLURM_JOB_ID"}) {
+        const char* v = std::getenv(var);
+        if (v && *v) return std::string(v);
+    }
+    return "";
+}
+
 // makeConnection can return NOT_FOUND until the comm thread finishes applying remote UCX
 // connection info; at multi-node scale that may lag slightly after checkRemoteMD succeeds.
 static bool nixl_wireup_status_retriable(nixl_status_t s) {
@@ -189,6 +197,8 @@ HybridEP_NIXLConnector::HybridEP_NIXLConnector(int rank_uuid, int local_device_i
       connected(false),
       d_dispatch_nixl_ctx(nullptr),
       d_combine_nixl_ctx(nullptr),
+      current_epoch(0),
+      gda_num_channels(0),
       d_dispatch_flag_counters(nullptr),
       d_combine_flag_counters(nullptr) {
 
@@ -350,7 +360,11 @@ void HybridEP_NIXLConnector::_nixl_agents_init(int num_agents) {
     nixl_agent_infos.clear();
     nixl_agent_infos.reserve(num_agents);
 
-    std::string agent_name = std::to_string(rank_uuid);
+    static int nixl_epoch = 0;
+    current_epoch = nixl_epoch++;
+    nixl_run_id = get_nixl_run_id();
+    std::string agent_name = std::to_string(rank_uuid) + "_e" + std::to_string(current_epoch);
+    if (!nixl_run_id.empty()) agent_name += "_r" + nixl_run_id;
 
     const char* etcd_endpoint = std::getenv("NIXL_ETCD_ENDPOINTS");
     if (etcd_endpoint) {
@@ -372,6 +386,10 @@ void HybridEP_NIXLConnector::_nixl_agents_init(int num_agents) {
     init_params["ucx_error_handling_mode"] = "none";
     init_params["num_workers"] = std::to_string(1);
 
+    gda_num_channels = std::max(1, getenv_int("DEEPEP_NIXL_GDA_NUM_CHANNELS", 1));
+    init_params["ucx_num_device_channels"] = std::to_string(gda_num_channels);
+    NIXL_LOG("    [Rank %d] _nixl_agents_init: gda_num_channels=%d\n", rank_uuid, gda_num_channels);
+
     nixlBackendH* ucx_backend = nullptr;
     status = agent->createBackend("UCX", init_params, ucx_backend);
     assert(status == NIXL_SUCCESS && ucx_backend != nullptr);
@@ -383,31 +401,49 @@ void HybridEP_NIXLConnector::_nixl_agents_init(int num_agents) {
     nixl_agent_infos[0].agent_name = agent_name;
     nixl_agent_infos[0].backend = ucx_backend;
     nixl_agent_infos[0].extra_params.backends.push_back(ucx_backend);
-    NIXL_LOG("    [Rank %d] _nixl_agents_init: done (%d remote nodes)\n", rank_uuid, num_remote_nodes);
+    NIXL_LOG("    [Rank %d] _nixl_agents_init: agent=%s (%d remote nodes)\n",
+             rank_uuid, agent_name.c_str(), num_remote_nodes);
 }
 
 void HybridEP_NIXLConnector::_nixl_agents_connect(const std::vector<int>& ranks) {
     NIXL_LOG("    [Rank %d] _nixl_agents_connect: Connecting to %zu remote agents...\n", rank_uuid, ranks.size());
     int agent_idx = 0;
 
+    const int refetch_interval = std::max(1, getenv_int("DEEPEP_NIXL_FETCH_RETRY_INTERVAL", 200));
+    const int max_fetch_retries = std::max(1, getenv_int("DEEPEP_NIXL_FETCH_MAX_RETRIES", 50));
+
     for (int remote_rank : ranks) {
-        std::string remote_agent_name = std::to_string(remote_rank);
+        std::string remote_agent_name = std::to_string(remote_rank) + "_e" + std::to_string(current_epoch);
+        if (!nixl_run_id.empty()) remote_agent_name += "_r" + nixl_run_id;
         nixl_agent_infos[agent_idx].dst_agent_names[remote_rank] = remote_agent_name;
+
+        auto& agent = nixl_agent_infos[agent_idx].agent;
+        auto& extra = nixl_agent_infos[agent_idx].extra_params;
 
         NIXL_LOG("    [Rank %d] _nixl_agents_connect: Fetching metadata for remote agent '%s'...\n",
                rank_uuid, remote_agent_name.c_str());
-        nixl_status_t fetch_status = nixl_agent_infos[agent_idx].agent->fetchRemoteMD(
-            remote_agent_name, &nixl_agent_infos[agent_idx].extra_params);
+        nixl_status_t fetch_status = agent->fetchRemoteMD(remote_agent_name, &extra);
         assert(fetch_status == NIXL_SUCCESS);
 
         nixl_xfer_dlist_t empty_descs(VRAM_SEG);
         int wait_count = 0;
-        while (nixl_agent_infos[agent_idx].agent->checkRemoteMD(remote_agent_name, empty_descs) != NIXL_SUCCESS) {
+        int fetch_retries = 0;
+        while (agent->checkRemoteMD(remote_agent_name, empty_descs) != NIXL_SUCCESS) {
             sleep_ms(10);
             wait_count++;
             if (wait_count % 100 == 0) {
                 NIXL_LOG("    [Rank %d] _nixl_agents_connect: Still waiting for rank %d metadata (%d waits)...\n",
                        rank_uuid, remote_rank, wait_count);
+            }
+            if (wait_count > 0 && wait_count % refetch_interval == 0 && fetch_retries < max_fetch_retries) {
+                fetch_retries++;
+                NIXL_LOG_CRITICAL(
+                    "  [Rank %d] _nixl_agents_connect: checkRemoteMD for %s still failing after "
+                    "%d waits, invalidating stale state and re-fetching (retry %d/%d)\n",
+                    rank_uuid, remote_agent_name.c_str(), wait_count, fetch_retries, max_fetch_retries);
+                agent->invalidateRemoteMD(remote_agent_name);
+                fetch_status = agent->fetchRemoteMD(remote_agent_name, &extra);
+                assert(fetch_status == NIXL_SUCCESS);
             }
         }
         NIXL_LOG("    [Rank %d] _nixl_agents_connect: Metadata available from rank %d\n", rank_uuid, remote_rank);
@@ -420,7 +456,7 @@ void HybridEP_NIXLConnector::_nixl_agents_wireup(const std::vector<int>& ranks) 
     int agent_idx = 0;
 
     for (int remote_rank : ranks) {
-        std::string remote_agent_name = std::to_string(remote_rank);
+        const std::string& remote_agent_name = nixl_agent_infos[agent_idx].dst_agent_names[remote_rank];
         std::string my_peer_info_str(reinterpret_cast<const char*>(&my_peer_info), sizeof(NixlPeerInfo));
         nixl_agent_infos[agent_idx].agent->genNotif(remote_agent_name, my_peer_info_str);
         NIXL_LOG("    [Rank %d] _nixl_agents_wireup: Sent peer info notification to rank %d\n", rank_uuid, remote_rank);
@@ -463,7 +499,7 @@ void HybridEP_NIXLConnector::_nixl_ucx_wireup(const std::vector<int>& ranks) {
     const int retry_ms = std::max(1, getenv_int("DEEPEP_NIXL_WIREUP_RETRY_MS", 10));
 
     for (int remote_rank : ranks) {
-        std::string remote_agent_name = std::to_string(remote_rank);
+        const std::string& remote_agent_name = nixl_agent_infos[agent_idx].dst_agent_names[remote_rank];
 
         nixl_status_t status = NIXL_ERR_UNKNOWN;
         for (int attempt = 0; attempt < max_retries; ++attempt) {
@@ -560,8 +596,7 @@ void HybridEP_NIXLConnector::_nixl_create_memory_views(const std::vector<int>& r
         int remote_rank = actual_node_rank * ranks_per_node + local_nvl_rank;
 
         int my_node_rank_in_remote = (node_rank < actual_node_rank) ? node_rank : (node_rank - 1);
-        // Must match NIXL agent id strings (same as fetchRemoteMD / etcd), not a cached copy.
-        const std::string remote_agent_name = std::to_string(remote_rank);
+        const std::string& remote_agent_name = nixl_agent_infos[agent_idx].dst_agent_names[remote_rank];
 
         void* remote_dispatch_token_addr = (uint8_t*)nixl_peer_info[remote_rank].rdma_buffer_ptr +
                                            my_node_rank_in_remote * token_stride;
@@ -681,7 +716,7 @@ void HybridEP_NIXLConnector::_nixl_create_memory_views(const std::vector<int>& r
         int actual_node_rank = peer_idx < node_rank ? peer_idx : (peer_idx + 1);
         int remote_rank = actual_node_rank * ranks_per_node + local_nvl_rank;
         int my_node_rank_in_remote = (node_rank < actual_node_rank) ? node_rank : (node_rank - 1);
-        const std::string remote_agent_name = std::to_string(remote_rank);
+        const std::string& remote_agent_name = nixl_agent_infos[agent_idx].dst_agent_names[remote_rank];
 
         size_t combine_token_stride = combine_buf->rdma_intra_node_red_token_sz / (num_nodes - 1);
 
@@ -771,13 +806,7 @@ void HybridEP_NIXLConnector::_nixl_build_gpu_contexts(int num_dispatch_blocks, i
     int agent_idx = 0;
     int num_remote_nodes = num_nodes - 1;
 
-    int ucx_num_channels = 1;
-    const char* env_num_channels = std::getenv("UCX_RC_GDA_NUM_CHANNELS");
-    if (env_num_channels) {
-        ucx_num_channels = std::atoi(env_num_channels);
-        if (ucx_num_channels <= 0) ucx_num_channels = 1;
-    }
-    NIXL_LOG("    [Rank %d] _nixl_build_gpu_contexts: UCX_RC_GDA_NUM_CHANNELS=%d\n", rank_uuid, ucx_num_channels);
+    NIXL_LOG("    [Rank %d] _nixl_build_gpu_contexts: gda_num_channels=%d\n", rank_uuid, gda_num_channels);
 
     // -- Dispatch context --
     NIXL_LOG("    [Rank %d] _nixl_build_gpu_contexts: Building dispatch GPU context...\n", rank_uuid);
@@ -793,7 +822,7 @@ void HybridEP_NIXLConnector::_nixl_build_gpu_contexts(int num_dispatch_blocks, i
     h_dispatch_ctx.remote_signal_mvh = nixl_agent_infos[agent_idx].dispatch_remote_signal_mvh;
     h_dispatch_ctx.local_flag_counters = d_dispatch_flag_counters;
     h_dispatch_ctx.num_remote_nodes = num_remote_nodes;
-    h_dispatch_ctx.num_channels = ucx_num_channels;
+    h_dispatch_ctx.num_channels = gda_num_channels;
     h_dispatch_ctx.rank = rank_uuid;
     h_dispatch_ctx.local_mvh_stride = dispatch_local_stride;
     h_dispatch_ctx.remote_data_mvh_stride = dispatch_remote_stride;
@@ -818,7 +847,7 @@ void HybridEP_NIXLConnector::_nixl_build_gpu_contexts(int num_dispatch_blocks, i
     h_combine_ctx.remote_signal_mvh = nixl_agent_infos[agent_idx].combine_remote_signal_mvh;
     h_combine_ctx.local_flag_counters = d_combine_flag_counters;
     h_combine_ctx.num_remote_nodes = num_remote_nodes;
-    h_combine_ctx.num_channels = ucx_num_channels;
+    h_combine_ctx.num_channels = gda_num_channels;
     h_combine_ctx.rank = rank_uuid;
     h_combine_ctx.local_mvh_stride = combine_local_stride;
     h_combine_ctx.remote_data_mvh_stride = combine_remote_stride;
@@ -829,8 +858,8 @@ void HybridEP_NIXLConnector::_nixl_build_gpu_contexts(int num_dispatch_blocks, i
                cudaMemcpyHostToDevice);
     NIXL_LOG("    [Rank %d]   Combine GPU context built\n", rank_uuid);
 
-    NIXL_LOG("    [Rank %d] _nixl_build_gpu_contexts: NIXL GPU contexts built (num_channels=%d)\n",
-           rank_uuid, ucx_num_channels);
+    NIXL_LOG("    [Rank %d] _nixl_build_gpu_contexts: NIXL GPU contexts built (gda_num_channels=%d)\n",
+           rank_uuid, gda_num_channels);
 }
 
 #define NIXL_REGISTER_BUF(ptr, sz, name) do { \
@@ -872,28 +901,12 @@ void HybridEP_NIXLConnector::_register_buffers_with_agents() {
             std::to_string(static_cast<int>(status)) + ").");
     }
 
-    nixl_agent_infos[agent_idx].agent->invalidateLocalMD(&nixl_agent_infos[agent_idx].extra_params);
-
     status = nixl_agent_infos[agent_idx].agent->sendLocalMD(&nixl_agent_infos[agent_idx].extra_params);
     if (status != NIXL_SUCCESS) {
         throw std::runtime_error(
             "HybridEP NIXL: sendLocalMD failed: " +
             nixlEnumStrings::statusStr(status) + " (code " +
             std::to_string(static_cast<int>(status)) + ").");
-    }
-
-    // invalidateLocalMD + sendLocalMD are asynchronous (enqueued to the NIXL comm
-    // thread).  If stale metadata from a prior run is still in etcd when a remote
-    // agent fetches, the remote loads the stale data and later prepMemView fails
-    // because buffer addresses have changed.  Sleep briefly to let the comm thread
-    // flush the queue to etcd before any barrier lets remote agents start fetching.
-    {
-        const int flush_ms = getenv_int("DEEPEP_NIXL_MD_FLUSH_DELAY_MS", 2000);
-        if (flush_ms > 0) {
-            NIXL_LOG("    [Rank %d] _register_buffers_with_agents: waiting %d ms for etcd flush\n",
-                     rank_uuid, flush_ms);
-            sleep_ms(flush_ms);
-        }
     }
 
     NIXL_LOG("    [Rank %d] _register_buffers_with_agents: done (%d buffers)\n", rank_uuid, buffer_count);

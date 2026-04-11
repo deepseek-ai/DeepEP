@@ -131,6 +131,10 @@ private:
     void _nixl_create_memory_views(const std::vector<int>& ranks);
     void _nixl_build_gpu_contexts(int num_dispatch_blocks, int num_combine_blocks);
 
+    int current_epoch;
+    std::string nixl_run_id;
+    int gda_num_channels;
+
     dispatch_gpu_nixl_ctx *d_dispatch_nixl_ctx;
     combine_gpu_nixl_ctx *d_combine_nixl_ctx;
     uint64_t* d_dispatch_flag_counters;
