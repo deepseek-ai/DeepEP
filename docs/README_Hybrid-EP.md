@@ -5,7 +5,7 @@ This document introduces the Hybrid Expert Parallel (Hybrid-EP) implementation t
 
 ### NIXL Integration (Experimental)
 
-> **⚠️ Experimental**: NIXL-based inter-node communication is an experimental feature. Performance may not be ideal compared to the DOCA/RDMA path in all configurations. We welcome feedback and contributions to improve it.
+> **⚠️ Experimental**: NIXL-based inter-node communication is an experimental feature. **Performance is not final — this is an initial integration that brings NIXL into Hybrid-EP, and we are actively working to improve NIXL path performance toward parity with the DOCA/RDMA path.** We welcome feedback and contributions.
 
 Hybrid-EP supports [NIXL](https://github.com/ai-dynamo/nixl) (NVIDIA Inter-node eXchange Library) as an alternative inter-node communication backend alongside the existing DOCA/RDMA path. NIXL uses UCX for GPU-to-GPU RDMA transfers and does not require the NCCL submodule or DOCA SDK at build time, simplifying deployment in environments where DOCA is unavailable.
 
@@ -224,6 +224,30 @@ RUN cd DeepEP && \
     apt-get autoremove -y && \
     rm -rf /var/lib/apt/lists/*
 ```
+
+### Running with NIXL
+
+#### Starting etcd
+
+NIXL uses [etcd](https://etcd.io/) as a distributed key-value store for metadata exchange between ranks. An etcd server must be running and reachable by all nodes before launching the job.
+
+Start etcd on one of the nodes (or a dedicated service node) in a separate terminal or `screen`/`tmux` session:
+
+```bash
+etcd --listen-client-urls http://0.0.0.0:2379 \
+     --advertise-client-urls http://$(hostname):2379
+```
+
+This binds etcd to all interfaces on port 2379 and advertises the machine's hostname so that remote nodes can connect.
+
+Then, when launching the job, set `NIXL_ETCD_ENDPOINTS` on every rank to point at that machine. For example, if etcd is running on `node01`:
+
+```bash
+srun --export=ALL,NIXL_ETCD_ENDPOINTS=http://node01:2379 \
+     python tests/test_hybrid_ep.py
+```
+
+> **Tip:** etcd only needs to be started once per allocation. You do not need to restart it between successive `srun` invocations — the run-ID mechanism (`SLURM_STEP_ID`) automatically prevents key collisions across runs.
 
 ### NIXL Runtime Configuration
 
