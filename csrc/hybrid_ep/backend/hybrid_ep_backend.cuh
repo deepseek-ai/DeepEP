@@ -712,70 +712,138 @@ inline __device__ void N2N_warp_group_device_function(const int node_rank,
       const int actual_remote_node_rank = remote_idx < node_rank ? remote_idx : (remote_idx + 1);
       const int my_node_rank_in_remote = (node_rank < actual_remote_node_rank) ? node_rank : (node_rank - 1);
       const size_t flag_offset = (my_node_rank_in_remote * NUM_OF_CHUNKS_PER_RANK + chunk_idx) * sizeof(uint64_t);
+
+      // Quick density probe: check first warp-width of tokens.
+      // On 4+ nodes, per-remote density is ~70%, so this almost always fails,
+      // letting us skip the full count pass and go straight to the original
+      // interleaved count+put loop with near-zero overhead.
+      bool try_coalesce;
+      {
+        int t = INTER_NODE_GROUP::thread_rank();
+        bool probe = (t < token_range) && smem_attn_to_rdma_map_ptr[remote_idx + t * (NUM_OF_NODES - 1)];
+        uint32_t ballot = __ballot_sync(0xffffffff, probe || t >= token_range);
+        try_coalesce = (ballot == 0xffffffff) && (token_range > 0);
+      }
+
       int total_tokens = 0;
 
-      for (int t = INTER_NODE_GROUP::thread_rank(); t < NUM_OF_TOKENS_PER_CHUNK; t += INTER_NODE_GROUP::size()) {
-        const int token_idx = t + chunk_base_token_idx;
-        const bool need_write = (t < token_range) && smem_attn_to_rdma_map_ptr[remote_idx + t * (NUM_OF_NODES - 1)];
-        total_tokens += __popc(__ballot_sync(0xffffffff, need_write));
+      if (try_coalesce) {
+        // First 32 tokens all need write — worth doing full count
+        for (int t = INTER_NODE_GROUP::thread_rank(); t < NUM_OF_TOKENS_PER_CHUNK; t += INTER_NODE_GROUP::size()) {
+          const bool need_write = (t < token_range) && smem_attn_to_rdma_map_ptr[remote_idx + t * (NUM_OF_NODES - 1)];
+          total_tokens += __popc(__ballot_sync(0xffffffff, need_write));
+        }
+      }
 
-        if (need_write) {
-          unsigned channel_id = blockIdx.x % nixl_ctx->num_channels;
-          constexpr uint64_t DEFER = nixl_gpu_flags::defer;
+      if (try_coalesce && total_tokens == token_range) {
+        // All tokens in this chunk need write: coalesce token data (and SF) into single puts.
+        // Prob data cannot be coalesced (local layout is strided by NUM_OF_NODES).
+        constexpr uint64_t DEFER = nixl_gpu_flags::defer;
+        const unsigned channel_id = blockIdx.x % nixl_ctx->num_channels;
 
-          // Sub-indices must match the memory view layout created at
-          // connector init time, which always includes all descriptors
-          // (token, prob if forward_dispatch, scaling_factor if use_fp8).
-          unsigned long local_sub = 0;
-          unsigned long remote_sub = 0;
-          
-          {
-            size_t local_offset = token_idx * static_cast<int64_t>(HIDDEN_DIM) * sizeof(TOKEN_DATA_TYPE);
-            size_t remote_offset = token_idx * static_cast<int64_t>(HIDDEN_DIM) * sizeof(TOKEN_DATA_TYPE);
-            constexpr size_t token_size = HIDDEN_DIM * sizeof(TOKEN_DATA_TYPE);
-            
-            nixlMemViewElem src_desc{nixl_ctx->local_mvh, local_sub, local_offset};
-            nixlMemViewElem dst_desc{nixl_ctx->remote_data_mvh, (size_t)remote_idx * remote_stride + remote_sub, remote_offset};
-            
-            nixl_status_t status = nixlPut<nixl_gpu_level_t::THREAD>(
-              src_desc, dst_desc, token_size, channel_id, DEFER);
-            assert(status == NIXL_SUCCESS || status == NIXL_IN_PROG);
-          }
+        if (INTER_NODE_GROUP::thread_rank() == 0) {
+          size_t chunk_local_base = (size_t)chunk_base_token_idx * HIDDEN_DIM * sizeof(TOKEN_DATA_TYPE);
+          size_t chunk_remote_base = (size_t)chunk_base_token_idx * HIDDEN_DIM * sizeof(TOKEN_DATA_TYPE);
+          size_t chunk_size = (size_t)token_range * HIDDEN_DIM * sizeof(TOKEN_DATA_TYPE);
 
-          if constexpr (FORWARD_DISPATCH) {
-            local_sub++;
-            remote_sub++;
-            size_t local_offset = (token_idx * NUM_OF_NODES + actual_remote_node_rank) * (NUM_OF_EXPERTS_PER_RANK * NUM_OF_RANKS_PER_NODE) * sizeof(float);
-            size_t remote_offset = token_idx * (NUM_OF_EXPERTS_PER_RANK * NUM_OF_RANKS_PER_NODE) * sizeof(float);
-            constexpr size_t prob_size = (NUM_OF_EXPERTS_PER_RANK * NUM_OF_RANKS_PER_NODE) * sizeof(float);
-          
-            nixlMemViewElem src_desc{nixl_ctx->local_mvh, local_sub, local_offset};
-            nixlMemViewElem dst_desc{nixl_ctx->remote_data_mvh, (size_t)remote_idx * remote_stride + remote_sub, remote_offset};
-            
+          nixlMemViewElem src_desc{nixl_ctx->local_mvh, 0, chunk_local_base};
+          nixlMemViewElem dst_desc{nixl_ctx->remote_data_mvh, (size_t)remote_idx * remote_stride + 0, chunk_remote_base};
+
+          nixl_status_t status = nixlPut<nixl_gpu_level_t::THREAD>(
+            src_desc, dst_desc, chunk_size, channel_id, DEFER);
+          assert(status == NIXL_SUCCESS || status == NIXL_IN_PROG);
+        }
+
+        if constexpr (FORWARD_DISPATCH) {
+          constexpr size_t prob_per_token = NUM_OF_EXPERTS_PER_RANK * NUM_OF_RANKS_PER_NODE;
+          for (int t = INTER_NODE_GROUP::thread_rank(); t < token_range; t += INTER_NODE_GROUP::size()) {
+            const int token_idx = t + chunk_base_token_idx;
+            size_t local_offset = ((size_t)token_idx * NUM_OF_NODES + actual_remote_node_rank) * prob_per_token * sizeof(float);
+            size_t remote_offset = (size_t)token_idx * prob_per_token * sizeof(float);
+            constexpr size_t prob_size = prob_per_token * sizeof(float);
+
+            nixlMemViewElem src_desc{nixl_ctx->local_mvh, 1, local_offset};
+            nixlMemViewElem dst_desc{nixl_ctx->remote_data_mvh, (size_t)remote_idx * remote_stride + 1, remote_offset};
+
             nixl_status_t status = nixlPut<nixl_gpu_level_t::THREAD>(
               src_desc, dst_desc, prob_size, channel_id, DEFER);
             assert(status == NIXL_SUCCESS || status == NIXL_IN_PROG);
           }
+        }
 
-          if constexpr (std::is_same<TOKEN_DATA_TYPE, uint8_t>::value) {
-            local_sub = local_stride - 1;
-            remote_sub = remote_stride - 1;
-            size_t local_offset = token_idx * (HIDDEN_DIM / 128) * sizeof(float);
-            size_t remote_offset = token_idx * (HIDDEN_DIM / 128) * sizeof(float);
-            constexpr size_t sf_size = (HIDDEN_DIM / 128) * sizeof(float);
-  
-            nixlMemViewElem src_desc{nixl_ctx->local_mvh, local_sub, local_offset};
-            nixlMemViewElem dst_desc{nixl_ctx->remote_data_mvh, (size_t)remote_idx * remote_stride + remote_sub, remote_offset};
-            
+        if constexpr (std::is_same<TOKEN_DATA_TYPE, uint8_t>::value) {
+          if (INTER_NODE_GROUP::thread_rank() == 0) {
+            size_t chunk_local_base = (size_t)chunk_base_token_idx * (HIDDEN_DIM / 128) * sizeof(float);
+            size_t chunk_remote_base = (size_t)chunk_base_token_idx * (HIDDEN_DIM / 128) * sizeof(float);
+            size_t chunk_size = (size_t)token_range * (HIDDEN_DIM / 128) * sizeof(float);
+
+            nixlMemViewElem src_desc{nixl_ctx->local_mvh, (size_t)(local_stride - 1), chunk_local_base};
+            nixlMemViewElem dst_desc{nixl_ctx->remote_data_mvh, (size_t)remote_idx * remote_stride + (remote_stride - 1), chunk_remote_base};
+
             nixl_status_t status = nixlPut<nixl_gpu_level_t::THREAD>(
-              src_desc, dst_desc, sf_size, channel_id, DEFER);
+              src_desc, dst_desc, chunk_size, channel_id, DEFER);
             assert(status == NIXL_SUCCESS || status == NIXL_IN_PROG);
           }
         }
+      } else {
+        // Sparse/original path: interleaved counting + putting (single loop)
+        for (int t = INTER_NODE_GROUP::thread_rank(); t < NUM_OF_TOKENS_PER_CHUNK; t += INTER_NODE_GROUP::size()) {
+          const int token_idx = t + chunk_base_token_idx;
+          const bool need_write = (t < token_range) && smem_attn_to_rdma_map_ptr[remote_idx + t * (NUM_OF_NODES - 1)];
+          total_tokens += __popc(__ballot_sync(0xffffffff, need_write));
+
+          if (need_write) {
+            const unsigned channel_id = blockIdx.x % nixl_ctx->num_channels;
+            constexpr uint64_t DEFER = nixl_gpu_flags::defer;
+            unsigned long local_sub = 0;
+            unsigned long remote_sub = 0;
+
+            {
+              size_t local_offset = token_idx * static_cast<int64_t>(HIDDEN_DIM) * sizeof(TOKEN_DATA_TYPE);
+              size_t remote_offset = token_idx * static_cast<int64_t>(HIDDEN_DIM) * sizeof(TOKEN_DATA_TYPE);
+              constexpr size_t token_size = HIDDEN_DIM * sizeof(TOKEN_DATA_TYPE);
+
+              nixlMemViewElem src_desc{nixl_ctx->local_mvh, local_sub, local_offset};
+              nixlMemViewElem dst_desc{nixl_ctx->remote_data_mvh, (size_t)remote_idx * remote_stride + remote_sub, remote_offset};
+
+              nixl_status_t status = nixlPut<nixl_gpu_level_t::THREAD>(
+                src_desc, dst_desc, token_size, channel_id, DEFER);
+              assert(status == NIXL_SUCCESS || status == NIXL_IN_PROG);
+            }
+
+            if constexpr (FORWARD_DISPATCH) {
+              local_sub++;
+              remote_sub++;
+              size_t local_offset = ((size_t)token_idx * NUM_OF_NODES + actual_remote_node_rank) * (NUM_OF_EXPERTS_PER_RANK * NUM_OF_RANKS_PER_NODE) * sizeof(float);
+              size_t remote_offset = (size_t)token_idx * (NUM_OF_EXPERTS_PER_RANK * NUM_OF_RANKS_PER_NODE) * sizeof(float);
+              constexpr size_t prob_size = (NUM_OF_EXPERTS_PER_RANK * NUM_OF_RANKS_PER_NODE) * sizeof(float);
+
+              nixlMemViewElem src_desc{nixl_ctx->local_mvh, local_sub, local_offset};
+              nixlMemViewElem dst_desc{nixl_ctx->remote_data_mvh, (size_t)remote_idx * remote_stride + remote_sub, remote_offset};
+
+              nixl_status_t status = nixlPut<nixl_gpu_level_t::THREAD>(
+                src_desc, dst_desc, prob_size, channel_id, DEFER);
+              assert(status == NIXL_SUCCESS || status == NIXL_IN_PROG);
+            }
+
+            if constexpr (std::is_same<TOKEN_DATA_TYPE, uint8_t>::value) {
+              local_sub = local_stride - 1;
+              remote_sub = remote_stride - 1;
+              size_t local_offset = (size_t)token_idx * (HIDDEN_DIM / 128) * sizeof(float);
+              size_t remote_offset = (size_t)token_idx * (HIDDEN_DIM / 128) * sizeof(float);
+              constexpr size_t sf_size = (HIDDEN_DIM / 128) * sizeof(float);
+
+              nixlMemViewElem src_desc{nixl_ctx->local_mvh, local_sub, local_offset};
+              nixlMemViewElem dst_desc{nixl_ctx->remote_data_mvh, (size_t)remote_idx * remote_stride + remote_sub, remote_offset};
+
+              nixl_status_t status = nixlPut<nixl_gpu_level_t::THREAD>(
+                src_desc, dst_desc, sf_size, channel_id, DEFER);
+              assert(status == NIXL_SUCCESS || status == NIXL_IN_PROG);
+            }
+          }
+        }
       }
-      
-      // CRITICAL: Sync warp to ensure ALL threads have issued their puts before flushing
-      // Without this, thread 0 might flush before other threads issue their operations!
+
       __syncwarp();
       if (total_tokens > 0 && INTER_NODE_GROUP::thread_rank() == 0) {
         const unsigned channel_id = blockIdx.x % nixl_ctx->num_channels;
