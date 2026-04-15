@@ -97,13 +97,15 @@ def create_grouped_scores(scores: torch.Tensor, group_idx: torch.Tensor, num_gro
     return (scores * mask).view(num_tokens, num_experts)
 
 
-def bench(fn, num_warmups: int = 50, num_tests: int = 50, post_fn=None):
+def bench(fn, num_warmups: int = 50, num_tests: int = 50, post_fn=None, pre_iteration_fn=None):
     # Flush L2 cache with 256 MB data
     torch.cuda.synchronize()
     cache = torch.empty(int(256e6 // 4), dtype=torch.int, device='cuda')
 
     # Warmup
     for _ in range(num_warmups):
+        if pre_iteration_fn is not None:
+            pre_iteration_fn()
         fn()
 
     # Flush L2
@@ -113,6 +115,8 @@ def bench(fn, num_warmups: int = 50, num_tests: int = 50, post_fn=None):
     start_events = [torch.cuda.Event(enable_timing=True) for _ in range(num_tests)]
     end_events = [torch.cuda.Event(enable_timing=True) for _ in range(num_tests)]
     for i in range(num_tests):
+        if pre_iteration_fn is not None:
+            pre_iteration_fn()
         # Record
         start_events[i].record()
         fn()
@@ -176,7 +180,8 @@ def bench_kineto(fn,
                  suppress_kineto_output: bool = False,
                  trace_path: Optional[str] = None,
                  barrier_comm_profiling: bool = False,
-                 num_kernels_per_period: int = 1):
+                 num_kernels_per_period: int = 1,
+                 pre_iteration_fn=None):
     # Profile
     suppress = suppress_stdout_stderr if suppress_kineto_output else empty_suppress
     with suppress():
@@ -190,6 +195,8 @@ def bench_kineto(fn,
                     lhs @ rhs
                     dist.all_reduce(torch.ones(1, dtype=torch.float, device='cuda'))
                 for _ in range(num_tests):
+                    if pre_iteration_fn is not None:
+                        pre_iteration_fn()
                     fn()
                 torch.cuda.synchronize()
                 prof.step()
