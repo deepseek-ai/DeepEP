@@ -179,6 +179,18 @@ void NIXLCoordinator::allocate_buffers() {
     auto torch_distributed = pybind11::module_::import("torch.distributed");
     torch_distributed.attr("barrier")(this->process_group);
 
+    // sendLocalMD is async — metadata publication to etcd happens in a background
+    // thread.  The barrier above ensures all ranks have *called* sendLocalMD, but
+    // the etcd writes may not yet be visible.  A brief sleep reduces spurious
+    // invalidate+refetch cycles in _nixl_agents_connect.
+    {
+        const char* env = std::getenv("DEEPEP_NIXL_POST_BARRIER_MS");
+        int delay_ms = env ? std::atoi(env) : 2000;
+        if (delay_ms > 0) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(delay_ms));
+        }
+    }
+
     std::vector<int> remote_rank_uuids;
     for (int node_idx = 0; node_idx < buffer_config.num_of_nodes; ++node_idx) {
         if (node_idx != node_rank) {

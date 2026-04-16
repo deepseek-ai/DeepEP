@@ -386,7 +386,7 @@ void HybridEP_NIXLConnector::_nixl_agents_init(int num_agents) {
     init_params["ucx_error_handling_mode"] = "none";
     init_params["num_workers"] = std::to_string(1);
 
-    gda_num_channels = std::max(1, getenv_int("DEEPEP_NIXL_GDA_NUM_CHANNELS", 1));
+    gda_num_channels = std::max(1, getenv_int("DEEPEP_NIXL_GDA_NUM_CHANNELS", num_channels));
     init_params["ucx_num_device_channels"] = std::to_string(gda_num_channels);
     NIXL_LOG("    [Rank %d] _nixl_agents_init: gda_num_channels=%d\n", rank_uuid, gda_num_channels);
 
@@ -409,8 +409,12 @@ void HybridEP_NIXLConnector::_nixl_agents_connect(const std::vector<int>& ranks)
     NIXL_LOG("    [Rank %d] _nixl_agents_connect: Connecting to %zu remote agents...\n", rank_uuid, ranks.size());
     int agent_idx = 0;
 
-    const int refetch_interval = std::max(1, getenv_int("DEEPEP_NIXL_FETCH_RETRY_INTERVAL", 200));
-    const int max_fetch_retries = std::max(1, getenv_int("DEEPEP_NIXL_FETCH_MAX_RETRIES", 50));
+    // sendLocalMD is async — metadata may not be visible in etcd immediately after
+    // the caller's barrier.  Give the etcd watch time to fire before invalidating;
+    // aggressive invalidation cancels the active watch and can miss the arrival event.
+    const int refetch_interval = std::max(1, getenv_int("DEEPEP_NIXL_FETCH_RETRY_INTERVAL", 3000));
+    const int max_fetch_retries = std::max(1, getenv_int("DEEPEP_NIXL_FETCH_MAX_RETRIES", 10));
+    const int hard_timeout_ms   = std::max(1000, getenv_int("DEEPEP_NIXL_CONNECT_TIMEOUT_MS", 120000));
 
     for (int remote_rank : ranks) {
         std::string remote_agent_name = std::to_string(remote_rank) + "_e" + std::to_string(current_epoch);
@@ -428,12 +432,25 @@ void HybridEP_NIXLConnector::_nixl_agents_connect(const std::vector<int>& ranks)
         nixl_xfer_dlist_t empty_descs(VRAM_SEG);
         int wait_count = 0;
         int fetch_retries = 0;
+        auto t_start = std::chrono::steady_clock::now();
         while (agent->checkRemoteMD(remote_agent_name, empty_descs) != NIXL_SUCCESS) {
             sleep_ms(10);
             wait_count++;
-            if (wait_count % 100 == 0) {
-                NIXL_LOG("    [Rank %d] _nixl_agents_connect: Still waiting for rank %d metadata (%d waits)...\n",
-                       rank_uuid, remote_rank, wait_count);
+
+            auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - t_start).count();
+            if (elapsed > hard_timeout_ms) {
+                fprintf(stderr,
+                    "ERROR: [Rank %d] _nixl_agents_connect: timed out after %ld ms waiting for "
+                    "remote agent '%s' (epoch %d). Remote rank may not have published metadata.\n",
+                    rank_uuid, (long)elapsed, remote_agent_name.c_str(), current_epoch);
+                fflush(stderr);
+                assert(false && "NIXL metadata fetch timed out");
+            }
+
+            if (wait_count % 500 == 0) {
+                NIXL_LOG("    [Rank %d] _nixl_agents_connect: Still waiting for rank %d metadata (%d waits, %ld ms)...\n",
+                       rank_uuid, remote_rank, wait_count, (long)elapsed);
             }
             if (wait_count > 0 && wait_count % refetch_interval == 0 && fetch_retries < max_fetch_retries) {
                 fetch_retries++;
