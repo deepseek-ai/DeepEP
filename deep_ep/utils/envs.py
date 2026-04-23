@@ -264,5 +264,24 @@ def get_rdma_gbs(nic_name: str = _DEFAULT_NIC_NAME) -> float:
         rate = int(match.group(1))
         return rate / 8
     except Exception as e:
+        # Fall back to sysfs (required on AWS EFA where `ibstat` does not enumerate the rdmap*s0 HCAs)
+        try:
+            import glob
+            rates = []
+            for rate_path in glob.glob('/sys/class/infiniband/*/ports/1/rate'):
+                with open(rate_path) as f:
+                    line = f.read().strip()
+                # Format: "200 Gb/sec (4X HDR)" — take the first int token
+                for tok in line.split():
+                    try:
+                        rates.append(int(tok))
+                        break
+                    except ValueError:
+                        continue
+            if rates:
+                # Aggregate across all rails, convert Gb/s to GB/s
+                return sum(rates) / 8.0
+        except Exception:
+            pass
         print(f'Failed to get RDMA connection speed: {e}')
         return 0

@@ -21,6 +21,30 @@ from ..utils.envs import (
 from ..utils.comm import get_nccl_comm_handle
 
 
+# AWS EFA + aws-ofi-nccl GIN plugin uses a 128-slot per-peer request ring
+# (NCCL_OFI_GIN_RING_SIZE, see aws-ofi-nccl/src/rdma/gin/nccl_ofi_gin.cpp).
+# DeepEP V2's auto-QP formula (num_sms*16+1) easily produces 129+ QPs, which
+# overruns the ring and triggers a hard assert ("Next sequence number is in
+# use") surfaced to CUDA as CUDA_ERROR_LAUNCH_FAILED. Cap auto-sized QPs on
+# EFA to stay safely below the ring limit. `EP_EFA_MAX_QPS` overrides the
+# default (empirically validated at 2 on p5en.48xlarge).
+_EFA_MAX_QPS = int(os.environ.get('EP_EFA_MAX_QPS', 2))
+
+
+def _is_efa_fabric() -> bool:
+    """Detect AWS EFA fabric via env var or sysfs rdmap*s0 device presence."""
+    if os.environ.get('FI_PROVIDER', '').lower() == 'efa':
+        return True
+    try:
+        import glob
+        # AWS EFA exposes HCAs as /sys/class/infiniband/rdmap<N>s0
+        if glob.glob('/sys/class/infiniband/rdmap*s0'):
+            return True
+    except Exception:
+        pass
+    return False
+
+
 class EPHandle:
     """
     Communication handle returned by `ElasticBuffer.dispatch`.
@@ -198,6 +222,14 @@ class ElasticBuffer:
                 num_allocated_qps = 65 if check_fast_rdma_atomic_support() else 129
             else:
                 num_allocated_qps = 17
+            # AWS EFA + aws-ofi-nccl GIN plugin caps per-peer outstanding
+            # requests at 128; clamp auto-sized QP count to avoid ring overflow.
+            if _is_efa_fabric() and num_allocated_qps > _EFA_MAX_QPS:
+                import sys
+                print(f'[DeepEP] EFA detected: capping num_allocated_qps '
+                      f'{num_allocated_qps} -> {_EFA_MAX_QPS} to avoid GIN '
+                      f'128-slot ring overflow', file=sys.stderr)
+                num_allocated_qps = _EFA_MAX_QPS
         self.num_allocated_qps = num_allocated_qps
 
         # Create CPP handle
@@ -657,6 +689,10 @@ class ElasticBuffer:
         # For hybrid mode, we encourage every channel (and notify) to have an independent QP
         if self.allow_hybrid_mode:
             num_qps = num_sms * 16 + 1
+
+        # AWS EFA: cap below the 128-slot aws-ofi-nccl GIN ring (see helper docstring).
+        if _is_efa_fabric():
+            num_qps = min(num_qps, _EFA_MAX_QPS)
 
         return min(num_qps, self.num_allocated_qps)
 
