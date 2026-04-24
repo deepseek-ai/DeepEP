@@ -91,7 +91,7 @@ def check_nvlink_connections(group: dist.ProcessGroup):
         handles = [pynvml.nvmlDeviceGetHandleByIndex(i) for i in physical_device_indices]
         for i, handle in enumerate(handles):
             for j, peer_handle in enumerate(handles):
-                if i >= j:
+                if i >= j or physical_device_indices[i] == physical_device_indices[j]:
                     continue
                 status = pynvml.nvmlDeviceGetP2PStatus(handle, peer_handle, pynvml.NVML_P2P_CAPS_INDEX_NVLINK)
                 assert status == pynvml.NVML_P2P_STATUS_OK,\
