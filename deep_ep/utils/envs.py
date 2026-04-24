@@ -253,6 +253,17 @@ def get_rdma_gbs(nic_name: str = _DEFAULT_NIC_NAME) -> float:
     Returns:
         gbs: the RDMA bandwidth in GB/s (0 if detection fails).
     """
+
+    # AWS EFA fast path: theoretical 16-rail × 200 Gb/s = 400 GB/s, but
+    # aws-ofi-nccl Gin proxy + libfabric SRD delivers ~25 GB/s effective
+    # aggregate per node. Override EP_EFA_RDMA_GBS to adjust.
+    import glob as _glob
+    try:
+        if _glob.glob('/sys/class/infiniband/rdmap*s0'):
+            return float(os.environ.get('EP_EFA_RDMA_GBS', 25.0))
+    except Exception:
+        pass
+
     # noinspection PyBroadException
     try:
         result = subprocess.run(['ibstat'], capture_output=True, text=True, check=True)
