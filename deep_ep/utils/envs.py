@@ -23,16 +23,6 @@ _global_seed = 0
 _DEFAULT_NIC_NAME = os.getenv('EP_NIC_NAME', 'mlx5_0')
 
 
-def _ibstat_available() -> bool:
-    """
-    Check if ibstat command is available.
-
-    Returns:
-        available: `True` if ibstat is available.
-    """
-    return shutil.which('ibstat') is not None
-
-
 def init_seed(global_seed: int) -> None:
     """
     Initialize the random seed for reproducibility. The local seed is derived from the global seed plus rank.
@@ -231,36 +221,6 @@ def get_nvlink_gbs(factor: float = 0.9) -> float:
         return 0
 
 
-def _get_nic_hca_type(nic_name: str) -> str | None:
-    """
-    Get NIC HCA type from ibstat (preferred) or sysfs (fallback).
-
-    Arguments:
-        nic_name: the NIC device name.
-
-    Returns:
-        hca_type: the HCA type string, or None if detection fails.
-    """
-    if _ibstat_available():
-        # Use ibstat
-        try:
-            result = subprocess.run(['ibstat'], capture_output=True, text=True, check=True)
-            output = result.stdout
-            pattern = rf"CA '{nic_name}'.*?CA type:\s*(\S+)"
-            match = re.search(pattern, output, re.DOTALL)
-            if match:
-                return match.group(1)
-        except Exception as e:
-            raise e
-    else:
-        # Use sysfs (no external tool dependency)
-        sysfs_path = f'/sys/class/infiniband/{nic_name}/hca_type'
-        if os.path.exists(sysfs_path):
-            with open(sysfs_path, 'r') as f:
-                return f.read().strip()
-    return None
-
-
 @functools.lru_cache()
 def check_fast_rdma_atomic_support(nic_name: str = _DEFAULT_NIC_NAME) -> bool:
     """
@@ -274,54 +234,14 @@ def check_fast_rdma_atomic_support(nic_name: str = _DEFAULT_NIC_NAME) -> bool:
     """
     # noinspection PyBroadException
     try:
-        hca_type = _get_nic_hca_type(nic_name)
-        if hca_type is None:
-            return False
-        # MT4131 = ConnectX-7, the first to support fast atomics
-        return hca_type == 'MT4131'
-    except Exception as e:
-        print(f'[deep_ep] Failed to check fast RDMA atomic support for {nic_name}, Exception: {e} :')
-        traceback.print_exc()
+        result = subprocess.run(['ibstat'], capture_output=True, text=True, check=True)
+        output = result.stdout
+        pattern = rf"CA '{nic_name}'.*?CA type:\s*(\S+)"
+        match = re.search(pattern, output, re.DOTALL)
+        assert match
+        return match.group(1) == 'MT4131'
+    except Exception:
         return False
-
-
-def _get_nic_rate_gbps(nic_name: str) -> int | None:
-    """
-    Get NIC port rate in Gbps from ibstat (preferred) or sysfs (fallback).
-
-    Arguments:
-        nic_name: the NIC device name.
-
-    Returns:
-        rate: the port rate in Gbps, or None if detection fails.
-    """
-    if _ibstat_available():
-        # Use ibstat
-        try:
-            result = subprocess.run(['ibstat'], capture_output=True, text=True, check=True)
-            output = result.stdout
-            pattern = rf"CA '{nic_name}'.*?Port \d+:\s*.*?Rate:\s*(\d+)"
-            match = re.search(pattern, output, re.DOTALL)
-            assert match
-            if match:
-                return int(match.group(1))
-        except Exception as e:
-            raise e
-    else:
-        # Use sysfs (no external tool dependency)
-        ports_path = f'/sys/class/infiniband/{nic_name}/ports'
-        if os.path.exists(ports_path):
-            # Find first available port
-            for port_num in os.listdir(ports_path):
-                rate_path = os.path.join(ports_path, port_num, 'rate')
-                if os.path.exists(rate_path):
-                    with open(rate_path, 'r') as f:
-                        rate_str = f.read().strip()
-                        # Rate format: "200 Gb/sec (2X NDR)" or "100 Gb/sec"
-                        match = re.search(r'(\d+)\s*Gb/sec', rate_str)
-                        if match:
-                            return int(match.group(1))
-    return None
 
 
 @functools.lru_cache()
@@ -337,11 +257,14 @@ def get_rdma_gbs(nic_name: str = _DEFAULT_NIC_NAME) -> float:
     """
     # noinspection PyBroadException
     try:
-        rate = _get_nic_rate_gbps(nic_name)
-        if rate is None:
-            return 0
+        result = subprocess.run(['ibstat'], capture_output=True, text=True, check=True)
+        output = result.stdout
+
+        pattern = rf"CA '{nic_name}'.*?Port \d+:\s*.*?Rate:\s*(\d+)"
+        match = re.search(pattern, output, re.DOTALL)
+        assert match
+        rate = int(match.group(1))
         return rate / 8
     except Exception as e:
-        print(f'[deep_ep] Failed to get RDMA connection speed for {nic_name}, Exception: {e} :')
-        traceback.print_exc()
+        print(f'Failed to get RDMA connection speed: {e}')
         return 0
