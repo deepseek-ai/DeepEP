@@ -338,7 +338,7 @@ The library provides some environment variables, which may be useful:
     - `EP_AVOID_RECORD_STREAM`: `0` or `1`, avoid `record_stream` on output tensors, `0` by default
     - `EP_NUM_TOPK_IDX_BITS`: integer, override the number of bits for top-k index encoding, `0` (auto) by default
 - Networking
-    - `EP_NIC_NAME`: string, the NIC device name for RDMA operations, `mlx5_0` by default
+    - `EP_NIC_NAME`: string, the default NIC name used to query NIC properties, `mlx5_0` by default
     - `EP_OVERRIDE_RDMA_SL`: integer, override the RDMA service level index for traffic isolation
     - `EP_DISABLE_GIN`: `0` or `1`, disable the NCCL Gin backend (fall back to non-Gin path), `0` by default
 - JIT
