@@ -45,11 +45,8 @@ def to_nvcc_gencode(s: str) -> str:
 def get_extension_hybrid_ep_cpp():
     current_dir = os.path.dirname(os.path.abspath(__file__))
     enable_multinode = os.getenv("HYBRID_EP_MULTINODE", "0").strip().lower() in {"1", "true", "t", "yes", "y", "on"}
+    # NIXL is opt-in and disabled by default; the DOCA/NCCL path is the default when multinode is enabled.
     use_nixl = os.getenv("USE_NIXL", "0").strip().lower() in {"1", "true", "t", "yes", "y", "on"}
-    # Fallback when env may not propagate (e.g. pip build isolation): .use_nixl in project root
-    if enable_multinode and not use_nixl and os.path.isfile(os.path.join(current_dir, ".use_nixl")):
-        use_nixl = True
-        print("Using NIXL (found .use_nixl; DOCA/NCCL build unavailable)")
 
     # Default to Blackwell series
     os.environ['TORCH_CUDA_ARCH_LIST'] = os.getenv('TORCH_CUDA_ARCH_LIST', '10.0')
@@ -146,16 +143,11 @@ def get_extension_hybrid_ep_cpp():
             extra_link_args.append(f"-l:libnvidia-ml.so.1")
 
             subprocess.run(["git", "submodule", "update", "--init", "--recursive"], cwd=current_dir)
-            nccl_make = subprocess.run(
+            subprocess.run(
                 ["make", "-j", "src.build", f"NVCC_GENCODE={to_nvcc_gencode(os.environ['TORCH_CUDA_ARCH_LIST'])}"],
                 cwd=nccl_dir,
+                check=True,
             )
-            if nccl_make.returncode != 0:
-                raise SystemExit(
-                    "NCCL/DOCA build failed (missing doca_gpunetio_device.h or DOCA SDK).\n"
-                    "Use NIXL instead: export USE_NIXL=1 HYBRID_EP_MULTINODE=1 && pip install .\n"
-                    "Or create .use_nixl in the project root and rebuild."
-                )
             include_dirs.append(os.path.join(nccl_dir, "src/transport/net_ib/gdaki/doca-gpunetio/include"))
             include_dirs.append(os.path.join(rdma_core_dir, "include"))
             library_dirs.append(os.path.join(rdma_core_dir, "lib"))

@@ -4,6 +4,14 @@
 
 #ifndef USE_NIXL
 
+#include <unordered_map>
+#include <cstdint>
+#include <pybind11/pybind11.h>
+#include <ATen/cuda/CUDAContext.h>
+#include <c10/util/Optional.h>
+#include <torch/torch.h>
+#include <iostream>
+#include <dlfcn.h>
 #include "doca_gpunetio_host.h"
 #include "doca_gpunetio_device.h"
 #include "infiniband/verbs.h"

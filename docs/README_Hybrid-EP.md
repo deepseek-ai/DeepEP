@@ -285,14 +285,7 @@ export USE_NIXL=1
 pip install .
 ```
 
-If `USE_NIXL` is not propagated (e.g. with pip build isolation), create a marker file before building:
-
-```bash
-touch .use_nixl
-HYBRID_EP_MULTINODE=1 pip install .
-```
-
-During build, you should see `Multinode enabled: use_nixl=True` and `-> NIXL path: skipping NCCL/DOCA build`. If you see `-> DOCA path` instead, `USE_NIXL` is not being passed (try the `.use_nixl` file).
+During build, you should see `Multinode enabled: use_nixl=True` and `-> NIXL path: skipping NCCL/DOCA build`. If you see `-> DOCA path` instead, `USE_NIXL` is not being passed; ensure the variable is exported in the same shell that invokes the build (some pip front-ends with build isolation strip env vars - in that case use `pip install --no-build-isolation .` or pass the variable through your build configuration).
 
 ### Quick Start
 
