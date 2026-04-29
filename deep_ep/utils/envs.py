@@ -262,6 +262,14 @@ def get_rdma_gbs(nic_name: str = _DEFAULT_NIC_NAME) -> float:
         match = re.search(pattern, output, re.DOTALL)
         assert match
         rate = int(match.group(1))
+
+        # Try to detect 802.3ad LACP bonding slaves and multiply by slave count
+        result = subprocess.run(f'cat /sys/class/infiniband/{nic_name}/device/net/*/upper_*/bonding/slaves',
+                                shell=True, capture_output=True, text=True)
+        slave_count = len(result.stdout.strip().split())
+        if slave_count >= 2:
+            rate *= slave_count
+
         return rate / 8
     except Exception as e:
         print(f'Failed to get RDMA connection speed: {e}')
