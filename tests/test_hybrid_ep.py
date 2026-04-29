@@ -259,7 +259,7 @@ def _report_bw(label, t, nvl_bytes, nvl_metric, rdma_bytes=None, rdma_metric=Non
     times = _gather_times(t)
     if dist.get_rank() == 0:
         t_min, t_avg, t_max = min(times), sum(times) / len(times), max(times)
-        bw_avg = nvl_bytes / 1e9 / t_avg
+        bw_avg = nvl_bytes / 1e9 / t_min
         label_col = f'{label}:'.ljust(LOG_LABEL_WIDTH)
         print(f'{label_col} {bw_avg:.2f} GB/s (NVL), '
               f't: {t_avg * 1e6:.1f} us [min={t_min * 1e6:.1f}, max={t_max * 1e6:.1f}], '
@@ -282,9 +282,9 @@ def _report_kineto(dispatch_label, combine_label, dispatch_t, dispatch_bytes, co
         c_avg = sum(c_times) / len(c_times)
         dispatch_col_nvl = f'{dispatch_label}(NVL):'.ljust(LOG_LABEL_WIDTH)
         combine_col_nvl = f'{combine_label}(NVL):'.ljust(LOG_LABEL_WIDTH)
-        print(f'{dispatch_col_nvl} {dispatch_bytes / 1e9 / d_avg:.2f} GB/s, '
+        print(f'{dispatch_col_nvl} {dispatch_bytes / 1e9 / d_min:.2f} GB/s, '
               f'avg_t={d_avg * 1e6:.1f} us [min={d_min * 1e6:.1f}, max={d_max * 1e6:.1f}]', flush=True)
-        print(f'{combine_col_nvl} {combine_bytes / 1e9 / c_avg:.2f} GB/s, '
+        print(f'{combine_col_nvl} {combine_bytes / 1e9 / c_min:.2f} GB/s, '
               f'avg_t={c_avg * 1e6:.1f} us [min={c_min * 1e6:.1f}, max={c_max * 1e6:.1f}]', flush=True)
         if rdma_dispatch is not None:
             dispatch_col_rdma = f'{dispatch_label}(RDMA):'.ljust(LOG_LABEL_WIDTH)

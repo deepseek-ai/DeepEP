@@ -4,6 +4,7 @@
 #include "executor.cuh"
 #include <vector>
 #include <cstdint>
+#include <nvtx3/nvToolsExt.h>
 
 Executor::Executor(int local_rank, int node_rank, std::string base_path, std::string comm_id, bool load_cached_kernels, bool enable_custom_allgather) : local_rank(local_rank), node_rank(node_rank), kernel_cache(node_rank, local_rank, base_path, comm_id, load_cached_kernels), enable_custom_allgather(enable_custom_allgather) {}  
 
@@ -60,7 +61,6 @@ HandleImpl Executor::metadata_preprocess_core(
     hybrid_ep::tmp_state_t *preprocessing_local_experts_tmp,
     torch::Tensor global_routing_map,
     int64_t num_of_tokens_per_rank,
-    int64_t max_num_dispatched_tokens,
     int64_t num_permuted_tokens,
     int64_t pad_multiple,
     bool enable_permute,
@@ -116,8 +116,9 @@ HandleImpl Executor::metadata_preprocess_core(
   int32_t *tokens_per_expert_ptr = nullptr;
   handle.overflow_flag =
       torch::empty({1}, torch::dtype(torch::kInt32).device(torch::kCUDA));
-  if(fuse_permute_dispatch && enable_permute) {
-    int num_of_chunks_per_rank = (num_of_tokens_per_rank - 1) / config.num_of_tokens_per_chunk_dispatch_api + 1;
+  const bool produce_dense_layout = enable_permute;
+  if(produce_dense_layout) {
+    int num_of_chunks_per_rank = (num_of_tokens_per_rank - 1) / config.num_of_tokens_per_chunk_preprocessing_api + 1;
     handle.dense_chunk_layout = 
         torch::empty({num_of_chunks_per_rank * config.num_of_ranks_per_node * config.num_of_nodes},
         torch::dtype(torch::kInt32).device(torch::kCUDA));
@@ -143,23 +144,7 @@ HandleImpl Executor::metadata_preprocess_core(
       handle.overflow_flag.data_ptr<int>(),
       static_cast<int>(node_rank), static_cast<int>(local_rank), 
       static_cast<int>(handle.num_permuted_tokens < 0 ? std::numeric_limits<int>::max() : handle.num_permuted_tokens),
-      num_of_tokens_per_rank, fuse_permute_dispatch, non_blocking, stream);
-
-
-  if(!fuse_permute_dispatch && enable_permute) {
-    // Standalone path: permute_preprocessing produces padded tokens_per_expert directly.
-    std::tie(handle.row_id_map, handle.tokens_per_expert, handle.overflow_flag) = permute_preprocessing(
-        handle.local_expert_routing_map.data_ptr<bool>(), 
-        handle.num_dispatched_tokens_tensor,
-        max_num_dispatched_tokens, 
-        config.num_of_experts_per_rank, 
-        pad_multiple, 
-        config.num_of_blocks_preprocessing_api,
-        handle.num_permuted_tokens,
-        non_blocking,
-        stream
-    );
-  }
+      num_of_tokens_per_rank, produce_dense_layout, non_blocking, stream);
 
   if(enable_permute) {
     // Both paths: handle.tokens_per_expert is raw int32 on GPU.
@@ -309,17 +294,20 @@ void Executor::dispatch_postprocess(HybridEpConfigInstance config, DispatchArgs&
     nvtxRangePushA("dispatch_postprocess in hybrid-ep");
 
     if(args.enable_permute && !args.fuse_permute_dispatch) {
-        // Standalone permute: permute kernel reads from NVLink buffer, writes to pre-allocated args output tensors
-        assert(args.num_dispatched_tokens_tensor.has_value());
-        assert(args.row_id_map.has_value());
+        // Standalone permute: scan already produced dense layout.
         assert(args.num_permuted_tokens >= 0);
+        assert(args.dense_chunk_layout.defined());
+        assert(args.dense_to_expert_map.defined());
+        assert(args.tokens_per_expert.defined());
     
         // Prepare the arguments for the permute kernel
         PermuteArgs permute_args;
         permute_args.tokens_ptr = reinterpret_cast<void*>(intra_node_dispatch_buffers->expert_output_token);
         permute_args.probs_ptr = reinterpret_cast<float*>(intra_node_dispatch_buffers->expert_output_prob);
         permute_args.scaling_factor_ptr = reinterpret_cast<float*>(intra_node_dispatch_buffers->expert_output_scaling_factor);
-        permute_args.row_id_map = args.row_id_map.value();
+        permute_args.dense_chunk_layout = args.dense_chunk_layout;
+        permute_args.dense_to_expert_map = args.dense_to_expert_map;
+        permute_args.num_of_local_experts_tokens = args.tokens_per_expert;
         // Output buffers: point to pre-allocated tensors from args
         permute_args.output_tokens_ptr = args.local_expert_output_token.data_ptr();
         permute_args.output_probs_ptr = args.local_expert_output_prob.has_value() ?
@@ -328,7 +316,6 @@ void Executor::dispatch_postprocess(HybridEpConfigInstance config, DispatchArgs&
             args.local_expert_output_scaling_factor.value().data_ptr<float>() : nullptr;
         permute_args.hidden_size = config.hidden_dim;
         permute_args.scales_per_token = config.hidden_dim / 128;
-        permute_args.num_dispatched_token_tensor = args.num_dispatched_tokens_tensor.value();
         permute_args.num_permuted_token = args.num_permuted_tokens;
         permute_args.num_ranks_per_node = config.num_of_ranks_per_node;
         permute_args.num_of_local_experts = config.num_of_experts_per_rank;
@@ -336,7 +323,6 @@ void Executor::dispatch_postprocess(HybridEpConfigInstance config, DispatchArgs&
         permute_args.local_rank = local_rank;
         permute_args.use_fp8 = config.token_data_type == APP_TOKEN_DATA_TYPE::UINT8;
         permute_args.with_probs = config.forward_dispatch_api;
-        permute_args.token_options = args.hidden.options();
         permute_args.stream = args.stream;
         permute_args.num_of_blocks_permute = config.num_of_blocks_permute;
         
@@ -388,19 +374,17 @@ void Executor::combine_preprocess(HybridEpConfigInstance config, CombineArgs& ar
     nvtxRangePushA("combine_preprocess in hybrid-ep");
 
     if(args.enable_unpermute && !args.fuse_unpermute_combine) {
-        assert(args.row_id_map.has_value());
-        assert(args.num_dispatched_tokens_tensor.has_value());
-        auto num_dispatched_tokens_tensor = args.num_dispatched_tokens_tensor.value();
+        assert(args.dense_chunk_layout.defined());
+        assert(args.dense_to_expert_map.defined());
     
         UnpermuteArgs unpermute_args;
         unpermute_args.permuted_tokens = args.hidden;
         unpermute_args.permuted_probs = args.probs;
         unpermute_args.tokens_ptr = reinterpret_cast<uint16_t*>(intra_node_combine_buffers->expert_input_token);
         unpermute_args.probs_ptr = reinterpret_cast<float*>(intra_node_combine_buffers->expert_input_prob);
-        unpermute_args.row_id_map = args.row_id_map.value();
+        unpermute_args.dense_chunk_layout = args.dense_chunk_layout;
+        unpermute_args.dense_to_expert_map = args.dense_to_expert_map;
         unpermute_args.num_of_local_experts = config.num_of_experts_per_rank;
-        unpermute_args.num_dispatched_tokens_tensor = num_dispatched_tokens_tensor;
-        unpermute_args.pad_multiple = args.pad_multiple;
         unpermute_args.hidden_size = config.hidden_dim;
         unpermute_args.local_rank = local_rank;
         unpermute_args.num_ranks_per_node = config.num_of_ranks_per_node;
@@ -510,4 +494,3 @@ void Executor::combine_postprocess(HybridEpConfigInstance config, CombineArgs& a
     // No postprocess is needed for the combine kernel now.
     nvtxRangePop();  // End of combine_postprocess nvtx range
 }
-

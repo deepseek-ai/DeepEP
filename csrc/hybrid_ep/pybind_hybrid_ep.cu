@@ -162,7 +162,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         .def_readwrite("local_expert_routing_map", &HandleImpl::local_expert_routing_map)
         .def_readwrite("num_of_tokens_per_rank", &HandleImpl::num_of_tokens_per_rank)
         .def_readwrite("config", &HandleImpl::config)
-        .def_readwrite("row_id_map", &HandleImpl::row_id_map)
         .def_readwrite("tokens_per_expert", &HandleImpl::tokens_per_expert)
         .def_readwrite("padded_tokens_per_expert", &HandleImpl::padded_tokens_per_expert)
         .def_readwrite("overflow_flag", &HandleImpl::overflow_flag)

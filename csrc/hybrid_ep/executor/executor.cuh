@@ -11,7 +11,6 @@
 #include "jit/compiler.cuh"
 #include "extension/permute.cuh"
 #include "extension/allgather.cuh"
-#include "extension/permute.cuh"
 #include "buffer/intranode.cuh"
 #ifdef HYBRID_EP_BUILD_MULTINODE_ENABLE
 #include "buffer/internode.cuh"
@@ -27,14 +26,11 @@ struct HandleImpl {
     int64_t num_of_tokens_per_rank = -1;
     HybridEpConfigInstance config;
 
-    // Handle for standalone permute
-    torch::Tensor row_id_map;
+    // Dense-layout metadata for permute/unpermute.
     torch::Tensor tokens_per_expert; 
     torch::Tensor padded_tokens_per_expert; 
     torch::Tensor overflow_flag;
     int64_t num_permuted_tokens = -1;
-
-    // Handle for fused permute
     torch::Tensor dense_chunk_layout;
     torch::Tensor dense_to_expert_map;
 };
@@ -52,8 +48,7 @@ public:
         torch::Tensor sparse_to_dense_map;
         torch::Tensor rdma_to_attn_map;
         torch::Tensor attn_to_rdma_map;
-        c10::optional<torch::Tensor> num_dispatched_tokens_tensor;  // Used in the permute
-        c10::optional<torch::Tensor> local_expert_routing_map;      // Used in the permute
+        c10::optional<torch::Tensor> num_dispatched_tokens_tensor;
 
         // Output of permute
         torch::Tensor local_expert_output_token;
@@ -64,10 +59,6 @@ public:
         torch::Tensor dense_to_expert_map; 
         torch::Tensor tokens_per_expert; 
 
-        int64_t num_dispatched_tokens = -1;
-        // Used in the permute case, use up-bound to avoid synchronization to get the real num_dispatched_tokens from the pinned memory
-        int64_t max_num_dispatched_tokens = -1;
-        c10::optional<torch::Tensor> row_id_map;
         int64_t num_permuted_tokens = -1;
         // Misc
         int pad_multiple;  // Used in the padding case of permute
@@ -91,18 +82,12 @@ public:
         torch::Tensor sparse_to_dense_map;
         torch::Tensor rdma_to_attn_map;
         torch::Tensor attn_to_rdma_map;
-        c10::optional<torch::Tensor> num_dispatched_tokens_tensor;
-        // Used in the fused unpermute-combine
+        // Dense-layout metadata used by standalone and fused unpermute.
         torch::Tensor dense_chunk_layout;  
         torch::Tensor dense_to_expert_map;          
         torch::Tensor tokens_per_expert;            
-        // Output of Permute-preprocess
-        c10::optional<torch::Tensor> row_id_map;  // Used in the unpermute
-        // Used in the sync-free Unpermute
-        int64_t num_dispatched_tokens = -1;
         
         // Misc
-        int pad_multiple;  // Used in the padding case of unpermute
         bool enable_unpermute = false;
         bool fuse_unpermute_combine = false;
         bool non_blocking = false; // If enable this, the HYBRID_EP_BUILD_TOKEN_DROP_ENABLE will be enabled on the fused combine-unpermute kernel.
@@ -123,7 +108,6 @@ public:
         hybrid_ep::tmp_state_t *preprocessing_local_experts_tmp,
         torch::Tensor global_routing_map,
         int64_t num_of_tokens_per_rank,
-        int64_t max_num_dispatched_tokens,
         int64_t num_permuted_tokens,
         int64_t pad_multiple,
         bool enable_permute,
@@ -166,4 +150,3 @@ private:
     InterNodeCombineBuffers *inter_node_combine_buffers = nullptr;
 #endif
 };
-
