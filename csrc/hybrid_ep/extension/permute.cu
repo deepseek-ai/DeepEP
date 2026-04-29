@@ -14,14 +14,20 @@ template void unpermute_launcher<uint16_t, float>(UnpermuteArgs args);
 
 namespace {
 
-constexpr int kLimitedSmCount = 32;
-constexpr int kKernelBlockSize = 1024;
+constexpr int kKernelMaxThreads = 1024;
 constexpr int kPermuteHiddenVec = 4;
 constexpr int kUnpermuteHiddenVec = 4;
 
-int clamp_limited_grid(int grid_size) {
-  assert(grid_size > 0);
-  return std::min(grid_size, kLimitedSmCount);
+int dense_token_block_threads(int hidden_size, bool use_fp8, int64_t token_count,
+                              int launch_blocks) {
+  assert(launch_blocks > 0);
+  const int hidden_float4 = hidden_size / (use_fp8 ? 16 : 8);
+  const int64_t token_blocks_32 = (token_count + 31) / 32;
+  const int64_t score2 =
+      2LL * hidden_float4 * launch_blocks + int64_t(hidden_float4) * token_blocks_32;
+  if (score2 < 2048LL * launch_blocks) return 128;
+  if (score2 < 3072LL * launch_blocks) return 256;
+  return 512;
 }
 
 __device__ __forceinline__ void store_float4_cg(float4* __restrict__ ptr, float4 value) {
@@ -56,7 +62,7 @@ void pad_tokens_per_expert(const int32_t* src, int64_t* dst, int num_experts,
 }
 
 template <typename DType>
-__global__ __launch_bounds__(kKernelBlockSize, 1) void permute_kernel(
+__global__ __launch_bounds__(kKernelMaxThreads, 1) void permute_kernel(
     const DType* __restrict__ tokens,
     DType* __restrict__ permuted_tokens,
     const float* __restrict__ scaling_factor,
@@ -90,7 +96,7 @@ __global__ __launch_bounds__(kKernelBlockSize, 1) void permute_kernel(
 
   // Per-token scratch stores the active expert output rows for the current
   // dense token. Only up to one warp writes/reads each 32-int row.
-  __shared__ int route_smem[kKernelBlockSize];
+  __shared__ int route_smem[kKernelMaxThreads];
 
   // Grid-stride over real dense tokens. dense_chunk_layout[-1] is produced by
   // the fused scan and excludes padding rows.
@@ -247,8 +253,11 @@ void permute_launcher(PermuteArgs args) {
   assert(args.dense_to_expert_map.is_contiguous());
   assert(args.num_of_local_experts_tokens.is_contiguous());
 
-  const int grid_size = clamp_limited_grid(args.num_of_blocks_permute);
-  permute_kernel<DType><<<grid_size, kKernelBlockSize, 0, args.stream>>>(
+  const int grid_size = args.num_of_blocks_permute;
+  assert(grid_size > 0);
+  const int block_threads =
+      dense_token_block_threads(args.hidden_size, args.use_fp8, args.num_permuted_token, grid_size);
+  permute_kernel<DType><<<grid_size, block_threads, 0, args.stream>>>(
       reinterpret_cast<const DType*>(args.tokens_ptr),
       reinterpret_cast<DType*>(args.output_tokens_ptr),
       args.use_fp8 ? reinterpret_cast<float*>(args.scaling_factor_ptr) : nullptr,
@@ -269,7 +278,7 @@ void permute_launcher(PermuteArgs args) {
 }
 
 template <typename DType>
-__global__ __launch_bounds__(kKernelBlockSize, 1) void unpermute_kernel(
+__global__ __launch_bounds__(kKernelMaxThreads, 1) void unpermute_kernel(
     const DType* __restrict__ permuted_tokens,
     DType* __restrict__ tokens,
     const float* __restrict__ permuted_probs,
@@ -416,11 +425,14 @@ void unpermute_launcher(UnpermuteArgs args) {
   assert(args.dense_chunk_layout.is_contiguous());
   assert(args.dense_to_expert_map.is_contiguous());
 
-  const int grid_size = clamp_limited_grid(args.num_of_blocks_unpermute);
+  const int grid_size = args.num_of_blocks_unpermute;
+  assert(grid_size > 0);
+  const int block_threads =
+      dense_token_block_threads(args.hidden_size, false, args.permuted_tokens.size(0), grid_size);
   const size_t shared_mem_size =
-      static_cast<size_t>(kKernelBlockSize / 32) * args.num_of_local_experts * sizeof(int);
+      static_cast<size_t>(block_threads / 32) * args.num_of_local_experts * sizeof(int);
   unpermute_kernel<__nv_bfloat16>
-      <<<grid_size, kKernelBlockSize, shared_mem_size, args.stream>>>(
+      <<<grid_size, block_threads, shared_mem_size, args.stream>>>(
           reinterpret_cast<const __nv_bfloat16*>(args.permuted_tokens.data_ptr()),
           reinterpret_cast<__nv_bfloat16*>(args.tokens_ptr),
           args.with_probs ? reinterpret_cast<float*>(args.permuted_probs.value().data_ptr()) : nullptr,

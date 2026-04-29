@@ -152,6 +152,24 @@ Hybrid-EP supports [NIXL](https://github.com/ai-dynamo/nixl) (NVIDIA Inter-node 
 
 ## 🚀 Usage Guide
 
+### Chunk Size Tuning
+
+HybridEP defaults the dispatch, combine, and metadata-preprocessing API chunk sizes to `64` tokens:
+
+```bash
+export NUM_OF_TOKENS_PER_CHUNK_DISPATCH_API=64
+export NUM_OF_TOKENS_PER_CHUNK_COMBINE_API=64
+export NUM_OF_TOKENS_PER_CHUNK_PREPROCESSING_API=64
+```
+
+When the fused path is not used, you can try increasing all three chunk-size variables to `128`; in some cases this can provide better performance:
+
+```bash
+export NUM_OF_TOKENS_PER_CHUNK_DISPATCH_API=128
+export NUM_OF_TOKENS_PER_CHUNK_COMBINE_API=128
+export NUM_OF_TOKENS_PER_CHUNK_PREPROCESSING_API=128
+```
+
 ### Installation
 
 #### Intra-node and MNNVL Installation
@@ -303,4 +321,3 @@ Refer to `tests/test_hybrid_ep.py` for comprehensive usage examples including:
 - Performance benchmarking setups
 
 For more information on the design and tuning details, please refer to the [Hybrid-EP Design Document](Hybrid-EP_Implementation.md).
-
