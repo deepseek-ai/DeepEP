@@ -117,42 +117,6 @@ class HybridEPBuffer:
         if os.path.exists(jit_cache_path):
             shutil.rmtree(jit_cache_path)
 
-    @staticmethod
-    def _dense_permute_handle_to_impl(handle: tuple):
-        if len(handle) != 11:
-            raise ValueError("dense-layout permute handles must contain 11 fields.")
-        handle_impl = hybrid_ep_cpp.HandleImpl()
-        (
-            handle_impl.sparse_to_dense_map,
-            handle_impl.rdma_to_attn_map,
-            handle_impl.attn_to_rdma_map,
-            handle_impl.num_dispatched_tokens_tensor,
-            handle_impl.local_expert_routing_map,
-            handle_impl.dense_chunk_layout,
-            handle_impl.dense_to_expert_map,
-            handle_impl.tokens_per_expert,
-            handle_impl.num_of_tokens_per_rank,
-            handle_impl.config,
-            handle_impl.overflow_flag,
-        ) = handle
-        return handle_impl
-
-    @staticmethod
-    def _dense_permute_handle_from_impl(handle_impl):
-        return (
-            handle_impl.sparse_to_dense_map,
-            handle_impl.rdma_to_attn_map,
-            handle_impl.attn_to_rdma_map,
-            handle_impl.num_dispatched_tokens_tensor,
-            handle_impl.local_expert_routing_map,
-            handle_impl.dense_chunk_layout,
-            handle_impl.dense_to_expert_map,
-            handle_impl.tokens_per_expert,
-            handle_impl.num_of_tokens_per_rank,
-            handle_impl.config,
-            handle_impl.overflow_flag,
-        )
-
     def update_template_config(
         self,
         hidden_dim: int = None,
@@ -414,7 +378,20 @@ class HybridEPBuffer:
                     non_blocking=non_blocking,
                 )
             else:
-                handle_impl = self._dense_permute_handle_to_impl(handle)
+                handle_impl = hybrid_ep_cpp.HandleImpl()
+                (
+                    handle_impl.sparse_to_dense_map,
+                    handle_impl.rdma_to_attn_map,
+                    handle_impl.attn_to_rdma_map,
+                    handle_impl.num_dispatched_tokens_tensor,
+                    handle_impl.local_expert_routing_map,
+                    handle_impl.dense_chunk_layout,
+                    handle_impl.dense_to_expert_map,
+                    handle_impl.tokens_per_expert,
+                    handle_impl.num_of_tokens_per_rank,
+                    handle_impl.config,
+                    handle_impl.overflow_flag,
+                ) = handle
                 handle_impl.num_permuted_tokens = num_permuted_tokens
                 if handle_impl.num_of_tokens_per_rank != num_of_tokens_per_rank:
                     warnings.warn("This handle could be invalid.")
@@ -439,7 +416,19 @@ class HybridEPBuffer:
             dispatched_probs,
             dispatched_scaling_factor,
             handle_impl.padded_tokens_per_expert,
-            self._dense_permute_handle_from_impl(handle_impl),
+            (
+                handle_impl.sparse_to_dense_map,
+                handle_impl.rdma_to_attn_map,
+                handle_impl.attn_to_rdma_map,
+                handle_impl.num_dispatched_tokens_tensor,
+                handle_impl.local_expert_routing_map,
+                handle_impl.dense_chunk_layout,
+                handle_impl.dense_to_expert_map,
+                handle_impl.tokens_per_expert,
+                handle_impl.num_of_tokens_per_rank,
+                handle_impl.config,
+                handle_impl.overflow_flag,
+            ),
         )
 
     def combine_with_unpermute(
@@ -465,7 +454,20 @@ class HybridEPBuffer:
             assert self.configurer is not None, "Please initialize the configurer first."
             assert handle is not None, "The handle is necessary in the combine pass."
 
-            handle_impl = self._dense_permute_handle_to_impl(handle)
+            handle_impl = hybrid_ep_cpp.HandleImpl()
+            (
+                handle_impl.sparse_to_dense_map,
+                handle_impl.rdma_to_attn_map,
+                handle_impl.attn_to_rdma_map,
+                handle_impl.num_dispatched_tokens_tensor,
+                handle_impl.local_expert_routing_map,
+                handle_impl.dense_chunk_layout,
+                handle_impl.dense_to_expert_map,
+                handle_impl.tokens_per_expert,
+                handle_impl.num_of_tokens_per_rank,
+                handle_impl.config,
+                handle_impl.overflow_flag,
+            ) = handle
             combined_token, combined_probs = self.runtime.combine_with_unpermute(
                 hidden=hidden,
                 probs=probs,

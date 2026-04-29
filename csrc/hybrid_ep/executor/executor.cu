@@ -116,8 +116,7 @@ HandleImpl Executor::metadata_preprocess_core(
   int32_t *tokens_per_expert_ptr = nullptr;
   handle.overflow_flag =
       torch::empty({1}, torch::dtype(torch::kInt32).device(torch::kCUDA));
-  const bool produce_dense_layout = enable_permute;
-  if(produce_dense_layout) {
+  if(enable_permute) {
     int num_of_chunks_per_rank = (num_of_tokens_per_rank - 1) / config.num_of_tokens_per_chunk_preprocessing_api + 1;
     handle.dense_chunk_layout = 
         torch::empty({num_of_chunks_per_rank * config.num_of_ranks_per_node * config.num_of_nodes},
@@ -144,7 +143,7 @@ HandleImpl Executor::metadata_preprocess_core(
       handle.overflow_flag.data_ptr<int>(),
       static_cast<int>(node_rank), static_cast<int>(local_rank), 
       static_cast<int>(handle.num_permuted_tokens < 0 ? std::numeric_limits<int>::max() : handle.num_permuted_tokens),
-      num_of_tokens_per_rank, produce_dense_layout, non_blocking, stream);
+      num_of_tokens_per_rank, enable_permute, non_blocking, stream);
 
   if(enable_permute) {
     // Both paths: handle.tokens_per_expert is raw int32 on GPU.
