@@ -92,14 +92,7 @@ __device__ static __forceinline__ nvshmemi_ibgda_device_qp_t* ibgda_get_rc_impl(
 
 __device__ static __forceinline__ nvshmemi_ibgda_device_qp_t* ibgda_get_rc(int pe, int id) {
     auto state = ibgda_get_state();
-    // PROBE: NVSHMEM 3.6.5 still typedefs nvshmemi_ibgda_device_state_t as
-    // nvshmemi_ibgda_device_state_v1, so PR #564's templated dispatch goes to
-    // the v1 (pre-3.5.21) branch. But the v1 struct's rkeys comment in 3.6.5
-    // —"rkeys[idx * npes + pe] gives rkey of chunck idx targeting peer pe"—
-    // says the post-3.5.21 (v2) layout is what's actually populated. So the
-    // v1 indexing yields wrong QPs → WQEs to wrong remote addresses →
-    // moe_recv_*_counter stays at -1 (the prenyx hang). Force v2 indexing.
-    return &state->globalmem.rcs[pe + nvshmemi_device_state_d.npes * id];
+    return ibgda_get_rc_impl(state, pe, id);
 }
 
 __device__ static __forceinline__
