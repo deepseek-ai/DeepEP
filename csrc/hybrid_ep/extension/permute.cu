@@ -18,16 +18,15 @@ constexpr int kKernelMaxThreads = 1024;
 constexpr int kPermuteHiddenVec = 4;
 constexpr int kUnpermuteHiddenVec = 4;
 
-int dense_token_block_threads(int hidden_size, bool use_fp8, int64_t token_count,
-                              int launch_blocks) {
+int dense_permute_block_threads(int64_t token_count, int launch_blocks) {
   assert(launch_blocks > 0);
-  const int hidden_float4 = hidden_size / (use_fp8 ? 16 : 8);
   const int64_t token_blocks_32 = (token_count + 31) / 32;
-  const int64_t score2 =
-      2LL * hidden_float4 * launch_blocks + int64_t(hidden_float4) * token_blocks_32;
-  if (score2 < 2048LL * launch_blocks) return 128;
-  if (score2 < 3072LL * launch_blocks) return 256;
-  return 512;
+  return 4 * token_blocks_32 >= 5LL * launch_blocks ? 512 : 256;
+}
+
+int dense_unpermute_block_threads(int64_t dense_token_count, int launch_blocks) {
+  assert(launch_blocks > 0);
+  return dense_token_count >= 16LL * launch_blocks ? 512 : 256;
 }
 
 __device__ __forceinline__ void store_float4_cg(float4* __restrict__ ptr, float4 value) {
@@ -255,8 +254,7 @@ void permute_launcher(PermuteArgs args) {
 
   const int grid_size = args.num_of_blocks_permute;
   assert(grid_size > 0);
-  const int block_threads =
-      dense_token_block_threads(args.hidden_size, args.use_fp8, args.num_permuted_token, grid_size);
+  const int block_threads = dense_permute_block_threads(args.num_permuted_token, grid_size);
   permute_kernel<DType><<<grid_size, block_threads, 0, args.stream>>>(
       reinterpret_cast<const DType*>(args.tokens_ptr),
       reinterpret_cast<DType*>(args.output_tokens_ptr),
@@ -427,8 +425,7 @@ void unpermute_launcher(UnpermuteArgs args) {
 
   const int grid_size = args.num_of_blocks_unpermute;
   assert(grid_size > 0);
-  const int block_threads =
-      dense_token_block_threads(args.hidden_size, false, args.permuted_tokens.size(0), grid_size);
+  const int block_threads = dense_unpermute_block_threads(args.permuted_tokens.size(0), grid_size);
   const size_t shared_mem_size =
       static_cast<size_t>(block_threads / 32) * args.num_of_local_experts * sizeof(int);
   unpermute_kernel<__nv_bfloat16>
