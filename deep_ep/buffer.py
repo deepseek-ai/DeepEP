@@ -32,7 +32,7 @@ class Buffer:
 
     def __init__(self, group: Optional[dist.ProcessGroup],
                  num_nvl_bytes: int = 0, num_rdma_bytes: int = 0,
-                 low_latency_mode: bool = False,  num_qps_per_rank: int = 24,
+                 low_latency_mode: bool = False,  num_qps_per_rank: int = 8,
                  allow_nvlink_for_normal_mode: bool = True,
                  allow_nvlink_for_low_latency_mode: bool = True,
                  allow_mnnvl: bool = False,
