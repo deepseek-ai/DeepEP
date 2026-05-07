@@ -106,6 +106,17 @@ notify_dispatch(const int* num_tokens_per_rank, int* moe_recv_counter_mapped, in
         EP_DEVICE_ASSERT(num_warps > 1);
         EP_DEVICE_ASSERT(kNumRDMARanks <= num_threads);
 
+        // [DEEPEP_DEBUG] Print IBGDA device-state contents on rank 0 thread 0 to confirm
+        // whether the state is initialized in DeepEP's __device__ instance.
+        // If state is all zeros / num_devices_initialized==0, NVSHMEM's host runtime
+        // is initializing a different __device__ instance than the one this kernel sees.
+        if (thread_id == 0 && rank == 0) {
+            auto _state = ibgda_get_state();
+            printf("[DEEPEP_DEBUG_INIT_STATE] state_ptr=%p num_devices_initialized=%d num_rc_per_pe=%d nvshmemi_npes=%d\n",
+                   _state, _state->num_devices_initialized, _state->num_rc_per_pe,
+                   nvshmemi_device_state_d.npes);
+        }
+
         // waiting for all previous inflight wrs to complete,
         // in case of rewriting cleared rdma_buffer
         auto qps_per_rdma_rank = ibgda_get_state()->num_rc_per_pe * ibgda_get_state()->num_devices_initialized;
