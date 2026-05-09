@@ -18,12 +18,33 @@ find_pkgs = importlib.util.module_from_spec(find_pkgs_spec)
 find_pkgs_spec.loader.exec_module(find_pkgs)
 
 
-# Wheel specific: the wheels only include the SO name of the host library `libnvshmem_host.so.X`
-def get_nvshmem_host_lib_name(base_dir):
-    path = Path(base_dir).joinpath('lib')
-    for file in path.rglob('libnvshmem_host.so.*'):
+# Wheel specific: NVIDIA pip wheels (nvidia-nvshmem-cu12, nvidia-nccl-cu12)
+# only ship the SO name of the host library, e.g. `libnvshmem_host.so.3`,
+# without the unversioned `libnvshmem_host.so` symlink. So `-l:libnvshmem_host.so`
+# (exact-name link) cannot resolve. Resolve the real file name at build time
+# and pass it through to the linker instead.
+def _find_versioned_so(base_dir, prefix):
+    """Return the real filename of the first ``{prefix}.so*`` under ``base_dir/lib``.
+
+    Prefers an unversioned ``{prefix}.so`` symlink when present so we keep
+    behaving identically to the Tarball install. Falls back to the SONAME
+    file (``{prefix}.so.X``) shipped by pip wheels.
+    """
+    lib_dir = Path(base_dir).joinpath('lib')
+    unversioned = lib_dir / f'{prefix}.so'
+    if unversioned.exists():
+        return unversioned.name
+    for file in sorted(lib_dir.rglob(f'{prefix}.so.*')):
         return file.name
-    raise ModuleNotFoundError('libnvshmem_host.so not found')
+    raise ModuleNotFoundError(f'{prefix}.so not found under {lib_dir}')
+
+
+def get_nvshmem_host_lib_name(base_dir):
+    return _find_versioned_so(base_dir, 'libnvshmem_host')
+
+
+def get_nccl_lib_name(base_dir):
+    return _find_versioned_so(base_dir, 'libnccl')
 
 
 def get_package_version():
@@ -84,17 +105,23 @@ if __name__ == '__main__':
     nvcc_dlink = []
     extra_link_args = ['-lcuda']
 
-    # NVSHMEM flags
+    # NVSHMEM flags. Use the real on-disk file name (which may be SONAME-only
+    # like ``libnvshmem_host.so.3`` when NVSHMEM came from a pip wheel) so
+    # that ``-l:NAME`` can resolve. The static device library always ships
+    # under its canonical name, so it stays hard-coded.
     sources.extend(['csrc/kernels/legacy/internode.cu', 'csrc/kernels/legacy/internode_ll.cu', 'csrc/kernels/backend/nvshmem.cu'])
     include_dirs.extend([f'{nvshmem_root_dir}/include'])
     library_dirs.extend([f'{nvshmem_root_dir}/lib'])
     nvcc_dlink.extend(['-dlink', f'-L{nvshmem_root_dir}/lib', '-lnvshmem_device'])
-    extra_link_args.extend([f'-l:libnvshmem_host.so', '-l:libnvshmem_device.a', f'-Wl,-rpath,{nvshmem_root_dir}/lib'])
+    nvshmem_host_lib = get_nvshmem_host_lib_name(nvshmem_root_dir)
+    extra_link_args.extend([f'-l:{nvshmem_host_lib}', '-l:libnvshmem_device.a', f'-Wl,-rpath,{nvshmem_root_dir}/lib'])
 
-    # NCCL flags
+    # NCCL flags. Same story as NVSHMEM above — pip wheels ship
+    # ``libnccl.so.2`` only, so resolve the real name dynamically.
     sources.extend(['csrc/kernels/backend/nccl.cu'])
     include_dirs.extend([f'{nccl_root_dir}/include'])
-    extra_link_args.extend([f'-l:libnccl.so', f'-Wl,-rpath,{nccl_root_dir}/lib'])
+    nccl_lib = get_nccl_lib_name(nccl_root_dir)
+    extra_link_args.extend([f'-l:{nccl_lib}', f'-Wl,-rpath,{nccl_root_dir}/lib'])
 
     # CUDA driver sources
     sources.extend(['csrc/kernels/backend/cuda_driver.cu'])
