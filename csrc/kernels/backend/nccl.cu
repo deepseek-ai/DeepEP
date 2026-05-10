@@ -81,17 +81,20 @@ NCCLSymmetricMemoryContext::NCCLSymmetricMemoryContext(const int64_t& nccl_comm,
     if (get_env<int>("EP_BUFFER_DEBUG"))
         printf("EP NCCL device communicator has %d allocated QPs\n", num_allocated_qps);
 
-    // Query NCCL supported Gin Type
-    ncclCommProperties props = NCCL_COMM_PROPERTIES_INITIALIZER;
-    NCCL_CHECK(ncclCommQueryProperties(comm, &props));
-    EP_HOST_ASSERT(
-        (allow_hybrid_mode ? props.railedGinType : props.ginType) != NCCL_GIN_TYPE_NONE and
-        "NCCL GIN is unavailable. This is usually due to a network configuration issue, "
-        "such as `allow_hybrid_mode=0` (disable direct RDMA kernels) in multi-plane network.");
+    const bool gin_disabled = get_env("EP_DISABLE_GIN", 0) != 0;
+    if (not gin_disabled) {
+        // Query NCCL supported Gin Type
+        ncclCommProperties props = NCCL_COMM_PROPERTIES_INITIALIZER;
+        NCCL_CHECK(ncclCommQueryProperties(comm, &props));
+        EP_HOST_ASSERT(
+            (allow_hybrid_mode ? props.railedGinType : props.ginType) != NCCL_GIN_TYPE_NONE and
+            "NCCL GIN is unavailable. This is usually due to a network configuration issue, "
+            "such as `allow_hybrid_mode=0` (disable direct RDMA kernels) in multi-plane network.");
+    }
 
     // Initialize NCCL device communicator
     ncclDevCommRequirements_t reqs = NCCL_DEV_COMM_REQUIREMENTS_INITIALIZER;
-    if (num_ranks > 1 and get_env("EP_DISABLE_GIN", 0) == 0) {
+    if (num_ranks > 1 and not gin_disabled) {
         reqs.ginContextCount = num_allocated_qps;
         reqs.ginExclusiveContexts = true;
         reqs.ginQueueDepth = 1024;
