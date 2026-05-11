@@ -1060,6 +1060,7 @@ LOW_LATENCY_COMBINE_RECV:
                             num_casted = (info >> 1) + (info & 1);
                         }
                         int num_tma_bytes = num_casted * kNumLogFMTPerWarpBytes + (num_decode_warps - num_casted) * kNumBF16PerWarpBytes;
+                        asm volatile("fence.proxy.async;");
                         tma_load_1d(
                             tma_ld_buffers[stage_idx], buffer + (kUseLogFMT ? kNumMetaBytes : 0), full_barriers[stage_idx], num_tma_bytes);
                         mbarrier_arrive_and_expect_tx(full_barriers[stage_idx], num_tma_bytes);
