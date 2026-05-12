@@ -113,6 +113,7 @@ struct HybridEpConfigInstance {
   int num_of_ranks_per_node;
   int num_of_nodes;
   int pad_multiple;
+  int topk;  // 0 = sparse bool routing map; >0 = dense int16 topk_idx mode
 
   /*
    *  Metadata-preprocessing API Config
@@ -452,6 +453,7 @@ public:
         config.num_of_additional_in_flight_s2g_unpermute_block_combine_api = get_env_int("NUM_OF_ADDITIONAL_IN_FLIGHT_S2G_UNPERMUTE_BLOCK_COMBINE_API", 2);
         
         config.pad_multiple = 1;
+        config.topk = 0;  // default: sparse bool routing map
 
         // If we use the fused permute-dispatch kernel, the number of blocks
         // for the permute part is the same as the number of blocks for the dispatch part.

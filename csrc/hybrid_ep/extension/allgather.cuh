@@ -38,6 +38,7 @@ private:
     int num_of_experts_per_rank;
     int num_of_tokens_per_rank;
     int num_of_nodes;
+    int routing_bytes_per_token;
     ExtendedMemoryAllocator *allocator;
     pybind11::object process_group;
 };

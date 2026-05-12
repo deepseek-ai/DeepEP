@@ -29,25 +29,40 @@ torch::Tensor Executor::allgather_routing_map(
     nvtxRangePushA("allgather_routing_map in hybrid-ep");
 
     auto torch_distributed = py::module_::import("torch.distributed");
-    auto num_of_expert = local_routing_map.size(-1);
+    auto num_cols = local_routing_map.size(-1);  // E_total (sparse) or TOPK (dense)
     auto num_of_tokens_per_rank = local_routing_map.size(-2);
     auto group_size = process_group.attr("size")().cast<int>();
-    assert(num_of_expert == config.num_of_experts_per_rank * config.num_of_ranks_per_node * config.num_of_nodes);
+    bool dense_routing = (config.topk > 0);
+    bool custom_allgather_aligned = (local_routing_map.numel() * local_routing_map.element_size()) % 16 == 0;
+    if (!dense_routing) {
+        assert(num_cols == config.num_of_experts_per_rank * config.num_of_ranks_per_node * config.num_of_nodes);
+    } else {
+        assert(num_cols == config.topk);
+    }
+    auto dtype = dense_routing ? torch::kInt16 : torch::kBool;
 
     torch::Tensor global_routing_map;
     // At inter-node case, we will use NCCL allgather
-    if(config.num_of_nodes > 1 || !enable_custom_allgather) {
+    if(config.num_of_nodes > 1 || !enable_custom_allgather || !custom_allgather_aligned) {
         global_routing_map = torch::empty(
-            {num_of_tokens_per_rank * group_size, num_of_expert},
-            torch::TensorOptions().dtype(torch::kBool).device(torch::kCUDA)
+            {num_of_tokens_per_rank * group_size, num_cols},
+            torch::TensorOptions().dtype(dtype).device(torch::kCUDA)
         );
-        torch_distributed.attr("all_gather_into_tensor")(global_routing_map, local_routing_map, process_group);
+        if (dense_routing) {
+            // NCCL does not support int16 directly. View as int8 for the collective,
+            // then reinterpret the gathered bytes through the int16 output tensor.
+            auto local_as_bytes = local_routing_map.view(torch::kInt8);
+            auto global_as_bytes = global_routing_map.view(torch::kInt8);
+            torch_distributed.attr("all_gather_into_tensor")(global_as_bytes, local_as_bytes, process_group);
+        } else {
+            torch_distributed.attr("all_gather_into_tensor")(global_routing_map, local_routing_map, process_group);
+        }
     } else { // At intra-node case, we will use custom allgather
         allgather_obj.launch(local_routing_map, /*NUM_OF_SMS=*/32, at::cuda::getCurrentCUDAStream());
         global_routing_map = torch::from_blob(
             allgather_obj.get_output_buffer(), 
-            {num_of_tokens_per_rank * group_size, num_of_expert},
-            torch::TensorOptions().dtype(torch::kBool).device(torch::kCUDA)
+            {num_of_tokens_per_rank * group_size, num_cols},
+            torch::TensorOptions().dtype(dtype).device(torch::kCUDA)
         );
     }
 
@@ -133,7 +148,7 @@ HandleImpl Executor::metadata_preprocess_core(
   }
 
   kernel_cache.run_preprocess_kernel(
-      config, global_routing_map.data_ptr<bool>(), 
+      config, global_routing_map.data_ptr(),
       preprocessing_tmp, preprocessing_local_experts_tmp,
       handle.sparse_to_dense_map.data_ptr<int32_t>(),
       handle.rdma_to_attn_map.data_ptr<bool>(), handle.attn_to_rdma_map.data_ptr<bool>(),

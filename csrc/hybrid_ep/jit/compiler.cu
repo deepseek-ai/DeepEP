@@ -208,7 +208,8 @@ std::string NVCCCompiler::get_metadata_preprocessing_code(HybridEpConfigInstance
          std::to_string(config.num_of_ranks_per_node) + ", " + std::to_string(config.num_of_nodes) + ", " +
          std::to_string(config.num_of_experts_per_rank) + ">::metadata_preprocessing<" +
          std::to_string(config.pad_multiple) + ", " + std::to_string(config.num_of_tokens_per_chunk_preprocessing_api) + ", " +
-         std::to_string(config.num_of_threads_per_block_preprocessing_api) + ", " + std::to_string(config.num_of_blocks_preprocessing_api) + R"(>;
+         std::to_string(config.num_of_threads_per_block_preprocessing_api) + ", " + std::to_string(config.num_of_blocks_preprocessing_api) + ", " +
+         std::to_string(config.topk) + R"(>;
             return func_ptr;
           }
         }
@@ -280,7 +281,7 @@ node_rank(node_rank), local_rank(local_rank), nvcc_compiler(base_path, comm_id) 
 
 void KernelCache::run_preprocess_kernel(
     HybridEpConfigInstance config, 
-    const bool* input_routing_map,
+    const void* input_routing_map,
     hybrid_ep::tmp_state_t* preprocessing_tmp,
     hybrid_ep::tmp_state_t* preprocessing_local_experts_tmp,
     int32_t* sparse_to_dense_map,
@@ -312,6 +313,7 @@ void KernelCache::run_preprocess_kernel(
         config.num_of_tokens_per_chunk_preprocessing_api,
         config.num_of_threads_per_block_preprocessing_api,
         config.num_of_blocks_preprocessing_api,
+        config.topk,
         fuse_permute_dispatch,
         non_blocking
     );
@@ -325,7 +327,7 @@ void KernelCache::run_preprocess_kernel(
     auto preprocessing_instance = kernel_cache[preprocess_kernel_key];
 
     // Cast the function pointer to the correct type
-    using PreprocessingFuncPtr = void (*)(const bool*, hybrid_ep::tmp_state_t*, hybrid_ep::tmp_state_t*, int32_t*, bool*, bool*, int32_t*, bool*, int32_t*, int32_t*, int32_t*, int*, const int, const int, const int, const int, cudaStream_t);
+    using PreprocessingFuncPtr = void (*)(const void*, hybrid_ep::tmp_state_t*, hybrid_ep::tmp_state_t*, int32_t*, bool*, bool*, int32_t*, bool*, int32_t*, int32_t*, int32_t*, int*, const int, const int, const int, const int, cudaStream_t);
     auto func_ptr = std::any_cast<PreprocessingFuncPtr>(preprocessing_instance);
 
     // Run the kernel
@@ -454,5 +456,4 @@ void KernelCache::run_combine_kernel(
     // Run the kernel
     func_ptr(param, stream);
 }
-
 
