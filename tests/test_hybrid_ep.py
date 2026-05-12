@@ -321,7 +321,7 @@ def test_hybrid_ep_benchmark(buffer: deep_ep.HybridEPBuffer, group: dist.Process
     multinode = (NUM_OF_NODES > 1)
 
     # ---- Setup: collect handles, build args dicts (also serves as warmup) ----
-    # Non-permute
+    # Non-permute (forward dispatch with probs)
     dispatched_hidden, dispatched_probs, _, handle = (
         buffer.dispatch(hidden=hidden, scaling_factor=scaling_factor, topk_idx=topk_idx,
                         topk_weights=topk_weights, num_of_experts=NUM_OF_EXPERTS))

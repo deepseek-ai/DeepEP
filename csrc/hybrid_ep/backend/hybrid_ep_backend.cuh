@@ -399,17 +399,20 @@ struct combine_kernel_dynamic_shared_memory_buffer_t<NUM_OF_STAGES_G2S, NUM_OF_S
   alignas(128) uint16_t inter_node_token_S2G_buffer[NUM_OF_STAGES_S2G][HIDDEN_DIM];
 
   // Shared memory prob buffer for intra node red warp group G2S data movement. Should be 16B alignment so can be used with TMA. 128B is too strict.
-  // Only used in BW combine.
-  alignas(16) float intra_node_prob_G2S_buffer[NUM_OF_STAGES_G2S][NUM_OF_EXPERTS_PER_RANK * NUM_OF_RANKS_PER_NODE];
+  // Only used in BW combine. Only the source rank's E_per_rank slice is loaded (sparse prob optimization).
+  alignas(16) float intra_node_prob_G2S_buffer[NUM_OF_STAGES_G2S][NUM_OF_EXPERTS_PER_RANK];
   // Shared memory prob buffer for intra node red warp group S2G data movement. Should be 16B alignment so can be used with TMA. 128B is too strict.
   // Only used in BW combine.
   alignas(16) float intra_node_prob_S2G_buffer[NUM_OF_STAGES_S2G][NUM_OF_EXPERTS_PER_RANK * NUM_OF_RANKS_PER_NODE];
   // Shared memory prob buffer for inter node red warp group G2S data movement. Should be 16B alignment so can be used with TMA. 128B is too strict.
-  // Only used in BW combine.
+  // Only used in BW combine. Only the source rank's E_per_rank slice is loaded (sparse prob optimization).
   alignas(16) float inter_node_prob_G2S_buffer[NUM_OF_STAGES_G2S][NUM_OF_EXPERTS_PER_RANK * NUM_OF_RANKS_PER_NODE];
   // Shared memory prob buffer for inter node red warp group S2G data movement. Should be 16B alignment so can be used with TMA. 128B is too strict.
   // Only used in BW combine.
   alignas(16) float inter_node_prob_S2G_buffer[NUM_OF_STAGES_S2G][NUM_OF_EXPERTS_PER_RANK * NUM_OF_RANKS_PER_NODE * NUM_OF_NODES];
+
+  // Source rank ID for each intra-node G2S prob stage, so the reduction warp group knows where to place the E_per_rank slice.
+  int intra_node_prob_src_rank_G2S_buffer[NUM_OF_STAGES_G2S];
 
   // Shared memory mbarrier that protect intra node red warp group G2S token entry. 1st for producer->consumer, 2nd for consumer->producer. Should be 8B alignment(natural alignment).
   alignas(8) uint64_t intra_node_mbarrier_G2S_buffer[NUM_OF_STAGES_G2S][2];
@@ -446,11 +449,14 @@ struct combine_kernel_dynamic_shared_memory_buffer_t<NUM_OF_STAGES_G2S, NUM_OF_S
   alignas(128) uint16_t inter_node_token_S2G_buffer[NUM_OF_STAGES_S2G][HIDDEN_DIM];
 
   // Shared memory prob buffer for inter node red warp group G2S data movement. Should be 16B alignment so can be used with TMA. 128B is too strict.
-  // Only used in BW combine.
-  alignas(16) float inter_node_prob_G2S_buffer[NUM_OF_STAGES_G2S][NUM_OF_EXPERTS_PER_RANK * NUM_OF_RANKS_PER_NODE];
+  // Only used in BW combine. Only the source rank's E_per_rank slice is loaded (sparse prob optimization).
+  alignas(16) float inter_node_prob_G2S_buffer[NUM_OF_STAGES_G2S][NUM_OF_EXPERTS_PER_RANK];
   // Shared memory prob buffer for inter node red warp group S2G data movement. Should be 16B alignment so can be used with TMA. 128B is too strict.
   // Only used in BW combine.
   alignas(16) float inter_node_prob_S2G_buffer[NUM_OF_STAGES_S2G][NUM_OF_EXPERTS_PER_RANK * NUM_OF_RANKS_PER_NODE];
+
+  // Source rank ID for each G2S prob stage, so the reduction warp group knows where to place the E_per_rank slice.
+  int inter_node_prob_src_rank_G2S_buffer[NUM_OF_STAGES_G2S];
 
   // Shared memory mbarrier that protect inter node red warp group G2S token entry. 1st for producer->consumer, 2nd for consumer->producer. Should be 8B alignment(natural alignment).
   alignas(8) uint64_t inter_node_mbarrier_G2S_buffer[NUM_OF_STAGES_G2S][2];
@@ -1637,13 +1643,22 @@ inline __device__ void S2G_warp_group_device_function(const int local_rank,
                                              (uint32_t)(HIDDEN_DIM * sizeof(TOKEN_DATA_TYPE)));
 
                     // Store the prob from shared to remote global for FW dispatch.
+                    // Only send the destination rank's E_per_rank slice (not the full E*R vector).
+                    // The source SMEM prob buffer contains the full E*R probs (mostly zeros for sparse routing).
+                    // Each rank's E_per_rank slice already has zeros at non-active expert positions.
                     if constexpr(FORWARD_DISPATCH){
-                      float* remote_prob_addr = remote_expert_output_prob[remote_rank_id] + (output_buffer_index * (NUM_OF_EXPERTS_PER_RANK * NUM_OF_RANKS_PER_NODE));
+                      static_assert(NUM_OF_EXPERTS_PER_RANK * sizeof(float) >= 16,
+                          "NUM_OF_EXPERTS_PER_RANK * sizeof(float) must be >= 16 for TMA minimum transfer size.");
+                      static_assert((NUM_OF_EXPERTS_PER_RANK * sizeof(float)) % 16 == 0,
+                          "NUM_OF_EXPERTS_PER_RANK * sizeof(float) must be 16B-aligned for TMA.");
+                      float* remote_prob_addr = remote_expert_output_prob[remote_rank_id]
+                          + output_buffer_index * static_cast<int64_t>(NUM_OF_EXPERTS_PER_RANK * NUM_OF_RANKS_PER_NODE)
+                          + remote_rank_id * NUM_OF_EXPERTS_PER_RANK;
                       cuda::ptx::cp_async_bulk(cuda::ptx::space_global,
                                                cuda::ptx::space_shared,
                                                reinterpret_cast<void*>(remote_prob_addr),
-                                               reinterpret_cast<const void*>(&smem_buffer_ptr->intra_node_prob_buffer[stage][0]),
-                                               (uint32_t)((NUM_OF_EXPERTS_PER_RANK * NUM_OF_RANKS_PER_NODE) * sizeof(float)));
+                                               reinterpret_cast<const void*>(&smem_buffer_ptr->intra_node_prob_buffer[stage][remote_rank_id * NUM_OF_EXPERTS_PER_RANK]),
+                                               (uint32_t)(NUM_OF_EXPERTS_PER_RANK * sizeof(float)));
 
                     }
 
@@ -2359,14 +2374,19 @@ inline __device__ void intra_node_G2S_warp_group_device_function(const int node_
                   total_tx_size += (uint32_t)(HIDDEN_DIM * sizeof(uint16_t));
 
                   if constexpr(BACKWARD_COMBINE){
+                    // Sparse prob optimization: only read the source rank's E_per_rank slice.
+                    // The source rank (current_src_token_id) wrote its probs at offset
+                    // current_src_token_id * E_per_rank within the E*R_per_node prob vector.
                     cuda::ptx::cp_async_bulk(cuda::ptx::space_shared,
                                              cuda::ptx::space_global,
                                              reinterpret_cast<void*>(&smem_buffer_ptr->intra_node_prob_G2S_buffer[token_stage][0]),
-                                             reinterpret_cast<const void*>(remote_expert_input_prob[current_src_token_id] + (sparse_to_dense_map_value * (NUM_OF_EXPERTS_PER_RANK * NUM_OF_RANKS_PER_NODE))),
-                                             (uint32_t)((NUM_OF_EXPERTS_PER_RANK * NUM_OF_RANKS_PER_NODE) * sizeof(float)),
+                                             reinterpret_cast<const void*>(remote_expert_input_prob[current_src_token_id] + (sparse_to_dense_map_value * (NUM_OF_EXPERTS_PER_RANK * NUM_OF_RANKS_PER_NODE)) + current_src_token_id * NUM_OF_EXPERTS_PER_RANK),
+                                             (uint32_t)(NUM_OF_EXPERTS_PER_RANK * sizeof(float)),
                                              &smem_buffer_ptr->intra_node_mbarrier_G2S_buffer[token_stage][0]);
 
-                    total_tx_size += (uint32_t)((NUM_OF_EXPERTS_PER_RANK * NUM_OF_RANKS_PER_NODE) * sizeof(float));
+                    total_tx_size += (uint32_t)(NUM_OF_EXPERTS_PER_RANK * sizeof(float));
+                    // Store the source rank ID so the reduction warp group can place probs at the correct offset.
+                    smem_buffer_ptr->intra_node_prob_src_rank_G2S_buffer[token_stage] = current_src_token_id;
                   }
 
                   if(current_src_token_id == last_src_token_id){
@@ -2578,12 +2598,16 @@ inline __device__ void intra_node_red_warp_group_device_function(const int node_
             }
 
             if constexpr(BACKWARD_COMBINE){
+              // Sparse prob optimization: SMEM only has E_per_rank elements for the source rank's slice.
+              // Read the source rank ID and accumulate into the correct position in acc_prob.
+              int src_rank = smem_buffer_ptr->intra_node_prob_src_rank_G2S_buffer[token_stage];
+              int prob_offset = src_rank * NUM_OF_EXPERTS_PER_RANK;
               #pragma unroll
               for(int n = 0; n < NUM_OF_PROB_VEC_ELEMENT_PER_THREAD; n++){
-                int element_id = INTRA_NODE_RED_GROUP::thread_rank() + n * INTRA_NODE_RED_GROUP::size();
-                if(element_id < NUM_OF_EXPERTS_PER_RANK * NUM_OF_RANKS_PER_NODE){
-                  float src_data = load_prob_base_ptr[element_id];
-                  acc_prob[n] += src_data;
+                int global_element_id = INTRA_NODE_RED_GROUP::thread_rank() + n * INTRA_NODE_RED_GROUP::size();
+                int local_element_id = global_element_id - prob_offset;
+                if(local_element_id >= 0 && local_element_id < NUM_OF_EXPERTS_PER_RANK){
+                  acc_prob[n] += load_prob_base_ptr[local_element_id];
                 }
               }
             }
@@ -3082,14 +3106,17 @@ inline __device__ void inter_node_G2S_warp_group_device_function(const int node_
                   total_tx_size += (uint32_t)(HIDDEN_DIM * sizeof(uint16_t));
 
                   if constexpr(BACKWARD_COMBINE){
+                    // Sparse prob optimization: only read the source rank's E_per_rank slice.
                     cuda::ptx::cp_async_bulk(cuda::ptx::space_shared,
                                              cuda::ptx::space_global,
                                              reinterpret_cast<void*>(&smem_buffer_ptr->inter_node_prob_G2S_buffer[token_stage][0]),
-                                             reinterpret_cast<const void*>(remote_expert_input_prob[current_src_token_id] + (sparse_to_dense_map_value * (NUM_OF_EXPERTS_PER_RANK * NUM_OF_RANKS_PER_NODE))),
-                                             (uint32_t)((NUM_OF_EXPERTS_PER_RANK * NUM_OF_RANKS_PER_NODE) * sizeof(float)),
+                                             reinterpret_cast<const void*>(remote_expert_input_prob[current_src_token_id] + (sparse_to_dense_map_value * (NUM_OF_EXPERTS_PER_RANK * NUM_OF_RANKS_PER_NODE)) + current_src_token_id * NUM_OF_EXPERTS_PER_RANK),
+                                             (uint32_t)(NUM_OF_EXPERTS_PER_RANK * sizeof(float)),
                                              &smem_buffer_ptr->inter_node_mbarrier_G2S_buffer[token_stage][0]);
 
-                    total_tx_size += (uint32_t)((NUM_OF_EXPERTS_PER_RANK * NUM_OF_RANKS_PER_NODE) * sizeof(float));
+                    total_tx_size += (uint32_t)(NUM_OF_EXPERTS_PER_RANK * sizeof(float));
+                    // Store the source rank ID so the reduction warp group can place probs at the correct offset.
+                    smem_buffer_ptr->inter_node_prob_src_rank_G2S_buffer[token_stage] = current_src_token_id;
                   }
 
                   if(current_src_token_id == last_src_token_id){
@@ -3376,12 +3403,16 @@ inline __device__ void inter_node_red_warp_group_device_function(const int node_
             }
 
             if constexpr(BACKWARD_COMBINE){
+              // Sparse prob optimization: SMEM only has E_per_rank elements for the source rank's slice.
+              // Read the source rank ID and accumulate into the correct position in acc_prob[0].
+              int src_rank = smem_buffer_ptr->inter_node_prob_src_rank_G2S_buffer[token_stage];
+              int prob_offset = src_rank * NUM_OF_EXPERTS_PER_RANK;
               #pragma unroll
               for(int n = 0; n < NUM_OF_PROB_VEC_ELEMENT_PER_THREAD; n++){
-                int element_id = thread_rank_within_pipeline + n * NUM_OF_THREADS_PER_PIPELINE;
-                if(element_id < NUM_OF_EXPERTS_PER_RANK * NUM_OF_RANKS_PER_NODE){
-                  float src_data = load_prob_base_ptr[element_id];
-                  acc_prob[0][n] += src_data;
+                int global_element_id = thread_rank_within_pipeline + n * NUM_OF_THREADS_PER_PIPELINE;
+                int local_element_id = global_element_id - prob_offset;
+                if(local_element_id >= 0 && local_element_id < NUM_OF_EXPERTS_PER_RANK){
+                  acc_prob[0][n] += load_prob_base_ptr[local_element_id];
                 }
               }
             }

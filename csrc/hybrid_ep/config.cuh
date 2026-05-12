@@ -287,13 +287,23 @@ static SmemSizes compute_smem_sizes(const HybridEpConfigInstance& c) {
         b.add((int64_t)c.num_of_stages_s2g_combine_api * c.hidden_dim * 2, 128);
         if (c.backward_combine_api) {
             if (multinode) {
-                b.add((int64_t)c.num_of_stages_g2s_combine_api * c.num_of_experts_per_rank * c.num_of_ranks_per_node * 4, 16);
+                // intra_node_prob_G2S: E_per_rank per stage (sparse prob optimization)
+                b.add((int64_t)c.num_of_stages_g2s_combine_api * c.num_of_experts_per_rank * 4, 16);
+                // intra_node_prob_S2G: E*R per stage (full vector for RDMA)
                 b.add((int64_t)c.num_of_stages_s2g_combine_api * c.num_of_experts_per_rank * c.num_of_ranks_per_node * 4, 16);
+                // inter_node_prob_G2S: E*R per stage (reads from RDMA landing buffer, already reduced)
                 b.add((int64_t)c.num_of_stages_g2s_combine_api * c.num_of_experts_per_rank * c.num_of_ranks_per_node * 4, 16);
+                // inter_node_prob_S2G: E*R*N per stage
                 b.add((int64_t)c.num_of_stages_s2g_combine_api * c.num_of_experts_per_rank * c.num_of_ranks_per_node * c.num_of_nodes * 4, 16);
+                // intra_node_prob_src_rank: int per stage
+                b.add((int64_t)c.num_of_stages_g2s_combine_api * 4, 4);
             } else {
-                b.add((int64_t)c.num_of_stages_g2s_combine_api * c.num_of_experts_per_rank * c.num_of_ranks_per_node * 4, 16);
+                // inter_node_prob_G2S: E_per_rank per stage (sparse prob optimization)
+                b.add((int64_t)c.num_of_stages_g2s_combine_api * c.num_of_experts_per_rank * 4, 16);
+                // inter_node_prob_S2G: E*R per stage
                 b.add((int64_t)c.num_of_stages_s2g_combine_api * c.num_of_experts_per_rank * c.num_of_ranks_per_node * 4, 16);
+                // inter_node_prob_src_rank: int per stage
+                b.add((int64_t)c.num_of_stages_g2s_combine_api * 4, 4);
             }
         }
         if (multinode)
