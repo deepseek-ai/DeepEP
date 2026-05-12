@@ -301,6 +301,19 @@ void Executor::dispatch_core(HybridEpConfigInstance config, DispatchArgs& args) 
     param.multinode_aux_ptr = reinterpret_cast<void*>(inter_node_dispatch_buffers->mr_info);
 #endif
 #endif
+    static constexpr bool kZeroDispatchProbBufferBeforeSparseWrites = false;
+    if constexpr (kZeroDispatchProbBufferBeforeSparseWrites) {
+        if (config.forward_dispatch_api && args.num_dispatched_tokens_tensor.has_value()) {
+            // Sparse prob dispatch writes only the destination rank's E_per_rank slice.
+            // A dense memset would preserve the old full-probs output contract, but it can be
+            // redundant and expensive when TOPK is large, so keep this path disabled by default.
+            int num_dispatched_tokens = args.num_dispatched_tokens_tensor.value().item<int>();
+            size_t probs_sz = static_cast<size_t>(num_dispatched_tokens) *
+                config.num_of_experts_per_rank * config.num_of_ranks_per_node * sizeof(float);
+            CUDA_CHECK(cudaMemsetAsync(intra_node_dispatch_buffers->expert_output_prob, 0, probs_sz, args.stream));
+        }
+    }
+
     // Launch kernel
     kernel_cache.run_dispatch_kernel<DType>(config, param, args.fuse_permute_dispatch, args.non_blocking, args.stream);
     nvtxRangePop();  // End of dispatch_core nvtx range

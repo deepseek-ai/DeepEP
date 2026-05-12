@@ -297,6 +297,8 @@ static SmemSizes compute_smem_sizes(const HybridEpConfigInstance& c) {
                 b.add((int64_t)c.num_of_stages_s2g_combine_api * c.num_of_experts_per_rank * c.num_of_ranks_per_node * c.num_of_nodes * 4, 16);
                 // intra_node_prob_src_rank: int per stage
                 b.add((int64_t)c.num_of_stages_g2s_combine_api * 4, 4);
+                // inter_node_prob_src_rank: int per stage for local-source G2S entries
+                b.add((int64_t)c.num_of_stages_g2s_combine_api * 4, 4);
             } else {
                 // inter_node_prob_G2S: E_per_rank per stage (sparse prob optimization)
                 b.add((int64_t)c.num_of_stages_g2s_combine_api * c.num_of_experts_per_rank * 4, 16);
