@@ -200,18 +200,30 @@ def test_hybrid_ep_correctness(buffer: deep_ep.HybridEPBuffer, ref: TorchRef, us
                 enable_permute=True,
             )
 
-            assert bitwise_equal(dispatched_hidden_ref, dispatched_hidden), \
-                f"Dispatch hidden mismatch (with_probs={with_probs}, fuse={fuse_permute_dispatch})"
-            if dispatched_probs is not None and dispatched_probs_ref is not None:
-                assert bitwise_equal(dispatched_probs_ref, dispatched_probs), \
-                    f"Dispatch probs mismatch (with_probs={with_probs}, fuse={fuse_permute_dispatch})"
-            if (
-                dispatched_scaling_factor is not None
-                and dispatched_scaling_factor_ref is not None
-            ):
-                assert bitwise_equal(
-                    dispatched_scaling_factor_ref, dispatched_scaling_factor
-                ), f"Dispatch scaling_factor mismatch (with_probs={with_probs}, fuse={fuse_permute_dispatch})"
+            def check_bitwise(name, ref, test):
+                if ref is None or test is None:
+                    return
+                if not bitwise_equal(ref, test):
+                    total = ref.numel()
+                    mismatch = (ref.contiguous().view(torch.uint8) != test.contiguous().view(torch.uint8)).sum().item()
+                    # Count element-level mismatches (not byte-level)
+                    elem_mismatch = (ref != test).sum().item()
+                    pct = 100.0 * elem_mismatch / max(ref.numel(), 1)
+                    msg = (f"{name} mismatch (with_probs={with_probs}, fuse={fuse_permute_dispatch}): "
+                           f"{elem_mismatch}/{ref.numel()} elements ({pct:.2f}%), "
+                           f"{mismatch} bytes differ, shape={list(ref.shape)}")
+                    # Print first few mismatching positions
+                    flat_ref = ref.contiguous().view(-1)
+                    flat_test = test.contiguous().view(-1)
+                    diff_idx = (flat_ref != flat_test).nonzero(as_tuple=True)[0][:5]
+                    for idx in diff_idx:
+                        i = idx.item()
+                        msg += f"\n    [{i}]: ref={flat_ref[i].item()}, got={flat_test[i].item()}"
+                    assert False, msg
+
+            check_bitwise("Dispatch hidden", dispatched_hidden_ref, dispatched_hidden)
+            check_bitwise("Dispatch probs", dispatched_probs_ref, dispatched_probs)
+            check_bitwise("Dispatch scaling_factor", dispatched_scaling_factor_ref, dispatched_scaling_factor)
 
             # The combine only support bf16
             dispatched_hidden = dispatched_hidden.to(torch.bfloat16)
@@ -318,6 +330,11 @@ def test_hybrid_ep_benchmark(buffer: deep_ep.HybridEPBuffer, group: dist.Process
                      'topk_weights': topk_weights, 'num_of_experts': NUM_OF_EXPERTS, 'handle': handle}
     combine_args = {'hidden': dispatched_hidden_bf16, 'probs': dispatched_probs, 'handle': handle}
 
+    # Dispatch/combine with probs=False variants
+    dispatch_noprob_args = {'hidden': hidden, 'scaling_factor': scaling_factor, 'topk_idx': topk_idx,
+                            'topk_weights': None, 'num_of_experts': NUM_OF_EXPERTS, 'handle': handle}
+    combine_noprob_args = {'hidden': dispatched_hidden_bf16, 'probs': None, 'handle': handle}
+
     # Permute (non-fused)
     dispatched_hidden_wp, dispatched_probs_wp, _, tpe_wp, handle_wp = (
         buffer.dispatch_with_permute(hidden=hidden, scaling_factor=scaling_factor,
@@ -365,11 +382,17 @@ def test_hybrid_ep_benchmark(buffer: deep_ep.HybridEPBuffer, group: dist.Process
         print(f'                combine  = fused_combine_unpermute_kernel + misc', flush=True)
         print(f'  (misc = device_sync, update_flag, etc.)', flush=True)
 
-    # Non-permute
+    # Non-permute (probs=True)
     t = bench(lambda: buffer.dispatch(**dispatch_args))[0]
-    _report_bw(f'dispatch ({dtype_str})', t, nvl_dispatch_actual, 'nvl_recv_bytes', rdma_dispatch, 'rdma_send_bytes')
+    _report_bw(f'dispatch ({dtype_str}, probs=True)', t, nvl_dispatch_actual, 'nvl_recv_bytes', rdma_dispatch, 'rdma_send_bytes')
     t = bench(lambda: buffer.combine(**combine_args))[0]
-    _report_bw('combine', t, nvl_combine, 'combine_send_bytes', rdma_combine, 'rdma_recv_bytes')
+    _report_bw('combine (probs=True)', t, nvl_combine, 'combine_send_bytes', rdma_combine, 'rdma_recv_bytes')
+
+    # Non-permute (probs=False)
+    t = bench(lambda: buffer.dispatch(**dispatch_noprob_args))[0]
+    _report_bw(f'dispatch ({dtype_str}, probs=False)', t, nvl_dispatch_actual, 'nvl_recv_bytes', rdma_dispatch, 'rdma_send_bytes')
+    t = bench(lambda: buffer.combine(**combine_noprob_args))[0]
+    _report_bw('combine (probs=False)', t, nvl_combine, 'combine_send_bytes', rdma_combine, 'rdma_recv_bytes')
 
     # Permute (non-fused)
     t = bench(lambda: buffer.dispatch_with_permute(**dispatch_wp_args))[0]
@@ -391,12 +414,20 @@ def test_hybrid_ep_benchmark(buffer: deep_ep.HybridEPBuffer, group: dist.Process
             print(f'  Non-fused:  dispatch_kernel only  |  combine_kernel only', flush=True)
             print(f'  Fused:      fused_permute_dispatch_kernel only  |  fused_combine_unpermute_kernel only', flush=True)
 
-        # Non-fused kernel profiling
+        # Non-fused kernel profiling (probs=True)
         group.barrier()
         dispatch_t, combine_t = bench_kineto(
             lambda: (buffer.dispatch(**dispatch_args), buffer.combine(**combine_args)),
             kernel_names=('dispatch_kernel', 'combine_kernel'), barrier_comm_profiling=True, suppress_kineto_output=True)
-        _report_kineto(f'dispatch kernel ({dtype_str})', 'combine kernel',
+        _report_kineto(f'dispatch kernel ({dtype_str}, probs=True)', 'combine kernel (probs=True)',
+                       dispatch_t, nvl_dispatch_actual, combine_t, nvl_combine, rdma_dispatch, rdma_combine)
+
+        # Non-fused kernel profiling (probs=False)
+        group.barrier()
+        dispatch_t, combine_t = bench_kineto(
+            lambda: (buffer.dispatch(**dispatch_noprob_args), buffer.combine(**combine_noprob_args)),
+            kernel_names=('dispatch_kernel', 'combine_kernel'), barrier_comm_profiling=True, suppress_kineto_output=True)
+        _report_kineto(f'dispatch kernel ({dtype_str}, probs=False)', 'combine kernel (probs=False)',
                        dispatch_t, nvl_dispatch_actual, combine_t, nvl_combine, rdma_dispatch, rdma_combine)
 
         # Fused kernel profiling
@@ -406,6 +437,25 @@ def test_hybrid_ep_benchmark(buffer: deep_ep.HybridEPBuffer, group: dist.Process
             kernel_names=('dispatch_kernel', 'combine_kernel'), barrier_comm_profiling=True, suppress_kineto_output=True)
         _report_kineto(f'fused dispatch+permute kernel ({dtype_str})', 'fused combine+unpermute kernel',
                        dispatch_t, nvl_dispatch_actual, combine_t, nvl_combine, rdma_dispatch, rdma_combine)
+
+        # Non-fused permute/unpermute kernel profiling (isolate permute_kernel and unpermute_kernel times)
+        group.barrier()
+        dispatch_t, permute_t = bench_kineto(
+            lambda: buffer.dispatch_with_permute(**dispatch_wp_args),
+            kernel_names=('dispatch_kernel', 'permute_kernel'), barrier_comm_profiling=True, suppress_kineto_output=True)
+        combine_t, unpermute_t = bench_kineto(
+            lambda: buffer.combine_with_unpermute(**combine_wp_args),
+            kernel_names=('combine_kernel', 'unpermute_kernel'), barrier_comm_profiling=True, suppress_kineto_output=True)
+        d_times = _gather_times(dispatch_t)
+        p_times = _gather_times(permute_t)
+        c_times = _gather_times(combine_t)
+        u_times = _gather_times(unpermute_t)
+        if rank == 0:
+            fmt = lambda ts: f'avg={sum(ts)/len(ts)*1e6:.1f} us [min={min(ts)*1e6:.1f}, max={max(ts)*1e6:.1f}]'
+            print(f'  {"dispatch_kernel (in dispatch+permute):":<{LOG_LABEL_WIDTH}} {fmt(d_times)}', flush=True)
+            print(f'  {"permute_kernel:":<{LOG_LABEL_WIDTH}} {fmt(p_times)}', flush=True)
+            print(f'  {"unpermute_kernel:":<{LOG_LABEL_WIDTH}} {fmt(u_times)}', flush=True)
+            print(f'  {"combine_kernel (in combine+unpermute):":<{LOG_LABEL_WIDTH}} {fmt(c_times)}', flush=True)
     else:
         if torch.distributed.get_rank() == 0:
             torch.cuda.profiler.start()
@@ -446,7 +496,8 @@ def test_main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
 
     stream = torch.cuda.Stream()
     with torch.cuda.stream(stream):
-        for use_fp8 in [False, True]:
+        fp8_modes = [False] if args.only_bf16 else [False, True]
+        for use_fp8 in fp8_modes:
             buffer = deep_ep.HybridEPBuffer(
                 group=group,
                 hidden_dim=HIDDEN_DIM,
@@ -487,5 +538,7 @@ if __name__ == "__main__":
                        help='Number of processes to spawn (default: 4)')
     parser.add_argument('--nsys-profile', action='store_true', default=False,
                        help='benchmark with nsys profile or not (default: False)')
+    parser.add_argument('--only-bf16', action='store_true', default=False,
+                       help='Skip FP8 tests, only run BF16 (default: False)')
     args = parser.parse_args()
     torch.multiprocessing.spawn(test_main, args=(args.num_processes, args), nprocs=args.num_processes)
