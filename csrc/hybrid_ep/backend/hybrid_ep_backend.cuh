@@ -5125,7 +5125,7 @@ __global__ void scan(const bool* input_routing_map,
 
 #ifdef HYBRID_EP_BUILD_PERMUTE_FUSION_ENABLE 
   // Load sum of all blocks' local experts' routing info to produce the accumulation of previous local experts' routing info. 
-  int32_t thread_local_all_block_local_experts_sum[NUM_OF_EXPERTS_PER_RANK - 1];
+  int32_t thread_local_all_block_local_experts_sum[NUM_OF_EXPERTS_PER_RANK];
   // Only threads which will participate in accumulation will need to load the data from the shared memory.
   if(threadIdx.x < NUM_OF_EXPERTS_PER_RANK){
     #pragma unroll

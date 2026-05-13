@@ -152,7 +152,6 @@ HandleImpl HybridEPBuffer::metadata_preprocessing(HybridEpConfigInstance config,
     nvl_coordinator.preprocessing_local_experts_tmp,
     global_routing_map, 
     num_of_tokens_per_rank, 
-    nvl_coordinator.max_num_of_tokens,
     num_permuted_tokens.has_value() ? num_permuted_tokens.value() : -1,
     pad_multiple.has_value() ? pad_multiple.value() : 0,
     enable_permute,
@@ -299,10 +298,7 @@ HybridEPBuffer::dispatch_with_permute(
  args.sparse_to_dense_map = handle.sparse_to_dense_map;
  args.rdma_to_attn_map = handle.rdma_to_attn_map;
  args.attn_to_rdma_map = handle.attn_to_rdma_map;
- args.local_expert_routing_map = handle.local_expert_routing_map;
  args.num_dispatched_tokens_tensor = handle.num_dispatched_tokens_tensor;
- args.max_num_dispatched_tokens = nvl_coordinator.max_num_of_tokens;
- args.row_id_map = handle.row_id_map;
  args.num_permuted_tokens = handle.num_permuted_tokens;
  args.pad_multiple = (pad_multiple.has_value()) ? pad_multiple.value() : 0;
  args.fuse_permute_dispatch = fuse_permute_dispatch;
@@ -310,11 +306,9 @@ HybridEPBuffer::dispatch_with_permute(
  args.num_of_tokens_per_rank = handle.num_of_tokens_per_rank;
  args.enable_permute = true;
  args.stream = at::cuda::getCurrentCUDAStream();
- if(fuse_permute_dispatch) {
-   args.dense_chunk_layout = handle.dense_chunk_layout;
-   args.dense_to_expert_map = handle.dense_to_expert_map;
-   args.tokens_per_expert = handle.tokens_per_expert;
- }
+ args.dense_chunk_layout = handle.dense_chunk_layout;
+ args.dense_to_expert_map = handle.dense_to_expert_map;
+ args.tokens_per_expert = handle.tokens_per_expert;
  // Pre-allocate output tensors for both fuse and standalone permute paths
  args.local_expert_output_token = 
     torch::empty({handle.num_permuted_tokens, config.hidden_dim}, torch::dtype(hidden.dtype()).device(torch::kCUDA));
@@ -380,18 +374,13 @@ HybridEPBuffer::combine_with_unpermute(
   args.sparse_to_dense_map = handle.sparse_to_dense_map;
   args.rdma_to_attn_map = handle.rdma_to_attn_map;
   args.attn_to_rdma_map = handle.attn_to_rdma_map;
-  args.num_dispatched_tokens_tensor = handle.num_dispatched_tokens_tensor;
-  args.row_id_map = handle.row_id_map;
-  args.pad_multiple = (pad_multiple.has_value()) ? pad_multiple.value() : 0;
   args.num_of_tokens_per_rank = handle.num_of_tokens_per_rank;
   args.fuse_unpermute_combine = fuse_unpermute_combine;
   args.enable_unpermute = true;
   args.stream = at::cuda::getCurrentCUDAStream();
- if(fuse_unpermute_combine) {
-   args.dense_chunk_layout = handle.dense_chunk_layout;
-   args.dense_to_expert_map = handle.dense_to_expert_map;
-   args.tokens_per_expert = handle.tokens_per_expert;
- }  
+  args.dense_chunk_layout = handle.dense_chunk_layout;
+  args.dense_to_expert_map = handle.dense_to_expert_map;
+  args.tokens_per_expert = handle.tokens_per_expert;
   // Run the full combine operation
   config.backward_combine_api = with_probs;
   executor.combine_preprocess(config, args);

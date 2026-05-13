@@ -128,8 +128,7 @@ void NVLCoordinator::init(
                               buffer_config.num_of_ranks_per_node *
                               buffer_config.num_of_nodes;
     assert(this->max_num_of_tokens % 4 == 0); 
-    // The number of tokens for experts should be divisible by 4,
-    // this is required by the permute make_row_id_map kernel
+    // The expert-token buffer is vectorized in 4-token groups.
 }
 
 bool NVLCoordinator::grow_buffer_config(const HybridEpConfigInstance& config, BufferConfig& buf_config) {
