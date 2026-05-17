@@ -4,7 +4,71 @@
 #ifdef USE_NIXL
 
 #include "buffer/internode.cuh"
+#include "buffer/internode_nixl.cuh"
 #include <pybind11/pybind11.h>
+
+// Restripe the user prob tensor from token-major
+// (`[num_tokens][num_of_nodes][prob_per_token]`) to dest-major
+// (`[num_of_nodes][max_tokens][prob_per_token]`). One block handles one
+// (dest, token) pair; threads cooperatively copy `prob_per_token` floats with
+// vector loads when the size is multiple of 4. Layout is sized such that all
+// `max_tokens` slots exist for every dest; only the first `num_tokens` slots
+// per dest are populated, the rest are left as previous-iteration garbage and
+// never read by N2N (token_range gates the put size).
+namespace {
+
+template <int VEC>
+__global__ void restripe_prob_kernel(
+    const float* __restrict__ src,
+    float* __restrict__ dst,
+    int num_tokens,
+    int max_tokens_per_rank,
+    int num_of_nodes,
+    int prob_per_token)
+{
+    const int dest = blockIdx.y;
+    const int token = blockIdx.x;
+    if (token >= num_tokens) return;
+
+    const float* src_row = src + (static_cast<size_t>(token) * num_of_nodes + dest) * prob_per_token;
+    float* dst_row = dst + (static_cast<size_t>(dest) * max_tokens_per_rank + token) * prob_per_token;
+
+    if constexpr (VEC == 4) {
+        const float4* s4 = reinterpret_cast<const float4*>(src_row);
+        float4* d4 = reinterpret_cast<float4*>(dst_row);
+        const int n4 = prob_per_token / 4;
+        for (int i = threadIdx.x; i < n4; i += blockDim.x) {
+            d4[i] = s4[i];
+        }
+    } else {
+        for (int i = threadIdx.x; i < prob_per_token; i += blockDim.x) {
+            dst_row[i] = src_row[i];
+        }
+    }
+}
+
+}  // anonymous
+
+void restripe_prob_for_nixl_dispatch(
+    const float* src_prob,
+    float* dst_prob,
+    int num_tokens,
+    int max_tokens_per_rank,
+    int num_of_nodes,
+    int prob_per_token,
+    cudaStream_t stream)
+{
+    if (num_tokens <= 0 || num_of_nodes <= 0 || prob_per_token <= 0) return;
+    dim3 grid(num_tokens, num_of_nodes);
+    const int block = (prob_per_token >= 128) ? 128 : 64;
+    if ((prob_per_token % 4) == 0) {
+        restripe_prob_kernel<4><<<grid, block, 0, stream>>>(
+            src_prob, dst_prob, num_tokens, max_tokens_per_rank, num_of_nodes, prob_per_token);
+    } else {
+        restripe_prob_kernel<1><<<grid, block, 0, stream>>>(
+            src_prob, dst_prob, num_tokens, max_tokens_per_rank, num_of_nodes, prob_per_token);
+    }
+}
 
 NIXLCoordinator::~NIXLCoordinator() {
     destroy();

@@ -683,6 +683,7 @@ template<typename INTER_NODE_GROUP,
          int NUM_OF_STAGES,
          int HIDDEN_DIM,
          int NUM_OF_TOKENS_PER_CHUNK,
+         int MAX_NUM_OF_TOKENS_PER_RANK,
          int NUM_OF_EXPERTS_PER_RANK,
          int NUM_OF_RANKS_PER_NODE,
          int NUM_OF_NODES,
@@ -740,8 +741,10 @@ inline __device__ void N2N_warp_group_device_function(const int node_rank,
       }
 
       if (try_coalesce && total_tokens == token_range) {
-        // All tokens in this chunk need write: coalesce token data (and SF) into single puts.
-        // Prob data cannot be coalesced (local layout is strided by NUM_OF_NODES).
+        // All tokens in this chunk need write: coalesce token data, prob,
+        // and (if FP8) SF into single puts. Prob coalescing relies on the
+        // dest-major source layout `[NUM_OF_NODES][max_tokens][prob_per_token]`
+        // set up by `restripe_prob_for_nixl_dispatch`.
         constexpr uint64_t DEFER = nixl_gpu_flags::defer;
         const unsigned channel_id = blockIdx.x % nixl_ctx->num_channels;
 
@@ -759,18 +762,18 @@ inline __device__ void N2N_warp_group_device_function(const int node_rank,
         }
 
         if constexpr (FORWARD_DISPATCH) {
-          constexpr size_t prob_per_token = NUM_OF_EXPERTS_PER_RANK * NUM_OF_RANKS_PER_NODE;
-          for (int t = INTER_NODE_GROUP::thread_rank(); t < token_range; t += INTER_NODE_GROUP::size()) {
-            const int token_idx = t + chunk_base_token_idx;
-            size_t local_offset = ((size_t)token_idx * NUM_OF_NODES + actual_remote_node_rank) * prob_per_token * sizeof(float);
-            size_t remote_offset = (size_t)token_idx * prob_per_token * sizeof(float);
-            constexpr size_t prob_size = prob_per_token * sizeof(float);
+          if (INTER_NODE_GROUP::thread_rank() == 0) {
+            constexpr size_t prob_per_token = NUM_OF_EXPERTS_PER_RANK * NUM_OF_RANKS_PER_NODE;
+            // Source slot for the (actual_remote_node_rank, chunk) range under the dest-major layout.
+            size_t local_offset = ((size_t)actual_remote_node_rank * MAX_NUM_OF_TOKENS_PER_RANK + chunk_base_token_idx) * prob_per_token * sizeof(float);
+            size_t remote_offset = (size_t)chunk_base_token_idx * prob_per_token * sizeof(float);
+            size_t put_size = (size_t)token_range * prob_per_token * sizeof(float);
 
             nixlMemViewElem src_desc{nixl_ctx->local_mvh, 1, local_offset};
             nixlMemViewElem dst_desc{nixl_ctx->remote_data_mvh, (size_t)remote_idx * remote_stride + 1, remote_offset};
 
             nixl_status_t status = nixlPut<nixl_gpu_level_t::THREAD>(
-              src_desc, dst_desc, prob_size, channel_id, DEFER);
+              src_desc, dst_desc, put_size, channel_id, DEFER);
             assert(status == NIXL_SUCCESS || status == NIXL_IN_PROG);
           }
         }
@@ -824,19 +827,21 @@ inline __device__ void N2N_warp_group_device_function(const int node_rank,
             }
 
             if constexpr (FORWARD_DISPATCH) {
-              constexpr size_t prob_size = (NUM_OF_EXPERTS_PER_RANK * NUM_OF_RANKS_PER_NODE) * sizeof(float);
-              for (int s = run_start; s < run_start + run_len; s++) {
-                int tok = s + chunk_base_token_idx;
-                size_t local_offset = ((size_t)tok * NUM_OF_NODES + actual_remote_node_rank) * prob_size;
-                size_t remote_offset = (size_t)tok * prob_size;
+              // Coalesced prob put across the run. The dest-major source
+              // layout `[NUM_OF_NODES][max_tokens][prob_per_token]` makes
+              // a contiguous token run for a given dest contiguous in memory.
+              constexpr size_t prob_per_token = NUM_OF_EXPERTS_PER_RANK * NUM_OF_RANKS_PER_NODE;
+              constexpr size_t prob_size = prob_per_token * sizeof(float);
+              size_t local_offset = ((size_t)actual_remote_node_rank * MAX_NUM_OF_TOKENS_PER_RANK + token_start) * prob_size;
+              size_t remote_offset = (size_t)token_start * prob_size;
+              size_t put_size = (size_t)run_len * prob_size;
 
-                nixlMemViewElem src_desc{nixl_ctx->local_mvh, 1, local_offset};
-                nixlMemViewElem dst_desc{nixl_ctx->remote_data_mvh, (size_t)remote_idx * remote_stride + 1, remote_offset};
+              nixlMemViewElem src_desc{nixl_ctx->local_mvh, 1, local_offset};
+              nixlMemViewElem dst_desc{nixl_ctx->remote_data_mvh, (size_t)remote_idx * remote_stride + 1, remote_offset};
 
-                nixl_status_t status = nixlPut<nixl_gpu_level_t::THREAD>(
-                  src_desc, dst_desc, prob_size, channel_id, DEFER);
-                assert(status == NIXL_SUCCESS || status == NIXL_IN_PROG);
-              }
+              nixl_status_t status = nixlPut<nixl_gpu_level_t::THREAD>(
+                src_desc, dst_desc, put_size, channel_id, DEFER);
+              assert(status == NIXL_SUCCESS || status == NIXL_IN_PROG);
             }
 
             if constexpr (std::is_same<TOKEN_DATA_TYPE, uint8_t>::value) {
@@ -1292,7 +1297,15 @@ inline __device__ void G2S_warp_group_device_function(const int node_rank,
           int chunk_first_token_id = i * NUM_OF_TOKENS_PER_CHUNK;
           token_load_base_addr = attn_input_token + chunk_first_token_id * static_cast<int64_t>(HIDDEN_DIM);
           if constexpr(FORWARD_DISPATCH){
+#ifdef USE_NIXL
+            // NIXL: dest-major `attn_input_prob`
+            // `[NUM_OF_NODES][MAX_NUM_OF_TOKENS_PER_RANK][prob_per_token]`.
+            // Local node's slice starts at `node_rank * MAX_TOKENS`;
+            // per-token stride is `prob_per_token`.
+            prob_load_base_addr = attn_input_prob + (static_cast<int64_t>(node_rank) * MAX_NUM_OF_TOKENS_PER_RANK + chunk_first_token_id) * (NUM_OF_EXPERTS_PER_RANK * NUM_OF_RANKS_PER_NODE);
+#else
             prob_load_base_addr = attn_input_prob + chunk_first_token_id * (NUM_OF_EXPERTS_PER_RANK * NUM_OF_RANKS_PER_NODE * NUM_OF_NODES);
+#endif
           }
           if constexpr(std::is_same<TOKEN_DATA_TYPE, uint8_t>::value){
             scaling_factor_load_base_addr = attn_input_token_scaling_factor + chunk_first_token_id * (HIDDEN_DIM / 128);
@@ -1332,8 +1345,15 @@ inline __device__ void G2S_warp_group_device_function(const int node_rank,
                 if(node_id != node_rank){
                   prob_load_token_addr = prob_load_base_addr + (current_token_id * (NUM_OF_EXPERTS_PER_RANK * NUM_OF_RANKS_PER_NODE));
                 }else{
-                  prob_load_token_addr = prob_load_base_addr + (current_token_id * (NUM_OF_EXPERTS_PER_RANK * NUM_OF_RANKS_PER_NODE * NUM_OF_NODES)) + 
+#ifdef USE_NIXL
+                  // Dest-major `attn_input_prob`: per-token stride is
+                  // `prob_per_token`; local-node base already offset by
+                  // `node_rank * MAX_TOKENS` in `prob_load_base_addr`.
+                  prob_load_token_addr = prob_load_base_addr + (current_token_id * (NUM_OF_EXPERTS_PER_RANK * NUM_OF_RANKS_PER_NODE));
+#else
+                  prob_load_token_addr = prob_load_base_addr + (current_token_id * (NUM_OF_EXPERTS_PER_RANK * NUM_OF_RANKS_PER_NODE * NUM_OF_NODES)) +
                                                                (node_rank * (NUM_OF_EXPERTS_PER_RANK * NUM_OF_RANKS_PER_NODE));
+#endif
                 }
                 cuda::ptx::cp_async_bulk(cuda::ptx::space_shared,
                                          cuda::ptx::space_global,
@@ -4393,7 +4413,7 @@ __global__ void dispatch_kernel(const __grid_constant__ dispatch_kernel_param_t<
       if constexpr(NUM_OF_NODES != 1){
 #ifdef USE_NIXL
         N2N_warp_group_device_function
-        <INTER_NODE_GROUP, TOKEN_DATA_TYPE, cur_smem_t, NUM_OF_STAGES, HIDDEN_DIM, NUM_OF_TOKENS_PER_CHUNK, NUM_OF_EXPERTS_PER_RANK, NUM_OF_RANKS_PER_NODE, NUM_OF_NODES, NUM_OF_BLOCKS, FORWARD_DISPATCH>
+        <INTER_NODE_GROUP, TOKEN_DATA_TYPE, cur_smem_t, NUM_OF_STAGES, HIDDEN_DIM, NUM_OF_TOKENS_PER_CHUNK, MAX_NUM_OF_TOKENS_PER_RANK, NUM_OF_EXPERTS_PER_RANK, NUM_OF_RANKS_PER_NODE, NUM_OF_NODES, NUM_OF_BLOCKS, FORWARD_DISPATCH>
         (param.node_rank, param.num_of_tokens_per_rank, param.attn_to_rdma_map, reinterpret_cast<dispatch_gpu_nixl_ctx*>(param.multinode_ctx_ptr), smem_buffer_ptr);
 #else
         N2N_warp_group_device_function
@@ -4449,7 +4469,8 @@ __global__ void dispatch_kernel(const __grid_constant__ dispatch_kernel_param_t<
 #ifdef USE_NIXL
       // Use NIXL for inter-node communication
       N2N_warp_group_device_function
-      <INTER_NODE_GROUP, TOKEN_DATA_TYPE, cur_smem_t, NUM_OF_STAGES, HIDDEN_DIM, NUM_OF_TOKENS_PER_CHUNK, NUM_OF_EXPERTS_PER_RANK, NUM_OF_RANKS_PER_NODE, NUM_OF_NODES, NUM_OF_BLOCKS, FORWARD_DISPATCH>
+      <INTER_NODE_GROUP, TOKEN_DATA_TYPE, cur_smem_t, NUM_OF_STAGES, HIDDEN_DIM, NUM_OF_TOKENS_PER_CHUNK,
+       MAX_NUM_OF_TOKENS_PER_RANK, NUM_OF_EXPERTS_PER_RANK, NUM_OF_RANKS_PER_NODE, NUM_OF_NODES, NUM_OF_BLOCKS, FORWARD_DISPATCH>
       (param.node_rank, param.num_of_tokens_per_rank, param.attn_to_rdma_map, reinterpret_cast<dispatch_gpu_nixl_ctx*>(param.multinode_ctx_ptr), smem_buffer_ptr);
 #else
       // Use DOCA for inter-node communication
