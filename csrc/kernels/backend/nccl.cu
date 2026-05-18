@@ -106,8 +106,8 @@ NCCLSymmetricMemoryContext::NCCLSymmetricMemoryContext(const int64_t& nccl_comm,
     // Get LSA domain from NCCL (needed for NCCL API calls regardless of NVLink presence)
     const int num_lsa_ranks = dev_comm.lsaSize, lsa_rank_idx = dev_comm.lsaRank;
 
-    // Override NVL domain when no NVLink hardware exists (PCIe-only topology)
-    // NCCL may report lsaSize > 1 on PCIe due to proximity grouping
+    // Override NVL domain when no NVLink hardware exists (RDMA-only topology)
+    // NCCL may report lsaSize > 1 due to proximity grouping even without NVLink
     num_nvl_ranks = has_nvlink ? num_lsa_ranks : 1;
     nvl_rank_idx = has_nvlink ? lsa_rank_idx : 0;
     num_rdma_ranks = num_ranks / num_nvl_ranks, rdma_rank_idx = rank_idx / num_nvl_ranks;
@@ -115,7 +115,7 @@ NCCLSymmetricMemoryContext::NCCLSymmetricMemoryContext(const int64_t& nccl_comm,
     EP_HOST_ASSERT(rank_idx == rdma_rank_idx * num_nvl_ranks + nvl_rank_idx);
 
     if (not has_nvlink and num_lsa_ranks > 1 and get_env<int>("EP_BUFFER_DEBUG"))
-        printf("[DeepEP] PCIe-only topology detected (NCCL lsaSize=%d), overriding num_nvl_ranks=1\n", num_lsa_ranks);
+        printf("[DeepEP] Non-NVLink topology detected (NCCL lsaSize=%d), overriding num_nvl_ranks=1\n", num_lsa_ranks);
 
     // Calculate scaleout/up domain size
     if (allow_hybrid_mode) {

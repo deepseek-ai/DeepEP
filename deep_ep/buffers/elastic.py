@@ -167,8 +167,8 @@ class ElasticBuffer:
         self.prefer_overlap_with_compute = prefer_overlap_with_compute
         self.nccl_comm_handle = get_nccl_comm_handle(group)
 
-        # Detect NVLink topology and auto-disable hybrid mode for PCIe-only setups
-        # NCCL may report num_nvl_ranks > 1 even on PCIe-only topologies (grouping by PCIe proximity),
+        # Detect NVLink topology and auto-disable hybrid mode for non-NVLink setups
+        # NCCL may report num_nvl_ranks > 1 even without NVLink (proximity grouping),
         # so we also check actual NVLink bandwidth to confirm real NVLink hardware exists
         num_rdma_ranks, num_nvl_ranks = _C.get_physical_domain_size(self.nccl_comm_handle.get())
         has_nvlink = get_nvlink_gbs() > 0
@@ -461,7 +461,7 @@ class ElasticBuffer:
 
         """
         assert self.num_nvlink_ranks > 1, \
-            'AGRS requires NVLink connectivity; not available in PCIe/RDMA-only topology'
+            'AGRS requires NVLink connectivity; not available in RDMA-only topology'
         self.runtime.create_agrs_session()
 
     def destroy_agrs_session(self) -> None:
