@@ -163,10 +163,21 @@ class ElasticBuffer:
         self.group = group
         self.rank_idx = group.rank()
         self.num_ranks = group.size()
-        self.allow_hybrid_mode = allow_hybrid_mode
         self.allow_multiple_reduction = allow_multiple_reduction
         self.prefer_overlap_with_compute = prefer_overlap_with_compute
         self.nccl_comm_handle = get_nccl_comm_handle(group)
+
+        # Detect NVLink topology and auto-disable hybrid mode for PCIe-only setups
+        # NCCL may report num_nvl_ranks > 1 even on PCIe-only topologies (grouping by PCIe proximity),
+        # so we also check actual NVLink bandwidth to confirm real NVLink hardware exists
+        num_rdma_ranks, num_nvl_ranks = _C.get_physical_domain_size(self.nccl_comm_handle.get())
+        has_nvlink = get_nvlink_gbs() > 0
+        if not has_nvlink and self.num_ranks > 1 and allow_hybrid_mode:
+            if int(os.environ.get('EP_BUFFER_DEBUG', 0)):
+                print(f'[DeepEP] No NVLink hardware detected (nccl_nvl_ranks={num_nvl_ranks}), '
+                      f'auto-disabling hybrid mode for RDMA-only operation')
+            allow_hybrid_mode = False
+        self.allow_hybrid_mode = allow_hybrid_mode
 
         # Calculate buffer size
         if num_bytes is None:
@@ -207,6 +218,7 @@ class ElasticBuffer:
                                         num_bytes,
                                         deterministic,
                                         allow_hybrid_mode,
+                                        has_nvlink,
                                         allow_multiple_reduction,
                                         prefer_overlap_with_compute,
                                         sl_idx, num_allocated_qps,
@@ -448,6 +460,8 @@ class ElasticBuffer:
         (Experimental) Begin a new all-gather reduce-scatter (AGRS) session. Must be paired with `destroy_agrs_session`.
 
         """
+        assert self.num_nvlink_ranks > 1, \
+            'AGRS requires NVLink connectivity; not available in PCIe/RDMA-only topology'
         self.runtime.create_agrs_session()
 
     def destroy_agrs_session(self) -> None:
@@ -614,7 +628,8 @@ class ElasticBuffer:
             rdma_traffic += (self.num_ranks - self.num_nvlink_ranks) / self.num_ranks
 
         # Found the bounded one
-        if self.num_scaleout_ranks > 1 and (rdma_traffic / rdma_gbs) > (nvlink_traffic / nvlink_gbs):
+        if nvlink_traffic == 0 or (rdma_traffic > 0 and rdma_gbs > 0
+                                   and (rdma_traffic / rdma_gbs) > (nvlink_traffic / nvlink_gbs)):
             bounded_traffic, bounded_gbs = rdma_traffic, rdma_gbs
         else:
             bounded_traffic, bounded_gbs = nvlink_traffic, nvlink_gbs

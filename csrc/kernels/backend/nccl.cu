@@ -65,6 +65,7 @@ NCCLSymmetricMemoryContext::NCCLSymmetricMemoryContext(const int64_t& nccl_comm,
                                                        const int& num_ranks, const int& rank_idx,
                                                        const size_t& size, const size_t& alignment,
                                                        const bool& allow_hybrid_mode,
+                                                       const bool& has_nvlink,
                                                        const int& sl_idx, const int& num_allocated_qps):
     rank_idx(rank_idx), num_ranks(num_ranks), num_allocated_qps(num_allocated_qps) {
     if (get_env("EP_BUFFER_DEBUG", 0)) {
@@ -102,11 +103,19 @@ NCCLSymmetricMemoryContext::NCCLSymmetricMemoryContext(const int64_t& nccl_comm,
     }
     NCCL_CHECK(ncclDevCommCreate(comm, &reqs, &dev_comm));
 
-    // Now we know the NVLink domain size
-    num_nvl_ranks = dev_comm.lsaSize, nvl_rank_idx = dev_comm.lsaRank;
+    // Get LSA domain from NCCL (needed for NCCL API calls regardless of NVLink presence)
+    const int num_lsa_ranks = dev_comm.lsaSize, lsa_rank_idx = dev_comm.lsaRank;
+
+    // Override NVL domain when no NVLink hardware exists (PCIe-only topology)
+    // NCCL may report lsaSize > 1 on PCIe due to proximity grouping
+    num_nvl_ranks = has_nvlink ? num_lsa_ranks : 1;
+    nvl_rank_idx = has_nvlink ? lsa_rank_idx : 0;
     num_rdma_ranks = num_ranks / num_nvl_ranks, rdma_rank_idx = rank_idx / num_nvl_ranks;
     EP_HOST_ASSERT(num_ranks % num_nvl_ranks == 0 and nvl_rank_idx == rank_idx % num_nvl_ranks);
     EP_HOST_ASSERT(rank_idx == rdma_rank_idx * num_nvl_ranks + nvl_rank_idx);
+
+    if (not has_nvlink and num_lsa_ranks > 1 and get_env<int>("EP_BUFFER_DEBUG"))
+        printf("[DeepEP] PCIe-only topology detected (NCCL lsaSize=%d), overriding num_nvl_ranks=1\n", num_lsa_ranks);
 
     // Calculate scaleout/up domain size
     if (allow_hybrid_mode) {
@@ -123,12 +132,11 @@ NCCLSymmetricMemoryContext::NCCLSymmetricMemoryContext(const int64_t& nccl_comm,
     // across all ranks, so no explicit barrier is needed after this call.
     NCCL_CHECK(ncclMemAlloc(&raw_window_ptr, size));
     NCCL_CHECK(ncclCommWindowRegister(comm, raw_window_ptr, size, &window, NCCL_WIN_DEFAULT));
-    NCCL_CHECK(ncclGetLsaDevicePointer(window, 0, nvl_rank_idx, &mapped_window_ptr));
+    NCCL_CHECK(ncclGetLsaDevicePointer(window, 0, lsa_rank_idx, &mapped_window_ptr));
 
     // Get LSA pointers for all LSA peers
-    // TODO: check whether this is correct for network with RDMA
-    nvl_window_ptrs.resize(num_nvl_ranks);
-    for (int i = 0; i < num_nvl_ranks; ++ i)
+    nvl_window_ptrs.resize(num_lsa_ranks);
+    for (int i = 0; i < num_lsa_ranks; ++ i)
         NCCL_CHECK(ncclGetLsaDevicePointer(window, 0, i, &nvl_window_ptrs[i]));
 
     // TODO: push NCCL team to support aligned allocation

@@ -149,6 +149,9 @@ def check_nvlink_connections(group: dist.ProcessGroup) -> None:
     Arguments:
         group: the communication group.
     """
+    if get_nvlink_gbs() == 0:
+        return
+
     # Check NVLink connection
     # NOTES: some A100 PCIE GPUs only have pairwise NVLink connection, so that we can only use EP2
     # TODO: check all cases, all local-node GPUs in the group should be connected via NVLink
