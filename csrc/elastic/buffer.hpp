@@ -597,6 +597,7 @@ public:
                                          const int& num_max_tokens_per_rank, const int& hidden,
                                          int num_topk, const bool& use_fp8_dispatch,
                                          const bool& allow_hybrid_mode,
+                                         const bool& has_nvlink,
                                          const bool& allow_multiple_reduction) {
         EP_HOST_ASSERT(num_max_tokens_per_rank > 0 and hidden > 0);
 
@@ -606,9 +607,19 @@ public:
         // NOTES: there are lots of `kNumTopk <= 32` restrictions, so we use 32 to calculate token size
         num_topk = num_topk == 0 ? 32 : num_topk;
 
-        // Topology
-        const auto [num_rdma_ranks, num_nvl_ranks] = nccl::get_physical_domain_size(nccl_comm);
-        const auto [num_scaleout_ranks, num_scaleup_ranks] = nccl::get_logical_domain_size(nccl_comm, allow_hybrid_mode);
+        // Topology (override NVL domain when no NVLink hardware exists)
+        const auto [physical_rdma_ranks, physical_nvl_ranks] = nccl::get_physical_domain_size(nccl_comm);
+        const auto num_nvl_ranks = has_nvlink ? physical_nvl_ranks : 1;
+        const auto num_ranks = physical_rdma_ranks * physical_nvl_ranks;
+        const auto num_rdma_ranks = num_ranks / num_nvl_ranks;
+        int num_scaleout_ranks, num_scaleup_ranks;
+        if (allow_hybrid_mode) {
+            num_scaleout_ranks = num_rdma_ranks;
+            num_scaleup_ranks = num_nvl_ranks;
+        } else {
+            num_scaleout_ranks = 1;
+            num_scaleup_ranks = num_ranks;
+        }
         const auto is_scaleup_nvlink = num_scaleup_ranks == num_nvl_ranks;
 
         // Dispatch size

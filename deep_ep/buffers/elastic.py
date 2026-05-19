@@ -185,7 +185,7 @@ class ElasticBuffer:
             num_bytes = _C.calculate_elastic_buffer_size(
                 self.nccl_comm_handle.get(),
                 num_max_tokens_per_rank, hidden, num_topk, use_fp8_dispatch,
-                allow_hybrid_mode, allow_multiple_reduction)
+                allow_hybrid_mode, has_nvlink, allow_multiple_reduction)
         if os.environ.get('EP_BUFFER_DEBUG', 0):
             print(f'Initializing EP elastic buffer with {num_bytes} bytes at rank EP {group.rank()}/{group.size()}')
         self.num_bytes = num_bytes
@@ -270,10 +270,11 @@ class ElasticBuffer:
         Returns:
             size: the recommended buffer size in bytes.
         """
+        has_nvlink = get_nvlink_gbs() > 0
         return _C.calculate_elastic_buffer_size(
             get_nccl_comm_handle(group).get(),
             num_max_tokens_per_rank, hidden, num_topk, use_fp8_dispatch,
-            allow_hybrid_mode, allow_multiple_reduction)
+            allow_hybrid_mode, has_nvlink, allow_multiple_reduction)
 
     @staticmethod
     def get_engram_storage_size_hint(num_entries: int, hidden: int,
