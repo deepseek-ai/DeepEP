@@ -16,8 +16,11 @@
 namespace deep_ep::elastic {
 
 class ElasticBuffer {
-    // Buffer registered for both scaleout and scaleup
+    // Buffer bytes = GPU buffer + CPU buffer (excludes workspace)
+    // Memory layout: [[[Workspace] GPU buffer] CPU buffer]
     int64_t num_buffer_bytes;
+    int64_t num_gpu_buffer_bytes;
+    int64_t num_cpu_buffer_bytes;
     void* buffer;
 
     // Destructor settings
@@ -59,8 +62,6 @@ class ElasticBuffer {
 
     // Some Engram storage settings
     int num_engram_entries = 0, engram_hidden = 0;
-    int64_t num_engram_storage_bytes = 0;
-    int64_t num_engram_recv_bytes = 0;
 
     // PP settings
     int prev_rank_idx = 0, next_rank_idx = 0;
@@ -79,8 +80,8 @@ class ElasticBuffer {
 
 public:
     ElasticBuffer(const int& rank_idx, const int& num_ranks,
-                  const int64_t& nccl_comm,
-                  const int64_t& num_buffer_bytes,
+                  const int64_t& nccl_comm, const symmetric::cpu_comm_t& cpu_comm,
+                  const int64_t& num_buffer_bytes, const int64_t& num_cpu_buffer_bytes,
                   const bool& deterministic,
                   const bool& allow_hybrid_mode,
                   const bool& allow_multiple_reduction,
@@ -89,18 +90,35 @@ public:
                   const int& num_cpu_timeout_secs, const int& num_gpu_timeout_secs,
                   const bool& explicitly_destroy):
         num_buffer_bytes(num_buffer_bytes),
+        num_cpu_buffer_bytes(num_cpu_buffer_bytes),
         explicitly_destroy(explicitly_destroy),
         comm_stream(get_global_comm_stream()),
         deterministic(deterministic),
         allow_hybrid_mode(allow_hybrid_mode),
         allow_multiple_reduction(allow_multiple_reduction),
         prefer_overlap_with_compute(prefer_overlap_with_compute) {
-        // Init NCCL runtime
-        static constexpr int kBufferAlignment = 16;
+        // Check buffer bytes alignment (2 MB)
+        EP_HOST_ASSERT(num_buffer_bytes > 0 and num_buffer_bytes % symmetric::kNumAlignmentBytes == 0);
+        EP_HOST_ASSERT(num_cpu_buffer_bytes >= 0 and num_cpu_buffer_bytes % symmetric::kNumAlignmentBytes == 0);
+        EP_HOST_ASSERT(num_cpu_buffer_bytes <= num_buffer_bytes);
+        num_gpu_buffer_bytes = num_buffer_bytes - num_cpu_buffer_bytes;
+
+        // Workspace is aligned to 2 MB so that it sits cleanly at the front of the GPU segment
+        const auto num_workspace_bytes = math::align<int64_t>(
+            layout::WorkspaceLayout::get_num_bytes(), symmetric::kNumAlignmentBytes);
+
+        // Create NCCL symmetric memory context
+        // Symmetric memory layout: [[[Workspace] GPU buffer] CPU buffer]
+        // sym.num_bytes = workspace + buffer, sym.num_cpu_bytes = CPU buffer
+        const auto num_sym_bytes = num_workspace_bytes + num_buffer_bytes;
         this->nccl_context = std::make_shared<nccl::NCCLSymmetricMemoryContext>(
-            nccl_comm, num_ranks, rank_idx,
-            layout::WorkspaceLayout::get_num_bytes() + num_buffer_bytes, kBufferAlignment,
+            nccl_comm, cpu_comm, num_ranks, rank_idx,
+            num_sym_bytes, num_cpu_buffer_bytes,
             allow_hybrid_mode, sl_idx, num_allocated_qps);
+
+        // Verify the symmetric memory layout matches our expectations
+        EP_HOST_ASSERT(num_workspace_bytes + num_gpu_buffer_bytes == nccl_context->num_gpu_bytes);
+        EP_HOST_ASSERT(num_cpu_buffer_bytes == nccl_context->num_cpu_bytes);
 
         // Timeout
         this->num_cpu_timeout_secs = num_cpu_timeout_secs;
@@ -111,8 +129,8 @@ public:
         workspace = this->nccl_context->mapped_window_ptr;
         workspace_layout_wo_expert = std::make_shared<layout::WorkspaceLayout>(
             workspace, nccl_context->num_scaleout_ranks, nccl_context->num_scaleup_ranks, 0);
-        buffer = static_cast<uint8_t*>(workspace) + layout::WorkspaceLayout::get_num_bytes();
-        CUDA_RUNTIME_CHECK(cudaMemset(workspace, 0, layout::WorkspaceLayout::get_num_bytes()));
+        buffer = static_cast<uint8_t*>(workspace) + num_workspace_bytes;
+        CUDA_RUNTIME_CHECK(cudaMemset(workspace, 0, num_workspace_bytes));
 
         // Allocate host workspaces
         CUDA_RUNTIME_CHECK(cudaMallocHost(&host_workspace, layout::WorkspaceLayout::get_num_bytes(), cudaHostAllocMapped));
@@ -203,13 +221,14 @@ public:
         EP_HOST_ASSERT(storage.is_cuda() and storage.is_contiguous());
         num_engram_entries = num_entries, engram_hidden = hidden;
 
-        // Write storage and ensure the received buffer is aligned
-        EP_HOST_ASSERT(storage.nbytes() <= num_buffer_bytes);
+        // Write storage to CPU segment at back of buffer
+        EP_HOST_ASSERT(storage.nbytes() <= num_cpu_buffer_bytes and "Engram storage exceeds CPU buffer size");
+        const auto cpu_write_offset = allow_hybrid_mode
+            ? static_cast<int64_t>(nccl_context->scaleup_rank_idx) * num_cpu_buffer_bytes : 0;
         CUDA_RUNTIME_CHECK(cudaMemcpyAsync(
-            buffer, storage.data_ptr(), storage.nbytes(),
+            math::advance_ptr(buffer, num_gpu_buffer_bytes + cpu_write_offset),
+            storage.data_ptr(), storage.nbytes(),
             cudaMemcpyDeviceToDevice, compute_stream));
-        num_engram_storage_bytes = math::align<int64_t>(storage.nbytes(), 32);
-        num_engram_recv_bytes = num_buffer_bytes - num_engram_storage_bytes;
 
         // Ensure data is visible for all ranks
         barrier(false, true);
@@ -219,7 +238,7 @@ public:
         const auto [num_tokens] = get_shape<1>(indices);
         EP_HOST_ASSERT(indices.scalar_type() == torch::kInt);
         EP_HOST_ASSERT(indices.is_cuda() and indices.is_contiguous());
-        EP_HOST_ASSERT(num_tokens * engram_hidden * sizeof(nv_bfloat16) <= num_engram_recv_bytes);
+        EP_HOST_ASSERT(num_tokens * engram_hidden * sizeof(nv_bfloat16) <= num_gpu_buffer_bytes);
 
         // Calculate a QP count
         if (num_qps == 0)
@@ -228,27 +247,34 @@ public:
         // Return tensor from the raw buffer
         EP_HOST_ASSERT(num_engram_entries > 0);
         const auto fetched = torch::from_blob(
-            math::advance_ptr(buffer, num_engram_storage_bytes),
+            buffer,
             {num_tokens, engram_hidden},
             torch::TensorOptions().dtype(torch::kBFloat16).device(torch::kCUDA)
         );
 
         // Last issued Gin requests
+        const auto num_gin_ranks = allow_hybrid_mode
+            ? nccl_context->num_scaleout_ranks
+            : nccl_context->num_ranks;
         const auto last_gin_requests = torch::empty(
-            {nccl_context->num_ranks * num_qps, sizeof(ncclGinRequest_t)},
+            {num_gin_ranks * num_qps, sizeof(ncclGinRequest_t)},
             torch::TensorOptions().dtype(torch::kByte).device(torch::kCUDA)
         );
 
         // Launch the fetch kernel
         launch_engram_fetch(
             nccl_context->dev_comm, nccl_context->window,
-            buffer,
+            math::advance_ptr(buffer, num_gpu_buffer_bytes),
             fetched.data_ptr(),
             indices.data_ptr<int>(),
             static_cast<ncclGinRequest_t*>(last_gin_requests.data_ptr()),
             num_engram_entries, engram_hidden,
             num_tokens,
-            nccl_context->num_ranks, num_qps,
+            nccl_context->num_scaleout_ranks,
+            nccl_context->num_scaleup_ranks,
+            num_cpu_buffer_bytes,
+            num_qps,
+            allow_hybrid_mode,
             at::cuda::getCurrentCUDAStream()
         );
 
@@ -258,7 +284,10 @@ public:
                 static_cast<ncclGinRequest_t*>(last_gin_requests.data_ptr()),
                 nccl_context->dev_comm,
                 nccl_context->window,
-                nccl_context->num_ranks, num_qps,
+                nccl_context->num_scaleout_ranks,
+                nccl_context->num_scaleup_ranks,
+                num_qps,
+                allow_hybrid_mode,
                 at::cuda::getCurrentCUDAStream()
             );
             return fetched;
@@ -366,13 +395,12 @@ public:
         out.reserve(num_bytes_list.size());
         int64_t offset = agrs_buffer_offset;
         for (const auto& num_bytes: num_bytes_list) {
-            EP_HOST_ASSERT(num_bytes % 32 == 0);
             EP_HOST_ASSERT(offset + num_bytes * nccl_context->num_ranks <= num_max_agrs_session_bytes and
                            agrs_buffer_slot_idx < num_max_agrs_per_session and
                            "Not enough session buffer size. Did you forget to flush session?");
             out.push_back(torch::from_blob(math::advance_ptr(buffer, offset + num_bytes * nccl_context->rank_idx),
                           {num_bytes}, torch::TensorOptions().dtype(torch::kByte).device(torch::kCUDA)));
-            offset += num_bytes * nccl_context->num_ranks;
+            offset += math::align<int64_t>(num_bytes * nccl_context->num_ranks, 32);
         }
         return out;
     }
@@ -388,13 +416,12 @@ public:
         for (int i = 0; i < num_tensors; ++ i) {
             const auto& x = tensors[i];
             EP_HOST_ASSERT(x.is_contiguous());
-            EP_HOST_ASSERT(x.is_cuda() and x.nbytes() % 32 == 0);
 
             const auto x_offset = math::ptr_diff(x.data_ptr(), buffer);
             const bool is_inplace = 0 <= x_offset and x_offset < num_max_agrs_session_bytes;
             offset[i] = agrs_buffer_offset;
             num_copies += nccl_context->num_ranks - is_inplace;
-            agrs_buffer_offset += x.nbytes() * nccl_context->num_ranks;
+            agrs_buffer_offset += math::align<int64_t>(x.nbytes() * nccl_context->num_ranks, 32);
             EP_HOST_ASSERT(not is_inplace or x.data_ptr() == math::advance_ptr(buffer, offset[i] + x.nbytes() * nccl_context->rank_idx));
         }
         EP_HOST_ASSERT(agrs_buffer_offset <= num_max_agrs_session_bytes and
@@ -624,8 +651,13 @@ public:
             num_scaleout_ranks, num_scaleup_ranks,
             is_scaleup_nvlink, allow_multiple_reduction);
 
-        // Return the maximum of those layouts
-        return std::max(num_dispatch_bytes, num_combine_bytes);
+        // Return the maximum of those layouts, aligned to 2 MB
+        return math::align(std::max(num_dispatch_bytes, num_combine_bytes), symmetric::kNumAlignmentBytes);
+    }
+
+    static symmetric::cpu_handle_t create_cpu_handle(const int64_t& num_cpu_bytes) {
+        EP_HOST_ASSERT(num_cpu_bytes > 0 and num_cpu_bytes % symmetric::kNumAlignmentBytes == 0);
+        return symmetric::HybridElasticSymmetricMemory::create_cpu_handle(num_cpu_bytes);
     }
 
     std::tuple<torch::Tensor, std::optional<torch::Tensor>,
@@ -1274,7 +1306,7 @@ public:
 
 static void register_apis(pybind11::module_& m) {
     pybind11::class_<ElasticBuffer>(m, "ElasticBuffer")
-        .def(pybind11::init<int, int, int64_t, int64_t, bool, bool, bool, bool, int, int, int, int, bool>())
+        .def(pybind11::init<int, int, int64_t, symmetric::cpu_comm_t, int64_t, int64_t, bool, bool, bool, bool, int, int, int, int, bool>())
         .def("destroy", &ElasticBuffer::destroy)
         .def("get_comm_stream", &ElasticBuffer::get_comm_stream)
         .def("get_physical_domain_size", &ElasticBuffer::get_physical_domain_size)
@@ -1292,7 +1324,11 @@ static void register_apis(pybind11::module_& m) {
         .def("all_gather", &ElasticBuffer::all_gather)
         .def("dispatch", &ElasticBuffer::dispatch)
         .def("combine", &ElasticBuffer::combine);
+    m.def("create_cpu_handle", &ElasticBuffer::create_cpu_handle);
     m.def("calculate_elastic_buffer_size", &ElasticBuffer::calculate_buffer_size);
+    m.def("get_elastic_buffer_alignment", [=]() {
+        return symmetric::kNumAlignmentBytes;
+    });
 
     // NCCL communicator handle
     m.def("get_local_nccl_unique_id", &nccl::get_local_unique_id);

@@ -12,7 +12,7 @@ from deep_ep.utils.testing import bench_kineto
 @torch.inference_mode()
 def test(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
     rank, num_ranks, group = init_dist(local_rank, num_local_ranks)
-    num_bytes = deep_ep.ElasticBuffer.get_engram_storage_size_hint(
+    num_gpu_bytes, num_cpu_bytes = deep_ep.ElasticBuffer.get_engram_storage_size_hint(
         args.num_entries, args.hidden, args.num_tokens, torch.bfloat16)
 
     # 1 QP uses 1 SM
@@ -30,8 +30,9 @@ def test(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
                once_in_node=True)
     buffer = deep_ep.ElasticBuffer(
         group,
-        num_bytes=num_bytes, explicitly_destroy=True, num_allocated_qps=num_qps,
-        allow_hybrid_mode=False, allow_multiple_reduction=False)
+        num_bytes=num_gpu_bytes + num_cpu_bytes, num_cpu_bytes=num_cpu_bytes,
+        explicitly_destroy=True, num_allocated_qps=num_qps,
+        allow_hybrid_mode=args.allow_hybrid_mode, allow_multiple_reduction=False)
 
     # Write buffer: each rank writes its own local storage into the NCCL window
     local_storage = torch.randn((args.num_entries, args.hidden), dtype=torch.bfloat16, device='cuda')
@@ -67,14 +68,12 @@ def test(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
         barrier=buffer.barrier,
         trace_path=f'{args.dump_profile_traces}/engram_fetch_rank{buffer.rank_idx}.json' if args.dump_profile_traces else None)
     mpps = args.num_tokens / (issue_t + wait_t) / 1e6
-    
     dist_print(f' > Rank {rank:3}/{num_ranks} | '
                f'issue: {issue_t * 1e6:.1f} us, '
                f'wait: {wait_t * 1e6:.1f} us, '
                f'{num_fetched_bytes / (issue_t + wait_t) / 1e9:.1f} GB/s, '
                f'bytes: {num_fetched_bytes / 1024 / 1024:.1f} MB, '
                f'{mpps:.2f} MPPS ({msg_bytes} B/msg)')
-    
     dist_print('', once_in_node=True)
 
     # Destroy the runtime and communication group
@@ -90,6 +89,7 @@ if __name__ == '__main__':
     parser.add_argument('--hidden', type=int, default=128, help='Hidden dimension size')
     parser.add_argument('--num-tokens', type=int, default=4096, help='Number of tokens to fetch')
     parser.add_argument('--skip-check', action='store_true', help='Skip correctness check')
+    parser.add_argument('--allow-hybrid-mode', action='store_true', help='Enable hybrid mode (multi-plane)')
     parser.add_argument('--dump-profile-traces', type=str, default='', help='Dump profiling trace JSONs')
     args = parser.parse_args()
 

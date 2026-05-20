@@ -56,7 +56,7 @@ def get_nccl_comm_handle(group: dist.ProcessGroup) -> NCCLCommHandle:
 
     # New PyTorch has such API
     backend = group._get_backend(torch.device('cuda'))
-    if hasattr(backend, '_comm_ptr') and int(os.getenv('EP_REUSE_NCCL_COMM', '0')):
+    if hasattr(backend, '_comm_ptr') and int(os.getenv('EP_REUSE_NCCL_COMM', '1')):
         _storage[group] = NCCLCommHandle(backend._comm_ptr(), False)
         return _storage[group]
 

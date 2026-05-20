@@ -580,14 +580,18 @@ hybrid_combine_impl(nv_bfloat16* x,
 
         // Update, wait and clean
         EP_STATIC_ASSERT(kNumScaleoutRanks <= 32, "Invalid ranks");
+        const auto expected_signal = math::pack2<int, int64_t>(1, 0);
+        gin.flush<ncclCoopWarp>();
         if (lane_idx < kNumScaleoutRanks) {
             // Update remote tails
-            const auto expected_signal = math::pack2<int, int64_t>(1, 0);
             gin.red_add_rel<ncclTeamTagRail>(
                 workspace_layout.get_scaleout_channel_signaled_tail_ptr(channel_idx, scaleout_rank_idx),
                 expected_signal, lane_idx);
+        }
+        __syncwarp();
 
-            // Wait tail arrival
+        // Wait tail arrival
+        if (lane_idx < kNumScaleoutRanks) {
             const auto wait_ptr = workspace_layout.get_scaleout_channel_signaled_tail_ptr(channel_idx, lane_idx);
             comm::timeout_while<kNumTimeoutCycles>([=](const bool& is_last_check) {
                 const auto signal = ptx::ld_acquire_sys<int64_t>(wait_ptr);

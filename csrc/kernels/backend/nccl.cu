@@ -1,8 +1,6 @@
 #include <cstring>
-#include <memory>
 #include <vector>
 #include <string>
-#include <optional>
 #include <pybind11/pytypes.h>
 #include <pybind11/stl.h>
 #include <sstream>
@@ -61,9 +59,9 @@ std::tuple<int, int> get_logical_domain_size(const int64_t& nccl_comm, const boo
             allow_hybrid_mode ? num_nvl_ranks : num_rdma_ranks * num_nvl_ranks};
 }
 
-NCCLSymmetricMemoryContext::NCCLSymmetricMemoryContext(const int64_t& nccl_comm,
+NCCLSymmetricMemoryContext::NCCLSymmetricMemoryContext(const int64_t& nccl_comm, const symmetric::cpu_comm_t& cpu_comm,
                                                        const int& num_ranks, const int& rank_idx,
-                                                       const size_t& size, const size_t& alignment,
+                                                       const int64_t& num_bytes, const int64_t& num_cpu_bytes,
                                                        const bool& allow_hybrid_mode,
                                                        const int& sl_idx, const int& num_allocated_qps):
     rank_idx(rank_idx), num_ranks(num_ranks), num_allocated_qps(num_allocated_qps) {
@@ -118,11 +116,20 @@ NCCLSymmetricMemoryContext::NCCLSymmetricMemoryContext(const int64_t& nccl_comm,
     }
     is_scaleup_nvlink = num_scaleup_ranks == num_nvl_ranks;
 
+    // Create symmetric memory
+    // num_bytes = GPU + CPU, derive GPU portion
+    this->symmetric_memory = symmetric::alloc(
+        num_bytes - num_cpu_bytes, num_cpu_bytes,
+        allow_hybrid_mode, num_scaleup_ranks, scaleout_rank_idx,
+        cpu_comm);
+
     // Create window
     // NOTES: `ncclCommWindowRegister` is collective: it internally calls bootstrapBarrier
     // across all ranks, so no explicit barrier is needed after this call.
-    NCCL_CHECK(ncclMemAlloc(&raw_window_ptr, size));
-    NCCL_CHECK(ncclCommWindowRegister(comm, raw_window_ptr, size, &window, NCCL_WIN_DEFAULT));
+    raw_window_ptr = this->symmetric_memory->ptr;
+    this->num_gpu_bytes = this->symmetric_memory->num_gpu_bytes;
+    this->num_cpu_bytes = this->symmetric_memory->num_cpu_bytes;
+    NCCL_CHECK(ncclCommWindowRegister(comm, raw_window_ptr, this->symmetric_memory->num_bytes, &window, NCCL_WIN_DEFAULT));
     NCCL_CHECK(ncclGetLsaDevicePointer(window, 0, nvl_rank_idx, &mapped_window_ptr));
 
     // Get LSA pointers for all LSA peers
@@ -130,11 +137,6 @@ NCCLSymmetricMemoryContext::NCCLSymmetricMemoryContext(const int64_t& nccl_comm,
     nvl_window_ptrs.resize(num_nvl_ranks);
     for (int i = 0; i < num_nvl_ranks; ++ i)
         NCCL_CHECK(ncclGetLsaDevicePointer(window, 0, i, &nvl_window_ptrs[i]));
-
-    // TODO: push NCCL team to support aligned allocation
-    EP_HOST_ASSERT(size % alignment == 0);
-    EP_HOST_ASSERT(reinterpret_cast<uint64_t>(raw_window_ptr) % alignment == 0);
-    EP_HOST_ASSERT(reinterpret_cast<uint64_t>(mapped_window_ptr) % alignment == 0);
 }
 
 void* NCCLSymmetricMemoryContext::get_sym_ptr(void* ptr, const int& dst_rank_idx) const {
@@ -142,10 +144,10 @@ void* NCCLSymmetricMemoryContext::get_sym_ptr(void* ptr, const int& dst_rank_idx
     return static_cast<uint8_t*>(nvl_window_ptrs[dst_rank_idx]) + offset;
 }
 
-void NCCLSymmetricMemoryContext::finalize() const {
-    // Deregister window and free buffer
+void NCCLSymmetricMemoryContext::finalize() {
+    // Deregister window
     NCCL_CHECK(ncclCommWindowDeregister(comm, window));
-    NCCL_CHECK(ncclMemFree(raw_window_ptr));
+    symmetric_memory.reset();
 
     // Destroy device communicator
     NCCL_CHECK(ncclDevCommDestroy(comm, &dev_comm));

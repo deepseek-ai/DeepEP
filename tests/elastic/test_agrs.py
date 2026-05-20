@@ -91,10 +91,14 @@ def test(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
 
     # Print configs
     shape = (32, 64, 2048)
-    num_bytes_per_tensor = math.prod(shape) * 2
     num_max_inflight_agrs = args.num_max_inflight_agrs
+    num_max_session_bytes = deep_ep.ElasticBuffer.get_agrs_num_max_session_bytes(
+        group,
+        [shape for _ in range(num_max_inflight_agrs)],
+        torch.bfloat16
+    )
     num_max_session_bytes = deep_ep.ElasticBuffer.get_agrs_buffer_size_hint(
-        group, num_bytes_per_tensor * group.size() * num_max_inflight_agrs)
+        group, num_max_session_bytes)
     dist_print(f'Config:\n'
                f' > Ranks: {num_ranks}\n'
                f' > Shape: {shape}\n'
@@ -140,8 +144,13 @@ def test(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
     buffer.destroy()
 
     # Profiling
+    num_max_session_bytes = deep_ep.ElasticBuffer.get_agrs_num_max_session_bytes(
+        group,
+        [(2 ** 26,) for _ in range(num_max_inflight_agrs)],
+        torch.bfloat16
+    )
     num_max_session_bytes = deep_ep.ElasticBuffer.get_agrs_buffer_size_hint(
-        group, (2 ** 26) * group.size() * num_max_inflight_agrs)
+        group, num_max_session_bytes)
     buffer = deep_ep.ElasticBuffer(group, explicitly_destroy=True, num_bytes=num_max_session_bytes)
     buffer.agrs_set_config(num_max_session_bytes, num_max_inflight_agrs)
     for num_bytes in (2 ** p for p in range(20, 27)):

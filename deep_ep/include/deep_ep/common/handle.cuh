@@ -140,6 +140,12 @@ struct NCCLGin {
         });
     }
 
+    template <typename coop_t = ncclCoopThread>
+    __device__ __forceinline__
+    void flush() const {
+        gin.flush(coop_t());
+    }
+
     template <typename team_t, typename coop_t = ncclCoopThread>
     __device__ __forceinline__
     void flush_async(const int& src_rank_idx, ncclGinRequest_t* request,

@@ -50,6 +50,8 @@ DECL_LAZY_CUDA_DRIVER_FUNCTION(cuCtxGetDevice);
 DECL_LAZY_CUDA_DRIVER_FUNCTION(cuMemImportFromShareableHandle);
 DECL_LAZY_CUDA_DRIVER_FUNCTION(cuMemExportToShareableHandle);
 DECL_LAZY_CUDA_DRIVER_FUNCTION(cuMemGetAllocationGranularity);
+DECL_LAZY_CUDA_DRIVER_FUNCTION(cuDeviceGet);
+DECL_LAZY_CUDA_DRIVER_FUNCTION(cuDeviceGetAttribute);
 DECL_LAZY_CUDA_DRIVER_FUNCTION(cuStreamBatchMemOp);
 
 }  // namespace deep_ep

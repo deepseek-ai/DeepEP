@@ -105,7 +105,7 @@ class ElasticBuffer:
             hierarchical RDMA + NVLink communication to achieve higher bandwidth, and is more friendly
             to multi-plane/multi-rail networks.
         allow_multiple_reduction: whether to allow multiple reductions in combine. If disabled,
-            only one reduction will be done in the combine epilogue for best precision, 
+            only one reduction will be done in the combine epilogue for best precision,
             but it may increase data transfer size.
         prefer_overlap_with_compute: whether to prefer overlapping communication with compute.
             If enabled, we tend to use fewer SMs.
@@ -122,8 +122,9 @@ class ElasticBuffer:
 
     def __init__(self,
                  group: dist.ProcessGroup,
-                 # Provide `num_bytes`
+                 # Provide `num_bytes` (GPU + CPU buffer, excludes workspace)
                  num_bytes: Optional[int] = None,
+                 num_cpu_bytes: int = 0,
                  # Or provide MoE settings (BF16 by default)
                  num_max_tokens_per_rank: int = 0,
                  hidden: int = 0,
@@ -143,7 +144,9 @@ class ElasticBuffer:
 
         Arguments:
             group: the communication group.
-            num_bytes: the total buffer size in bytes, if set, overrides MoE-based calculation.
+            num_bytes: the total buffer size in bytes (GPU + CPU, excludes workspace), if set, overrides MoE-based calculation.
+                Must be aligned to 2 MB (``get_elastic_buffer_alignment()``).
+            num_cpu_bytes: the number of CPU buffer bytes (e.g. for Engram storage). Must be aligned to 2 MB.
             num_max_tokens_per_rank: the maximum number of tokens per rank, used for buffer size calculation.
             hidden: the hidden dimension of each token.
             num_topk: the number of top-k experts per token.
@@ -168,15 +171,17 @@ class ElasticBuffer:
         self.prefer_overlap_with_compute = prefer_overlap_with_compute
         self.nccl_comm_handle = get_nccl_comm_handle(group)
 
-        # Calculate buffer size
+        # Calculate buffer size (already 2 MB-aligned from hint functions / calculate_elastic_buffer_size)
         if num_bytes is None:
             # NOTES: we allow `num_topk == 0`, as the buffer size can also be calculated by number of ranks (maybe bigger though)
             num_bytes = _C.calculate_elastic_buffer_size(
                 self.nccl_comm_handle.get(),
                 num_max_tokens_per_rank, hidden, num_topk, use_fp8_dispatch,
                 allow_hybrid_mode, allow_multiple_reduction)
+
         if os.environ.get('EP_BUFFER_DEBUG', 0):
-            print(f'Initializing EP elastic buffer with {num_bytes} bytes at rank EP {group.rank()}/{group.size()}')
+            print(f'Initializing EP elastic buffer with {num_bytes} bytes '
+                  f'(cpu: {num_cpu_bytes}) at rank EP {group.rank()}/{group.size()}')
         self.num_bytes = num_bytes
 
         # Store default values
@@ -200,11 +205,18 @@ class ElasticBuffer:
                 num_allocated_qps = 17
         self.num_allocated_qps = num_allocated_qps
 
+        # Create CPU communicator (exchange POSIX FD handles for CPU segments)
+        cpu_comm = []
+        if allow_hybrid_mode and num_cpu_bytes > 0:
+            pid, fd = _C.create_cpu_handle(num_cpu_bytes)
+            cpu_comm = [None] * self.num_ranks
+            dist.all_gather_object(cpu_comm, (pid, fd), self.group)
+
         # Create CPP handle
         self.explicitly_destroy = explicitly_destroy
         self.runtime = _C.ElasticBuffer(group.rank(), group.size(),
-                                        self.nccl_comm_handle.get(),
-                                        num_bytes,
+                                        self.nccl_comm_handle.get(), cpu_comm,
+                                        num_bytes, num_cpu_bytes,
                                         deterministic,
                                         allow_hybrid_mode,
                                         allow_multiple_reduction,
@@ -245,6 +257,7 @@ class ElasticBuffer:
                              allow_multiple_reduction: bool = True) -> int:
         """
         Get a recommended buffer size (in bytes) for the given MoE settings, without constructing the buffer.
+        The returned value is aligned to 2 MB.
 
         Arguments:
             group: the communication group.
@@ -256,8 +269,9 @@ class ElasticBuffer:
             allow_multiple_reduction: whether to allow multiple reductions in combine.
 
         Returns:
-            size: the recommended buffer size in bytes.
+            size: the recommended buffer size in bytes (2 MB-aligned).
         """
+        # NOTES: calculate_elastic_buffer_size already returns 2 MB-aligned values
         return _C.calculate_elastic_buffer_size(
             get_nccl_comm_handle(group).get(),
             num_max_tokens_per_rank, hidden, num_topk, use_fp8_dispatch,
@@ -266,9 +280,10 @@ class ElasticBuffer:
     @staticmethod
     def get_engram_storage_size_hint(num_entries: int, hidden: int,
                                      num_max_tokens_per_rank: int,
-                                     dtype: torch.dtype = torch.bfloat16) -> int:
+                                     dtype: torch.dtype = torch.bfloat16) -> Tuple[int, int]:
         """
         (Experimental) Get a minimum buffer size requirement for Engram storage.
+        Both returned values are aligned to 2 MB.
 
         Arguments:
             num_entries: the number of entries in the Engram storage.
@@ -277,48 +292,78 @@ class ElasticBuffer:
             dtype: the data type, defaults to `torch.bfloat16`.
 
         Returns:
-            size: the recommended Engram storage size in bytes.
+            num_gpu_bytes: the recommended GPU buffer size in bytes for fetch recv area (2 MB-aligned).
+            num_cpu_bytes: the recommended CPU buffer size in bytes for engram local storage (2 MB-aligned).
         """
         # TODO: refactor all APIs to allow more parallelism
         # TODO: consider FP4
+        buffer_alignment = _C.get_elastic_buffer_alignment()
         num_sf_packs = ceil_div(hidden, 32) if dtype.itemsize <= 1 else 0
         # NOTES: we align per-entry size with 32 bytes (LDG.256)
         num_bytes_per_entry = align(hidden * dtype.itemsize + num_sf_packs * 4, 32)
-        return num_bytes_per_entry * (num_entries + num_max_tokens_per_rank)
+        num_gpu_bytes = align(num_bytes_per_entry * num_max_tokens_per_rank, buffer_alignment)
+        num_cpu_bytes = align(num_bytes_per_entry * num_entries, buffer_alignment)
+        return num_gpu_bytes, num_cpu_bytes
 
     @staticmethod
     def get_pp_buffer_size_hint(num_max_tensor_bytes: int,
                                 num_max_inflight_tensors: int) -> int:
         """
         (Experimental) Get a minimum buffer size requirement for pipeline-parallel (PP) send/recv.
+        The returned value is aligned to 2 MB.
 
         Arguments:
             num_max_tensor_bytes: the maximum tensor size in bytes per send/recv operation.
             num_max_inflight_tensors: the maximum number of in-flight tensors at once.
 
         Returns:
-            size: the recommended PP buffer size in bytes.
+            size: the recommended PP buffer size in bytes (2 MB-aligned).
         """
         # Align with `LDG.256`
         num_max_tensor_bytes = align(num_max_tensor_bytes, 32)
 
         # Each buffer (send and recv, * 2) contains prev and next rank (* 2) in the ring
-        return num_max_tensor_bytes * num_max_inflight_tensors * 2 * 2
+        buffer_alignment = _C.get_elastic_buffer_alignment()
+        return align(num_max_tensor_bytes * num_max_inflight_tensors * 2 * 2, buffer_alignment)
+
+    @staticmethod
+    def get_agrs_num_max_session_bytes(group: dist.ProcessGroup,
+                                       shapes: Union[Tuple[int, ...], torch.Size, Sequence[Union[Tuple[int, ...], torch.Size]]],
+                                       dtype: torch.dtype) -> int:
+        """
+        (Experimental) Calculate the total buffer bytes required for all-gather reduce-scatter (AGRS)
+        in a single session.
+
+        Arguments:
+            group: the communication group.
+            shapes: the local shape(s) of the tensor(s) before gathering. Pass a single shape
+                tuple, or a sequence of shape tuples for batched mode.
+            dtype: the data type for the tensor(s).
+
+        Returns:
+            size: the total number of bytes that will be used in this session.
+        """
+        if not isinstance(shapes[0], tuple):
+            shapes = (shapes,)
+        return sum(align(group.size() * math.prod(x) * dtype.itemsize, 32) for x in shapes)
 
     @staticmethod
     def get_agrs_buffer_size_hint(group: dist.ProcessGroup,
                                   num_max_session_bytes: int) -> int:
         """
         (Experimental) Get a minimum buffer size requirement for all-gather reduce-scatter (AGRS) sessions.
+        The returned value is aligned to 2 MB.
 
         Arguments:
             group: the communication group.
-            num_max_session_bytes: the maximum total bytes of all gathered tensors in a single session.
+            num_max_session_bytes: the maximum total bytes of all gathered tensors in a single session
+                (calculated by rounding each tensor up to 32 bytes).
 
         Returns:
-            size: the recommended AGRS buffer size in bytes.
+            size: the recommended AGRS buffer size in bytes (2 MB-aligned).
         """
-        return num_max_session_bytes
+        buffer_alignment = _C.get_elastic_buffer_alignment()
+        return align(num_max_session_bytes, buffer_alignment)
 
     def barrier(self, use_comm_stream: bool = True, with_cpu_sync: bool = False) -> None:
         """
@@ -518,7 +563,7 @@ class ElasticBuffer:
 
         Arguments:
             t: a single tensor or a sequence of tensors to all-gather. Each tensor must be contiguous and
-                CUDA-allocated, with `nbytes` aligned to 32 bytes.
+                CUDA-allocated.
 
         Returns:
             For a single tensor: `(gathered, handle)` where `gathered` has an extra leading dimension of

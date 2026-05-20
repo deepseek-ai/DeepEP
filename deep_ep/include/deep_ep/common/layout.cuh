@@ -76,8 +76,7 @@ struct WorkspaceLayout {
         // AGRS signals
         num_bytes += (kNumMaxInflightAGRS + 1) * kNumMaxRanks * sizeof(int);
 
-        // Ensure LDG.256 work
-        return math::align<int64_t>(num_bytes, 32);
+        return num_bytes;
     }
 
     __forceinline__ __device__ __host__ unsigned long long* get_nvl_barrier_counter_ptr() const {

@@ -29,9 +29,9 @@ constexpr int get_max_unroll_factor() {
 template <int kHiddenBytes>
 struct CombineVecTraits {
 #if defined(__CUDA_ARCH__) and (__CUDA_ARCH__ >= 1000)
-    // On SM100+, use longlong4_t (32 bytes) if hidden is aligned, otherwise fall back to int4 (16 bytes)
-    static constexpr bool kUseLonglong4 = (kHiddenBytes % sizeof(longlong4_t) == 0) and
-                                          ((kHiddenBytes / sizeof(longlong4_t)) % 32 == 0);
+    // On SM100+, use `longlong4_t` (32 bytes) if hidden is aligned, otherwise fall back to `int4` (16 bytes)
+    // NOTES: we observe some performance degrade with `longlong4_t`, temporarily disable it
+    static constexpr bool kUseLonglong4 = false;
     using vec_t = std::conditional_t<kUseLonglong4, longlong4_t, int4>;
 #else
     using vec_t = int4;
