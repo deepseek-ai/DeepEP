@@ -49,6 +49,18 @@ static inline bool hybrid_ep_token_capacity_is_valid(
   return false;
 }
 
+static inline int hybrid_ep_pad_num_of_tokens_per_rank(
+    int max_num_of_tokens_per_rank, int num_of_tokens_per_chunk_combine_api) {
+  if (num_of_tokens_per_chunk_combine_api <= 0) {
+    return max_num_of_tokens_per_rank;
+  }
+  return static_cast<int>(
+      (static_cast<int64_t>(max_num_of_tokens_per_rank) +
+       num_of_tokens_per_chunk_combine_api - 1) /
+      num_of_tokens_per_chunk_combine_api *
+      num_of_tokens_per_chunk_combine_api);
+}
+
 // Config used for buffer allocation.
 struct BufferConfig {
   int hidden_dim;
@@ -361,7 +373,6 @@ public:
 
         // Fill BufferConfig
         buffer_config.hidden_dim = hidden_dim;
-        buffer_config.max_num_of_tokens_per_rank = std::max(max_num_of_tokens_per_rank, 512);
         buffer_config.num_of_experts_per_rank = num_local_experts;
         buffer_config.num_of_ranks_per_node = num_of_ranks_per_node;
         buffer_config.num_of_nodes = num_of_nodes;
@@ -371,6 +382,9 @@ public:
         buffer_config.token_data_type = use_fp8 ? APP_TOKEN_DATA_TYPE::UINT8 : APP_TOKEN_DATA_TYPE::UINT16;
         buffer_config.num_of_tokens_per_chunk_dispatch_api = get_env_int("NUM_OF_TOKENS_PER_CHUNK_DISPATCH_API", 64);
         buffer_config.num_of_tokens_per_chunk_combine_api = get_env_int("NUM_OF_TOKENS_PER_CHUNK_COMBINE_API", 64);
+        buffer_config.max_num_of_tokens_per_rank = hybrid_ep_pad_num_of_tokens_per_rank(
+            std::max(max_num_of_tokens_per_rank, 512),
+            buffer_config.num_of_tokens_per_chunk_combine_api);
         buffer_config.num_of_dispatch_chunks = (buffer_config.max_num_of_tokens_per_rank - 1)
             / buffer_config.num_of_tokens_per_chunk_dispatch_api + 1;
         buffer_config.num_of_combine_chunks = (buffer_config.max_num_of_tokens_per_rank - 1)
@@ -449,6 +463,10 @@ public:
     // shared memory fits within the device limit. Reduces stages down to
     // MIN_STAGES, then errors if still too large.
     void adjust_template(HybridEpConfigInstance& config, bool fuse_permute_dispatch = false) {
+        config.max_num_of_tokens_per_rank = hybrid_ep_pad_num_of_tokens_per_rank(
+            config.max_num_of_tokens_per_rank,
+            config.num_of_tokens_per_chunk_combine_api);
+
         const int max_smem = max_smem_per_block;
         constexpr int MIN_STAGES = 2;
 
@@ -536,5 +554,8 @@ public:
             fflush(stderr);
             throw std::runtime_error("Cannot fit kernels into shared memory even with minimum stages.");
         }
+        buffer_config.max_num_of_tokens_per_rank = std::max(
+            buffer_config.max_num_of_tokens_per_rank,
+            config.max_num_of_tokens_per_rank);
     }
 };
