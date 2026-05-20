@@ -5,6 +5,7 @@
 #include <tuple>
 #include <map>
 #include <cassert>
+#include <cstdint>
 #include <cstring>
 #include <stdexcept>
 #include <optional>
@@ -13,6 +14,40 @@
 // Now we support up to 72(GB200) ranks per node.
 // This will be used to initialize the template param_t for communication kernel.
 #define MAX_NUM_OF_RANKS_PER_NODE 72
+
+static constexpr int64_t HYBRID_EP_IB_QP_MAX_TX_DEPTH = 65536;
+static constexpr int64_t HYBRID_EP_DISPATCH_TX_DEPTH_TOKEN_FACTOR = 3;
+static constexpr int64_t HYBRID_EP_DISPATCH_TX_DEPTH_EXTRA = 1;
+
+static inline bool hybrid_ep_token_capacity_is_valid(
+    int max_num_of_tokens_per_rank, int num_of_nodes, const char* config_name) {
+  if (num_of_nodes <= 1) {
+    return true;
+  }
+
+  int64_t tx_depth =
+      HYBRID_EP_DISPATCH_TX_DEPTH_TOKEN_FACTOR *
+          static_cast<int64_t>(max_num_of_tokens_per_rank) +
+      HYBRID_EP_DISPATCH_TX_DEPTH_EXTRA;
+  if (tx_depth < HYBRID_EP_IB_QP_MAX_TX_DEPTH) {
+    return true;
+  }
+
+  int max_num_of_tokens_per_rank_supported = static_cast<int>(
+      (HYBRID_EP_IB_QP_MAX_TX_DEPTH - 1 - HYBRID_EP_DISPATCH_TX_DEPTH_EXTRA) /
+      HYBRID_EP_DISPATCH_TX_DEPTH_TOKEN_FACTOR);
+  fprintf(stderr,
+          "[Error] Invalid %s: max_num_of_tokens_per_rank=%d exceeds the supported "
+          "maximum number of %d tokens in multi-node mode (required IB QP tx depth %ld, "
+          "limit < %ld).\n",
+          config_name,
+          max_num_of_tokens_per_rank,
+          max_num_of_tokens_per_rank_supported,
+          static_cast<long>(tx_depth),
+          static_cast<long>(HYBRID_EP_IB_QP_MAX_TX_DEPTH));
+  fflush(stderr);
+  return false;
+}
 
 // Config used for buffer allocation.
 struct BufferConfig {
@@ -44,6 +79,8 @@ struct BufferConfig {
     valid &= ((num_of_experts_per_rank * num_of_ranks_per_node) % 4 == 0);
     // TMA requires (num_of_tokens_per_chunk * num_of_ranks_per_node * 4) % 16 == 0
     valid &= ((num_of_tokens_per_chunk_dispatch_api * num_of_ranks_per_node) % 4 == 0);
+    valid &= hybrid_ep_token_capacity_is_valid(
+        max_num_of_tokens_per_rank, num_of_nodes, "BufferConfig");
     if(!valid){
       fprintf(stderr, "[Error] Invalid BufferConfig: hidden_dim=%d, num_of_experts_per_rank=%d, num_of_ranks_per_node=%d, num_of_tokens_per_chunk_dispatch_api=%d\n", 
               hidden_dim, num_of_experts_per_rank, num_of_ranks_per_node, num_of_tokens_per_chunk_dispatch_api);
@@ -119,6 +156,8 @@ struct HybridEpConfigInstance {
     valid &= ((num_of_experts_per_rank * num_of_ranks_per_node) % 4 == 0);
     // TMA requires (num_of_tokens_per_chunk * num_of_ranks_per_node * 4) % 16 == 0
     valid &= ((num_of_tokens_per_chunk_dispatch_api * num_of_ranks_per_node) % 4 == 0);
+    valid &= hybrid_ep_token_capacity_is_valid(
+        max_num_of_tokens_per_rank, num_of_nodes, "HybridEpConfigInstance");
     // In fuse mode, all chunk sizes must be the same
     if (fuse_permute_dispatch) {
       bool chunk_match = (num_of_tokens_per_chunk_dispatch_api == num_of_tokens_per_chunk_combine_api)
