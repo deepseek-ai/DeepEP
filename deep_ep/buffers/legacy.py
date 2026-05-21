@@ -378,7 +378,7 @@ class Buffer:
         if self.runtime.get_num_rdma_ranks() > 1:
             assert num_worst_tokens == 0, 'Internode dispatch does not support `num_worst_tokens > 0`'
             return self.internode_dispatch(x, handle, num_tokens_per_rank, num_tokens_per_rdma_rank, is_token_in_rank,
-                                           num_tokens_per_expert, topk_idx, topk_weights, expert_alignment, config, previous_event,
+                                           num_tokens_per_expert, topk_idx, topk_weights, expert_alignment, num_worst_tokens, config, previous_event,
                                            async_finish, allocate_on_comm_stream)
 
         # Launch the kernel with cached or non-cached mode
