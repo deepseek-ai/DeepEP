@@ -54,7 +54,7 @@ def check_nccl_so():
     # PyTorch may load another NCCL library, which is different to the linked one
     with open('/proc/self/maps', 'r') as f:
         loaded_nccl_so = None
-        for so in [line.strip().split(' ')[-1] for line in f if 'nccl' in line]:
+        for so in [line.strip().split(' ')[-1] for line in f if 'libnccl' in line]:
             loaded_nccl_so = so if loaded_nccl_so is None else loaded_nccl_so
             assert so == loaded_nccl_so, f'Duplicate NCCL runtime found in the current system: {so} and {loaded_nccl_so}'
     linked_nccl_so_candidates = sorted(glob.glob(f'{find_nccl_root()}/lib/libnccl.so*'))
