@@ -10,18 +10,21 @@ namespace deep_ep::elastic {
 
 template <int kNumQPs,
           int kNumEntriesPerRank,
-          int kHidden,
+          int kNumHiddenBytes,
+          int kNumSFPacks,
+          int kNumEntriesPerToken,
           int kNumRDMAPeers,
           int kNumRanksPerRDMAPeer,
           size_t kIntraRankStorageStride,
           int kNumThreads,
           typename team_t,
-          int kNumWarps = kNumThreads / 32,
-          int kNumHiddenBytes = kHidden * sizeof(nv_bfloat16)>
+          int kNumWarps = kNumThreads / 32>
 __global__ void __launch_bounds__(kNumThreads, 1)
 engram_fetch_impl(const ncclDevComm_t nccl_dev_comm, const ncclWindow_t nccl_window,
                   void* storage, void* fetched, int* indices,
                   ncclGinRequest_t* last_gin_requests,
+                  const sf_pack_t* sf_table, sf_pack_t* fetched_sf,
+                  const int sf_token_stride, const int sf_hidden_stride,
                   const int num_tokens) {
     const auto qp_idx = static_cast<int>(blockIdx.x);
     const auto warp_idx = ptx::get_warp_idx();
@@ -31,10 +34,10 @@ engram_fetch_impl(const ncclDevComm_t nccl_dev_comm, const ncclWindow_t nccl_win
     // Gin handle
     const auto gin = handle::NCCLGin(nccl_dev_comm, nccl_window, qp_idx, NCCL_GIN_RESOURCE_SHARING_CTA);
 
-    __shared__ bool sent_to_peer[kNumRDMAPeers];
+    __shared__ int num_requests_per_peer[kNumRDMAPeers];
     EP_STATIC_ASSERT(kNumRDMAPeers <= kNumThreads, "Too many RDMA peers");
     if (thread_idx < kNumRDMAPeers)
-        sent_to_peer[thread_idx] = false;
+        num_requests_per_peer[thread_idx] = 0;
     __syncthreads();
 
     // Issue RDMA
@@ -49,7 +52,7 @@ engram_fetch_impl(const ncclDevComm_t nccl_dev_comm, const ncclWindow_t nccl_win
     // TODO: deal with padded tokens
     if (ptx::elect_one_sync()) {
         #pragma unroll 4
-        for (int i = global_warp_idx; i < num_tokens; i += kNumQPs * kNumWarps) {
+        for (int i = global_warp_idx; i < num_tokens * kNumEntriesPerToken; i += kNumQPs * kNumWarps) {
             const auto global_idx = __ldg(indices + i);
             const auto owner_rank_idx = global_idx / kNumEntriesPerRank;
             const auto local_entry_idx = global_idx % kNumEntriesPerRank;
@@ -62,9 +65,27 @@ engram_fetch_impl(const ncclDevComm_t nccl_dev_comm, const ncclWindow_t nccl_win
             const auto src_byte_offset = static_cast<int64_t>(intra_peer_rank_idx) * kIntraRankStorageStride +
                                          static_cast<int64_t>(local_entry_idx) * kNumHiddenBytes;
 
-            // Delay ring DB
-            issue_rdma_get(i, peer_idx, src_byte_offset, ncclGinOptFlagsAggregateRequests);
-            sent_to_peer[peer_idx] = true;
+            // Issue RDMA get
+            const auto request_idx = atomicAdd_block(num_requests_per_peer + peer_idx, 1);
+            issue_rdma_get(
+                i, peer_idx, src_byte_offset,
+                // NOTES: requests may exceed the queue depth, flush if needed
+                (request_idx % kGinQPFlushDepth == (kGinQPFlushDepth - 1)) ? 0 : ncclGinOptFlagsAggregateRequests
+            );
+
+            // TODO: once NCCL supports ncclCoopWarp gin.get, drop the elect_one_sync and let the whole warp
+            // gather SF packs in parallel.
+            if constexpr (kNumSFPacks > 0) {
+                EP_STATIC_ASSERT(sizeof(sf_pack_t) == sizeof(int), "SF pack must be 4 bytes");
+                const auto token_idx = i / kNumEntriesPerToken;
+                const auto entry_idx = i % kNumEntriesPerToken;
+                const auto* src = reinterpret_cast<const int*>(sf_table) + global_idx * kNumSFPacks;
+                auto* dst = reinterpret_cast<int*>(fetched_sf)
+                          + token_idx * sf_token_stride + entry_idx * kNumSFPacks * sf_hidden_stride;
+                #pragma unroll
+                for (int p = 0; p < kNumSFPacks; ++p)
+                    dst[p * sf_hidden_stride] = __ldg(src + p);
+            }
         }
     }
     __syncthreads();
@@ -74,7 +95,7 @@ engram_fetch_impl(const ncclDevComm_t nccl_dev_comm, const ncclWindow_t nccl_win
     if (ptx::elect_one_sync()) {
         for (int i = warp_idx; i < kNumRDMAPeers; i += kNumWarps) {
             const auto request_ptr = last_gin_requests + qp_idx * kNumRDMAPeers + i;
-            if (sent_to_peer[i]) {
+            if (num_requests_per_peer[i] > 0) {
                 gin.flush_async<team_t, ncclCoopThread>(i, request_ptr);
             } else {
                 EP_STATIC_ASSERT(sizeof(ncclGinRequest_t) == sizeof(int4), "Invalid request size");

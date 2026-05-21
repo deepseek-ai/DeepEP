@@ -35,6 +35,7 @@ dispatch_impl(
     int* cumulative_local_expert_recv_stats,
     int* psum_num_recv_tokens_per_scaleup_rank,
     int* psum_num_recv_tokens_per_expert,
+    int* num_unaligned_recv_tokens_per_expert,
     int* dst_buffer_slot_idx,
     const int num_tokens,
     const int sf_token_stride, const int sf_hidden_stride,
@@ -206,6 +207,11 @@ dispatch_impl(
                 #pragma unroll
                 for (int j = 0; j < kNumRanks; ++ j)
                     sum += expert_count[j * kNumExpertsPerRank + i];
+
+                // Write unaligned count before aligning
+                if (num_unaligned_recv_tokens_per_expert != nullptr)
+                    num_unaligned_recv_tokens_per_expert[i] = sum;
+
                 expert_count[i] = math::align(sum, kExpertAlignment);
 
                 // Update statistics counters

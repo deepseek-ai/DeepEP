@@ -64,8 +64,8 @@ combine_impl(nv_bfloat16* x,
         ptx::mbarrier_init_with_fence(mbarrier_ptr, 1);
     __syncwarp();
 
-    // Expanding mode must not be backward
-    if constexpr (kUseExpandedLayout)
+    // Expanding send mode must not be backward
+    if constexpr (kDoExpandedSend)
         EP_DEVICE_ASSERT(topk_weights == nullptr);
 
     // Gin handle
@@ -213,8 +213,14 @@ combine_impl(nv_bfloat16* x,
         }
 
         // Write topk weights
-        if (not kUseExpandedLayout and topk_weights != nullptr and lane_idx < kNumTopk) {
-            const float value = __ldg(topk_weights + (i * kNumTopk + lane_idx));
+        if (not kDoExpandedSend and topk_weights != nullptr and lane_idx < kNumTopk) {
+            float value = 0;
+            if constexpr (kUseExpandedLayout) {
+                if (stored_topk_slot_idx >= 0)
+                    value = __ldg(topk_weights + stored_topk_slot_idx);
+            } else {
+                value = __ldg(topk_weights + (i * kNumTopk + lane_idx));
+            }
             master_token_buffer.get_topk_weights_ptr()[lane_idx] = value;
         }
         __syncwarp();

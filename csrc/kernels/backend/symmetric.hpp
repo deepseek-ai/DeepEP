@@ -313,9 +313,6 @@ static std::shared_ptr<SymmetricMemory> alloc(const int64_t& num_gpu_bytes, cons
     // Enable NCCL elastic buffer register if the allocator may produce CPU-backed segments
     if (dynamic_cast<ElasticSymmetricMemory*>(result.get()) != nullptr)
         setenv("NCCL_ELASTIC_BUFFER_REGISTER", "1", 0);
-    // Multi-plane: all ranks share CPU segments, skip proxy re-export for sysmem handles
-    if (dynamic_cast<HybridElasticSymmetricMemory*>(result.get()) != nullptr)
-        setenv("NCCL_SYM_REUSE_SYSMEM_HANDLES", "1", 0);
     return result;
 }
 

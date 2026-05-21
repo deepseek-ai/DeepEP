@@ -114,8 +114,8 @@ hybrid_combine_impl(nv_bfloat16* x,
         if constexpr (kUseScaleupRankLayout)
             scaleup_buffer = scaleup_buffer.get_rank_buffer(scaleup_rank_idx);
 
-        // Expanding mode must not be backward
-        if constexpr (kUseExpandedLayout)
+        // Expanding send mode must not be backward
+        if constexpr (kDoExpandedSend)
             EP_DEVICE_ASSERT(topk_weights == nullptr);
 
         // Tail issuer
@@ -301,9 +301,15 @@ hybrid_combine_impl(nv_bfloat16* x,
                     }
                 }
 
-                // Write top-k weights
-                if (not kUseExpandedLayout and topk_weights != nullptr and lane_idx < kNumTopk) {
-                    const float value = __ldg(topk_weights + (token_idx * kNumTopk + lane_idx));
+                // Write top-k weights (expanded send handled inside the loop above)
+                if (not kDoExpandedSend and topk_weights != nullptr and lane_idx < kNumTopk) {
+                    float value = 0;
+                    if constexpr (kUseExpandedLayout) {
+                        if (stored_topk_slot_idx >= 0)
+                            value = __ldg(topk_weights + stored_topk_slot_idx);
+                    } else {
+                        value = __ldg(topk_weights + (token_idx * kNumTopk + lane_idx));
+                    }
                     tma_buffer.get_topk_weights_ptr()[lane_idx] = value;
                     ptx::tma_store_fence();
                 }
@@ -527,7 +533,7 @@ hybrid_combine_impl(nv_bfloat16* x,
                 // NOTES: the slot indices must follow the master lane
                 stored_src_buffer_idx = ptx::exchange(
                     stored_src_buffer_idx, ptx::get_master_lane_idx(ptx::match(stored_src_scaleup_rank_idx)));
-                if (not kUseExpandedLayout and stored_src_scaleup_rank_idx >= 0) {
+                if (stored_src_scaleup_rank_idx >= 0) {
                     tma_buffer.get_topk_weights_ptr()[lane_idx] =
                         scaleup_buffer.get_token_buffer(stored_src_buffer_idx, true)
                                     .get_topk_weights_ptr()[lane_idx];

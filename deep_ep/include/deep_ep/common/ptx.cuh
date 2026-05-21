@@ -89,6 +89,15 @@ __forceinline__ __device__ void mbarrier_wait_and_flip_phase(mbarrier* ptr, arri
     phase ^= 1;
 }
 
+template <int kNumBytes>
+__forceinline__ __device__ void st_bulk(void* smem_ptr) {
+    EP_STATIC_ASSERT(kNumBytes % 8 == 0, "`st.bulk` requires size to be a multiple of 8");
+    asm volatile("st.bulk.weak.shared::cta [%0], %1, 0;\n" ::
+                 "r"(static_cast<uint32_t>(__cvta_generic_to_shared(smem_ptr))),
+                 "r"(kNumBytes)
+                 : "memory");
+}
+
 __forceinline__ __device__ void tma_store_fence() {
     asm volatile("fence.proxy.async.shared::cta;");
 }
@@ -269,6 +278,14 @@ __forceinline__ __device__ void red_add_rel_sys(const int64_t* ptr, const int64_
     asm volatile("red.release.sys.global.add.u64 [%0], %1;" :: "l"(ptr), "l"(value));
 }
 
+__forceinline__ __device__ void red_add_rel_gpu(const int* ptr, const int& value) {
+    asm volatile("red.release.gpu.global.add.s32 [%0], %1;" :: "l"(ptr), "r"(value));
+}
+
+__forceinline__ __device__ void red_add_rel_gpu(const int64_t* ptr, const int64_t& value) {
+    asm volatile("red.release.gpu.global.add.u64 [%0], %1;" :: "l"(ptr), "l"(value));
+}
+
 template <typename dtype_t>
 __forceinline__ __device__ dtype_t ld_acquire_sys(const dtype_t* ptr) {
     if constexpr (sizeof(dtype_t) == 4) {
@@ -402,6 +419,10 @@ __device__ __forceinline__ int warp_inclusive_sum(int value, const int& lane_idx
             value += synced;
     }
     return value;
+}
+
+__device__ __forceinline__ int warp_exclusive_sum(const int& value, const int& lane_idx) {
+    return warp_inclusive_sum(value, lane_idx) - value;
 }
 
 __device__ __forceinline__ float2 fadd2(const float2& a, const float2& b) {

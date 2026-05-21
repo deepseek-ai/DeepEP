@@ -72,20 +72,21 @@ __device__ __forceinline__ void tma_copy(
         return std::make_pair(offset, num_transaction_bytes);
     };
 
+    // Fill pipeline: issue loads for the first kNumStages iterations
+    for (int64_t iter_idx = 0; iter_idx < kNumStages and iter_idx < num_iterations; ++ iter_idx) {
+        const auto [load_offset, num_load_bytes] = get_iter_info(iter_idx);
+        ptx::tma_load_1d(
+            tma_buffers + iter_idx * kNumTMABytesPerStage,
+            math::advance_ptr(src_ptr, load_offset),
+            mbarriers + iter_idx, num_load_bytes);
+        ptx::mbarrier_arrive_and_set_tx(mbarriers + iter_idx, num_load_bytes);
+    }
+
     for (int64_t iter_idx = 0; iter_idx < num_iterations; ++ iter_idx) {
         const auto stage_idx = static_cast<int>(iter_idx % kNumStages);
         const auto [store_offset, num_store_bytes] = get_iter_info(iter_idx);
 
-        // Fill pipeline: issue loads for the first kNumStages iterations
-        if (iter_idx < kNumStages) {
-            ptx::tma_load_1d(
-                tma_buffers + stage_idx * kNumTMABytesPerStage,
-                math::advance_ptr(src_ptr, store_offset),
-                mbarriers + stage_idx, num_store_bytes);
-            ptx::mbarrier_arrive_and_set_tx(mbarriers + stage_idx, num_store_bytes);
-        }
-
-        // Wait for this stage's load, then store
+        // Wait this stage's load and issue store
         ptx::mbarrier_wait_and_flip_phase(mbarriers + stage_idx, phases[stage_idx]);
         ptx::tma_store_1d(
             math::advance_ptr(dst_ptr, store_offset),
@@ -93,10 +94,10 @@ __device__ __forceinline__ void tma_copy(
             num_store_bytes);
         ptx::tma_store_commit();
 
-        // Prefetch: wait until this stage's buffer is safe to reuse, then issue next load
+        // Prefetch: wait until this stage's store is completed, then issue next load
         const auto next_iter_idx = iter_idx + kNumStages;
         if (next_iter_idx < num_iterations) {
-            ptx::tma_store_wait<kNumStages - 1>();
+            ptx::tma_store_wait();
             const auto [load_offset, num_load_bytes] = get_iter_info(next_iter_idx);
             ptx::tma_load_1d(
                 tma_buffers + stage_idx * kNumTMABytesPerStage,

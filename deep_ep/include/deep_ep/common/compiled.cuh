@@ -81,5 +81,7 @@ constexpr int kNumAlignedSFPacks = 16 / sizeof(sf_pack_t);
 
 // Some communication channel settings
 constexpr int kNumMaxChannels = 1024;
+constexpr int kGinQPDepth = 1024;
+constexpr int kGinQPFlushDepth = 768;
 
 } // namespace deep_ep

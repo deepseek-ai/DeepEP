@@ -11,82 +11,6 @@
 
 namespace deep_ep::elastic {
 
-class DispatchPrologueRuntime final : public jit::LaunchRuntime<DispatchPrologueRuntime> {
-public:
-    struct Args {
-        // Templated arguments
-        int num_warps;
-        int num_ranks;
-        int num_max_tokens_per_rank;
-        int num_experts, num_topk;
-
-        // Parameters
-        topk_idx_t* topk_idx;
-        int* rank_count_buffer;
-        int* dst_buffer_slot_idx;
-        int num_tokens;
-        int rank_idx;
-
-        jit::LaunchArgs launch_args;
-    };
-
-    static std::string generate_impl(const Args& args) {
-        return fmt::format(R"(
-#include <deep_ep/impls/dispatch_deterministic_prologue.cuh>
-
-using namespace deep_ep::elastic;
-
-static void __instantiate_kernel() {{
-    auto ptr = reinterpret_cast<void*>(&dispatch_deterministic_prologue_impl<{}, {}, {}, {}, {}, {}>);
-}}
-)",
-                           args.launch_args.grid_dim.first,
-                           args.num_warps,
-                           args.num_ranks,
-                           args.num_max_tokens_per_rank,
-                           args.num_experts, args.num_topk);
-    }
-
-    static void launch_impl(const jit::KernelHandle& kernel, const jit::LaunchConfigHandle& config, Args args) {
-        EP_CUDA_UNIFIED_CHECK(jit::launch_kernel(kernel,
-                                                 config,
-                                                 args.topk_idx,
-                                                 args.rank_count_buffer,
-                                                 args.dst_buffer_slot_idx,
-                                                 args.num_tokens,
-                                                 args.rank_idx));
-    }
-};
-
-static void launch_dispatch_deterministic_prologue(topk_idx_t* topk_idx, int* rank_count_buffer,
-                                                   int* dst_buffer_slot_idx,
-                                                   const int& num_tokens, const int& num_max_tokens_per_rank,
-                                                   const int& num_experts, const int& num_topk,
-                                                   const int& rank_idx, const int& num_ranks,
-                                                   const int& num_sms, const int& num_smem_bytes,
-                                                   const at::cuda::CUDAStream& stream) {
-    constexpr auto num_warps = 8;
-    constexpr auto num_threads = num_warps * 32;
-    EP_HOST_ASSERT((2 * num_warps + 1) * num_ranks * sizeof(int) <= num_smem_bytes and
-                   "Insufficient shared memory");
-
-    // Generate, build and launch
-    const DispatchPrologueRuntime::Args args = {
-        .num_warps = num_warps,
-        .num_ranks = num_ranks,
-        .num_max_tokens_per_rank = num_max_tokens_per_rank,
-        .num_experts = num_experts, .num_topk = num_topk,
-        .topk_idx = topk_idx,
-        .rank_count_buffer = rank_count_buffer,
-        .dst_buffer_slot_idx = dst_buffer_slot_idx,
-        .num_tokens = num_tokens,
-        .rank_idx = rank_idx,
-        .launch_args = jit::LaunchArgs(num_sms, num_threads, num_smem_bytes, 1, true)};
-    const auto code = DispatchPrologueRuntime::generate(args);
-    const auto runtime = jit::compiler->build("dispatch_deterministic_prologue", code);
-    DispatchPrologueRuntime::launch(runtime, args, stream);
-}
-
 class DispatchRuntime final : public jit::LaunchRuntime<DispatchRuntime> {
 public:
     struct Args {
@@ -110,6 +34,7 @@ public:
         int* cumulative_local_expert_recv_stats;
         int* psum_num_recv_tokens_per_scaleup_rank;
         int* psum_num_recv_tokens_per_expert;
+        int* num_unaligned_recv_tokens_per_expert;
         int* dst_buffer_slot_idx;
         int* token_metadata_at_forward;
         int num_tokens;
@@ -172,6 +97,7 @@ static void __instantiate_kernel() {{
                 args.cumulative_local_expert_recv_stats,
                 args.psum_num_recv_tokens_per_scaleup_rank,
                 args.psum_num_recv_tokens_per_expert,
+                args.num_unaligned_recv_tokens_per_expert,
                 args.dst_buffer_slot_idx,
                 args.num_tokens,
                 args.sf_token_stride, args.sf_hidden_stride,
@@ -187,6 +113,7 @@ static void __instantiate_kernel() {{
                 args.cumulative_local_expert_recv_stats,
                 args.psum_num_recv_tokens_per_scaleup_rank,
                 args.psum_num_recv_tokens_per_expert,
+                args.num_unaligned_recv_tokens_per_expert,
                 args.dst_buffer_slot_idx,
                 args.token_metadata_at_forward,
                 args.num_tokens,
@@ -217,6 +144,7 @@ static void launch_dispatch(void* x, void* sf,
                             int* cumulative_local_expert_recv_stats,
                             int* psum_num_recv_tokens_per_scaleup_rank,
                             int* psum_num_recv_tokens_per_expert,
+                            int* num_unaligned_recv_tokens_per_expert,
                             int* dst_buffer_slot_idx,
                             int* token_metadata_at_forward,
                             const int& num_tokens, const int& num_max_tokens_per_rank,
@@ -233,7 +161,6 @@ static void launch_dispatch(void* x, void* sf,
                             const int& num_smem_bytes,
                             const int& num_qps, const int64_t& num_timeout_cycles,
                             const bool& cached_mode,
-                            const bool& deterministic,
                             const bool& do_cpu_sync,
                             const at::cuda::CUDAStream& stream) {
     // Cached mode does not support expert token counting
@@ -246,7 +173,7 @@ static void launch_dispatch(void* x, void* sf,
     // Notify warps
     // TODO: why don't we use 4 notify warps?
     const int num_notify_warps = cached_mode ? 0 : kNumNotifyWarps;
-    const bool reuse_slot_indices = cached_mode or deterministic;
+    const bool reuse_slot_indices = cached_mode;
     const int num_notify_smem_bytes = cached_mode ? 0 : get_num_notify_smem_bytes(num_ranks, num_experts);
     EP_HOST_ASSERT(num_notify_warps % 4 == 0);
 
@@ -257,17 +184,12 @@ static void launch_dispatch(void* x, void* sf,
 
     // Maximize shared memory utilization
     if (num_scaleout_ranks == 1) {
-        // Too many warps may cause performance degrade, so we limit the total warps into 512
         const auto token_layout = get_dispatch_token_layout(hidden, elem_size, num_sf_packs, num_topk);
-        num_dispatch_warps = std::min<int>(std::min<int>(
-            (num_smem_bytes - num_notify_smem_bytes) / token_layout.get_num_bytes<true>(), 32 - num_notify_warps),
-            math::ceil_div(512, num_sms));
+        num_dispatch_warps = std::min<int>(
+            (num_smem_bytes - num_notify_smem_bytes) / token_layout.get_num_bytes<true>(), 32 - num_notify_warps);
         num_threads = (num_notify_warps + num_dispatch_warps) * 32;
     } else {
         // Hybrid kernels
-        // Some unimplemented assertions
-        EP_HOST_ASSERT(not deterministic);
-
         num_scaleout_warps = num_channels_per_sm;
         num_forward_warps = num_channels_per_sm;
         num_threads = (num_notify_warps + num_scaleout_warps + num_forward_warps) * 32;
@@ -291,6 +213,7 @@ static void launch_dispatch(void* x, void* sf,
         .cumulative_local_expert_recv_stats = cumulative_local_expert_recv_stats,
         .psum_num_recv_tokens_per_scaleup_rank = psum_num_recv_tokens_per_scaleup_rank,
         .psum_num_recv_tokens_per_expert = psum_num_recv_tokens_per_expert,
+        .num_unaligned_recv_tokens_per_expert = num_unaligned_recv_tokens_per_expert,
         .dst_buffer_slot_idx = dst_buffer_slot_idx,
         .token_metadata_at_forward = token_metadata_at_forward,
         .num_tokens = num_tokens,
@@ -310,13 +233,13 @@ class DispatchCopyEpilogueRuntime final : public jit::LaunchRuntime<DispatchCopy
 public:
     struct Args {
         // Templated arguments
-        bool do_expand, cached_mode;
+        bool do_expand, cached_mode, do_zero_padding;
         int num_channels;
         int num_warps;
         int num_scaleout_ranks, num_scaleup_ranks;
         int num_hidden_bytes, num_sf_packs;
         int num_max_tokens_per_rank;
-        int num_experts, num_topk;
+        int num_experts, num_topk, expert_alignment;
 
         // Parameters
         void *buffer, *workspace;
@@ -326,6 +249,7 @@ public:
         topk_idx_t* recv_topk_idx; float* recv_topk_weights;
         int* recv_src_metadata;
         int* channel_linked_list;
+        int* num_unaligned_recv_tokens_per_expert;
         int num_recv_tokens;
         int recv_sf_token_stride, recv_sf_hidden_stride;
         int scaleout_rank_idx, scaleup_rank_idx;
@@ -340,15 +264,15 @@ public:
 using namespace deep_ep::elastic;
 
 static void __instantiate_kernel() {{
-    auto ptr = reinterpret_cast<void*>(&dispatch_copy_epilogue_impl<{}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}>);
+    auto ptr = reinterpret_cast<void*>(&dispatch_copy_epilogue_impl<{}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}>);
 }}
 )",
-                           args.do_expand, args.cached_mode,
+                           args.do_expand, args.cached_mode, args.do_zero_padding,
                            args.launch_args.grid_dim.first, args.num_channels, args.num_warps,
                            args.num_scaleout_ranks, args.num_scaleup_ranks,
                            args.num_hidden_bytes, args.num_sf_packs,
                            args.num_max_tokens_per_rank,
-                           args.num_experts, args.num_topk);
+                           args.num_experts, args.num_topk, args.expert_alignment);
     }
 
     static void launch_impl(const jit::KernelHandle& kernel, const jit::LaunchConfigHandle& config, Args args) {
@@ -359,6 +283,7 @@ static void __instantiate_kernel() {{
                                                  args.recv_x, args.recv_sf, args.recv_topk_idx, args.recv_topk_weights,
                                                  args.recv_src_metadata,
                                                  args.channel_linked_list,
+                                                 args.num_unaligned_recv_tokens_per_expert,
                                                  args.num_recv_tokens,
                                                  args.recv_sf_token_stride, args.recv_sf_hidden_stride,
                                                  args.scaleout_rank_idx, args.scaleup_rank_idx));
@@ -372,15 +297,17 @@ static void launch_dispatch_copy_epilogue(void* buffer, void* workspace,
                                           topk_idx_t* recv_topk_idx, float* recv_topk_weights,
                                           int* recv_src_metadata,
                                           int* channel_linked_list,
+                                          int* num_unaligned_recv_tokens_per_expert,
                                           const int& num_recv_tokens, const int& num_max_tokens_per_rank,
                                           const int& num_hidden_bytes,
                                           const int& num_sf_packs, const int& recv_sf_token_stride, const int& recv_sf_hidden_stride,
-                                          const int& num_experts, const int& num_topk,
+                                          const int& num_experts, const int& num_topk, const int& expert_alignment,
                                           const int& scaleout_rank_idx, const int& scaleup_rank_idx,
                                           const int& num_scaleout_ranks, const int& num_scaleup_ranks,
                                           const int& num_sms, const int& num_smem_bytes,
                                           const int& num_channels,
                                           const bool& do_expand, const bool& cached_mode,
+                                          const bool& do_zero_padding,
                                           const at::cuda::CUDAStream& stream) {
     // Maximize shared memory utilization
     const auto token_layout = layout::TokenLayout(num_hidden_bytes, num_sf_packs * sizeof(sf_pack_t), num_topk, true);
@@ -389,12 +316,12 @@ static void launch_dispatch_copy_epilogue(void* buffer, void* workspace,
 
     // Generate, build and launch
     const DispatchCopyEpilogueRuntime::Args args = {
-        .do_expand = do_expand, .cached_mode = cached_mode,
+        .do_expand = do_expand, .cached_mode = cached_mode, .do_zero_padding = do_zero_padding,
         .num_channels = num_channels, .num_warps = num_warps,
         .num_scaleout_ranks = num_scaleout_ranks, .num_scaleup_ranks = num_scaleup_ranks,
         .num_hidden_bytes = num_hidden_bytes, .num_sf_packs = num_sf_packs,
         .num_max_tokens_per_rank = num_max_tokens_per_rank,
-        .num_experts = num_experts, .num_topk = num_topk,
+        .num_experts = num_experts, .num_topk = num_topk, .expert_alignment = expert_alignment,
         .buffer = buffer, .workspace = workspace,
         .psum_num_recv_tokens_per_scaleup_rank = psum_num_recv_tokens_per_scaleup_rank,
         .psum_num_recv_tokens_per_expert = psum_num_recv_tokens_per_expert,
@@ -402,6 +329,7 @@ static void launch_dispatch_copy_epilogue(void* buffer, void* workspace,
         .recv_topk_idx = recv_topk_idx, .recv_topk_weights = recv_topk_weights,
         .recv_src_metadata = recv_src_metadata,
         .channel_linked_list = channel_linked_list,
+        .num_unaligned_recv_tokens_per_expert = num_unaligned_recv_tokens_per_expert,
         .num_recv_tokens = num_recv_tokens,
         .recv_sf_token_stride = recv_sf_token_stride, .recv_sf_hidden_stride = recv_sf_hidden_stride,
         .scaleout_rank_idx = scaleout_rank_idx, .scaleup_rank_idx = scaleup_rank_idx,

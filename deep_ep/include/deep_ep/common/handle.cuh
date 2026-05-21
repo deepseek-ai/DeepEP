@@ -100,8 +100,11 @@ struct NCCLGin {
         const auto dst_ptr = get_sym_ptr<team_t>(sym_ptr, dst_rank_idx);
         // Use symmetric pointers as much as possible, RDMA otherwise
         if (dst_ptr != nullptr) {
-            // NOTES: local rank (or even NVLink-connected) for tag rail can also bypass
-            ptx::red_add_rel_sys(dst_ptr, value);
+            if (std::is_same_v<team_t, ncclTeamTagRail> or dst_ptr == sym_ptr) {
+                ptx::red_add_rel_gpu(dst_ptr, value);
+            } else {
+                ptx::red_add_rel_sys(dst_ptr, value);
+            }
         } else {
             EP_DEVICE_ASSERT((not std::is_same_v<team_t, ncclTeamTagLsa>));
             EP_DEVICE_ASSERT((std::is_same_v<dtype_t, int64_t>) or (std::is_same_v<dtype_t, uint64_t>));
