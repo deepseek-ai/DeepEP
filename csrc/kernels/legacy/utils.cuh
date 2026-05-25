@@ -382,6 +382,15 @@ __device__ __forceinline__ void tma_store_fence() {
     asm volatile("fence.proxy.async.shared::cta;");
 }
 
+__device__ __forceinline__ void fence_view_async_shared() {
+    asm volatile (
+        "{\n\t"
+        "fence.proxy.async.shared::cta; \n"
+        "}"
+        ::
+        : "memory");
+}
+
 constexpr uint64_t kEvictFirst = 0x12f0000000000000;
 constexpr uint64_t kEvictNormal = 0x1000000000000000;
 
