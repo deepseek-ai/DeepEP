@@ -242,16 +242,61 @@ def check_fast_rdma_atomic_support(nic_name: str = _DEFAULT_NIC_NAME) -> bool:
         return False
 
 
+def _get_local_gpu_count() -> int:
+    """
+    Get the number of GPUs/ranks sharing local RDMA NICs.
+    """
+
+    try:
+        result = subprocess.run(['nvidia-smi', '-L'], capture_output=True, text=True)
+        count = len(re.findall(r'^GPU \d+:', result.stdout, re.MULTILINE)) if result.returncode == 0 else 0
+        if count > 0:
+            return count
+    except Exception:
+        pass
+
+    if torch.cuda.is_available():
+        count = torch.cuda.device_count()
+        if count > 0:
+            return count
+
+    return 1
+
+
+def _get_rdma_nic_prefix(nic_name: str) -> str:
+    """
+    Get the RDMA NIC prefix used to count peer NIC devices.
+    """
+    match = re.match(r'(.+_)\d+$', nic_name)
+    return match.group(1) if match else nic_name
+
+
+def _get_active_rdma_nic_count(ibstat_output: str, nic_name: str) -> int:
+    """
+    Count active RDMA NICs from `ibstat` output using the selected NIC prefix.
+    """
+    nic_prefix = _get_rdma_nic_prefix(nic_name)
+    nic_pattern = rf'{re.escape(nic_prefix)}\d+' if nic_prefix != nic_name else re.escape(nic_name)
+    ca_blocks = re.findall(r"^CA '[^']+'.*?(?=^CA '|\Z)", ibstat_output, re.MULTILINE | re.DOTALL)
+    count = sum(
+        1 for block in ca_blocks
+        if re.match(rf"^CA '{nic_pattern}'", block)
+        and re.search(r'\bState:\s*Active\b', block)
+        and re.search(r'\bRate:\s*\d+', block)
+    )
+    return max(count, 1)
+
+
 @functools.lru_cache()
 def get_rdma_gbs(nic_name: str = _DEFAULT_NIC_NAME) -> float:
     """
-    Get the RDMA bandwidth in GB/s, cached.
+    Get the per-GPU RDMA bandwidth in GB/s, cached.
 
     Arguments:
         nic_name: the NIC device name.
 
     Returns:
-        gbs: the RDMA bandwidth in GB/s (0 if detection fails).
+        gbs: the RDMA bandwidth in GB/s per local GPU/rank (0 if detection fails).
     """
     # noinspection PyBroadException
     try:
@@ -262,7 +307,16 @@ def get_rdma_gbs(nic_name: str = _DEFAULT_NIC_NAME) -> float:
         match = re.search(pattern, output, re.DOTALL)
         assert match
         rate = int(match.group(1))
-        return rate / 8
+        nic_count = _get_active_rdma_nic_count(output, nic_name)
+        # Try to detect 802.3ad LACP bonding slaves and multiply by slave count
+        result = subprocess.run(f'cat /sys/class/infiniband/{nic_name}/device/net/*/upper_*/bonding/slaves',
+                                shell=True, capture_output=True, text=True)
+        slave_count = len(result.stdout.strip().split())
+        if slave_count >= 2:
+            nic_count *= slave_count
+        gpu_count = _get_local_gpu_count()
+
+        return rate * nic_count / gpu_count / 8
     except Exception as e:
         print(f'Failed to get RDMA connection speed: {e}')
         return 0

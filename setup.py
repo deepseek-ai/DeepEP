@@ -203,6 +203,9 @@ if __name__ == '__main__':
                 'include/deep_ep/**/*',
             ]
         },
+        install_requires=[
+            "deepxtrace>=0.1.0",
+        ],
         ext_modules=[
             CUDAExtension(name='deep_ep._C',
                           include_dirs=include_dirs,
