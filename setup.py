@@ -120,6 +120,7 @@ if __name__ == '__main__':
     # ``libnccl.so.2`` only, so resolve the real name dynamically.
     sources.extend(['csrc/kernels/backend/nccl.cu'])
     include_dirs.extend([f'{nccl_root_dir}/include'])
+    library_dirs.extend([f'{nccl_root_dir}/lib'])
     nccl_lib = get_nccl_lib_name(nccl_root_dir)
     extra_link_args.extend([f'-l:{nccl_lib}', f'-Wl,-rpath,{nccl_root_dir}/lib'])
 
