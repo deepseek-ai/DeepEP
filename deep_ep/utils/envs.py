@@ -162,7 +162,9 @@ def check_nvlink_connections(group: dist.ProcessGroup) -> None:
         # noinspection PyTypeChecker
         devices = os.environ.get('CUDA_VISIBLE_DEVICES', '0,1,2,3,4,5,6,7').strip(',').split(',')
         physical_device_idx = int(devices[torch.cuda.current_device()])
-        physical_device_indices = [0, ] * group.size()
+        physical_device_indices = [
+            0,
+        ] * group.size()
         dist.all_gather_object(physical_device_indices, physical_device_idx, group)
 
         # Check whether they are all connected via NVLink
@@ -202,8 +204,7 @@ def get_nvlink_gbs(factor: float = 0.9) -> float:
     """
     # noinspection PyBroadException
     try:
-        result = subprocess.run(['nvidia-smi', 'nvlink', '-s'],
-                                capture_output=True, text=True, check=True)
+        result = subprocess.run(['nvidia-smi', 'nvlink', '-s'], capture_output=True, text=True, check=True)
         output = result.stdout
         pattern = r'GPU \d+:.*?(?=^GPU \d+:|^$)'
         match = re.search(pattern, output, re.MULTILINE | re.DOTALL)
@@ -280,10 +281,7 @@ def _get_active_rdma_nic_count(ibstat_output: str, nic_name: str) -> int:
     ca_blocks = re.findall(r"^CA '[^']+'.*?(?=^CA '|\Z)", ibstat_output, re.MULTILINE | re.DOTALL)
     count = sum(
         1 for block in ca_blocks
-        if re.match(rf"^CA '{nic_pattern}'", block)
-        and re.search(r'\bState:\s*Active\b', block)
-        and re.search(r'\bRate:\s*\d+', block)
-    )
+        if re.match(rf"^CA '{nic_pattern}'", block) and re.search(r'\bState:\s*Active\b', block) and re.search(r'\bRate:\s*\d+', block))
     return max(count, 1)
 
 
@@ -310,7 +308,9 @@ def get_rdma_gbs(nic_name: str = _DEFAULT_NIC_NAME) -> float:
         nic_count = _get_active_rdma_nic_count(output, nic_name)
         # Try to detect 802.3ad LACP bonding slaves and multiply by slave count
         result = subprocess.run(f'cat /sys/class/infiniband/{nic_name}/device/net/*/upper_*/bonding/slaves',
-                                shell=True, capture_output=True, text=True)
+                                shell=True,
+                                capture_output=True,
+                                text=True)
         slave_count = len(result.stdout.strip().split())
         if slave_count >= 2:
             nic_count *= slave_count

@@ -68,6 +68,7 @@ def get_package_version():
 
 
 class CustomBuildPy(build_py):
+
     def run(self):
         # Make clusters' cache setting default into `envs.py`
         self.generate_default_envs()
@@ -98,9 +99,7 @@ if __name__ == '__main__':
     cxx_flags = ['-O3', '-Wno-deprecated-declarations', '-Wno-unused-variable', '-Wno-sign-compare', '-Wno-reorder', '-Wno-attributes']
     nvcc_flags = ['-O3', '-Xcompiler', '-O3', '--extended-lambda', '--diag-suppress=128,2417']
     sources = ['csrc/python_api.cpp', 'csrc/kernels/legacy/layout.cu', 'csrc/kernels/legacy/intranode.cu']
-    include_dirs = [f'{current_dir}/deep_ep/include',
-                    f'{current_dir}/third-party/fmt/include',
-                    '/usr/local/cuda/include/cccl']
+    include_dirs = [f'{current_dir}/deep_ep/include', f'{current_dir}/third-party/fmt/include', '/usr/local/cuda/include/cccl']
     library_dirs = []
     nvcc_dlink = []
     extra_link_args = ['-lcuda']
@@ -194,28 +193,24 @@ if __name__ == '__main__':
             print(f'   > {k}: {v}')
     print()
 
-    setuptools.setup(
-        name='deep_ep',
-        version=get_package_version(),
-        packages=setuptools.find_packages(include=['deep_ep', 'deep_ep.*']),
-        package_data={
-            'deep_ep': [
-                'include/deep_ep/**/*',
-            ]
-        },
-        install_requires=[
-            "deepxtrace>=0.1.0",
-        ],
-        ext_modules=[
-            CUDAExtension(name='deep_ep._C',
-                          include_dirs=include_dirs,
-                          library_dirs=library_dirs,
-                          sources=sources,
-                          extra_compile_args=extra_compile_args,
-                          extra_link_args=extra_link_args)
-        ],
-        cmdclass={
-            'build_ext': BuildExtension,
-            'build_py': CustomBuildPy
-        }
-    )
+    setuptools.setup(name='deep_ep',
+                     version=get_package_version(),
+                     packages=setuptools.find_packages(include=['deep_ep', 'deep_ep.*']),
+                     package_data={'deep_ep': [
+                         'include/deep_ep/**/*',
+                     ]},
+                     install_requires=[
+                         "deepxtrace>=0.1.0",
+                     ],
+                     ext_modules=[
+                         CUDAExtension(name='deep_ep._C',
+                                       include_dirs=include_dirs,
+                                       library_dirs=library_dirs,
+                                       sources=sources,
+                                       extra_compile_args=extra_compile_args,
+                                       extra_link_args=extra_link_args)
+                     ],
+                     cmdclass={
+                         'build_ext': BuildExtension,
+                         'build_py': CustomBuildPy
+                     })
