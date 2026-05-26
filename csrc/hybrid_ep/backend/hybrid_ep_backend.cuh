@@ -5459,6 +5459,16 @@ __global__ void scan(const void* input_routing_data,  // bool* (TOPK==0) or int1
     bool token_needed_by_rank_step2[NUM_OF_RANKS_PER_NODE];
     // Sparse mode needs the full routing map for local_expert_routing_map writes later.
     bool token_routing_map[DENSE_ROUTING ? 1 : (NUM_OF_EXPERTS_PER_RANK * NUM_OF_RANKS_PER_NODE)];
+    constexpr int NUM_LOCAL_EXPERT_MASK_WORDS = (NUM_OF_EXPERTS_PER_RANK + 31) / 32;
+    static_assert(!DENSE_ROUTING || NUM_LOCAL_EXPERT_MASK_WORDS <= 16,
+                  "Dense scan supports up to 512 local experts per rank.");
+    uint32_t local_expert_mask[DENSE_ROUTING ? NUM_LOCAL_EXPERT_MASK_WORDS : 1];
+    if constexpr(DENSE_ROUTING){
+      #pragma unroll
+      for(int k = 0; k < NUM_LOCAL_EXPERT_MASK_WORDS; k++){
+        local_expert_mask[k] = 0;
+      }
+    }
     #pragma unroll
     for(int j = 0; j < NUM_OF_RANKS_PER_NODE; j++){
       token_needed_by_rank_step2[j] = false;
@@ -5482,6 +5492,12 @@ __global__ void scan(const void* input_routing_data,  // bool* (TOPK==0) or int1
             int local_expert_id = expert_id - node_expert_start;
             int rank_within_node = local_expert_id / NUM_OF_EXPERTS_PER_RANK;
             token_needed_by_rank_step2[rank_within_node] = true;
+            int local_expert_start = local_rank * NUM_OF_EXPERTS_PER_RANK;
+            int local_expert_end = local_expert_start + NUM_OF_EXPERTS_PER_RANK;
+            if(local_expert_id >= local_expert_start && local_expert_id < local_expert_end){
+              int local_expert_idx = local_expert_id - local_expert_start;
+              local_expert_mask[local_expert_idx / 32] |= 1u << (local_expert_idx % 32);
+            }
           }
         }
       }
@@ -5539,17 +5555,8 @@ __global__ void scan(const void* input_routing_data,  // bool* (TOPK==0) or int1
           bool token_needed_by_this_local_expert = false;
           if(token_out_of_bound == 0){
             if constexpr(DENSE_ROUTING){
-              // Check if any topk index matches this local expert.
-              int target_expert = node_rank * (NUM_OF_EXPERTS_PER_RANK * NUM_OF_RANKS_PER_NODE) + j * NUM_OF_EXPERTS_PER_RANK + k;
-              // Re-load topk indices. The compiler should hoist this out of the k loop.
-              const int16_t* topk_base = input_topk_idx + current_token_id * TOPK;
-              #pragma unroll
-              for(int m = 0; m < TOPK; m++){
-                if((int)topk_base[m] == target_expert){
-                  token_needed_by_this_local_expert = true;
-                  break;
-                }
-              }
+              token_needed_by_this_local_expert =
+                  ((local_expert_mask[k / 32] >> (k % 32)) & 1u) != 0;
             } else {
               token_needed_by_this_local_expert = token_routing_map[j * NUM_OF_EXPERTS_PER_RANK + k];
             }
@@ -5586,18 +5593,7 @@ __global__ void scan(const void* input_routing_data,  // bool* (TOPK==0) or int1
           bool local_expert_bools[NUM_OF_EXPERTS_PER_RANK];
           #pragma unroll
           for(int k = 0; k < NUM_OF_EXPERTS_PER_RANK; k++){
-            local_expert_bools[k] = false;
-          }
-          // Re-load topk indices (or reuse from above if we cached them).
-          const int16_t* topk_base = input_topk_idx + current_token_id * TOPK;
-          int local_expert_start = node_rank * (NUM_OF_EXPERTS_PER_RANK * NUM_OF_RANKS_PER_NODE) + local_rank * NUM_OF_EXPERTS_PER_RANK;
-          #pragma unroll
-          for(int k = 0; k < TOPK; k++){
-            int expert_id = (int)topk_base[k];
-            int local_idx = expert_id - local_expert_start;
-            if(local_idx >= 0 && local_idx < NUM_OF_EXPERTS_PER_RANK){
-              local_expert_bools[local_idx] = true;
-            }
+            local_expert_bools[k] = ((local_expert_mask[k / 32] >> (k % 32)) & 1u) != 0;
           }
           // Store as expert_to_rank_t chunks.
           expert_to_rank_t* local_expert_routing_map_store_base_addr = reinterpret_cast<expert_to_rank_t*>(local_expert_routing_map + (final_ex_scan[j] * NUM_OF_EXPERTS_PER_RANK));
