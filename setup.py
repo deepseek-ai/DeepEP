@@ -58,11 +58,11 @@ def get_package_version():
         status_output = subprocess.check_output(status_cmd).decode('ascii').strip()
         if status_output:
             print(f'Warning: Git working directory is not clean. Uncommitted changes:\n{status_output}')
-            assert False, 'Git working directory is not clean'
+            raise AssertionError('Git working directory is not clean')
 
         cmd = ['git', 'rev-parse', '--short', 'HEAD']
         revision = '+' + subprocess.check_output(cmd).decode('ascii').rstrip()
-    except:
+    except Exception:
         revision = '+local'
     return f'{public_version}{revision}'
 
@@ -135,7 +135,7 @@ if __name__ == '__main__':
         nvcc_flags.append('-DDISABLE_SM90_FEATURES')
 
         # Disable internode and low-latency kernels
-        assert False, 'Not implemented'
+        raise AssertionError('Not implemented')
     else:
         # Prefer H800 series
         os.environ['TORCH_CUDA_ARCH_LIST'] = os.getenv('TORCH_CUDA_ARCH_LIST', '9.0')
@@ -188,7 +188,7 @@ if __name__ == '__main__':
         if name in os.environ:
             persistent_envs.append((name, os.environ[name]))
     if len(persistent_envs) > 0:
-        print(f' > Persistent envs:')
+        print(' > Persistent envs:')
         for k, v in persistent_envs:
             print(f'   > {k}: {v}')
     print()
