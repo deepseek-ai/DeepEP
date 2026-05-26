@@ -335,6 +335,7 @@ The library provides some environment variables, which may be useful:
 - General
     - `EP_BUFFER_DEBUG`: `0` or `1`, print buffer initialization, SM approximation, and backend debugging information, `0` by default
     - `EP_SUPPRESS_NCCL_CHECK`: `0` or `1`, suppress NCCL version mismatch checking, `0` by default
+    - `EP_SUPPRESS_NUMA_CHECK`: `0` or `1`, suppress the Linux automatic NUMA balancing warning at import (see [Performance gotchas](#performance-gotchas)), `0` by default
     - `EP_AVOID_RECORD_STREAM`: `0` or `1`, avoid `record_stream` on output tensors, `0` by default
     - `EP_NUM_TOPK_IDX_BITS`: integer, override the number of bits for top-k index encoding, `0` (auto) by default
 - Networking
@@ -398,6 +399,18 @@ If the hardware supports it, we recommend using the following command to set the
 ```bash
 sudo mlxconfig -y -d mlx5_$i set PCI_ATOMIC_MODE=4
 ```
+
+## Performance gotchas
+
+DeepEP's communication kernels run on the critical path of every MoE step, so host-side interference is directly visible in dispatch/combine latency:
+
+- **Linux automatic NUMA balancing** (`kernel.numa_balancing != 0`, enabled by default on most distros). The `task_numa_work` kernel routine rewrites PTEs at the user/kernel boundary and can add up to 16+ ms to affected `internode_dispatch` invocations (issue #624 trace: 139 invocations over 60 s on a 5.15 kernel running SGLang, avg 5 ms with 2 samples in the 16-31 ms bucket). We recommend disabling it on EP serving nodes:
+
+  ```bash
+  sudo sysctl -w kernel.numa_balancing=0
+  ```
+
+  DeepEP emits a warning at module init if it is still enabled. Silence it with `EP_SUPPRESS_NUMA_CHECK=1` if you cannot toggle the sysctl (e.g. inside a container).
 
 ## Experimental branches
 

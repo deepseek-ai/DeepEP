@@ -68,6 +68,31 @@ def check_nccl_so():
          f'please contact Chenggang or Shangyan to upgrade PyTorch NCCL version')
 
 
+def check_numa_balancing():
+    """
+    Warn if Linux automatic NUMA balancing is enabled, which can add tail latency to internode dispatch.
+    """
+    if int(os.environ.get('EP_SUPPRESS_NUMA_CHECK', 0)):
+        return
+
+    # Non-Linux systems or unreadable procfs (e.g. containers): skip silently
+    try:
+        with open('/proc/sys/kernel/numa_balancing', 'r') as f:
+            value = f.read().strip()
+    except OSError:
+        return
+
+    # `kernel.numa_balancing` is a bitmask; any non-zero value runs `task_numa_work`
+    if value and value != '0':
+        import warnings
+        warnings.warn(
+            f'Automatic NUMA balancing is enabled (kernel.numa_balancing={value}), which can add '
+            'up to 16+ ms tail latency to DeepEP internode dispatch. Disable with '
+            '`sudo sysctl -w kernel.numa_balancing=0`, or set EP_SUPPRESS_NUMA_CHECK=1 to silence. '
+            'See https://github.com/deepseek-ai/DeepEP/issues/624.',
+            RuntimeWarning, stacklevel=2)
+
+
 def init_jit():
     """
     Initialize the JIT compilation runtime. Sets up CUDA and NCCL root paths for the JIT compiler.
@@ -81,6 +106,7 @@ def init_jit():
 
 # Run initialization
 check_nccl_so()
+check_numa_balancing()
 init_jit()
 
 
