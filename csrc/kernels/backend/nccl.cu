@@ -95,7 +95,7 @@ NCCLSymmetricMemoryContext::NCCLSymmetricMemoryContext(const int64_t& nccl_comm,
     if (num_ranks > 1 and not gin_disabled) {
         reqs.ginContextCount = num_allocated_qps;
         reqs.ginExclusiveContexts = true;
-        reqs.ginQueueDepth = 1024;
+        reqs.ginQueueDepth = get_env("EP_GIN_QUEUE_DEPTH", 1024);
         reqs.ginTrafficClass = sl_idx;
         // Customized RDMA barrier needs extra signals
         reqs.ginSignalCount = num_ranks + 2 * 2;

@@ -341,6 +341,7 @@ The library provides some environment variables, which may be useful:
     - `EP_NIC_NAME`: string, the default NIC name used to query NIC properties, `mlx5_0` by default
     - `EP_OVERRIDE_RDMA_SL`: integer, override the RDMA service level index for traffic isolation
     - `EP_DISABLE_GIN`: `0` or `1`, disable the NCCL Gin backend (fall back to non-Gin path), `0` by default
+    - `EP_GIN_QUEUE_DEPTH`: integer, NCCL Gin QP depth, `0` is required when in GIN PROXY mode, `1024` by default
 - JIT
     - `EP_JIT_DEBUG`: `0` or `1`, print JIT debugging information, `0` by default
     - `EP_JIT_CACHE_DIR`: string, cache directory for compiled kernels, `$HOME/.deep_ep` by default
