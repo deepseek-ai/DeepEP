@@ -1120,7 +1120,7 @@ LOW_LATENCY_COMBINE_RECV:
                             false,
                             topk_weight);
                     }
-
+                    fence_view_async_shared();
                     if (elect_one_sync())
                         mbarrier_arrive(empty_barriers[stage_idx]);
                     stage_idx = (stage_idx + 1) % kNumStages;
