@@ -110,6 +110,10 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
                        &HybridEpConfigInstance::num_of_stages_g2s_combine_api)
         .def_readwrite("num_of_stages_s2g_combine_api",
                        &HybridEpConfigInstance::num_of_stages_s2g_combine_api)
+        .def_readwrite("num_of_stages_g2s_unpermute_block",
+                       &HybridEpConfigInstance::num_of_stages_g2s_unpermute_block)
+        .def_readwrite("num_of_stages_s2g_unpermute_block",
+                       &HybridEpConfigInstance::num_of_stages_s2g_unpermute_block)
         .def_readwrite("num_of_tokens_per_chunk_combine_api",
                        &HybridEpConfigInstance::num_of_tokens_per_chunk_combine_api)
         .def_readwrite("num_of_tokens_per_group_combine_api",
@@ -119,6 +123,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         .def_readwrite(
             "num_of_additional_in_flight_s2g_combine_api",
             &HybridEpConfigInstance::num_of_additional_in_flight_s2g_combine_api)
+        .def_readwrite(
+            "num_of_additional_in_flight_s2g_unpermute_block_combine_api",
+            &HybridEpConfigInstance::num_of_additional_in_flight_s2g_unpermute_block_combine_api)
         .def_readwrite("backward_combine_api",
                        &HybridEpConfigInstance::backward_combine_api)
         .def_readwrite("device_side_sync_combine_api",
