@@ -63,8 +63,8 @@ static void launch_barrier(const ncclDevComm_t& nccl_dev_comm, const ncclWindow_
     constexpr auto kNumThreads = 512;
 
     // Generate, build and launch
-    // NOTES: only the hybrid kernel needs 2 SMs
-    const auto num_sms = num_scaleout_ranks > 1 ? 2 : 1;
+    // NOTES: also use 1 SM in hybrid kernel to ensure global sync.
+    const auto num_sms = 1;
     const BarrierRuntime::Args args = {
         .is_scaleup_nvlink = is_scaleup_nvlink,
         .num_scaleout_ranks = num_scaleout_ranks, .num_scaleup_ranks = num_scaleup_ranks,
