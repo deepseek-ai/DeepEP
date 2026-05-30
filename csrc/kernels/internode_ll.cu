@@ -193,16 +193,19 @@ __device__ uint32_t cvt_warp_fp16_to_fp4(PackedVec& vec, float SFScaleVal, uint8
   return e2m1Vec;
 }
 
-template <bool kUseFP8, bool kUseUE8M0, bool kUseNVFP4, bool kUseUE8M0ForNVFP4SF, int kHidden>
+template <bool kUseFP8, bool kUseUE8M0, bool kUseNVFP4, bool kUseUE8M0ForNVFP4SF, bool kUseTopKWeights, int kHidden>
 __global__ __launch_bounds__(1024, 1) void
 dispatch(void* packed_recv_x, void* packed_recv_x_scales,
          int* packed_recv_src_info, int64_t* packed_recv_layout_range,
          int* packed_recv_count,
+         float* packed_recv_topk_weights,
+         int* packed_recv_rank_info,
          int* cumulative_local_expert_recv_stats,
          int64_t* dispatch_wait_recv_cost_stats,
          const float* x_global_scale,
          void* rdma_recv_x, int* rdma_recv_count, void* rdma_x,
          const void* x, const int64_t* topk_idx,
+         const float* topk_weights,
          int* atomic_counter_per_expert, int* atomic_finish_counter_per_expert,
          int* next_clean, int num_next_clean_int,
          int num_tokens, int num_max_dispatch_tokens_per_rank,
@@ -271,7 +274,17 @@ dispatch(void* packed_recv_x, void* packed_recv_x_scales,
 
             // Overlap top-k index read and source token index writes
             auto dst_expert_idx = warp_id < num_topk ? static_cast<int>(__ldg(topk_idx + token_idx * num_topk + warp_id)) : -1;
-            thread_id == 0 ? (*rdma_x_src_idx = token_idx) : 0;
+            if constexpr (!kUseTopKWeights) {
+                // Standard path: token_idx written to the first int of the message header (rdma_x_src_idx)
+                thread_id == 0 ? (*rdma_x_src_idx = token_idx) : 0;
+            }
+            int my_topk_weight_bits = 0;
+            if constexpr (kUseTopKWeights) {
+                if (warp_id < num_topk and lane_id == 0) {
+                    my_topk_weight_bits = __ldg(reinterpret_cast<const int*>(topk_weights) + token_idx * num_topk + warp_id);
+                }
+            }
+
             float SFScaleVal = 1.0f;
             if constexpr (kUseNVFP4) {
                 // Get scaling value;
@@ -347,12 +360,21 @@ dispatch(void* packed_recv_x, void* packed_recv_x_scales,
                                      slot_idx * num_bytes_per_msg;
                 const auto dst_p2p_ptr = nvshmemi_get_p2p_ptr(dst_ptr, rank, dst_rank);
                 if (dst_p2p_ptr == 0) {
+                    EP_DEVICE_ASSERT(!kUseTopKWeights && "TopK weights not supported with RDMA (non-P2P) path");
                     nvshmemi_ibgda_put_nbi_warp(dst_ptr, src_ptr, num_bytes_per_msg, dst_rank, dst_expert_local_idx, lane_id, slot_idx);
                 } else {
                     // NOTES: only 2 load iterations for 7K hidden with 8 unrolls
                     const auto* src_int4_ptr = reinterpret_cast<const int4*>(src_ptr);
                     const auto* dst_int4_ptr = reinterpret_cast<int4*>(dst_p2p_ptr);
-                    UNROLLED_WARP_COPY(8, lane_id, num_int4_per_msg, dst_int4_ptr, src_int4_ptr, ld_nc_global, st_na_global);
+                    if constexpr (kUseTopKWeights) {
+                        // Write extended header: int4{token_idx, topk_weight (as raw bits), 0, 0}
+                        if (lane_id == 0)
+                            st_na_global(dst_int4_ptr, make_int4(token_idx, my_topk_weight_bits, 0, 0));
+                        // Copy payload after header
+                        UNROLLED_WARP_COPY(8, lane_id, num_int4_per_msg - 1, dst_int4_ptr + 1, src_int4_ptr + 1, ld_nc_global, st_na_global);
+                    } else {
+                        UNROLLED_WARP_COPY(8, lane_id, num_int4_per_msg, dst_int4_ptr, src_int4_ptr, ld_nc_global, st_na_global);
+                    }
                 }
 
                 // Increase counter after finishing
@@ -435,8 +457,11 @@ dispatch(void* packed_recv_x, void* packed_recv_x_scales,
         return;
 
     // For send-and-recv kernels, we need a grid sync for making `packed_recv_count` visible
-    if (phases & LOW_LATENCY_SEND_PHASE)
-        cg::this_grid().sync();
+    // Only available when not using overlap launch (cooperative attribute required)
+    if constexpr (!kUseTopKWeights) {
+        if (phases & LOW_LATENCY_SEND_PHASE)
+            cg::this_grid().sync();
+    }
 
     // Receiving and packing
     if (responsible_expert_idx < num_experts) {
@@ -448,6 +473,8 @@ dispatch(void* packed_recv_x, void* packed_recv_x_scales,
         const auto recv_x_int4 = static_cast<int4*>(packed_recv_x) +
                 local_expert_idx * num_ranks * num_max_dispatch_tokens_per_rank * hidden_int4;
         const auto recv_src_info = packed_recv_src_info + local_expert_idx * num_ranks * num_max_dispatch_tokens_per_rank;
+        const auto recv_topk_weights = kUseTopKWeights ? reinterpret_cast<int*>(packed_recv_topk_weights) + local_expert_idx * num_ranks * num_max_dispatch_tokens_per_rank : nullptr;
+        const auto recv_rank_info = kUseTopKWeights ? packed_recv_rank_info + local_expert_idx * num_ranks * num_max_dispatch_tokens_per_rank : nullptr;
         const auto recv_range = packed_recv_layout_range + local_expert_idx * num_ranks;
         const auto num_aligned_tokens = align_up<int>(num_ranks * num_max_dispatch_tokens_per_rank, 128);
         const auto num_aligned_scales = align_up<int>(num_scales, sizeof(float) / sizeof(scale_t));
@@ -484,8 +511,13 @@ dispatch(void* packed_recv_x, void* packed_recv_x_scales,
         for (int i = sub_warp_id; i < num_recv_tokens; i += num_warps_per_group) {
             // Copy source info
             const auto src_src_idx = reinterpret_cast<int*>(rdma_recv_x_uint8 + i * num_bytes_per_msg);
-            if (lane_id == 0)
+            if (lane_id == 0) {
                 recv_src_info[recv_token_begin_idx + i] = ld_nc_global(src_src_idx);
+                if constexpr (kUseTopKWeights) {
+                    recv_topk_weights[recv_token_begin_idx + i] = ld_nc_global(src_src_idx + 1);
+                    recv_rank_info[recv_token_begin_idx + i] = src_rank;
+                }
+            }
             __syncwarp();
 
             // Copy data
@@ -516,12 +548,12 @@ dispatch(void* packed_recv_x, void* packed_recv_x_scales,
                     auto scale = extract_required_scale_format<kUseUE8M0>(ld_nc_global(src_scales + lane_id + 32));
                     recv_x_scales[token_idx * token_stride + pack_idx * pack_stride + elem_idx] = scale;
                 }
-            } else if constexpr (kUseNVFP4) {            
+            } else if constexpr (kUseNVFP4) {
                  // The physical layout is (l, rm, rk, 32, 4, 4)
                 const auto src_scales = reinterpret_cast<uint8_t*>(reinterpret_cast<uint8_t*>(src_data) + hidden_bytes);
                 const auto num_elems_per_pack = static_cast<int>(sizeof(packed_t) / sizeof(scale_t));
                 const auto token_idx = recv_token_begin_idx + i;
-                
+
                 const auto rk = align_up<int>(kHidden / kNumPerChannels, 4) / 4;
                 const auto dim0_stride = rk * 128 * num_elems_per_pack;
                 const auto dim1_stride = 128 * num_elems_per_pack;
@@ -548,11 +580,14 @@ dispatch(void* packed_recv_x, void* packed_recv_x_scales,
 void dispatch(void* packed_recv_x, void* packed_recv_x_scales,
               int* packed_recv_src_info, int64_t* packed_recv_layout_range,
               int* packed_recv_count,
+              float* packed_recv_topk_weights,
+              int* packed_recv_rank_info,
               int* cumulative_local_expert_recv_stats,
               int64_t* dispatch_wait_recv_cost_stats,
               const float* x_global_scale,
               void* rdma_recv_x, int* rdma_recv_count, void* rdma_x,
               const void* x, const int64_t* topk_idx,
+              const float* topk_weights,
               int* next_clean, int num_next_clean_int,
               int num_tokens, int hidden, int num_max_dispatch_tokens_per_rank,
               int num_topk, int num_experts, int rank, int num_ranks,
@@ -580,24 +615,38 @@ void dispatch(void* packed_recv_x, void* packed_recv_x_scales,
         EP_HOST_ASSERT(round_scale and "UE8M0 SF requires `round_scale=True`");
 
 #define DISPATCH_LAUNCH_CASE(hidden) { \
-auto dispatch_func = dispatch<false, false, false, false, hidden>; \
-if (use_fp8 and not use_ue8m0) \
-    dispatch_func = dispatch<true, false, false, false, hidden>; \
-if (use_fp8 and use_ue8m0) \
-    dispatch_func = dispatch<true, true, false, false, hidden>; \
-if (use_nvfp4 and not use_ue8m0_for_sf) \
-    dispatch_func = dispatch<false, false, true, false, hidden>; \
-if (use_nvfp4 and use_ue8m0_for_sf) \
-    dispatch_func = dispatch<false, false, true, true, hidden>; \
+const bool use_topk_weights = (topk_weights != nullptr); \
+auto dispatch_func = dispatch<false, false, false, false, false, hidden>; \
+if (use_fp8 and not use_ue8m0 and not use_topk_weights) \
+    dispatch_func = dispatch<true, false, false, false, false, hidden>; \
+if (use_fp8 and not use_ue8m0 and use_topk_weights) \
+    dispatch_func = dispatch<true, false, false, false, true, hidden>; \
+if (use_fp8 and use_ue8m0 and not use_topk_weights) \
+    dispatch_func = dispatch<true, true, false, false, false, hidden>; \
+if (use_fp8 and use_ue8m0 and use_topk_weights) \
+    dispatch_func = dispatch<true, true, false, false, true, hidden>; \
+if (use_nvfp4 and not use_ue8m0_for_sf and not use_topk_weights) \
+    dispatch_func = dispatch<false, false, true, false, false, hidden>; \
+if (use_nvfp4 and not use_ue8m0_for_sf and use_topk_weights) \
+    dispatch_func = dispatch<false, false, true, false, true, hidden>; \
+if (use_nvfp4 and use_ue8m0_for_sf and not use_topk_weights) \
+    dispatch_func = dispatch<false, false, true, true, false, hidden>; \
+if (use_nvfp4 and use_ue8m0_for_sf and use_topk_weights) \
+    dispatch_func = dispatch<false, false, true, true, true, hidden>; \
+if (not use_fp8 and not use_nvfp4 and use_topk_weights) \
+    dispatch_func = dispatch<false, false, false, false, true, hidden>; \
 LAUNCH_KERNEL(&cfg, dispatch_func, \
               packed_recv_x, packed_recv_x_scales, \
               packed_recv_src_info, packed_recv_layout_range, \
               packed_recv_count, \
+              packed_recv_topk_weights, \
+              packed_recv_rank_info, \
               cumulative_local_expert_recv_stats, \
               dispatch_wait_recv_cost_stats, \
               x_global_scale, \
               rdma_recv_x, rdma_recv_count, rdma_x, \
               x, topk_idx, \
+              topk_weights, \
               atomic_counter_per_expert, atomic_finish_counter_per_expert, \
               next_clean, num_next_clean_int, \
               num_tokens, num_max_dispatch_tokens_per_rank, \
@@ -605,8 +654,13 @@ LAUNCH_KERNEL(&cfg, dispatch_func, \
               num_warp_groups, num_warps_per_group, \
               round_scale, phases); } break
 
-    SETUP_LAUNCH_CONFIG(num_sms, num_warps * 32, stream);
-    SWITCH_HIDDEN(DISPATCH_LAUNCH_CASE);
+    if (topk_weights != nullptr) {
+        SETUP_OVERLAP_LAUNCH_CONFIG(num_sms, num_warps * 32, stream);
+        SWITCH_HIDDEN(DISPATCH_LAUNCH_CASE);
+    } else {
+        SETUP_LAUNCH_CONFIG(num_sms, num_warps * 32, stream);
+        SWITCH_HIDDEN(DISPATCH_LAUNCH_CASE);
+    }
 #undef DISPATCH_LAUNCH_CASE
 }
 

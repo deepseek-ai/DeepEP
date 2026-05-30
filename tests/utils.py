@@ -578,6 +578,21 @@ class TorchRef:
         )
 
         if enable_permute:
+            # Build local_expert_routing_map from global_routing_map if not provided
+            if local_expert_routing_map is None:
+                start, end = self._local_expert_range()
+                row_mask = global_routing_map[:, start:end].any(dim=1)
+                local_expert_routing_map = global_routing_map[row_mask, start:end]
+            if out_token_num is None:
+                token_per_expert = local_expert_routing_map.sum(dim=0, dtype=torch.int64)
+                if pad_multiple > 0:
+                    out_token_num = sum(
+                        (int(t) + pad_multiple - 1) // pad_multiple * pad_multiple
+                        for t in token_per_expert
+                    )
+                else:
+                    out_token_num = local_expert_routing_map.sum().item()
+
             dispatched_hidden, dispatched_probs, dispatched_scaling_factor = permute(
                 dispatched_hidden,
                 local_expert_routing_map,

@@ -2,6 +2,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 
 #include "allocator.cuh"
+#include <algorithm>
+#include <string>
 
 // Round-up allocation size to fabric granularity.
 size_t inline get_size_align_to_granularity(size_t size_raw, size_t granularity) {
@@ -13,6 +15,13 @@ size_t inline get_size_align_to_granularity(size_t size_raw, size_t granularity)
 
 ExtendedMemoryAllocator::ExtendedMemoryAllocator() {
   this->support_fabric_ = support_fabric();
+  const char* use_mnnvl = std::getenv("USE_MNNVL");
+  if (use_mnnvl) {
+    std::string val(use_mnnvl);
+    std::transform(val.begin(), val.end(), val.begin(), ::tolower);
+    if (val == "0" || val == "false")
+      this->support_fabric_ = false;
+  }
   if (gethostname(hostname_, sizeof(hostname_)) != 0) {
     perror("gethostname");
     std::snprintf(hostname_, sizeof(hostname_), "unknown");
@@ -158,13 +167,6 @@ bool ExtendedMemoryAllocator::is_accessible(MemHandle* mem_handle) {
     accessible = ret == CUDA_SUCCESS;
     if (accessible) {
       cuMemRelease(handle);
-    }else{
-      if (ret != CUDA_SUCCESS) {
-          const char* errStr;
-          cuGetErrorString(ret, &errStr);
-          fprintf(stderr, "[Error] Failed to import the fabric handle: %s\n", errStr);
-          fflush(stderr);
-      }
     }
   } else {
     // Check if the source hostname is the same as the current hostname

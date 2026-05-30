@@ -119,11 +119,24 @@ void CustomAllgather::init(pybind11::object process_group, int rank_idx, BufferC
     this->process_group = process_group;
 }
 
-void CustomAllgather::update(BufferConfig buffer_config) {
-    this->num_of_ranks_per_node = buffer_config.num_of_ranks_per_node;
-    this->num_of_experts_per_rank = buffer_config.num_of_experts_per_rank;
-    this->num_of_tokens_per_rank = buffer_config.max_num_of_tokens_per_rank;
-    this->num_of_nodes = buffer_config.num_of_nodes;
+bool CustomAllgather::grow_buffer_config(const HybridEpConfigInstance& config, BufferConfig& buf_config) {
+    bool changed = false;
+    changed |= grow_to(buf_config.num_of_ranks_per_node, config.num_of_ranks_per_node);
+    changed |= grow_to(buf_config.num_of_experts_per_rank, config.num_of_experts_per_rank);
+    changed |= grow_to(buf_config.max_num_of_tokens_per_rank, config.max_num_of_tokens_per_rank);
+    changed |= grow_to(buf_config.num_of_nodes, config.num_of_nodes);
+    return changed;
+}
+
+void CustomAllgather::update_config(BufferConfig config) {
+    this->num_of_ranks_per_node = config.num_of_ranks_per_node;
+    this->num_of_experts_per_rank = config.num_of_experts_per_rank;
+    this->num_of_tokens_per_rank = config.max_num_of_tokens_per_rank;
+    this->num_of_nodes = config.num_of_nodes;
+}
+
+void CustomAllgather::allocate_buffers() {
+    allocate_ag_buffer();
 }
 
 void CustomAllgather::allocate_ag_buffer() {

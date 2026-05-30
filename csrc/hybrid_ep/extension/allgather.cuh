@@ -5,20 +5,24 @@
 
 #include "utils.cuh"
 #include "config.cuh"
+#include "coordinator.cuh"
 #include "allocator/allocator.cuh"
 
-class CustomAllgather {
+class CustomAllgather : public HybridEPCoordinator {
 public:
     CustomAllgather() = default;
-    ~CustomAllgather();
+    ~CustomAllgather() override;
     void init(pybind11::object process_group, int rank_idx, BufferConfig buffer_config, ExtendedMemoryAllocator* allocator);
-    void update(BufferConfig buffer_config);
-    void allocate_ag_buffer();
-    void open_ag_handles();
-    void destroy();
+    bool grow_buffer_config(const HybridEpConfigInstance& config, BufferConfig& buf_config) override;
+    void update_config(BufferConfig config) override;
+    void allocate_buffers() override;
+    void destroy() override;
     void launch(torch::Tensor src, int ag_sms = 32, cudaStream_t stream = nullptr);
     void * get_output_buffer();
 private:
+    void allocate_ag_buffer();
+    void open_ag_handles();
+
     // Required pre-allocated buffers
     void* dst_buffer = nullptr;
     void** dst_buffers_all_ranks = nullptr;

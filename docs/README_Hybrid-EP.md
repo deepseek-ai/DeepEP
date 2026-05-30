@@ -3,6 +3,17 @@
 ## Overview
 This document introduces the Hybrid Expert Parallel (Hybrid-EP) implementation to the DeepEP library, developed by NVIDIA as an optimized solution for large-scale MoE (Mixture of Experts) model all-to-all communication. This implementation is specifically designed to leverage NVIDIA GPU hardware capabilities, significantly reducing Streaming Multiprocessor (SM) resource usage while dramatically improving communication efficiency and overall throughput. This implementation maintains full backward compatibility with DeepEP. Users can seamlessly integrate Hybrid-EP into existing workflows without code modifications.
 
+### NIXL Integration (Experimental)
+
+> **⚠️ Experimental**: NIXL-based inter-node communication is an experimental feature. **Performance is not final — this is an initial integration that brings NIXL into Hybrid-EP, and we are actively working to improve NIXL path performance toward parity with the DOCA/RDMA path.** We welcome feedback and contributions.
+
+Hybrid-EP supports [NIXL](https://github.com/ai-dynamo/nixl) (NVIDIA Inter-node eXchange Library) as an alternative inter-node communication backend alongside the existing DOCA/RDMA path. NIXL uses UCX for GPU-to-GPU RDMA transfers and does not require the NCCL submodule or DOCA SDK at build time, simplifying deployment in environments where DOCA is unavailable.
+
+**Key points:**
+- Build with `USE_NIXL=1` to select the NIXL path; the default (`USE_NIXL=0`) preserves the DOCA path with no behavior change
+- NIXL code is fully guarded by `#ifdef USE_NIXL`; no NIXL symbols are linked when building with DOCA
+- A complete example Dockerfile is provided at [`docs/Dockerfile.nixl`](Dockerfile.nixl)
+
 ## 🎯 Design Goals
 
 1. **Maximize Network Bandwidth Utilization** - Achieve optimal network bandwidth usage for large-scale distributed training
@@ -141,6 +152,24 @@ This document introduces the Hybrid Expert Parallel (Hybrid-EP) implementation t
 
 ## 🚀 Usage Guide
 
+### Chunk Size Tuning
+
+HybridEP defaults the dispatch, combine, and metadata-preprocessing API chunk sizes to `64` tokens:
+
+```bash
+export NUM_OF_TOKENS_PER_CHUNK_DISPATCH_API=64
+export NUM_OF_TOKENS_PER_CHUNK_COMBINE_API=64
+export NUM_OF_TOKENS_PER_CHUNK_PREPROCESSING_API=64
+```
+
+When the fused path is not used, you can try increasing all three chunk-size variables to `128`; in some cases this can provide better performance:
+
+```bash
+export NUM_OF_TOKENS_PER_CHUNK_DISPATCH_API=128
+export NUM_OF_TOKENS_PER_CHUNK_COMBINE_API=128
+export NUM_OF_TOKENS_PER_CHUNK_PREPROCESSING_API=128
+```
+
 ### Installation
 
 #### Intra-node and MNNVL Installation
@@ -151,11 +180,34 @@ export TORCH_CUDA_ARCH_LIST="9.0 10.0"  # Adjust based on your GPU architecture
 pip install .
 ```
 
-#### Multi-node RDMA Installation
-For multi-node support with RDMA, additional configuration is required, make sure RDMA core libraries are properly installed and the path points to the directory containing the RDMA headers and libraries.
+#### Multi-node NIXL Installation (recommended when NIXL is available)
+For multi-node support with NIXL. NIXL replaces DOCA for inter-node GPU data transfers, so the DOCA SDK and NCCL submodule are not needed at build time. Note that NCCL may still be used at runtime by `torch.distributed` for collective metadata operations.
+
+**Prerequisites:**
+- **NIXL** ([ai-dynamo/nixl](https://github.com/ai-dynamo/nixl)) — GPU-aware inter-node communication library. Install from source; see the NIXL README for build instructions.
+- **UCX** ([openucx/ucx](https://github.com/openucx/ucx)) — UCX v1.17+ is recommended. Pre-installed in NVIDIA NGC PyTorch containers (e.g. `nvcr.io/nvidia/pytorch:24.12-py3` and later), as well as the NGC TensorFlow and Triton inference containers. If your image does not include UCX, install from source or via `apt install libucx-dev`.
 
 ```bash
 export HYBRID_EP_MULTINODE=1
+export USE_NIXL=1
+export NIXL_HOME=/usr/local/nixl  # Path to NIXL install prefix (contains include/ and lib/)
+export UCX_HOME=/usr              # Path to UCX install prefix (contains include/ and lib/)
+export TORCH_CUDA_ARCH_LIST="9.0 10.0"  # Adjust based on your GPU architecture
+pip install .
+```
+
+**Dockerfile example:** A complete, ready-to-build Dockerfile (based on the NGC PyTorch 26.03 image) that builds UCX, etcd-cpp-apiv3, NIXL, rdma-core, and DeepEP from source is provided at [`docs/Dockerfile.nixl`](Dockerfile.nixl). To build:
+
+```bash
+docker build -f docs/Dockerfile.nixl -t deepep-nixl .
+```
+
+#### Multi-node RDMA (DOCA) Installation
+For multi-node support with DOCA/RDMA, additional configuration is required, make sure RDMA core libraries are properly installed and the path points to the directory containing the RDMA headers and libraries.
+
+```bash
+export HYBRID_EP_MULTINODE=1
+# Do NOT set USE_NIXL - DOCA path requires NCCL submodule + DOCA SDK
 export RDMA_CORE_HOME=/path/to/rdma-core  # Path to your RDMA core installation
 export TORCH_CUDA_ARCH_LIST="9.0 10.0"  # Adjust based on your GPU architecture
 pip install .
@@ -191,6 +243,68 @@ RUN cd DeepEP && \
     rm -rf /var/lib/apt/lists/*
 ```
 
+### Running with NIXL
+
+#### Starting etcd
+
+NIXL uses [etcd](https://etcd.io/) as a distributed key-value store for metadata exchange between ranks. An etcd server must be running and reachable by all nodes before launching the job.
+
+Start etcd on one of the nodes (or a dedicated service node) in a separate terminal or `screen`/`tmux` session:
+
+```bash
+etcd --listen-client-urls http://0.0.0.0:2379 \
+     --advertise-client-urls http://$(hostname):2379
+```
+
+This binds etcd to all interfaces on port 2379 and advertises the machine's hostname so that remote nodes can connect.
+
+Then, when launching the job, set `NIXL_ETCD_ENDPOINTS` on every rank to point at that machine. For example, if etcd is running on `node01`:
+
+```bash
+srun --export=ALL,NIXL_ETCD_ENDPOINTS=http://node01:2379 \
+     python tests/test_hybrid_ep.py
+```
+
+> **Tip:** etcd only needs to be started once per allocation. You do not need to restart it between successive `srun` invocations — the run-ID mechanism (`SLURM_STEP_ID`) automatically prevents key collisions across runs.
+
+### NIXL Runtime Configuration
+
+When using the NIXL inter-node path (`USE_NIXL=1`), the following environment variables can be used to tune performance and reliability. All variables are optional and have sensible defaults.
+
+#### Performance Tuning
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `DEEPEP_NIXL_GDA_NUM_CHANNELS` | `1` | Number of GPU Direct Async (GDA) channels per UCX endpoint. More channels can increase throughput by allowing the GPU to post more concurrent RDMA operations through the NIC. Start with 1 and increase (e.g., 2 or 4) while monitoring for diminishing returns. The optimal value depends on the NIC capabilities and number of remote peers. |
+
+#### Connection & Metadata
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `DEEPEP_NIXL_RUN_ID` | *(auto)* | Unique identifier for this run, used to prevent etcd key collisions between successive invocations. If unset, falls back to `SLURM_STEP_ID` then `SLURM_JOB_ID` automatically. Only set this if you are not using Slurm and experience stale-metadata errors across runs. |
+| `DEEPEP_NIXL_FETCH_RETRY_INTERVAL` | `200` | Number of 10 ms polling iterations before invalidating and re-fetching a remote agent's metadata. |
+| `DEEPEP_NIXL_FETCH_MAX_RETRIES` | `50` | Maximum number of invalidate-and-re-fetch cycles when remote metadata is unavailable. |
+| `DEEPEP_NIXL_WIREUP_MAX_RETRIES` | `2000` | Maximum retry iterations for `makeConnection` during UCX wire-up. Increase at large scale or on slow networks. |
+| `DEEPEP_NIXL_WIREUP_RETRY_MS` | `10` | Sleep duration (ms) between `makeConnection` retries. |
+| `DEEPEP_NIXL_PREPMV_MAX_RETRIES` | `5000` | Maximum retry iterations for `prepRemoteMemView`. |
+| `DEEPEP_NIXL_PREPMV_RETRY_MS` | `20` | Sleep duration (ms) between `prepRemoteMemView` retries. |
+| `DEEPEP_NIXL_PREPMV_INITIAL_DELAY_MS` | `0` | Optional initial delay (ms) before creating remote memory views. Useful as a debugging aid; not normally needed. |
+| `NIXL_ETCD_ENDPOINTS` | `http://localhost:2379` | etcd endpoint(s) used by NIXL for metadata exchange. |
+
+### Troubleshooting
+
+**Error: `No rule to make target '.../doca_gpunetio_device.h', needed by 'lib'`**
+
+This occurs when the DOCA path is used but the DOCA SDK or NCCL build is incomplete. To avoid this, use NIXL instead:
+
+```bash
+export HYBRID_EP_MULTINODE=1
+export USE_NIXL=1
+pip install .
+```
+
+During build, you should see `Multinode enabled: use_nixl=True` and `-> NIXL path: skipping NCCL/DOCA build`. If you see `-> DOCA path` instead, `USE_NIXL` is not being passed; ensure the variable is exported in the same shell that invokes the build (some pip front-ends with build isolation strip env vars - in that case use `pip install --no-build-isolation .` or pass the variable through your build configuration).
+
 ### Quick Start
 
 Refer to `tests/test_hybrid_ep.py` for comprehensive usage examples including:
@@ -200,4 +314,3 @@ Refer to `tests/test_hybrid_ep.py` for comprehensive usage examples including:
 - Performance benchmarking setups
 
 For more information on the design and tuning details, please refer to the [Hybrid-EP Design Document](Hybrid-EP_Implementation.md).
-

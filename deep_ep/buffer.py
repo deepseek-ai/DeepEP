@@ -102,7 +102,7 @@ class Buffer:
         # Synchronize NVSHMEM unique IDs
         root_unique_id = None
         if self.runtime.get_num_rdma_ranks() > 1 or low_latency_mode or self.disable_nvlink_for_normal_mode:
-            # Enable IBGDA 
+            # Enable IBGDA
             assert num_qps_per_rank > 0
             os.environ['NVSHMEM_DISABLE_P2P'] = '0' if allow_nvlink_for_low_latency_mode else '1'
             os.environ['NVSHMEM_IB_ENABLE_IBGDA'] = '1'
@@ -468,7 +468,7 @@ class Buffer:
     # noinspection PyTypeChecker
     def dispatch_pcie(self, x: Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]],
                            handle: Optional[Tuple] = None,
-                           num_tokens_per_rank: Optional[torch.Tensor] = None, 
+                           num_tokens_per_rank: Optional[torch.Tensor] = None,
                            is_token_in_rank: Optional[torch.Tensor] = None, num_tokens_per_expert: Optional[torch.Tensor] = None,
                            topk_idx: Optional[torch.Tensor] = None, topk_weights: Optional[torch.Tensor] = None, expert_alignment: int = 1,
                            config: Optional[Config] = None,
@@ -493,7 +493,7 @@ class Buffer:
                 x, x_scales, topk_idx, topk_weights,
                 None, is_token_in_rank, None,
                 num_recv_tokens,
-                rdma_channel_prefix_matrix, recv_rdma_rank_prefix_sum, 
+                rdma_channel_prefix_matrix, recv_rdma_rank_prefix_sum,
                 expert_alignment, config, getattr(previous_event, 'event', None), async_finish, allocate_on_comm_stream)
             return (recv_x, recv_x_scales) if x_scales is not None else recv_x, None, None, None, None, EventOverlap(event)
         else:
@@ -505,8 +505,8 @@ class Buffer:
                 num_tokens_per_rank, is_token_in_rank, num_tokens_per_expert,
                 0, None, None,
                 expert_alignment, config, getattr(previous_event, 'event', None), async_finish, allocate_on_comm_stream)
-            handle = (is_token_in_rank, 
-                    rdma_channel_prefix_matrix, recv_rdma_channel_prefix_matrix, recv_rdma_rank_prefix_sum, 
+            handle = (is_token_in_rank,
+                    rdma_channel_prefix_matrix, recv_rdma_channel_prefix_matrix, recv_rdma_rank_prefix_sum,
                     recv_x.shape[0], send_rdma_head)
             return (recv_x, recv_x_scales) if x_scales is not None else recv_x, recv_topk_idx, recv_topk_weights, num_recv_tokens_per_expert_list, handle, EventOverlap(event)
 
@@ -639,13 +639,13 @@ class Buffer:
     # noinspection PyTypeChecker
     def low_latency_dispatch(self, x: torch.Tensor, topk_idx: torch.Tensor,
                              num_max_dispatch_tokens_per_rank: int, num_experts: int,
+                             topk_weights: Optional[torch.Tensor] = None,
                              cumulative_local_expert_recv_stats: Optional[torch.Tensor] = None,
                              dispatch_wait_recv_cost_stats: Optional[torch.Tensor] = None,
                              x_global_scale: Optional[torch.Tensor] = None,
                              use_fp8: bool = True, round_scale: bool = False, use_ue8m0: bool = False,
                              use_nvfp4: bool = False, use_ue8m0_for_sf: bool = False,
-                             async_finish: bool = False, return_recv_hook: bool = False) -> \
-            Tuple[Tuple[torch.Tensor, torch.Tensor], torch.Tensor, Tuple, EventOverlap, Callable]:
+                             async_finish: bool = False, return_recv_hook: bool = False):
         """
         A low-latency implementation for dispatching with IBGDA.
         This kernel requires all the ranks (no matter intranode or internode) should be visible via RDMA
@@ -660,6 +660,8 @@ class Buffer:
                 are supported. `-1` indices (not selecting any expert) are supported.
             num_max_dispatch_tokens_per_rank: the maximum number of tokens to dispatch, all the ranks must hold the same value.
             num_experts: the number of all experts.
+            topk_weights: `torch.Tensor` with `torch.float32`, shaped as `[num_tokens, num_topk]`, optional. If provided,
+                the topk weights will be dispatched along with the tokens and returned in the output.
             cumulative_local_expert_recv_stats: a cumulative expert count tensor for statistics, which should have shape
                 `[num_local_experts]` and be typed as `torch.int`. This is useful for online service EP load balance
                 monitoring.
@@ -696,12 +698,21 @@ class Buffer:
                 as we do not synchronize CPU received count with GPU (also not incompatible with CUDA graph if synced).
             recv_count: a tensor shaped `[num_local_experts]` with type `torch.int`, indicating how many tokens each
                 expert receives. As mentioned before, not all tokens are valid in `recv_x`.
+            recv_topk_weights: (Only returned if `topk_weights` was provided) tensor shaped
+                `[num_local_experts, num_max_dispatch_tokens_per_rank * num_ranks]` with type `torch.float32`,
+                containing the received topk weights for each token.
+            recv_rank_info: (Only returned if `topk_weights` was provided) tensor shaped
+                `[num_local_experts, num_max_dispatch_tokens_per_rank * num_ranks]` with type `torch.int32`,
+                containing the source rank for each received token.
             handle: the communication handle to be used in the `low_latency_combine` function.
             event: the event after executing the kernel (valid only if `async_finish` is set).
             hook: the receiving hook function (valid only if `return_recv_hook` is set).
+
+            Note: Returns 5 elements when `topk_weights=None`, 7 elements when `topk_weights` is provided.
         """
-        packed_recv_x, packed_recv_x_scales, packed_recv_count, packed_recv_src_info, packed_recv_layout_range, event, hook = \
+        packed_recv_x, packed_recv_x_scales, packed_recv_count, packed_recv_src_info, packed_recv_layout_range, packed_recv_topk_weights, packed_recv_rank_info, event, hook = \
             self.runtime.low_latency_dispatch(x, topk_idx,
+                                              topk_weights,
                                               cumulative_local_expert_recv_stats,
                                               dispatch_wait_recv_cost_stats,
                                               x_global_scale,
@@ -713,12 +724,19 @@ class Buffer:
         tensors_to_record = (x, topk_idx,
                              packed_recv_x, packed_recv_x_scales, packed_recv_count,
                              packed_recv_src_info, packed_recv_layout_range,
+                             packed_recv_topk_weights, packed_recv_rank_info,
                              cumulative_local_expert_recv_stats,
                              x_global_scale)
         if use_fp8 or use_nvfp4:
             packed_recv_x = (packed_recv_x, packed_recv_x_scales)
-        return packed_recv_x, packed_recv_count, handle, \
-            EventOverlap(event, tensors_to_record if async_finish else None), hook
+
+        # Return format depends on whether topk_weights was provided (backward compatibility)
+        if topk_weights is not None:
+            return packed_recv_x, packed_recv_count, packed_recv_topk_weights, packed_recv_rank_info, handle, \
+                EventOverlap(event, tensors_to_record if async_finish else None), hook
+        else:
+            return packed_recv_x, packed_recv_count, handle, \
+                EventOverlap(event, tensors_to_record if async_finish else None), hook
 
     # noinspection PyTypeChecker
     def low_latency_combine(self, x: torch.Tensor, topk_idx: torch.Tensor, topk_weights: torch.Tensor,

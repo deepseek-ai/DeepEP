@@ -11,6 +11,7 @@
 #include <c10/util/Optional.h>
 #include <torch/torch.h>
 #include <vector>
+#include <memory>
 #include <algorithm>
 #include <string>
 
@@ -22,61 +23,60 @@
 class HybridEPBuffer {
 public:
   HybridEPBuffer(pybind11::object process_group, BufferConfig config, int local_rank, int node_rank, int group_size, std::string base_path, bool load_cached_kernels, bool use_shared_buffer, bool enable_custom_allgather);
+  ~HybridEPBuffer();
   bool update_buffer(HybridEpConfigInstance config); // True means the buffer is reallocated.
 
-  std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor,
-             torch::Tensor>
-  metadata_preprocessing(HybridEpConfigInstance config, torch::Tensor global_routing_map, int64_t num_of_tokens_per_rank, bool non_blocking);
+  HandleImpl metadata_preprocessing(HybridEpConfigInstance config, 
+    torch::Tensor local_routing_map, 
+    int64_t num_of_tokens_per_rank, 
+    c10::optional<int64_t> num_permuted_tokens, 
+    c10::optional<int64_t> pad_multiple, 
+    bool enable_permute, 
+    bool fuse_permute_dispatch,
+    bool non_blocking
+  );
 
   std::tuple<torch::Tensor, c10::optional<torch::Tensor>, c10::optional<torch::Tensor>>
-  dispatch(HybridEpConfigInstance config, 
-           torch::Tensor hidden, c10::optional<torch::Tensor> probs,
+  dispatch(torch::Tensor hidden, c10::optional<torch::Tensor> probs,
            c10::optional<torch::Tensor> scaling_factor,
-           torch::Tensor sparse_to_dense_map, torch::Tensor rdma_to_attn_map,
-           torch::Tensor attn_to_rdma_map, c10::optional<torch::Tensor> num_dispatched_tokens_tensor,
-           c10::optional<int64_t> num_dispatched_tokens,
-           int64_t num_of_tokens_per_rank,
+           HandleImpl handle,
            bool with_probs);
 
   std::tuple<torch::Tensor, torch::Tensor>
-  combine(HybridEpConfigInstance config, torch::Tensor hidden, c10::optional<torch::Tensor> probs,
-          torch::Tensor sparse_to_dense_map, torch::Tensor rdma_to_attn_map,
-          torch::Tensor attn_to_rdma_map, int64_t num_of_tokens_per_rank,
+  combine(torch::Tensor hidden, c10::optional<torch::Tensor> probs,
+          HandleImpl handle,
           bool with_probs);
   
-  std::tuple<torch::Tensor, c10::optional<torch::Tensor>, c10::optional<torch::Tensor>, torch::Tensor, torch::Tensor, torch::Tensor>
+  std::tuple<torch::Tensor, c10::optional<torch::Tensor>, c10::optional<torch::Tensor>>
   dispatch_with_permute(
-            HybridEpConfigInstance config, 
-            torch::Tensor hidden, c10::optional<torch::Tensor> probs,
+            torch::Tensor hidden, 
+            c10::optional<torch::Tensor> probs,
             c10::optional<torch::Tensor> scaling_factor,
-            torch::Tensor sparse_to_dense_map, torch::Tensor rdma_to_attn_map,
-            torch::Tensor attn_to_rdma_map, 
-            c10::optional<torch::Tensor> num_dispatched_tokens_tensor,
-            c10::optional<torch::Tensor> local_expert_routing_map,
-            c10::optional<torch::Tensor> row_id_map,
-            c10::optional<int64_t> num_permuted_tokens,
-            int64_t num_of_tokens_per_rank,
+            HandleImpl handle,
             c10::optional<int64_t> pad_multiple,
+            bool fuse_permute_dispatch,
             bool non_blocking,
             bool with_probs);
 
   std::tuple<torch::Tensor, torch::Tensor>
   combine_with_unpermute(
-          HybridEpConfigInstance config, 
-          torch::Tensor hidden, c10::optional<torch::Tensor> probs,
-          torch::Tensor sparse_to_dense_map, torch::Tensor rdma_to_attn_map,
-          torch::Tensor attn_to_rdma_map, c10::optional<torch::Tensor> num_dispatched_tokens_tensor,
-          c10::optional<torch::Tensor> row_id_map,
-          int64_t num_of_tokens_per_rank,
+          torch::Tensor hidden, 
+          c10::optional<torch::Tensor> probs,
+          HandleImpl handle,
           c10::optional<int64_t> pad_multiple,
+          bool fuse_unpermute_combine,
           bool with_probs);       
 
 private:
+  ExtendedMemoryAllocator remote_allocator;
 #ifdef HYBRID_EP_BUILD_MULTINODE_ENABLE
-  RDMACoordinator rdma_coordinator;
+#ifdef USE_NIXL
+  NIXLCoordinator internode_coordinator;
+#else
+  RDMACoordinator internode_coordinator;
+#endif
 #endif
   NVLCoordinator nvl_coordinator;
-  ExtendedMemoryAllocator remote_allocator;
   BufferConfig buffer_config;
   Executor executor;
   pybind11::object process_group;

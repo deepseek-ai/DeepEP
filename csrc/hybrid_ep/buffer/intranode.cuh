@@ -8,6 +8,7 @@
 #include <torch/torch.h>
 #include "utils.cuh"
 #include "config.cuh"
+#include "coordinator.cuh"
 #include "allocator/allocator.cuh"
 #include "backend/hybrid_ep_backend.cuh"
 
@@ -23,6 +24,10 @@ struct IntraNodeDispatchBuffers {
     // Misc flags
     uint32_t *    intra_node_write_completion_flags = nullptr;
     uint32_t *    expected_intra_node_flag_value = nullptr;
+    uint32_t *    intra_node_flag_parity = nullptr;
+    uint32_t *    expected_permute_flag_value = nullptr;
+    uint32_t *    intra_node_expert_output_chunk_flags = nullptr;              // Local rank's chunk flags buffer
+    uint32_t **   intra_node_expert_output_chunk_flags_all_ranks = nullptr;  // Host array of per-rank device pointers
 };
 
 struct IntraNodeCombineBuffers {
@@ -34,26 +39,30 @@ struct IntraNodeCombineBuffers {
     // Misc flags
     uint32_t *    intra_node_write_completion_flags = nullptr;
     uint32_t *    expected_intra_node_flag_value = nullptr;
+    uint32_t *    intra_node_flag_parity = nullptr;
+    uint32_t *    intra_node_expert_input_chunk_flags = nullptr;              // Local rank's chunk flags buffer
+    uint32_t **   intra_node_expert_input_chunk_flags_all_ranks = nullptr;  // Host array of per-rank device pointers
+    // Fused unpermute-combine flags
+    uint32_t *    expected_unpermute_flag_value = nullptr;
 };
   
 
-class NVLCoordinator {
+class NVLCoordinator : public HybridEPCoordinator {
 public:
     NVLCoordinator() = default;
-    ~NVLCoordinator();
+    ~NVLCoordinator() override;
 
     void init(pybind11::object process_group, int node_rank, int local_rank, int group_size, bool use_shared_buffer, BufferConfig config, ExtendedMemoryAllocator *remote_allocator);
-    void update_config(BufferConfig config);
-    void destroy();
-    void allocate_preprocessing_buffers();
-    void allocate_dispatch_buffers();
-    void allocate_combine_buffers();
-    void exchange_remote_nvl_info();
+    bool grow_buffer_config(const HybridEpConfigInstance& config, BufferConfig& buf_config) override;
+    void update_config(BufferConfig config) override;
+    void allocate_buffers() override;
+    void destroy() override;
 
     IntraNodeDispatchBuffers dispatch_buffers;
     IntraNodeCombineBuffers combine_buffers;
     // Buffer for metadata preprocessing
     hybrid_ep::tmp_state_t *preprocessing_tmp = nullptr;
+    hybrid_ep::tmp_state_t *preprocessing_local_experts_tmp = nullptr;
     // Maximum number of tokens for experts (worst case: all tokens to one expert)
     int64_t max_num_of_tokens = -1;
     // On intra-node communication, dispatch/combine can share same buffers.
@@ -72,6 +81,10 @@ private:
     torch::Tensor dispatch_memory_handles;
     torch::Tensor combine_memory_handles;
 
+    void allocate_preprocessing_buffers();
+    void allocate_dispatch_buffers();
+    void allocate_combine_buffers();
+    void exchange_remote_nvl_info();
     void open_handles_from_other_ranks(std::vector<torch::Tensor> dispatch_handles,
                                      std::vector<torch::Tensor> combine_handles);
 };

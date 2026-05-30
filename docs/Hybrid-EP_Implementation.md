@@ -63,6 +63,9 @@ tests/
 | `use_fp8` | `bool` | Use FP8 quantization (default: False) |
 | `num_sms_dispatch_api` | `int` | SMs for dispatch kernel |
 | `num_sms_combine_api` | `int` | SMs for combine kernel |
+| `num_sms_preprocessing_api` | `int` | CUDA blocks for preprocessing kernel |
+| `num_blocks_permute` | `int` | CUDA blocks for permute (standalone or fused permute-dispatch) |
+| `num_blocks_unpermute` | `int` | CUDA blocks for unpermute (standalone or fused unpermute-combine) |
 | `load_cached_kernels` | `bool` | Load pre-compiled JIT kernels (default: False) |
 | `use_shared_buffer` | `bool` | Share intra-node buffer between dispatch/combine (default: True) |
 | `enable_custom_allgather` | `bool` | Use optimized intra-node allgather (default: False) |
@@ -94,6 +97,7 @@ Dispatch tokens to target experts. Use `dispatch_with_permute` for integrated pe
 | `pad_multiple` | `int` | Pad output to multiple (for GEMM alignment) |
 | `num_permuted_tokens` | `int` | Expected output size (for non_blocking) |
 | `non_blocking` | `bool` | Skip sync, use GPU-side metadata (default: False) |
+| `fuse_permute_dispatch` | `bool` | Fuse permute into the dispatch kernel (default: False) |
 
 > **Non-blocking Mode:** When `non_blocking=True`, stream synchronizations are skipped. Output buffer is sized by `num_permuted_tokens`; overflow sets `overflow_flag=True` and drops excess tokens. In non-blocking mode, `num_dispatched_tokens_tensor` and `tokens_per_expert` are GPU tensors; otherwise they reside in CPU pinned memory.
 
@@ -117,6 +121,7 @@ Combine tokens from experts back to original positions. Use corresponding method
 | `probs` | `Tensor` | Routing probabilities for weighted sum |
 | `handle` | `tuple` | Metadata from dispatch (required) |
 | `pad_multiple` | `int` | Padding alignment (`combine_with_unpermute` only) |
+| `fuse_unpermute_combine` | `bool` | Fuse unpermute into the combine kernel (default: False) |
 
 **Outputs:**
 | Return | Type | Description |
@@ -146,7 +151,7 @@ handle = (
 )
 ```
 
-#### `dispatch_with_permute` Handle
+#### `dispatch_with_permute` Handle (independent permute)
 
 ```python
 handle = (
@@ -162,13 +167,33 @@ handle = (
 )
 ```
 
+#### `dispatch_with_permute` Handle (fused permute)
+
+When `fuse_permute_dispatch=True`, `row_id_map` is replaced by fused-mode metadata:
+
+```python
+handle = (
+    sparse_to_dense_map,         # [0] Tensor
+    rdma_to_attn_map,            # [1] Tensor
+    attn_to_rdma_map,            # [2] Tensor
+    num_dispatched_tokens_tensor,# [3] Tensor: Total dispatched token count
+    local_expert_routing_map,    # [4] Tensor: Local expert routing information
+    dense_chunk_layout,          # [5] Tensor: Per-chunk start positions in the per-rank buffer
+    dense_to_expert_map,         # [6] Tensor: Token-to-local-expert mapping
+    tokens_per_expert,           # [7] Tensor: Token count per local expert
+    num_of_tokens_per_rank,      # [8] int: Number of tokens per rank
+    config,                      # [9] HybridEpConfigInstance: Runtime configuration
+    overflow_flag,               # [10] Tensor: Buffer overflow indicator
+)
+```
+
 ---
 
 ## 3. Config
 
 Hybrid-EP uses two configuration structures defined in [`config.cuh`](../csrc/hybrid_ep/config.cuh):
 
-- **`BufferConfig`**: A subset of parameters used solely for buffer size calculation, stored persistently in the buffer object.
+- **`BufferConfig`**: Parameters used solely for buffer size calculation, stored persistently in the buffer object.
 - **`HybridEpConfigInstance`**: Contains all parameters needed for JIT-compiling and launching Hybrid-EP kernels. A new instance is created for each invocation.
 
 Each run compares the new `HybridEpConfigInstance` against `BufferConfig` to detect whether existing buffers are sufficient. If not, a free-reallocate cycle is triggered (see [4. Buffer Management](#4-buffer-management)).
@@ -200,6 +225,15 @@ These parameters are pre-tuned for optimal performance. Adjustments are generall
 | `num_of_stages_g2s_combine_api` | `NUM_OF_STAGES_G2S_COMBINE_API` | Pipeline depth for global-to-shared in combine. Same shared memory trade-off as dispatch |
 | `num_of_stages_s2g_combine_api` | `NUM_OF_STAGES_S2G_COMBINE_API` | Pipeline depth for shared-to-global in combine |
 | `num_of_blocks_combine_api` | - | Number of CTAs for combine kernels |
+| `num_of_blocks_permute` | - | Number of CUDA blocks for the permute portion (standalone or fused dispatch) |
+| `num_of_stages_permute_block_dispatch_api` | `NUM_OF_STAGES_PERMUTE_BLOCK_DISPATCH_API` | Shared-memory pipeline stages for permute blocks in fused dispatch |
+| `num_of_in_flight_s2g_permute_block_dispatch_api` | `NUM_OF_IN_FLIGHT_S2G_PERMUTE_BLOCK_DISPATCH_API` | In-flight S2G token entries for permute blocks in fused dispatch |
+| `num_of_blocks_unpermute` | - | Number of CUDA blocks for the unpermute portion (standalone or fused combine) |
+| `num_of_stages_g2s_unpermute_block` | `NUM_OF_STAGES_G2S_UNPERMUTE_BLOCK` | Pipeline depth for G2S in unpermute blocks (fused combine) |
+| `num_of_stages_s2g_unpermute_block` | `NUM_OF_STAGES_S2G_UNPERMUTE_BLOCK` | Pipeline depth for S2G in unpermute blocks (fused combine) |
+| `num_of_additional_in_flight_s2g_unpermute_block_combine_api` | `NUM_OF_ADDITIONAL_IN_FLIGHT_S2G_UNPERMUTE_BLOCK_COMBINE_API` | In-flight S2G token entries for unpermute blocks in fused combine |
+
+> **Fused-mode constraint:** When `fuse_permute_dispatch=True`, `is_valid()` additionally requires all chunk sizes (`num_of_tokens_per_chunk_dispatch_api`, `num_of_tokens_per_chunk_combine_api`, `num_of_tokens_per_chunk_preprocessing_api`) to be identical.
 
 ### Note on `max_num_of_tokens_per_rank`
 
@@ -309,14 +343,17 @@ The Executor orchestrates all communication operations. Each API is divided into
 
 | API | Preprocess | Core | Postprocess |
 |-----|------------|------|-------------|
-| `metadata_preprocess` | - | Allgather + metadata kernel | - |
+| `metadata_preprocess` | - | Allgather + metadata kernel + permute preprocessing | - |
 | `dispatch` | D2D to RDMA buffer* | Dispatch kernel | D2D from buffer |
-| `dispatch_with_permute` (no handle) | D2D to RDMA buffer* + permute preprocessing | Dispatch kernel | Permute kernel |
-| `dispatch_with_permute` (with handle) | D2D to RDMA buffer* | Dispatch kernel | Permute kernel |
+| `dispatch_with_permute` | D2D to RDMA buffer*| Dispatch kernel | Permute kernel |
+| `dispatch_with_permute` (fused) | D2D to RDMA buffer*  | Fused dispatch+permute kernel | - |
 | `combine` | D2D to buffer | Combine kernel | - |
 | `combine_with_unpermute` | Unpermute kernel | Combine kernel | - |
+| `combine_with_unpermute` (fused) | - | Fused combine+unpermute kernel | - |
 
 \* Only when `num_of_nodes > 1`
+
+In fused mode, the permute/unpermute operations are executed by dedicated permute blocks within the same kernel grid as the dispatch/combine blocks (see [8. Hybrid-EP Kernels](#8-hybrid-ep-kernels)).
 
 ---
 
@@ -334,6 +371,8 @@ Hybrid-EP uses NVCC JIT compilation to generate optimized kernels based on runti
 ```
 HybridEpConfigInstance ──► Generate .cu ──► nvcc compile ──► .so ──► dlopen/dlsym ──► function pointer
 ```
+
+When `fuse_permute_dispatch=True` or `fuse_unpermute_combine=True`, the `build()` method passes `-DHYBRID_EP_BUILD_PERMUTE_FUSION_ENABLE` to nvcc, which activates the fused permute/unpermute code paths in the kernel templates. The same macro controls both dispatch-side permute fusion and combine-side unpermute fusion. Fused and non-fused kernels produce separate `.so` files; each is loaded with `RTLD_LOCAL` to prevent symbol conflicts between the two variants.
 
 ### 6.2 Cache Management
 
@@ -366,6 +405,11 @@ Conversely, `combine_with_unpermute` reverses this process: it unpermutes expert
 
 Additionally, some training frameworks require token alignment per expert (e.g., for efficient GEMM). The `pad_multiple` parameter enables padding to meet these alignment requirements.
 
+Hybrid-EP supports two execution modes for permutation:
+
+- **Independent mode** (default): The permute/unpermute operation runs as a separate kernel after/before the dispatch/combine kernel.
+- **Fused mode** (`fuse_permute_dispatch=True` / `fuse_unpermute_combine=True`): The permute/unpermute operation is fused into the dispatch/combine communication kernel itself. Dedicated permute blocks run within the same kernel grid as the dispatch/combine blocks, reading from per-rank buffers as chunks become ready and writing directly to the output tensors.
+
 #### Buffer Allocation Challenge
 
 When using `dispatch_with_permute` / `combine_with_unpermute`, we face a fundamental challenge: **the number of permuted tokens is unknown before preprocessing completes** due to the dynamic nature of MoE routing.
@@ -376,22 +420,26 @@ Allocating buffers for the worst case would require `worst_case_dispatch_output 
 
 By default, `dispatch_with_permute` performs a **stream synchronization** after the preprocessing kernel to obtain the exact token count, then allocates a precisely-sized buffer using `torch.empty()`:
 
-```
-┌───────────────────┐     ┌──────────────┐     ┌─────────────────┐     ┌─────────────────┐     ┌────────────────┐
-│ Permute           │────▶│ Stream Sync  │────▶│ Allocate Buffer │────▶│ Dispatch Kernel │────▶│ Permute Kernel │
-│ Preprocessing     │     │ (blocking)   │     │ (exact size)    │     │                 │     │                │
-└───────────────────┘     └──────────────┘     └─────────────────┘     └─────────────────┘     └────────────────┘
-```
+#### Blocking (default)
 
-#### Non-Blocking Mode
-
-For CUDA graph capture, `non_blocking=True` allows users to provide an estimated token count (`num_permuted_tokens`) to avoid synchronization:
+A stream synchronization obtains the exact token count, then allocates a precisely-sized buffer. The dispatch kernel is followed by a permute step -- either a separate permute kernel (independent) or fused permute blocks within the same kernel grid (`fuse_permute_dispatch=True`):
 
 ```
-┌───────────────────┐     ┌─────────────────────┐     ┌─────────────────┐     ┌────────────────┐
-│ Permute           │────▶│ Allocate Buffer     │────▶│ Dispatch Kernel │────▶│ Permute Kernel │
-│ Preprocessing     │     │ (user-estimated)    │     │                 │     │                │
-└───────────────────┘     └─────────────────────┘     └─────────────────┘     └────────────────┘
+┌───────────────────┐     ┌──────────────┐     ┌─────────────────┐     ┌──────────────────────────────────┐
+│ Permute           │────▶│ Stream Sync  │────▶│ Allocate Buffer │────▶│ Dispatch Kernel + Permute        │
+│ Preprocessing     │     │ (blocking)   │     │ (exact size)    │     │ (independent or fused)           │
+└───────────────────┘     └──────────────┘     └─────────────────┘     └──────────────────────────────────┘
+```
+
+#### Non-Blocking
+
+For CUDA graph capture, `non_blocking=True` allows users to provide an estimated token count (`num_permuted_tokens`) to avoid synchronization. The permute step is likewise independent or fused:
+
+```
+┌───────────────────┐     ┌─────────────────────┐     ┌──────────────────────────────────┐
+│ Permute           │────▶│ Allocate Buffer     │────▶│ Dispatch Kernel + Permute        │
+│ Preprocessing     │     │ (user-estimated)    │     │ (independent or fused)           │
+└───────────────────┘     └─────────────────────┘     └──────────────────────────────────┘
 ```
 
 **Output behavior**:
@@ -426,6 +474,20 @@ The dispatch kernel moves tokens from attention output to expert input buffers:
 3. **S2G Warp Group**: Writes data to remote ranks' buffers via NVLink
 4. **RDMA Warp Group** (multi-node only): Sends data to corresponding ranks on other nodes; also receives RDMA data from other nodes
 
+#### Fused Permute Blocks
+
+When `fuse_permute_dispatch=True` (compiled with `-DHYBRID_EP_BUILD_PERMUTE_FUSION_ENABLE`), the kernel grid is extended with `NUM_OF_PERMUTE_BLOCKS` additional blocks appended after the `NUM_OF_BLOCKS` dispatch blocks. Block role is determined by `blockIdx.x`:
+
+- `blockIdx.x < NUM_OF_BLOCKS` — dispatch block (original logic above)
+- `blockIdx.x >= NUM_OF_BLOCKS` — permute block
+
+Each permute block contains two warp groups:
+
+5. **Permute G2S Warp Group**: Reads dispatched tokens from per-rank NVLink buffers. Waits on chunk-ready flags (`intra_node_expert_output_chunk_flags`) set by dispatch S2G warp groups when a chunk's write to the per-rank buffer completes.
+6. **Permute S2G Warp Group**: Writes permuted tokens directly to the output tensor (`local_expert_output_token`), grouped by expert. Handles padding initialization for `pad_multiple` alignment.
+
+**Synchronization**: Dispatch S2G warp groups notify permute G2S warp groups via per-chunk flags. A monotonically increasing `expected_permute_flag_value` tracks completion across invocations without resetting the flags.
+
 ### 8.2 Combine Kernel
 
 ![Combine Kernel](../figures/hybrid-ep-img/hybrid_ep_combine.png)
@@ -443,6 +505,18 @@ The combine kernel aggregates expert outputs back to original token positions.
    - *Inter-node*: Writes to intra-node peers' buffers via NVLink
    - *Intra-node* (multi-node only): Writes to RDMA buffer for cross-node transfer
 5. **RDMA Warp Group** (multi-node only): Sends data to peer ranks on other nodes; also receives RDMA data from peers
+
+#### Fused Unpermute Blocks
+
+When `fuse_unpermute_combine=True` (compiled with `-DHYBRID_EP_BUILD_PERMUTE_FUSION_ENABLE`), the kernel grid is extended with `NUM_OF_UNPERMUTE_BLOCKS` additional blocks appended after the `NUM_OF_BLOCKS` combine blocks. Block role is determined by `blockIdx.x`:
+
+- `blockIdx.x < NUM_OF_BLOCKS` — combine block (original logic above)
+- `blockIdx.x >= NUM_OF_BLOCKS` — unpermute block
+
+Each unpermute block contains two warp groups:
+
+6. **Unpermute G2S Warp Group**: Reads expert output tokens from the user's input tensor (`local_expert_input_token`) using `dense_to_expert_map` to traverse tokens in expert-grouped order. Produces token entries into the shared memory G2S FIFO with `num_of_stages_g2s_unpermute_block` pipeline depth.
+7. **Unpermute Red Warp Group**: Consumes token entries from the shared memory G2S FIFO, rearranges them from expert-grouped order to chunk-based order, and writes to the local rank's NVLink buffer (`expert_input_token[local_rank]`). Sets chunk-ready flags (`intra_node_expert_input_chunk_flags`) on all ranks after each chunk write completes, notifying combine G2S warp groups that the data is ready for reading.
 
 ## 9. Allocator
 
@@ -469,3 +543,11 @@ This environment variable specifies the number of ranks that can directly access
 - `num_of_nodes = group_size // NUM_OF_HYBRID_EP_RANKS_PER_NVLINK_DOMAIN` — total number of NVLink domains
 
 The value must evenly divide the total number of ranks.
+
+To disable MNNVL (fabric) support and fall back to IPC-based memory sharing, set:
+
+```bash
+export USE_MNNVL=0   # or USE_MNNVL=false (case-insensitive)
+```
+
+When this variable is set to `0` or `false`, the allocator forces `support_fabric_` to `false` regardless of hardware capability, causing all allocations to use `cudaMalloc` / `cudaIpc*` instead of fabric handles.

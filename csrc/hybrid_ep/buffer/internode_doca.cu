@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: MIT
 // SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES.
 // All rights reserved
-#include "internode.cuh"
+#include "buffer/internode_doca.cuh"
 #include <sstream>
 #include <cstdlib>
 #include <unordered_map>
 
 // Functions realted to get RDMA context.
-static ibv_device *ctx_find_dev(const char *ib_devname) {
+ibv_device *ctx_find_dev(const char *ib_devname) {
   int num_of_device;
   struct ibv_device **dev_list;
   struct ibv_device *ib_dev = NULL;
@@ -72,7 +72,7 @@ static void get_nic_name(const std::vector<int>& gpu_idx_vec, int local_device_i
 }
 
 // Functions related to initialization of gverbs_context.
-static int get_gpu_handler(struct doca_gpu *handler,
+int get_gpu_handler(struct doca_gpu *handler,
                            struct ibv_context *ib_context, int local_rank) {
   char pciBusId[256];
   int compute_cap_major;
@@ -188,7 +188,7 @@ int create_and_place_qps(struct gverbs_context *g_ctx,
   return status;
 }
 
-static int setup_qp_attr_for_modify(struct ibv_port_attr *port_attr, struct doca_verbs_qp_attr *qp_attr, 
+int setup_qp_attr_for_modify(struct ibv_port_attr *port_attr, struct doca_verbs_qp_attr *qp_attr, 
   struct remote_info *l_info, struct remote_info *r_info,
   struct ibv_context *ib_context) {
   int status = 0;
@@ -282,7 +282,7 @@ int doca_gpunetio_test_change_qp_state(struct doca_gpu_verbs_qp_hl *qp,
   return 0;
 }
 
-static int setup_qp_attr_and_set_qp(struct gverbs_context *g_ctx, struct ibv_context *ib_context, struct ibv_port_attr *port_attr,
+int setup_qp_attr_and_set_qp(struct gverbs_context *g_ctx, struct ibv_context *ib_context, struct ibv_port_attr *port_attr,
   struct remote_info *rem_dest, struct doca_verbs_qp_attr *qp_attr,
   int num_of_blocks, int num_of_nodes, int node_rank, uint32_t qp_cnt) {
   int attr_mask = DOCA_VERBS_QP_ATTR_NEXT_STATE | DOCA_VERBS_QP_ATTR_ALLOW_REMOTE_WRITE |
@@ -305,8 +305,33 @@ static int setup_qp_attr_and_set_qp(struct gverbs_context *g_ctx, struct ibv_con
   return 0;
 }
 
+bool RDMACoordinator::grow_buffer_config(const HybridEpConfigInstance& config, BufferConfig& buf_config) {
+  bool changed = false;
+  changed |= grow_to(buf_config.max_num_of_tokens_per_rank, config.max_num_of_tokens_per_rank);
+  changed |= grow_to(buf_config.hidden_dim, config.hidden_dim);
+  changed |= grow_to(buf_config.num_of_experts_per_rank, config.num_of_experts_per_rank);
+  changed |= grow_to(buf_config.num_of_ranks_per_node, config.num_of_ranks_per_node);
+  changed |= grow_to(buf_config.num_of_nodes, config.num_of_nodes);
+  changed |= grow_to(buf_config.num_of_blocks_dispatch_api, config.num_of_blocks_dispatch_api);
+  changed |= grow_to(buf_config.num_of_blocks_combine_api, config.num_of_blocks_combine_api);
+  if (buf_config.num_of_tokens_per_chunk_dispatch_api != config.num_of_tokens_per_chunk_dispatch_api) {
+    changed = true;
+    buf_config.num_of_tokens_per_chunk_dispatch_api = config.num_of_tokens_per_chunk_dispatch_api;
+  }
+  if (buf_config.num_of_tokens_per_chunk_combine_api != config.num_of_tokens_per_chunk_combine_api) {
+    changed = true;
+    buf_config.num_of_tokens_per_chunk_combine_api = config.num_of_tokens_per_chunk_combine_api;
+  }
+  return changed;
+}
+
 void RDMACoordinator::update_config(BufferConfig config) {
   this->buffer_config = config;
+}
+
+void RDMACoordinator::allocate_buffers() {
+  allocate_combine_buffers();
+  allocate_dispatch_buffers();
 }
 
 void RDMACoordinator::init(  
@@ -376,9 +401,10 @@ void RDMACoordinator::allocate_dispatch_buffers(){
                                         * buffer_config.num_of_ranks_per_node);
   auto rdma_inter_node_group_scaling_factor_elts = buffer_config.max_num_of_tokens_per_rank * 
                                                     (buffer_config.num_of_nodes - 1) * (buffer_config.hidden_dim / 128);
-  auto rdma_inter_node_group_flags_elts = ((buffer_config.max_num_of_tokens_per_rank - 1) /
+  size_t rdma_inter_node_group_flags_barrier_idx = (size_t)((buffer_config.max_num_of_tokens_per_rank - 1) /
                                            buffer_config.num_of_tokens_per_chunk_dispatch_api + 1) *
                                           (buffer_config.num_of_nodes - 1);
+  size_t rdma_inter_node_group_flags_elts = rdma_inter_node_group_flags_barrier_idx + 2 * (buffer_config.num_of_nodes - 1);
   // Allocate RDMA buffers
   CUDA_CHECK(cudaMalloc((void**)&dispatch_buffers.attn_input_token,
                         attn_input_token_elts * sizeof_token_data_type));
@@ -441,8 +467,6 @@ void RDMACoordinator::allocate_dispatch_buffers(){
   dispatch_remote_info_vec = static_cast<remote_info *>(calloc(buffer_config.num_of_nodes * num_of_dispatch_qps, sizeof(remote_info)));
   remote_info *my_dispatch_info = static_cast<remote_info *>(calloc(num_of_dispatch_qps, sizeof(remote_info)));
   int token_stride = buffer_config.max_num_of_tokens_per_rank * buffer_config.hidden_dim;
-  // TODO: should be the real dyncmic num_of_tokens_per_rank 
-  int flag_stride = (buffer_config.max_num_of_tokens_per_rank - 1) / buffer_config.num_of_tokens_per_chunk_dispatch_api + 1;
   int prob_stride = buffer_config.max_num_of_tokens_per_rank * buffer_config.num_of_experts_per_rank * buffer_config.num_of_ranks_per_node;
   int scaling_factor_stride = buffer_config.max_num_of_tokens_per_rank * (buffer_config.hidden_dim / 128);
   // For each queue pair to the same remote. 
@@ -467,8 +491,7 @@ void RDMACoordinator::allocate_dispatch_buffers(){
           break;
       }
       curr_info->flag_rkey = dispatch_rdma_inter_node_group_flags_mr->rkey;
-      curr_info->flag_vaddr = (uintptr_t)((uint64_t *)dispatch_rdma_inter_node_group_flags_mr->addr +
-                                          peer_idx * flag_stride);
+      curr_info->flag_vaddr = (uintptr_t)dispatch_rdma_inter_node_group_flags_mr->addr;
       curr_info->prob_rkey = dispatch_rdma_inter_node_group_prob_mr->rkey;
       curr_info->prob_vaddr = (uintptr_t)((float *)dispatch_rdma_inter_node_group_prob_mr->addr +
                                           peer_idx * prob_stride);
@@ -508,10 +531,11 @@ void RDMACoordinator::allocate_dispatch_buffers(){
       data->scaling_factor_lkey = htobe32(attn_input_token_scaling_factor_mr->lkey);
       data->scaling_factor_raddr = dispatch_remote_info_vec[rem_idx].scaling_factor_vaddr;
       data->scaling_factor_rkey = htobe32(dispatch_remote_info_vec[rem_idx].scaling_factor_rkey);
-      data->flag_laddr = (uint64_t)((uint64_t *)attn_input_flags_mr->addr + peer_idx * flag_stride);
+      data->flag_laddr = (uint64_t)attn_input_flags_mr->addr;
       data->flag_lkey = htobe32(attn_input_flags_mr->lkey);
       data->flag_raddr = dispatch_remote_info_vec[rem_idx].flag_vaddr;
       data->flag_rkey = htobe32(dispatch_remote_info_vec[rem_idx].flag_rkey);
+      data->back_sync_barrier_idx = rdma_inter_node_group_flags_barrier_idx;
       data->prob_laddr = (uint64_t)attn_input_prob_mr->addr;
       data->prob_lkey = htobe32(attn_input_prob_mr->lkey);
       data->prob_raddr = dispatch_remote_info_vec[rem_idx].prob_vaddr;
@@ -540,9 +564,10 @@ void RDMACoordinator::allocate_combine_buffers(){
                                           (buffer_config.num_of_nodes - 1) * buffer_config.hidden_dim;
   auto rdma_inter_node_group_prob_elts = buffer_config.max_num_of_tokens_per_rank * (buffer_config.num_of_nodes - 1) *
                                          (buffer_config.num_of_experts_per_rank * buffer_config.num_of_ranks_per_node);
-  auto rdma_inter_node_group_flags_elts = ((buffer_config.max_num_of_tokens_per_rank - 1) /
+  size_t combine_rdma_inter_node_group_flags_barrier_idx = (size_t)((buffer_config.max_num_of_tokens_per_rank - 1) /
                                            buffer_config.num_of_tokens_per_chunk_combine_api + 1) *
                                           (buffer_config.num_of_nodes - 1);
+  size_t rdma_inter_node_group_flags_elts = combine_rdma_inter_node_group_flags_barrier_idx + 2 * (buffer_config.num_of_nodes - 1);
                                     
   // Allocate RDMA buffers
   CUDA_CHECK(cudaMalloc((void**)&combine_buffers.rdma_intra_node_red_token,
@@ -597,7 +622,6 @@ void RDMACoordinator::allocate_combine_buffers(){
   combine_remote_info_vec = static_cast<remote_info *>(calloc(buffer_config.num_of_nodes * num_of_combine_qps, sizeof(remote_info)));
   remote_info *my_combine_info = static_cast<remote_info *>(calloc(num_of_combine_qps, sizeof(remote_info)));
   int token_stride = buffer_config.max_num_of_tokens_per_rank * buffer_config.hidden_dim;
-  int flag_stride = (buffer_config.max_num_of_tokens_per_rank - 1) / buffer_config.num_of_tokens_per_chunk_combine_api + 1;
   int prob_stride = buffer_config.max_num_of_tokens_per_rank * buffer_config.num_of_experts_per_rank * buffer_config.num_of_ranks_per_node;
   // For each queue pair to the same remote. 
   for (int qp_idx = 0; qp_idx < buffer_config.num_of_blocks_combine_api; ++qp_idx) {
@@ -615,8 +639,7 @@ void RDMACoordinator::allocate_combine_buffers(){
       curr_info->token_vaddr = (uintptr_t)((uint16_t *)combine_rdma_inter_node_group_token_mr->addr +
                                            peer_idx * token_stride);
       curr_info->flag_rkey = combine_rdma_inter_node_group_flags_mr->rkey;
-      curr_info->flag_vaddr = (uintptr_t)((uint64_t *)combine_rdma_inter_node_group_flags_mr->addr +
-                                          peer_idx * flag_stride);
+      curr_info->flag_vaddr = (uintptr_t)combine_rdma_inter_node_group_flags_mr->addr;
       curr_info->prob_rkey = combine_rdma_inter_node_group_prob_mr->rkey;
       curr_info->prob_vaddr = (uintptr_t)((float *)combine_rdma_inter_node_group_prob_mr->addr +
                                           peer_idx * prob_stride);
@@ -650,10 +673,11 @@ void RDMACoordinator::allocate_combine_buffers(){
       data->token_lkey = htobe32(rdma_intra_node_red_token_mr->lkey);
       data->token_raddr = combine_remote_info_vec[rem_idx].token_vaddr;
       data->token_rkey = htobe32(combine_remote_info_vec[rem_idx].token_rkey);
-      data->flag_laddr = (uint64_t)((uint64_t *)attn_output_flags_mr->addr + peer_idx * flag_stride);
+      data->flag_laddr = (uint64_t)attn_output_flags_mr->addr;
       data->flag_lkey = htobe32(attn_output_flags_mr->lkey);
       data->flag_raddr = combine_remote_info_vec[rem_idx].flag_vaddr;
       data->flag_rkey = htobe32(combine_remote_info_vec[rem_idx].flag_rkey);
+      data->back_sync_barrier_idx = combine_rdma_inter_node_group_flags_barrier_idx;
       data->prob_laddr = (uint64_t)rdma_intra_node_red_prob_mr->addr;
       data->prob_lkey = htobe32(rdma_intra_node_red_prob_mr->lkey);
       data->prob_raddr = combine_remote_info_vec[rem_idx].prob_vaddr;
@@ -741,14 +765,14 @@ void RDMACoordinator::destroy() {
   FREE_CUDA_MEMORY(combine_buffers.expected_rdma_flag_value);
 
   // If we use doca_gpu_verbs_destroy_qp_hl and re-allocate RDMA resources, "part or all of the requested memory range is already mapped" occurs. Do not know why now, so just comment it out.
-  // int num_of_dispatch_qps = (buffer_config.num_of_nodes - 1) * buffer_config.num_of_blocks_dispatch_api;
-  // int num_of_combine_qps = (buffer_config.num_of_nodes - 1) * buffer_config.num_of_blocks_combine_api;
-  // for (int idx = 0; idx < num_of_dispatch_qps; ++idx) {
-  //   doca_gpu_verbs_destroy_qp_hl(dispatch_gverbs_ctx.qp_hls[idx]);
-  // }
-  // for (int idx = 0; idx < num_of_combine_qps; ++idx) {
-  //   doca_gpu_verbs_destroy_qp_hl(combine_gverbs_ctx.qp_hls[idx]);
-  // }
+  int num_of_dispatch_qps = (buffer_config.num_of_nodes - 1) * buffer_config.num_of_blocks_dispatch_api;
+  int num_of_combine_qps = (buffer_config.num_of_nodes - 1) * buffer_config.num_of_blocks_combine_api;
+  for (int idx = 0; idx < num_of_dispatch_qps; ++idx) {
+    doca_gpu_verbs_destroy_qp_hl(dispatch_gverbs_ctx.qp_hls[idx]);
+  }
+  for (int idx = 0; idx < num_of_combine_qps; ++idx) {
+    doca_gpu_verbs_destroy_qp_hl(combine_gverbs_ctx.qp_hls[idx]);
+  }
   FREE_CPU_MEMORY(dispatch_gverbs_ctx.qp_hls);
   FREE_CPU_MEMORY(dispatch_gverbs_ctx.qp_init_attr);
   FREE_CPU_MEMORY(combine_gverbs_ctx.qp_hls);
