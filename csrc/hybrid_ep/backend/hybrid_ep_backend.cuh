@@ -4943,6 +4943,10 @@ __global__ void scan(const void* input_routing_data,  // bool* (TOPK==0) or int1
   //static_assert(NUM_OF_RANKS_PER_NODE % sizeof(rank_to_node_t) == 0, "NUM_OF_RANKS_PER_NODE and rank_to_node_t mismatch");
   //constexpr int RANKS_TO_NODE_REDUCE_ITER = NUM_OF_RANKS_PER_NODE / sizeof(rank_to_node_t);
 
+  constexpr int NUM_RANK_MASK_WORDS = (NUM_OF_RANKS_PER_NODE + 31) / 32;
+  static_assert(!DENSE_ROUTING || NUM_RANK_MASK_WORDS <= 16,
+                "Dense scan supports up to 512 ranks per node.");
+
   // How do a warp save per-rank routing info back to shared memory. What's the max number of elements does each thread save back.
   constexpr int NUM_OF_RANKS_PER_THREAD = ((NUM_OF_RANKS_PER_NODE - 1) / WARP_SIZE) + 1;
 #ifdef HYBRID_EP_BUILD_PERMUTE_FUSION_ENABLE
@@ -5020,11 +5024,20 @@ __global__ void scan(const void* input_routing_data,  // bool* (TOPK==0) or int1
     int current_token_rdma_to_attn_map_id = current_token_node_rank * rdma_to_attn_map_size_per_node + current_token_local_id;
     // Load routing data and compute per-rank routing info.
     bool token_needed_by_this_node = false;
-    // Per-rank routing flag array (reused in both modes).
-    bool token_needed_by_rank[NUM_OF_RANKS_PER_NODE];
-    #pragma unroll
-    for(int j = 0; j < NUM_OF_RANKS_PER_NODE; j++){
-      token_needed_by_rank[j] = false;
+    // Per-rank routing flags. Dense mode uses a compact bitset to avoid a large
+    // per-thread bool array when the NVL domain has many ranks.
+    bool token_needed_by_rank[DENSE_ROUTING ? 1 : NUM_OF_RANKS_PER_NODE];
+    uint32_t rank_mask[DENSE_ROUTING ? NUM_RANK_MASK_WORDS : 1];
+    if constexpr(DENSE_ROUTING){
+      #pragma unroll
+      for(int j = 0; j < NUM_RANK_MASK_WORDS; j++){
+        rank_mask[j] = 0;
+      }
+    } else {
+      #pragma unroll
+      for(int j = 0; j < NUM_OF_RANKS_PER_NODE; j++){
+        token_needed_by_rank[j] = false;
+      }
     }
 
     if constexpr(DENSE_ROUTING){
@@ -5049,14 +5062,14 @@ __global__ void scan(const void* input_routing_data,  // bool* (TOPK==0) or int1
         if(expert_id >= node_expert_start && expert_id < node_expert_end){
           int local_expert_id = expert_id - node_expert_start;
           int rank_within_node = local_expert_id / NUM_OF_EXPERTS_PER_RANK;
-          token_needed_by_rank[rank_within_node] = true;
+          rank_mask[rank_within_node / 32] |= 1u << (rank_within_node % 32);
           token_needed_by_this_node = true;
         }
       }
       // Accumulate per-rank sums.
       #pragma unroll
       for(int j = 0; j < NUM_OF_RANKS_PER_NODE; j++){
-        if(token_needed_by_rank[j]){
+        if(((rank_mask[j / 32] >> (j % 32)) & 1u) != 0){
           token_routing_map_sum[j] += 1;
         }
       }
@@ -5456,22 +5469,28 @@ __global__ void scan(const void* input_routing_data,  // bool* (TOPK==0) or int1
     // In dense mode: load TOPK int16 expert indices.
     // In sparse mode: load E_per_rank * R_per_node bools for local node slice.
     // Also compute per-rank routing flags.
-    bool token_needed_by_rank_step2[NUM_OF_RANKS_PER_NODE];
+    bool token_needed_by_rank_step2[DENSE_ROUTING ? 1 : NUM_OF_RANKS_PER_NODE];
     // Sparse mode needs the full routing map for local_expert_routing_map writes later.
     bool token_routing_map[DENSE_ROUTING ? 1 : (NUM_OF_EXPERTS_PER_RANK * NUM_OF_RANKS_PER_NODE)];
     constexpr int NUM_LOCAL_EXPERT_MASK_WORDS = (NUM_OF_EXPERTS_PER_RANK + 31) / 32;
     static_assert(!DENSE_ROUTING || NUM_LOCAL_EXPERT_MASK_WORDS <= 16,
                   "Dense scan supports up to 512 local experts per rank.");
     uint32_t local_expert_mask[DENSE_ROUTING ? NUM_LOCAL_EXPERT_MASK_WORDS : 1];
+    uint32_t rank_mask[DENSE_ROUTING ? NUM_RANK_MASK_WORDS : 1];
     if constexpr(DENSE_ROUTING){
       #pragma unroll
       for(int k = 0; k < NUM_LOCAL_EXPERT_MASK_WORDS; k++){
         local_expert_mask[k] = 0;
       }
-    }
-    #pragma unroll
-    for(int j = 0; j < NUM_OF_RANKS_PER_NODE; j++){
-      token_needed_by_rank_step2[j] = false;
+      #pragma unroll
+      for(int k = 0; k < NUM_RANK_MASK_WORDS; k++){
+        rank_mask[k] = 0;
+      }
+    } else {
+      #pragma unroll
+      for(int j = 0; j < NUM_OF_RANKS_PER_NODE; j++){
+        token_needed_by_rank_step2[j] = false;
+      }
     }
 
     if constexpr(DENSE_ROUTING){
@@ -5491,7 +5510,7 @@ __global__ void scan(const void* input_routing_data,  // bool* (TOPK==0) or int1
           if(expert_id >= node_expert_start && expert_id < node_expert_end){
             int local_expert_id = expert_id - node_expert_start;
             int rank_within_node = local_expert_id / NUM_OF_EXPERTS_PER_RANK;
-            token_needed_by_rank_step2[rank_within_node] = true;
+            rank_mask[rank_within_node / 32] |= 1u << (rank_within_node % 32);
             int local_expert_start = local_rank * NUM_OF_EXPERTS_PER_RANK;
             int local_expert_end = local_expert_start + NUM_OF_EXPERTS_PER_RANK;
             if(local_expert_id >= local_expert_start && local_expert_id < local_expert_end){
@@ -5533,7 +5552,12 @@ __global__ void scan(const void* input_routing_data,  // bool* (TOPK==0) or int1
     #pragma unroll
     for(int j = 0; j < NUM_OF_RANKS_PER_NODE; j++){
       int32_t temp_scan = 0;
-      bool token_needed_by_this_rank = token_needed_by_rank_step2[j];
+      bool token_needed_by_this_rank;
+      if constexpr(DENSE_ROUTING){
+        token_needed_by_this_rank = ((rank_mask[j / 32] >> (j % 32)) & 1u) != 0;
+      } else {
+        token_needed_by_this_rank = token_needed_by_rank_step2[j];
+      }
 
       // Each warp vote to create a bit mask indicating which token is needed by this rank within this tile.
       unsigned vote_result = __ballot_sync(~0, token_needed_by_this_rank);
