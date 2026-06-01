@@ -269,6 +269,14 @@ __forceinline__ __device__ void red_add_rel_sys(const int64_t* ptr, const int64_
     asm volatile("red.release.sys.global.add.u64 [%0], %1;" :: "l"(ptr), "l"(value));
 }
 
+__forceinline__ __device__ void red_add_rel_gpu(const int* ptr, const int& value) {
+    asm volatile("red.release.gpu.global.add.s32 [%0], %1;" :: "l"(ptr), "r"(value));
+}
+
+__forceinline__ __device__ void red_add_rel_gpu(const int64_t* ptr, const int64_t& value) {
+    asm volatile("red.release.gpu.global.add.u64 [%0], %1;" :: "l"(ptr), "l"(value));
+}
+
 template <typename dtype_t>
 __forceinline__ __device__ dtype_t ld_acquire_sys(const dtype_t* ptr) {
     if constexpr (sizeof(dtype_t) == 4) {

@@ -339,7 +339,7 @@ hybrid_dispatch_impl(
 
                 // NOTES: the "release" scope will be `sys` for the local rank (we may involve NVLink so not `gpu`)
                 // For RDMA requests, "release" is ensured by "atomic"
-                gin.red_add_rel<ncclTeamTagRail>(ptr, signaled_tail - old_signaled_tail, lane_idx);
+                gin.red_add_rel_gpu<ncclTeamTagRail>(ptr, signaled_tail - old_signaled_tail, lane_idx);
                 stored_old_scaleout_tail = stored_scaleout_tail;
             }
             __syncwarp();
