@@ -187,7 +187,24 @@ void Executor::dispatch_preprocess(HybridEpConfigInstance config, DispatchArgs& 
         auto sizeof_token_data_type = get_token_data_type_size(config.token_data_type);
         CUDA_CHECK(cudaMemcpyAsync(inter_node_dispatch_buffers->attn_input_token, args.hidden.data_ptr(), args.hidden.numel() * sizeof_token_data_type, cudaMemcpyDeviceToDevice, args.stream));
         if(config.forward_dispatch_api) {
+#ifdef USE_NIXL
+            // Stage prob into the dest-major NIXL send layout
+            // `[num_of_nodes][max_tokens][prob_per_token]` so the dispatch
+            // N2N warp coalesces prob puts per chunk (or per run in the
+            // sparse path) instead of one put per token. Same total bytes
+            // as the `cudaMemcpyAsync` it replaces.
+            const int prob_per_token = config.num_of_experts_per_rank * config.num_of_ranks_per_node;
+            restripe_prob_for_nixl_dispatch(
+                static_cast<const float*>(args.probs.data_ptr()),
+                static_cast<float*>(inter_node_dispatch_buffers->attn_input_prob),
+                static_cast<int>(args.num_of_tokens_per_rank),
+                static_cast<int>(config.max_num_of_tokens_per_rank),
+                static_cast<int>(config.num_of_nodes),
+                prob_per_token,
+                args.stream);
+#else
             CUDA_CHECK(cudaMemcpyAsync(inter_node_dispatch_buffers->attn_input_prob, args.probs.data_ptr(), args.probs.numel() * sizeof(float), cudaMemcpyDeviceToDevice, args.stream));
+#endif
         }
         if(config.token_data_type == APP_TOKEN_DATA_TYPE::UINT8) {
             CUDA_CHECK(cudaMemcpyAsync(inter_node_dispatch_buffers->attn_input_scaling_factor, args.scaling_factor.data_ptr(), args.scaling_factor.numel() * sizeof(float), cudaMemcpyDeviceToDevice, args.stream));
