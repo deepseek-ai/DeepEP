@@ -404,7 +404,7 @@ sudo mlxconfig -y -d mlx5_$i set PCI_ATOMIC_MODE=4
 
 DeepEP's communication kernels run on the critical path of every MoE step, so host-side interference is directly visible in dispatch/combine latency:
 
-- **Linux automatic NUMA balancing** (`kernel.numa_balancing != 0`, enabled by default on most distros). The `task_numa_work` kernel routine rewrites PTEs at the user/kernel boundary and can add up to 16+ ms to affected `internode_dispatch` invocations (issue #624 trace: 139 invocations over 60 s on a 5.15 kernel running SGLang, avg 5 ms with 2 samples in the 16-31 ms bucket). We recommend disabling it on EP serving nodes:
+- **Linux automatic NUMA balancing** (`kernel.numa_balancing != 0`, enabled by default on most distros). The `task_numa_work` kernel routine rewrites PTEs at the user/kernel boundary and can add milliseconds of tail latency to `internode_dispatch` calls on some configurations (issue #624 trace on a 5.15 kernel running SGLang: 139 invocations over 60 s, avg 5 ms; a separate test on a 5.10 kernel with frequent internode dispatch showed negligible overhead). If you observe unexpected latency spikes on EP serving nodes, consider disabling it:
 
   ```bash
   sudo sysctl -w kernel.numa_balancing=0
