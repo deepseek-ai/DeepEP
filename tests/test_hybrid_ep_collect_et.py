@@ -108,8 +108,8 @@ def test_main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
         
         prof = torch.profiler.profile(
             schedule=torch.profiler.schedule(
-                wait=1,
-                warmup=2,
+                wait=0,
+                warmup=0,
                 active=1,
                 repeat=1,
             ),
@@ -119,25 +119,37 @@ def test_main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
         )
         prof.start()
 
-        for i in range(5):
+        for i in range(1):
+
+            # Non-permute
             dispatched_hidden, dispatched_probs, _, handle = (
-                buffer.dispatch(hidden=hidden, scaling_factor=scaling_factor, topk_idx=topk_idx, topk_weights=topk_weights, num_of_experts=NUM_OF_EXPERTS)
-            )
-            # The combine only support bf16
-            dispatched_hidden_bf16 = dispatched_hidden.to(torch.bfloat16)
-            dispatched_probs = None
-            _, _ = buffer.combine(dispatched_hidden_bf16, dispatched_probs, handle)
+                buffer.dispatch(hidden=hidden, scaling_factor=scaling_factor, topk_idx=topk_idx,
+                                topk_weights=topk_weights, num_of_experts=NUM_OF_EXPERTS))
+            # dispatched_hidden_bf16 = dispatched_hidden.to(torch.bfloat16)
+            # combine_args = {'hidden': dispatched_hidden_bf16, 'probs': dispatched_probs, 'handle': handle}
+            # buffer.combine(**combine_args)
 
+            # # Permute (non-fused)
+            # dispatched_hidden_wp, dispatched_probs_wp, _, tpe_wp, handle_wp = (
+            #     buffer.dispatch_with_permute(hidden=hidden, scaling_factor=scaling_factor,
+            #         routing_map=routing_map, probs=probs, pad_multiple=PAD_MULTIPLE))
+            # dispatched_hidden_bf16_wp = dispatched_hidden_wp.to(torch.bfloat16)
+            # combine_wp_args = {'hidden': dispatched_hidden_bf16_wp, 'probs': dispatched_probs_wp,
+            #                 'handle': handle_wp, 'pad_multiple': PAD_MULTIPLE}
+            # buffer.combine_with_unpermute(**combine_wp_args)
 
-            dispatched_hidden_with_permute, dispatched_probs_with_permute, _, _, handle_with_permute= (
-            buffer.dispatch_with_permute(hidden=hidden, scaling_factor=scaling_factor, routing_map=routing_map, probs=probs, pad_multiple=PAD_MULTIPLE)
-            )
-            dispatched_hidden_bf16_with_permute = dispatched_hidden_with_permute.to(torch.bfloat16)
+            # # Fused permute-dispatch
+            # dispatched_hidden_fused, dispatched_probs_fused, _, tpe_fused, handle_fused = (
+            #     buffer.dispatch_with_permute(hidden=hidden, scaling_factor=scaling_factor,
+            #         routing_map=routing_map, probs=probs, pad_multiple=PAD_MULTIPLE, fuse_permute_dispatch=True))
+            # dispatched_hidden_bf16_fused = dispatched_hidden_fused.to(torch.bfloat16)
 
-            combine_with_unpermute_args = {'hidden': dispatched_hidden_bf16_with_permute, 'probs': dispatched_probs_with_permute, 'handle': handle_with_permute, 'pad_multiple': PAD_MULTIPLE}
-            buffer.combine_with_unpermute(**combine_with_unpermute_args)
-
+            # combine_fused_args = {'hidden': dispatched_hidden_bf16_fused, 'probs': dispatched_probs_fused,
+            #                     'handle': handle_fused, 'pad_multiple': PAD_MULTIPLE, 'fuse_unpermute_combine': True}
+            # buffer.combine_with_unpermute(**combine_fused_args)
+            
             prof.step()
+
 
         prof.stop()
         et.unregister_callback()
