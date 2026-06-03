@@ -3,11 +3,20 @@
 #include <memory>
 #include <vector>
 #include <optional>
+#include <cstdint>
 
 #include <nccl.h>
 #include <nccl_device.h>
 
 #include "symmetric.hpp"
+
+#ifndef DEEP_EP_HAS_LOGICAL_ENDPOINTS
+#if (defined(CUDART_VERSION) and CUDART_VERSION >= 13030) or (defined(CUDA_VERSION) and CUDA_VERSION >= 13030)
+#define DEEP_EP_HAS_LOGICAL_ENDPOINTS 1
+#else
+#define DEEP_EP_HAS_LOGICAL_ENDPOINTS 0
+#endif
+#endif
 
 // TODO: make a unified API
 namespace deep_ep::nvshmem {
@@ -49,6 +58,13 @@ private:
     void* raw_window_ptr;
     std::shared_ptr<symmetric::SymmetricMemory> symmetric_memory;
 
+#if DEEP_EP_HAS_LOGICAL_ENDPOINTS
+    bool counted_scaleup_le_created = false;
+    bool counted_scaleup_le_ready = false;
+    CUlogicalEndpointId counted_scaleup_le_id = 0;
+    std::vector<CUlogicalEndpointId> imported_counted_scaleup_le_ids;
+#endif
+
 public:
     // Global
     int rank_idx;
@@ -87,6 +103,15 @@ public:
     // ~NCCLSymmetricMemoryContext();
 
     void* get_sym_ptr(void* ptr, const int& dst_rank_idx) const;
+
+    bool supports_counted_scaleup_le() const;
+
+    bool is_counted_scaleup_le_ready() const;
+
+    std::vector<uint8_t> export_counted_scaleup_le_handle();
+
+    void import_counted_scaleup_le_handles(const std::vector<std::vector<uint8_t>>& handles,
+                                           uint32_t* device_le_ids);
 
     void finalize();
 };

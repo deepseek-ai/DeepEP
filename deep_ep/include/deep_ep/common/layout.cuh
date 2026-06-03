@@ -76,6 +76,9 @@ struct WorkspaceLayout {
         // AGRS signals
         num_bytes += (kNumMaxInflightAGRS + 1) * kNumMaxRanks * sizeof(int);
 
+        // Counted scale-up logical endpoint ids
+        num_bytes += kNumMaxRanks * sizeof(uint32_t);
+
         return num_bytes;
     }
 
@@ -173,6 +176,55 @@ struct WorkspaceLayout {
         const auto base_ptr = math::advance_ptr<int>(
             get_agrs_recv_signal_ptr(0, 0), kNumMaxInflightAGRS * kNumMaxRanks * sizeof(int));
         return base_ptr + rank_idx;
+    }
+
+    __forceinline__ __device__ __host__ uint32_t* get_counted_scaleup_le_id_ptr(const int& scaleup_rank_idx) const {
+        const auto base_ptr = math::advance_ptr<uint32_t>(
+            get_agrs_session_signal_ptr(0), kNumMaxRanks * sizeof(int));
+        return base_ptr + scaleup_rank_idx;
+    }
+};
+
+struct CounterLayout {
+    void* base;
+    int num_scaleup_ranks;
+
+    static constexpr int64_t kCounterStrideBytes = 256;
+
+    __forceinline__ __device__ __host__
+    CounterLayout(void* base,
+                  const int& num_scaleup_ranks):
+        base(base),
+        num_scaleup_ranks(num_scaleup_ranks) {
+        EP_UNIFIED_ASSERT(num_scaleup_ranks > 0);
+    }
+
+    __forceinline__ __device__ __host__
+    static int64_t get_num_bytes(const int& num_scaleup_ranks) {
+        EP_UNIFIED_ASSERT(num_scaleup_ranks > 0);
+        return static_cast<int64_t>(num_scaleup_ranks) * kCounterStrideBytes;
+    }
+
+    __forceinline__ __device__ __host__
+    int64_t get_num_bytes() const {
+        return get_num_bytes(num_scaleup_ranks);
+    }
+
+    __forceinline__ __device__ __host__
+    int64_t get_counter_offset(const int& src_scaleup_rank_idx) const {
+        EP_UNIFIED_ASSERT(0 <= src_scaleup_rank_idx and src_scaleup_rank_idx < num_scaleup_ranks);
+        return static_cast<int64_t>(src_scaleup_rank_idx) * kCounterStrideBytes;
+    }
+
+    __forceinline__ __device__ __host__
+    uint64_t* get_counter_ptr(const int& src_scaleup_rank_idx) const {
+        return math::advance_ptr<uint64_t>(
+            base, get_counter_offset(src_scaleup_rank_idx));
+    }
+
+    __forceinline__ __device__ __host__
+    void* get_buffer_end_ptr() const {
+        return math::advance_ptr(base, get_num_bytes());
     }
 };
 

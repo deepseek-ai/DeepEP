@@ -54,4 +54,18 @@ DECL_LAZY_CUDA_DRIVER_FUNCTION(cuDeviceGet);
 DECL_LAZY_CUDA_DRIVER_FUNCTION(cuDeviceGetAttribute);
 DECL_LAZY_CUDA_DRIVER_FUNCTION(cuStreamBatchMemOp);
 
+#if (defined(CUDART_VERSION) and CUDART_VERSION >= 13030) or (defined(CUDA_VERSION) and CUDA_VERSION >= 13030)
+DECL_LAZY_CUDA_DRIVER_FUNCTION(cuLogicalEndpointIdReserve);
+DECL_LAZY_CUDA_DRIVER_FUNCTION(cuLogicalEndpointIdRelease);
+DECL_LAZY_CUDA_DRIVER_FUNCTION(cuLogicalEndpointGetLimits);
+DECL_LAZY_CUDA_DRIVER_FUNCTION(cuLogicalEndpointCreate);
+DECL_LAZY_CUDA_DRIVER_FUNCTION(cuLogicalEndpointDestroy);
+DECL_LAZY_CUDA_DRIVER_FUNCTION(cuLogicalEndpointBindAddr);
+DECL_LAZY_CUDA_DRIVER_FUNCTION(cuLogicalEndpointBindMem);
+DECL_LAZY_CUDA_DRIVER_FUNCTION(cuLogicalEndpointUnbind);
+DECL_LAZY_CUDA_DRIVER_FUNCTION(cuLogicalEndpointExport);
+DECL_LAZY_CUDA_DRIVER_FUNCTION(cuLogicalEndpointImport);
+DECL_LAZY_CUDA_DRIVER_FUNCTION(cuLogicalEndpointQuery);
+#endif
+
 }  // namespace deep_ep

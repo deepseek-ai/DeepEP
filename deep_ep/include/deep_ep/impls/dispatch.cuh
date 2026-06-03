@@ -14,7 +14,8 @@
 
 namespace deep_ep::elastic {
 
-template <bool kIsScaleupNVLink,
+template <bool kUseCFTCounted,
+          bool kIsScaleupNVLink,
           bool kDoCPUSync,
           bool kReuseSlotIndices,
           int kNumSMs,
@@ -36,6 +37,7 @@ dispatch_impl(
     int* psum_num_recv_tokens_per_scaleup_rank,
     int* psum_num_recv_tokens_per_expert,
     int* dst_buffer_slot_idx,
+    const uint32_t* counted_scaleup_le_ids,
     const int num_tokens,
     const int sf_token_stride, const int sf_hidden_stride,
     const ncclDevComm_t nccl_dev_comm, const ncclWindow_t nccl_window, void* buffer,
@@ -68,6 +70,65 @@ dispatch_impl(
     const auto [qp_idx, sharing_mode] = comm::get_qp_mode<kNumSMs, kNumQPs, kNumDispatchWarps, (kNumNotifyWarps > 0)>(
         sm_idx, warp_idx - kNumNotifyWarps, warp_idx < kNumNotifyWarps);
     const auto gin = handle::NCCLGin(nccl_dev_comm, nccl_window, qp_idx, sharing_mode);
+
+    const auto token_layout = layout::TokenLayout(kNumHiddenBytes, kNumSFPacks * sizeof(sf_pack_t), kNumTopk, true);
+    void* data_buffer = buffer;
+    const auto counted_recv_buffer_layout = layout::BufferLayout<false>(
+        token_layout, kNumRanks, kNumMaxTokensPerRank, data_buffer);
+    const auto counted_send_buffer_layout = layout::BufferLayout<false>(
+        token_layout, 0, kNumMaxTokensPerRank,
+        counted_recv_buffer_layout.get_buffer_end_ptr());
+    const auto counter_layout = layout::CounterLayout(
+        math::advance_ptr(
+            data_buffer,
+            math::align<int64_t>(
+                math::ptr_diff(counted_send_buffer_layout.get_buffer_end_ptr(), data_buffer),
+                layout::CounterLayout::kCounterStrideBytes)),
+        kNumRanks);
+    const auto token_bytes = static_cast<uint64_t>(token_layout.get_num_bytes<false>());
+
+    const auto wait_receive_counters_by_count = [&](const int* count, const int& wait_thread_idx, const int& num_wait_threads) {
+        for (int src_rank_idx = wait_thread_idx; src_rank_idx < kNumRanks; src_rank_idx += num_wait_threads) {
+            const auto expected_bytes = static_cast<uint64_t>(count[src_rank_idx]) * token_bytes;
+            const auto counter_ptr = counter_layout.get_counter_ptr(src_rank_idx);
+            comm::timeout_while<kNumTimeoutCycles>([=](const bool& is_last_check) {
+                const auto counter = ptx::ld_acquire_sys(counter_ptr);
+                if (counter >= expected_bytes)
+                    return true;
+
+                if (is_last_check) {
+                    printf("DeepEP counted dispatch counter wait timeout, rank: %d/%d, "
+                           "src rank: %d, counter: %llu, expected bytes: %llu\n",
+                           rank_idx, kNumRanks, src_rank_idx,
+                           static_cast<unsigned long long>(counter),
+                           static_cast<unsigned long long>(expected_bytes));
+                }
+                return false;
+            });
+        }
+    };
+    const auto wait_receive_counters_by_psum = [&](const int& wait_thread_idx, const int& num_wait_threads) {
+        for (int src_rank_idx = wait_thread_idx; src_rank_idx < kNumRanks; src_rank_idx += num_wait_threads) {
+            const auto end = psum_num_recv_tokens_per_scaleup_rank[src_rank_idx];
+            const auto start = src_rank_idx == 0 ? 0 : psum_num_recv_tokens_per_scaleup_rank[src_rank_idx - 1];
+            const auto expected_bytes = static_cast<uint64_t>(end - start) * token_bytes;
+            const auto counter_ptr = counter_layout.get_counter_ptr(src_rank_idx);
+            comm::timeout_while<kNumTimeoutCycles>([=](const bool& is_last_check) {
+                const auto counter = ptx::ld_acquire_sys(counter_ptr); // gpu?
+                if (counter >= expected_bytes)
+                    return true;
+
+                if (is_last_check) {
+                    printf("DeepEP counted dispatch counter wait timeout, rank: %d/%d, "
+                           "src rank: %d, counter: %llu, expected bytes: %llu\n",
+                           rank_idx, kNumRanks, src_rank_idx,
+                           static_cast<unsigned long long>(counter),
+                           static_cast<unsigned long long>(expected_bytes));
+                }
+                return false;
+            });
+        }
+    };
 
     // Barrier without TMA store flush, without prologue grid sync
     comm::gpu_barrier<kIsScaleupNVLink, 1, kNumRanks,
@@ -249,24 +310,85 @@ dispatch_impl(
                 // Exclusive prefix sum for later expanding
                 do_psum(expert_count, psum_num_recv_tokens_per_expert, kNumExpertsPerRank, 1);
             }
+            if constexpr (kUseCFTCounted) {
+                ptx::named_barrier<kNumNotifyThreads>(kNotifyBarrierIndex);
+                wait_receive_counters_by_count(rank_count, thread_idx, kNumNotifyThreads);
+            }
         }
     } else {
         const int dispatch_warp_idx = warp_idx - kNumNotifyWarps;
 
-        // Buffer layouts
-        const auto token_layout = layout::TokenLayout(kNumHiddenBytes, kNumSFPacks * sizeof(sf_pack_t), kNumTopk, true);
-        const auto tma_buffer = layout::BufferLayout<true>(token_layout, kNumDispatchWarps, 1,
-            math::advance_ptr<int>(smem, kNumSmemBytesForNotify)).get_rank_buffer(dispatch_warp_idx).get_token_buffer(0);
-        auto recv_buffer = layout::BufferLayout<false>(token_layout, kNumRanks, kNumMaxTokensPerRank, buffer);
+        const auto tma_smem_base = math::advance_ptr<int8_t>(smem, kNumSmemBytesForNotify);
+        const auto tma_smem_layout = layout::BufferLayout<true>(
+            token_layout, kNumDispatchWarps, 1, tma_smem_base);
+        const auto tma_buffer = tma_smem_layout.get_rank_buffer(dispatch_warp_idx).get_token_buffer(0);
+        auto recv_buffer = layout::BufferLayout<false>(token_layout, kNumRanks, kNumMaxTokensPerRank, data_buffer);
         auto send_buffer = layout::BufferLayout<false>(token_layout, 1, kNumMaxTokensPerRank, recv_buffer.get_buffer_end_ptr());
         recv_buffer = recv_buffer.get_rank_buffer(rank_idx);
 
         // Init TMA
         ptx::arrival_phase phase = 0;
+        ptx::arrival_phase fabric_phase = 0;
         const auto mbarrier_ptr = tma_buffer.get_mbarrier_ptr();
-        if (ptx::elect_one_sync())
+        const auto fabric_mbarrier_base_offset = math::align<int64_t>(
+            kNumSmemBytesForNotify + tma_smem_layout.get_num_bytes(),
+            ptx::kFabricMBarrierAlignBytes);
+        auto fabric_mbarrier_ptr =
+            math::advance_ptr<ptx::fabric_mbarrier>(smem, fabric_mbarrier_base_offset) + dispatch_warp_idx;
+        if (ptx::elect_one_sync()) {
             ptx::mbarrier_init_with_fence(mbarrier_ptr, 1);
+            if constexpr (kUseCFTCounted) {
+                ptx::fabric_mbarrier_init(fabric_mbarrier_ptr, 1);
+            }
+        }
         __syncwarp();
+
+        constexpr int kPendingSendNone = 0;
+        constexpr int kPendingSendLocalTMA = 1;
+        constexpr int kPendingSendFabric = 2;
+        int pending_send_kind = kPendingSendNone;
+        uint64_t* pending_local_counter_ptr = nullptr;
+        const auto flush_pending_counted_send = [&]() {
+            if constexpr (kUseCFTCounted) {
+                if (pending_send_kind == kPendingSendLocalTMA) {
+                    ptx::tma_store_wait();
+                    ptx::red_add_rel_gpu(
+                        pending_local_counter_ptr,
+                        static_cast<uint64_t>(token_layout.get_num_bytes<false>()));
+                    pending_local_counter_ptr = nullptr;
+                    pending_send_kind = kPendingSendNone;
+                } else if (pending_send_kind == kPendingSendFabric) {
+                    while (not ptx::fabric_mbarrier_try_wait_parity(fabric_mbarrier_ptr, fabric_phase & 1)) {}
+                    fabric_phase ^= 1;
+                    pending_send_kind = kPendingSendNone;
+                }
+            }
+        };
+
+        const auto issue_counted_store = [&](const int& dst_rank_idx, const int& dst_slot_idx) {
+            EP_DEVICE_ASSERT(pending_send_kind == kPendingSendNone);
+            const auto num_bytes = token_layout.get_num_bytes<false>();
+            const auto dst_base_ptr = recv_buffer.get_token_buffer(dst_slot_idx).get_base_ptr();
+            const auto counter_ptr = counter_layout.get_counter_ptr(rank_idx);
+            if (dst_rank_idx == rank_idx) { // local store
+                ptx::tma_store_1d(dst_base_ptr, tma_buffer.get_base_ptr(), num_bytes);
+                ptx::tma_store_commit();
+                pending_local_counter_ptr = counter_ptr;
+                pending_send_kind = kPendingSendLocalTMA;
+            } else { // cft counted
+                const auto remote_le_id = counted_scaleup_le_ids[dst_rank_idx];
+                ptx::fabric_try_put_counted(
+                    remote_le_id,
+                    static_cast<uint64_t>(gin.get_sym_offset(dst_base_ptr)),
+                    static_cast<uint64_t>(gin.get_sym_offset(counter_ptr)),
+                    tma_buffer.get_base_ptr(),
+                    num_bytes,
+                    fabric_mbarrier_ptr);
+                ptx::fabric_submit();
+                ptx::fabric_mbarrier_arrive_relaxed_parity(fabric_mbarrier_ptr, num_bytes);
+                pending_send_kind = kPendingSendFabric;
+            }
+        };
 
         // Iterate all tokens
         const auto token_start = dispatch_warp_idx * kNumSMs + sm_idx;
@@ -274,8 +396,12 @@ dispatch_impl(
         for (int token_idx = token_start; token_idx < num_tokens; token_idx += token_stride) {
             const auto token_i64_idx = static_cast<int64_t>(token_idx);
 
-            // Wait TMA store arrivals
-            ptx::tma_store_wait();
+            if constexpr (kUseCFTCounted) {
+                if (ptx::elect_one_sync())
+                    flush_pending_counted_send();
+            } else {
+                ptx::tma_store_wait();
+            }
             __syncwarp();
 
             // Issue data TMA
@@ -353,45 +479,74 @@ dispatch_impl(
             }
             __syncwarp();
 
-            // TMA store to send buffer
-            auto send_buffer_ptr = send_buffer.get_token_buffer(token_idx).get_base_ptr();
-            if constexpr (not kIsScaleupNVLink) {
-                if (ptx::elect_one_sync())
-                    ptx::tma_store_1d(send_buffer_ptr, tma_buffer.get_base_ptr(), tma_buffer.get_num_bytes<false>());
+            if constexpr (kUseCFTCounted) {
+                auto send_mask = ptx::gather(stored_dst_slot_idx >= 0);
+                while (send_mask) {
+                    const auto send_lane_idx = __ffs(send_mask) - 1;
+                    send_mask ^= 1u << send_lane_idx;
+                    const auto dst_rank_idx = ptx::exchange(stored_dst_rank_idx, send_lane_idx);
+                    const auto dst_slot_idx = ptx::exchange(stored_dst_slot_idx, send_lane_idx);
+                    if (ptx::elect_one_sync()) {
+                        flush_pending_counted_send();
+                        issue_counted_store(dst_rank_idx, dst_slot_idx);
+                    }
+                    __syncwarp();
+                }
+            } else {
+                // TMA store to send buffer
+                auto send_buffer_ptr = send_buffer.get_token_buffer(token_idx).get_base_ptr();
+                if constexpr (not kIsScaleupNVLink) {
+                    if (ptx::elect_one_sync())
+                        ptx::tma_store_1d(send_buffer_ptr, tma_buffer.get_base_ptr(), tma_buffer.get_num_bytes<false>());
+                    ptx::tma_store_commit();
+                    __syncwarp();
+                }
+
+                // Issue TMA NVLink stores
+                EP_STATIC_ASSERT(kNumTopk <= 32, "Invalid top-k selection");
+                const auto dst_ptr = stored_dst_slot_idx >= 0 ?
+                    gin.get_sym_ptr<team_t>(recv_buffer.get_token_buffer(stored_dst_slot_idx).get_base_ptr(), stored_dst_rank_idx) :
+                    nullptr;
+                if (dst_ptr != nullptr)
+                    ptx::tma_store_1d(dst_ptr, tma_buffer.get_base_ptr(), tma_buffer.get_num_bytes<false>());
                 ptx::tma_store_commit();
                 __syncwarp();
-            }
 
-            // Issue TMA NVLink stores
-            EP_STATIC_ASSERT(kNumTopk <= 32, "Invalid top-k selection");
-            const auto dst_ptr = stored_dst_slot_idx >= 0 ?
-                gin.get_sym_ptr<team_t>(recv_buffer.get_token_buffer(stored_dst_slot_idx).get_base_ptr(), stored_dst_rank_idx) :
-                nullptr;
-            if (dst_ptr != nullptr)
-                ptx::tma_store_1d(dst_ptr, tma_buffer.get_base_ptr(), tma_buffer.get_num_bytes<false>());
-            ptx::tma_store_commit();
-            __syncwarp();
+                // Issue RDMA put
+                if constexpr (not kIsScaleupNVLink) {
+                    // Wait the send buffer store to arrive
+                    ptx::tma_store_wait<1>();
+                    __syncwarp();
 
-            // Issue RDMA put
-            if constexpr (not kIsScaleupNVLink) {
-                // Wait the send buffer store to arrive
-                ptx::tma_store_wait<1>();
-                __syncwarp();
-
-                // NOTES: we should skip the NVLink accessible ranks
-                if (stored_dst_slot_idx >= 0 and dst_ptr == nullptr) {
-                    gin.put<team_t>(recv_buffer.get_token_buffer(stored_dst_slot_idx).get_base_ptr(),
-                                    send_buffer_ptr, tma_buffer.get_num_bytes<false>(), stored_dst_rank_idx);
+                    // NOTES: we should skip the NVLink accessible ranks
+                    if (stored_dst_slot_idx >= 0 and dst_ptr == nullptr) {
+                        gin.put<team_t>(recv_buffer.get_token_buffer(stored_dst_slot_idx).get_base_ptr(),
+                                        send_buffer_ptr, tma_buffer.get_num_bytes<false>(), stored_dst_rank_idx);
+                    }
+                    __syncwarp();
                 }
-                __syncwarp();
             }
+        }
+
+        if constexpr (kUseCFTCounted) {
+            if (ptx::elect_one_sync())
+                flush_pending_counted_send();
+            __syncwarp();
         }
     }
 
-    // Barrier to ensure data arrival
-    comm::gpu_barrier<kIsScaleupNVLink, 1, kNumRanks,
-                      kNumSMs, kNumThreads, kNumQPs, kNumTimeoutCycles, comm::kDispatchTag1, true, true, false>(
-        gin, workspace_layout, 0, rank_idx, sm_idx, thread_idx);
+    if constexpr (kUseCFTCounted) {
+        if constexpr (kNumNotifyWarps == 0) {
+            const auto global_thread_idx = sm_idx * kNumThreads + thread_idx;
+            constexpr int kNumGridThreads = kNumSMs * kNumThreads;
+            wait_receive_counters_by_psum(global_thread_idx, kNumGridThreads);
+        }
+    } else {
+        // Barrier to ensure data arrival
+        comm::gpu_barrier<kIsScaleupNVLink, 1, kNumRanks,
+                          kNumSMs, kNumThreads, kNumQPs, kNumTimeoutCycles, comm::kDispatchTag1, true, true, false>(
+            gin, workspace_layout, 0, rank_idx, sm_idx, thread_idx);
+    }
 
     // Trigger the copy epilogue kernel
     cudaTriggerProgrammaticLaunchCompletion();
