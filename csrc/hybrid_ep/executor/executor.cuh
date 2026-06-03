@@ -34,24 +34,24 @@ struct HandleImpl {
     torch::Tensor dense_chunk_layout;
     torch::Tensor dense_to_expert_map;
 
-    /** Convert all attributes to a single IValue holding a tuple of IValues (tensors/ints/nested config tuple). */
+    /** Convert all attributes to a single IValue holding a GenericList of IValues (tensors/ints/nested config list). */
     c10::IValue to_ivalue_tuple() const {
-        std::vector<c10::IValue> elements;
-        elements.reserve(13);
-        elements.push_back(c10::IValue(sparse_to_dense_map));
-        elements.push_back(c10::IValue(rdma_to_attn_map));
-        elements.push_back(c10::IValue(attn_to_rdma_map));
-        elements.push_back(c10::IValue(num_dispatched_tokens_tensor));
-        elements.push_back(c10::IValue(local_expert_routing_map));
-        elements.push_back(c10::IValue(static_cast<int64_t>(num_of_tokens_per_rank)));
-        elements.push_back(config.to_ivalue_tuple());
-        elements.push_back(c10::IValue(tokens_per_expert));
-        elements.push_back(c10::IValue(padded_tokens_per_expert));
-        elements.push_back(c10::IValue(overflow_flag));
-        elements.push_back(c10::IValue(static_cast<int64_t>(num_permuted_tokens)));
-        elements.push_back(c10::IValue(dense_chunk_layout));
-        elements.push_back(c10::IValue(dense_to_expert_map));
-        return c10::IValue(c10::ivalue::Tuple::create(std::move(elements)));
+        c10::impl::GenericList list(c10::AnyType::get());
+        list.reserve(13);
+        list.push_back(c10::IValue(sparse_to_dense_map));
+        list.push_back(c10::IValue(rdma_to_attn_map));
+        list.push_back(c10::IValue(attn_to_rdma_map));
+        list.push_back(c10::IValue(num_dispatched_tokens_tensor));
+        list.push_back(c10::IValue(local_expert_routing_map));
+        list.push_back(c10::IValue(static_cast<int64_t>(num_of_tokens_per_rank)));
+        list.push_back(config.to_ivalue_tuple());
+        list.push_back(c10::IValue(tokens_per_expert));
+        list.push_back(c10::IValue(padded_tokens_per_expert));
+        list.push_back(c10::IValue(overflow_flag));
+        list.push_back(c10::IValue(static_cast<int64_t>(num_permuted_tokens)));
+        list.push_back(c10::IValue(dense_chunk_layout));
+        list.push_back(c10::IValue(dense_to_expert_map));
+        return c10::IValue(std::move(list));
     }
 };
 

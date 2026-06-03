@@ -121,22 +121,27 @@ def test_main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
 
         for i in range(1):
 
+            hidden = torch.relu(hidden)
             # Non-permute
-            dispatched_hidden, dispatched_probs, _, handle = (
-                buffer.dispatch(hidden=hidden, scaling_factor=scaling_factor, topk_idx=topk_idx,
-                                topk_weights=topk_weights, num_of_experts=NUM_OF_EXPERTS))
-            # dispatched_hidden_bf16 = dispatched_hidden.to(torch.bfloat16)
-            # combine_args = {'hidden': dispatched_hidden_bf16, 'probs': dispatched_probs, 'handle': handle}
-            # buffer.combine(**combine_args)
+            dispatched_hidden, dispatched_probs, _, handle = buffer.dispatch(
+                hidden=hidden,
+                scaling_factor=scaling_factor,
+                topk_idx=topk_idx,
+                topk_weights=topk_weights,
+                num_of_experts=NUM_OF_EXPERTS,
+            )
+            dispatched_hidden_bf16 = dispatched_hidden.to(torch.bfloat16)
+            combine_args = {'hidden': dispatched_hidden_bf16, 'probs': dispatched_probs, 'handle': handle}
+            buffer.combine(**combine_args)
 
             # # Permute (non-fused)
-            # dispatched_hidden_wp, dispatched_probs_wp, _, tpe_wp, handle_wp = (
-            #     buffer.dispatch_with_permute(hidden=hidden, scaling_factor=scaling_factor,
-            #         routing_map=routing_map, probs=probs, pad_multiple=PAD_MULTIPLE))
-            # dispatched_hidden_bf16_wp = dispatched_hidden_wp.to(torch.bfloat16)
-            # combine_wp_args = {'hidden': dispatched_hidden_bf16_wp, 'probs': dispatched_probs_wp,
-            #                 'handle': handle_wp, 'pad_multiple': PAD_MULTIPLE}
-            # buffer.combine_with_unpermute(**combine_wp_args)
+            dispatched_hidden_wp, dispatched_probs_wp, _, tpe_wp, handle_wp = (
+                buffer.dispatch_with_permute(hidden=hidden, scaling_factor=scaling_factor,
+                    routing_map=routing_map, probs=probs, pad_multiple=PAD_MULTIPLE))
+            dispatched_hidden_bf16_wp = dispatched_hidden_wp.to(torch.bfloat16)
+            combine_wp_args = {'hidden': dispatched_hidden_bf16_wp, 'probs': dispatched_probs_wp,
+                            'handle': handle_wp, 'pad_multiple': PAD_MULTIPLE}
+            buffer.combine_with_unpermute(**combine_wp_args)
 
             # # Fused permute-dispatch
             # dispatched_hidden_fused, dispatched_probs_fused, _, tpe_fused, handle_fused = (

@@ -11,6 +11,7 @@
 #include <optional>
 #include "utils.cuh"
 #include <ATen/core/ivalue.h>
+#include <ATen/core/jit_type.h>
 
 // Now we support up to 72(GB200) ranks per node.
 // This will be used to initialize the template param_t for communication kernel.
@@ -102,24 +103,24 @@ struct BufferConfig {
     return valid;
   }
 
-  /** Convert all attributes to a single IValue holding a tuple of IValues (ints/string). */
+  /** Convert all attributes to a single IValue holding a GenericList of IValues (ints/string). */
   c10::IValue to_ivalue_tuple() const {
-    std::vector<c10::IValue> elements;
-    elements.reserve(13);
-    elements.push_back(c10::IValue(static_cast<int64_t>(hidden_dim)));
-    elements.push_back(c10::IValue(static_cast<int64_t>(max_num_of_tokens_per_rank)));
-    elements.push_back(c10::IValue(static_cast<int64_t>(num_of_experts_per_rank)));
-    elements.push_back(c10::IValue(static_cast<int64_t>(num_of_ranks_per_node)));
-    elements.push_back(c10::IValue(static_cast<int64_t>(num_of_nodes)));
-    elements.push_back(c10::IValue(type_to_string(token_data_type)));
-    elements.push_back(c10::IValue(static_cast<int64_t>(num_of_blocks_preprocessing_api)));
-    elements.push_back(c10::IValue(static_cast<int64_t>(num_of_blocks_dispatch_api)));
-    elements.push_back(c10::IValue(static_cast<int64_t>(num_of_blocks_combine_api)));
-    elements.push_back(c10::IValue(static_cast<int64_t>(num_of_tokens_per_chunk_dispatch_api)));
-    elements.push_back(c10::IValue(static_cast<int64_t>(num_of_tokens_per_chunk_combine_api)));
-    elements.push_back(c10::IValue(static_cast<int64_t>(num_of_dispatch_chunks)));
-    elements.push_back(c10::IValue(static_cast<int64_t>(num_of_combine_chunks)));
-    return c10::IValue(c10::ivalue::Tuple::create(std::move(elements)));
+    c10::impl::GenericList list(c10::AnyType::get());
+    list.reserve(13);
+    list.push_back(c10::IValue(static_cast<int64_t>(hidden_dim)));
+    list.push_back(c10::IValue(static_cast<int64_t>(max_num_of_tokens_per_rank)));
+    list.push_back(c10::IValue(static_cast<int64_t>(num_of_experts_per_rank)));
+    list.push_back(c10::IValue(static_cast<int64_t>(num_of_ranks_per_node)));
+    list.push_back(c10::IValue(static_cast<int64_t>(num_of_nodes)));
+    list.push_back(c10::IValue(type_to_string(token_data_type)));
+    list.push_back(c10::IValue(static_cast<int64_t>(num_of_blocks_preprocessing_api)));
+    list.push_back(c10::IValue(static_cast<int64_t>(num_of_blocks_dispatch_api)));
+    list.push_back(c10::IValue(static_cast<int64_t>(num_of_blocks_combine_api)));
+    list.push_back(c10::IValue(static_cast<int64_t>(num_of_tokens_per_chunk_dispatch_api)));
+    list.push_back(c10::IValue(static_cast<int64_t>(num_of_tokens_per_chunk_combine_api)));
+    list.push_back(c10::IValue(static_cast<int64_t>(num_of_dispatch_chunks)));
+    list.push_back(c10::IValue(static_cast<int64_t>(num_of_combine_chunks)));
+    return c10::IValue(std::move(list));
   }
 };
 
@@ -210,47 +211,47 @@ struct HybridEpConfigInstance {
     return valid;
   }
 
-  /** Convert all attributes to a single IValue holding a tuple of IValues (ints/bools/string). */
+  /** Convert all attributes to a single IValue holding a GenericList of IValues (ints/bools/string). */
   c10::IValue to_ivalue_tuple() const {
-    std::vector<c10::IValue> elements;
-    elements.reserve(32);
+    c10::impl::GenericList list(c10::AnyType::get());
+    list.reserve(32);
     // Hybrid-ep Config
-    elements.push_back(c10::IValue(static_cast<int64_t>(hidden_dim)));
-    elements.push_back(c10::IValue(static_cast<int64_t>(max_num_of_tokens_per_rank)));
-    elements.push_back(c10::IValue(static_cast<int64_t>(num_of_experts_per_rank)));
-    elements.push_back(c10::IValue(static_cast<int64_t>(num_of_ranks_per_node)));
-    elements.push_back(c10::IValue(static_cast<int64_t>(num_of_nodes)));
-    elements.push_back(c10::IValue(static_cast<int64_t>(pad_multiple)));
+    list.push_back(c10::IValue(static_cast<int64_t>(hidden_dim)));
+    list.push_back(c10::IValue(static_cast<int64_t>(max_num_of_tokens_per_rank)));
+    list.push_back(c10::IValue(static_cast<int64_t>(num_of_experts_per_rank)));
+    list.push_back(c10::IValue(static_cast<int64_t>(num_of_ranks_per_node)));
+    list.push_back(c10::IValue(static_cast<int64_t>(num_of_nodes)));
+    list.push_back(c10::IValue(static_cast<int64_t>(pad_multiple)));
     // Metadata-preprocessing API Config
-    elements.push_back(c10::IValue(static_cast<int64_t>(num_of_tokens_per_chunk_preprocessing_api)));
-    elements.push_back(c10::IValue(static_cast<int64_t>(num_of_threads_per_block_preprocessing_api)));
-    elements.push_back(c10::IValue(static_cast<int64_t>(num_of_blocks_preprocessing_api)));
-    elements.push_back(c10::IValue(static_cast<int64_t>(num_of_blocks_permute)));
-    elements.push_back(c10::IValue(static_cast<int64_t>(num_of_blocks_unpermute)));
+    list.push_back(c10::IValue(static_cast<int64_t>(num_of_tokens_per_chunk_preprocessing_api)));
+    list.push_back(c10::IValue(static_cast<int64_t>(num_of_threads_per_block_preprocessing_api)));
+    list.push_back(c10::IValue(static_cast<int64_t>(num_of_blocks_preprocessing_api)));
+    list.push_back(c10::IValue(static_cast<int64_t>(num_of_blocks_permute)));
+    list.push_back(c10::IValue(static_cast<int64_t>(num_of_blocks_unpermute)));
     // Dispatch API Config
-    elements.push_back(c10::IValue(type_to_string(token_data_type)));
-    elements.push_back(c10::IValue(static_cast<int64_t>(num_of_stages_dispatch_api)));
-    elements.push_back(c10::IValue(static_cast<int64_t>(num_of_stages_permute_block_dispatch_api)));
-    elements.push_back(c10::IValue(static_cast<int64_t>(num_of_in_flight_s2g_dispatch_api)));
-    elements.push_back(c10::IValue(static_cast<int64_t>(num_of_in_flight_s2g_permute_block_dispatch_api)));
-    elements.push_back(c10::IValue(static_cast<int64_t>(num_of_additional_in_flight_s2g_dispatch_api)));
-    elements.push_back(c10::IValue(static_cast<int64_t>(num_of_tokens_per_chunk_dispatch_api)));
-    elements.push_back(c10::IValue(static_cast<int64_t>(num_of_blocks_dispatch_api)));
-    elements.push_back(c10::IValue(forward_dispatch_api));
-    elements.push_back(c10::IValue(device_side_sync_dispatch_api));
+    list.push_back(c10::IValue(type_to_string(token_data_type)));
+    list.push_back(c10::IValue(static_cast<int64_t>(num_of_stages_dispatch_api)));
+    list.push_back(c10::IValue(static_cast<int64_t>(num_of_stages_permute_block_dispatch_api)));
+    list.push_back(c10::IValue(static_cast<int64_t>(num_of_in_flight_s2g_dispatch_api)));
+    list.push_back(c10::IValue(static_cast<int64_t>(num_of_in_flight_s2g_permute_block_dispatch_api)));
+    list.push_back(c10::IValue(static_cast<int64_t>(num_of_additional_in_flight_s2g_dispatch_api)));
+    list.push_back(c10::IValue(static_cast<int64_t>(num_of_tokens_per_chunk_dispatch_api)));
+    list.push_back(c10::IValue(static_cast<int64_t>(num_of_blocks_dispatch_api)));
+    list.push_back(c10::IValue(forward_dispatch_api));
+    list.push_back(c10::IValue(device_side_sync_dispatch_api));
     // Combine API Config
-    elements.push_back(c10::IValue(static_cast<int64_t>(num_of_stages_g2s_combine_api)));
-    elements.push_back(c10::IValue(static_cast<int64_t>(num_of_stages_s2g_combine_api)));
-    elements.push_back(c10::IValue(static_cast<int64_t>(num_of_stages_g2s_unpermute_block)));
-    elements.push_back(c10::IValue(static_cast<int64_t>(num_of_stages_s2g_unpermute_block)));
-    elements.push_back(c10::IValue(static_cast<int64_t>(num_of_tokens_per_chunk_combine_api)));
-    elements.push_back(c10::IValue(static_cast<int64_t>(num_of_tokens_per_group_combine_api)));
-    elements.push_back(c10::IValue(static_cast<int64_t>(num_of_blocks_combine_api)));
-    elements.push_back(c10::IValue(static_cast<int64_t>(num_of_additional_in_flight_s2g_combine_api)));
-    elements.push_back(c10::IValue(static_cast<int64_t>(num_of_additional_in_flight_s2g_unpermute_block_combine_api)));
-    elements.push_back(c10::IValue(backward_combine_api));
-    elements.push_back(c10::IValue(device_side_sync_combine_api));
-    return c10::IValue(c10::ivalue::Tuple::create(std::move(elements)));
+    list.push_back(c10::IValue(static_cast<int64_t>(num_of_stages_g2s_combine_api)));
+    list.push_back(c10::IValue(static_cast<int64_t>(num_of_stages_s2g_combine_api)));
+    list.push_back(c10::IValue(static_cast<int64_t>(num_of_stages_g2s_unpermute_block)));
+    list.push_back(c10::IValue(static_cast<int64_t>(num_of_stages_s2g_unpermute_block)));
+    list.push_back(c10::IValue(static_cast<int64_t>(num_of_tokens_per_chunk_combine_api)));
+    list.push_back(c10::IValue(static_cast<int64_t>(num_of_tokens_per_group_combine_api)));
+    list.push_back(c10::IValue(static_cast<int64_t>(num_of_blocks_combine_api)));
+    list.push_back(c10::IValue(static_cast<int64_t>(num_of_additional_in_flight_s2g_combine_api)));
+    list.push_back(c10::IValue(static_cast<int64_t>(num_of_additional_in_flight_s2g_unpermute_block_combine_api)));
+    list.push_back(c10::IValue(backward_combine_api));
+    list.push_back(c10::IValue(device_side_sync_combine_api));
+    return c10::IValue(std::move(list));
   }
   bool operator<(const HybridEpConfigInstance& other) const {
     return std::memcmp(this, &other, sizeof(HybridEpConfigInstance)) < 0;

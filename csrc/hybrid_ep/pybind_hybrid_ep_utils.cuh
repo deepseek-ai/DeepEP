@@ -120,44 +120,6 @@ inline HybridEPBuffer* hybrid_ep_buffer_init(
                               base_path, load_cached_kernels, use_shared_buffer, enable_custom_allgather);
 }
 
-template<typename Func>
-auto hybrid_ep_buffer_combine(Func func) {
-    return [func](HybridEPBuffer& self,
-                        torch::Tensor hidden,
-                        c10::optional<torch::Tensor> probs,
-                        HandleImpl handle,
-                        bool with_probs) {
-        auto result = (self.*func)(hidden, probs, handle, with_probs);
-        if (isProfilerEnabledInMainThread()) {
-            record_hybrid_ep_buffer_init();
-
-            std::vector<c10::IValue> inputValues;
-            inputValues.reserve(4);
-            inputValues.push_back(to_ivalue(hidden));
-            inputValues.push_back(to_ivalue(probs));
-            inputValues.push_back(to_ivalue(handle));
-            inputValues.push_back(to_ivalue(with_probs));
-
-            std::vector<c10::IValue> outputValues;
-            record_result(outputValues, result);
-
-            std::vector<c10::Argument> args;
-            args.emplace_back("hidden", c10::TensorType::get());
-            args.emplace_back("probs", c10::OptionalType::create(c10::TensorType::get()));
-            args.emplace_back("handle", c10::AnyType::get());
-            args.emplace_back("with_probs", c10::BoolType::get());
-            std::vector<c10::Argument> returns;
-            returns.emplace_back("", c10::TensorType::get());
-            returns.emplace_back("", c10::TensorType::get());
-            c10::FunctionSchema schema(
-                "HybridEPBuffer::combine", "",
-                std::move(args), std::move(returns), false, false);
-            RECORD_FUNCTION_WITH_INPUTS_OUTPUTS(schema, &inputValues, outputValues);
-        }
-        return result;
-    };
-}
-
 // Wrapper for update_buffer (returns bool)
 template<typename Func>
 auto hybrid_ep_buffer_update_buffer(Func func) {
@@ -203,7 +165,6 @@ auto hybrid_ep_buffer_metadata_preprocessing(Func func) {
                                    fuse_permute_dispatch, non_blocking);
         if (isProfilerEnabledInMainThread()) {
             record_hybrid_ep_buffer_init();
-
             std::vector<c10::IValue> inputValues;
             inputValues.reserve(8);
             inputValues.push_back(to_ivalue(config));
@@ -228,24 +189,12 @@ auto hybrid_ep_buffer_metadata_preprocessing(Func func) {
             args.emplace_back("fuse_permute_dispatch", c10::BoolType::get());
             args.emplace_back("non_blocking", c10::BoolType::get());
             std::vector<c10::Argument> returns;
-            returns.reserve(13);
-            returns.emplace_back("", c10::TensorType::get());  // sparse_to_dense_map
-            returns.emplace_back("", c10::TensorType::get());  // rdma_to_attn_map
-            returns.emplace_back("", c10::TensorType::get());  // attn_to_rdma_map
-            returns.emplace_back("", c10::TensorType::get());  // num_dispatched_tokens_tensor
-            returns.emplace_back("", c10::TensorType::get());  // local_expert_routing_map
-            returns.emplace_back("", c10::IntType::get());      // num_of_tokens_per_rank
-            returns.emplace_back("", c10::AnyType::get());      // config
-            returns.emplace_back("", c10::TensorType::get());  // tokens_per_expert
-            returns.emplace_back("", c10::TensorType::get());  // padded_tokens_per_expert
-            returns.emplace_back("", c10::TensorType::get());  // overflow_flag
-            returns.emplace_back("", c10::IntType::get());      // num_permuted_tokens
-            returns.emplace_back("", c10::TensorType::get());  // dense_chunk_layout
-            returns.emplace_back("", c10::TensorType::get());  // dense_to_expert_map
+            returns.emplace_back("HandleImpl", c10::AnyType::get());
             c10::FunctionSchema schema(
                 "HybridEPBuffer::metadata_preprocessing", "",
                 std::move(args), std::move(returns), false, false);
-            RECORD_FUNCTION_WITH_INPUTS_OUTPUTS(schema, &inputValues, outputValues);
+            RECORD_FUNCTION_WITH_INPUTS_OUTPUTS(schema, &inputValues, outputValues);    
+            // RECORD_FUNCTION_WITH_INPUTS_OUTPUTS("HybridEPBuffer::metadata_preprocessing", &inputValues, outputValues);
         }
         return result;
     };
@@ -340,6 +289,44 @@ auto hybrid_ep_buffer_dispatch_with_permute(Func func) {
             returns.emplace_back("", c10::TensorType::get());
             c10::FunctionSchema schema(
                 "HybridEPBuffer::dispatch_with_permute", "",
+                std::move(args), std::move(returns), false, false);
+            RECORD_FUNCTION_WITH_INPUTS_OUTPUTS(schema, &inputValues, outputValues);
+        }
+        return result;
+    };
+}
+
+template<typename Func>
+auto hybrid_ep_buffer_combine(Func func) {
+    return [func](HybridEPBuffer& self,
+                        torch::Tensor hidden,
+                        c10::optional<torch::Tensor> probs,
+                        HandleImpl handle,
+                        bool with_probs) {
+        auto result = (self.*func)(hidden, probs, handle, with_probs);
+        if (isProfilerEnabledInMainThread()) {
+            record_hybrid_ep_buffer_init();
+
+            std::vector<c10::IValue> inputValues;
+            inputValues.reserve(4);
+            inputValues.push_back(to_ivalue(hidden));
+            inputValues.push_back(to_ivalue(probs));
+            inputValues.push_back(to_ivalue(handle));
+            inputValues.push_back(to_ivalue(with_probs));
+
+            std::vector<c10::IValue> outputValues;
+            record_result(outputValues, result);
+
+            std::vector<c10::Argument> args;
+            args.emplace_back("hidden", c10::TensorType::get());
+            args.emplace_back("probs", c10::OptionalType::create(c10::TensorType::get()));
+            args.emplace_back("handle", c10::AnyType::get());
+            args.emplace_back("with_probs", c10::BoolType::get());
+            std::vector<c10::Argument> returns;
+            returns.emplace_back("", c10::TensorType::get());
+            returns.emplace_back("", c10::TensorType::get());
+            c10::FunctionSchema schema(
+                "HybridEPBuffer::combine", "",
                 std::move(args), std::move(returns), false, false);
             RECORD_FUNCTION_WITH_INPUTS_OUTPUTS(schema, &inputValues, outputValues);
         }
