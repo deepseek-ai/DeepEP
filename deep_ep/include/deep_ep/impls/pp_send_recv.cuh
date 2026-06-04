@@ -96,7 +96,7 @@ __device__ __forceinline__ void tma_copy(
         // Prefetch: wait until this stage's buffer is safe to reuse, then issue next load
         const auto next_iter_idx = iter_idx + kNumStages;
         if (next_iter_idx < num_iterations) {
-            ptx::tma_store_wait<kNumStages - 1>();
+            ptx::tma_store_wait();
             const auto [load_offset, num_load_bytes] = get_iter_info(next_iter_idx);
             ptx::tma_load_1d(
                 tma_buffers + stage_idx * kNumTMABytesPerStage,
