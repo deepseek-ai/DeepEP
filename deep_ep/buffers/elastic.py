@@ -204,6 +204,7 @@ class ElasticBuffer:
             else:
                 num_allocated_qps = 17
         self.num_allocated_qps = num_allocated_qps
+        self.num_pp_qps = 0
 
         # Create CPU communicator (exchange POSIX FD handles for CPU segments)
         cpu_comm = []
@@ -456,15 +457,26 @@ class ElasticBuffer:
         """
         return self.runtime.engram_fetch(indices, num_qps)
 
-    def pp_set_config(self, num_max_tensor_bytes: int, num_max_inflight_tensors: int):
+    def _normalize_pp_num_qps(self, num_qps: int) -> int:
+        assert num_qps >= 0, 'Number of PP QPs must be non-negative'
+        if num_qps == 0:
+            return self.num_allocated_qps
+        assert num_qps <= self.num_allocated_qps, 'Allocated QPs are not enough'
+        return num_qps
+
+    def pp_set_config(self, num_max_tensor_bytes: int, num_max_inflight_tensors: int, num_qps: int = 0):
         """
         (Experimental) Configure pipeline-parallel (PP) send/recv parameters. Includes a barrier to flush previous operations.
 
         Arguments:
             num_max_tensor_bytes: the maximum tensor size in bytes per send/recv operation.
             num_max_inflight_tensors: the maximum number of in-flight tensors at once.
+            num_qps: the number of RDMA QPs to use for PP (0 for all allocated QPs).
+                This is fixed until the next `pp_set_config` call and must match on paired ranks.
         """
-        self.runtime.pp_set_config(num_max_tensor_bytes, num_max_inflight_tensors)
+        actual_num_qps = self._normalize_pp_num_qps(num_qps)
+        self.runtime.pp_set_config(num_max_tensor_bytes, num_max_inflight_tensors, num_qps)
+        self.num_pp_qps = actual_num_qps
 
     def pp_send(self, t: torch.Tensor, dst_rank_idx: int, num_sms: int = 0) -> None:
         """

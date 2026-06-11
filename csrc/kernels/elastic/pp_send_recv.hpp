@@ -18,6 +18,7 @@ public:
         // Templated arguments
         int num_ranks;
         int num_smem_bytes;
+        int num_qps;
         int64_t num_timeout_cycles;
 
         // Parameters
@@ -41,11 +42,12 @@ public:
 using namespace deep_ep::elastic;
 
 static void __instantiate_kernel() {{
-    auto ptr = reinterpret_cast<void*>(&pp_send_impl<{}, {}, {}, {}>);
+    auto ptr = reinterpret_cast<void*>(&pp_send_impl<{}, {}, {}, {}, {}>);
 }}
 )", args.launch_args.grid_dim.first,
     args.num_ranks,
     args.num_smem_bytes,
+    args.num_qps,
     args.num_timeout_cycles);
     }
 
@@ -69,6 +71,7 @@ static void launch_pp_send(const ncclDevComm_t& nccl_dev_comm,
                            const int64_t& num_max_tensor_bytes,
                            const int num_max_inflight_tensors,
                            const int& num_sms,
+                           const int& num_qps,
                            const int64_t& num_timeout_cycles,
                            const int& num_smem_bytes,
                            const at::cuda::CUDAStream& stream) {
@@ -76,6 +79,7 @@ static void launch_pp_send(const ncclDevComm_t& nccl_dev_comm,
     const PPSendRuntime::Args args = {
         .num_ranks = num_ranks,
         .num_smem_bytes = num_smem_bytes,
+        .num_qps = num_qps,
         .num_timeout_cycles = num_timeout_cycles,
         .nccl_dev_comm = nccl_dev_comm,
         .nccl_window = nccl_window,
@@ -100,6 +104,7 @@ public:
         // Templated arguments
         int num_ranks;
         int num_smem_bytes;
+        int num_qps;
         int64_t num_timeout_cycles;
 
         // Parameters
@@ -124,11 +129,12 @@ public:
 using namespace deep_ep::elastic;
 
 static void __instantiate_kernel() {{
-    auto ptr = reinterpret_cast<void*>(&pp_recv_impl<{}, {}, {}, {}>);
+    auto ptr = reinterpret_cast<void*>(&pp_recv_impl<{}, {}, {}, {}, {}>);
 }}
 )", args.launch_args.grid_dim.first,
     args.num_ranks,
     args.num_smem_bytes,
+    args.num_qps,
     args.num_timeout_cycles);
     }
 
@@ -154,6 +160,7 @@ static void launch_pp_recv(const ncclDevComm_t& nccl_dev_comm,
                            const int64_t& num_max_tensor_bytes,
                            const int& num_max_inflight_tensors,
                            const int& num_sms,
+                           const int& num_qps,
                            const int64_t& num_timeout_cycles,
                            const int& num_smem_bytes,
                            const at::cuda::CUDAStream& stream) {
@@ -161,6 +168,7 @@ static void launch_pp_recv(const ncclDevComm_t& nccl_dev_comm,
     const PPRecvRuntime::Args args = {
         .num_ranks = num_ranks,
         .num_smem_bytes = num_smem_bytes,
+        .num_qps = num_qps,
         .num_timeout_cycles = num_timeout_cycles,
         .nccl_dev_comm = nccl_dev_comm,
         .nccl_window = nccl_window,
