@@ -87,10 +87,11 @@ def check_numa_balancing():
         import warnings
         warnings.warn(
             f'Automatic NUMA balancing is enabled (kernel.numa_balancing={value}). '
-            'On some kernel versions and workloads, the page scanner can add '
-            'milliseconds of tail latency to RDMA-based internode dispatch '
-            '(see issue #624 for a 5.15-kernel example). '
-            'If you observe unexpected latency spikes, consider: '
+            'The kernel hands NUMA page scanning (task_numa_work) to busy threads, '
+            'and the per-scan cost grows with process memory. For EP serving '
+            'processes with large resident memory, this can add milliseconds of '
+            'tail latency to internode dispatch (see issue #624). '
+            'If you observe latency spikes, consider: '
             '`sudo sysctl -w kernel.numa_balancing=0`. '
             'Set EP_SUPPRESS_NUMA_CHECK=1 to silence this warning. '
             'Details: https://github.com/deepseek-ai/DeepEP/issues/624',
