@@ -418,6 +418,8 @@ sudo mlxconfig -y -d mlx5_$i set PCI_ATOMIC_MODE=4
     - [LL-Layered](https://github.com/deepseek-ai/DeepEP/pull/500) Optimizing cross-node LL operator communication using rail-optimized forwarding and data merging to reduce latency
 - [Mori-EP](https://github.com/deepseek-ai/DeepEP/tree/mori-ep)
     - ROCm/AMD GPU support powered by [MORI](https://github.com/ROCm/mori) backend (low-latency mode)
+- [nvDev](https://github.com/deepseek-ai/DeepEP/tree/nvDev)
+    - V2-based branch with the latest CUDA features, such as Compute Fabric Transport (CFT) that brings better latency on small token sizes.
 
 ## Community forks
 
