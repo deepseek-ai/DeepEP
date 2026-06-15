@@ -1,19 +1,17 @@
-#include <cstring>
-#include <vector>
-#include <string>
-#include <pybind11/pytypes.h>
-#include <pybind11/stl.h>
-#include <sstream>
-
 #include <nccl.h>
 #include <nccl_device/core.h>
+#include <pybind11/pytypes.h>
+#include <pybind11/stl.h>
 
+#include <cstring>
 #include <deep_ep/common/compiled.cuh>
 #include <deep_ep/common/exception.cuh>
+#include <sstream>
+#include <string>
+#include <vector>
 
-#include "api.cuh"
 #include "../../utils/system.hpp"
-
+#include "api.cuh"
 
 namespace deep_ep::nccl {
 
@@ -25,8 +23,7 @@ pybind11::bytearray get_local_unique_id() {
     return {result.data(), result.size()};
 }
 
-int64_t create_nccl_comm(const pybind11::bytearray& root_unique_id_bytes,
-                         const int& num_ranks, const int& rank_idx) {
+int64_t create_nccl_comm(const pybind11::bytearray& root_unique_id_bytes, const int& num_ranks, const int& rank_idx) {
     // Copy unique ID
     ncclUniqueId root_unique_id;
     const auto root_unique_id_str = root_unique_id_bytes.cast<std::string>();
@@ -55,21 +52,26 @@ std::tuple<int, int> get_physical_domain_size(const int64_t& nccl_comm) {
 
 std::tuple<int, int> get_logical_domain_size(const int64_t& nccl_comm, const bool& allow_hybrid_mode) {
     const auto [num_rdma_ranks, num_nvl_ranks] = get_physical_domain_size(nccl_comm);
-    return {allow_hybrid_mode ? num_rdma_ranks : 1,
-            allow_hybrid_mode ? num_nvl_ranks : num_rdma_ranks * num_nvl_ranks};
+    return {allow_hybrid_mode ? num_rdma_ranks : 1, allow_hybrid_mode ? num_nvl_ranks : num_rdma_ranks * num_nvl_ranks};
 }
 
-NCCLSymmetricMemoryContext::NCCLSymmetricMemoryContext(const int64_t& nccl_comm, const symmetric::cpu_comm_t& cpu_comm,
-                                                       const int& num_ranks, const int& rank_idx,
-                                                       const int64_t& num_bytes, const int64_t& num_cpu_bytes,
+NCCLSymmetricMemoryContext::NCCLSymmetricMemoryContext(const int64_t& nccl_comm,
+                                                       const symmetric::cpu_comm_t& cpu_comm,
+                                                       const int& num_ranks,
+                                                       const int& rank_idx,
+                                                       const int64_t& num_bytes,
+                                                       const int64_t& num_cpu_bytes,
                                                        const bool& allow_hybrid_mode,
-                                                       const int& sl_idx, const int& num_allocated_qps):
-    rank_idx(rank_idx), num_ranks(num_ranks), num_allocated_qps(num_allocated_qps) {
+                                                       const int& sl_idx,
+                                                       const int& num_allocated_qps)
+    : rank_idx(rank_idx), num_ranks(num_ranks), num_allocated_qps(num_allocated_qps) {
     if (get_env("EP_BUFFER_DEBUG", 0)) {
         int nccl_version;
         NCCL_CHECK(ncclGetVersion(&nccl_version));
         printf("DeepEP initialized with NCCL version: %d.%d.%d (loaded library)\n",
-               nccl_version / 10000, (nccl_version % 10000) / 100, nccl_version % 100);
+               nccl_version / 10000,
+               (nccl_version % 10000) / 100,
+               nccl_version % 100);
     }
 
     // Reuse the NCCL communicator
@@ -84,10 +86,9 @@ NCCLSymmetricMemoryContext::NCCLSymmetricMemoryContext(const int64_t& nccl_comm,
         // Query NCCL supported Gin Type
         ncclCommProperties props = NCCL_COMM_PROPERTIES_INITIALIZER;
         NCCL_CHECK(ncclCommQueryProperties(comm, &props));
-        EP_HOST_ASSERT(
-            (allow_hybrid_mode ? props.railedGinType : props.ginType) != NCCL_GIN_TYPE_NONE and
-            "NCCL GIN is unavailable. This is usually due to a network configuration issue, "
-            "such as `allow_hybrid_mode=0` (disable direct RDMA kernels) in multi-plane network.");
+        EP_HOST_ASSERT((allow_hybrid_mode ? props.railedGinType : props.ginType) != NCCL_GIN_TYPE_NONE and
+                       "NCCL GIN is unavailable. This is usually due to a network configuration issue, "
+                       "such as `allow_hybrid_mode=0` (disable direct RDMA kernels) in multi-plane network.");
     }
 
     // Initialize NCCL device communicator
@@ -95,11 +96,11 @@ NCCLSymmetricMemoryContext::NCCLSymmetricMemoryContext(const int64_t& nccl_comm,
     if (num_ranks > 1 and not gin_disabled) {
         reqs.ginContextCount = num_allocated_qps;
         reqs.ginExclusiveContexts = true;
-        reqs.ginQueueDepth = 1024;
+        reqs.ginQueueDepth = get_env("EP_GIN_QUEUE_DEPTH", 1024);
         reqs.ginTrafficClass = sl_idx;
         // Customized RDMA barrier needs extra signals
         reqs.ginSignalCount = num_ranks + 2 * 2;
-        reqs.ginConnectionType = allow_hybrid_mode ? NCCL_GIN_CONNECTION_RAIL: NCCL_GIN_CONNECTION_FULL;
+        reqs.ginConnectionType = allow_hybrid_mode ? NCCL_GIN_CONNECTION_RAIL : NCCL_GIN_CONNECTION_FULL;
     }
     NCCL_CHECK(ncclDevCommCreate(comm, &reqs, &dev_comm));
 
@@ -121,10 +122,8 @@ NCCLSymmetricMemoryContext::NCCLSymmetricMemoryContext(const int64_t& nccl_comm,
 
     // Create symmetric memory
     // num_bytes = GPU + CPU, derive GPU portion
-    this->symmetric_memory = symmetric::alloc(
-        num_bytes - num_cpu_bytes, num_cpu_bytes,
-        allow_hybrid_mode, num_scaleup_ranks, scaleout_rank_idx,
-        cpu_comm);
+    this->symmetric_memory =
+        symmetric::alloc(num_bytes - num_cpu_bytes, num_cpu_bytes, allow_hybrid_mode, num_scaleup_ranks, scaleout_rank_idx, cpu_comm);
 
     // Create window
     // NOTES: `ncclCommWindowRegister` is collective: it internally calls bootstrapBarrier
@@ -138,7 +137,7 @@ NCCLSymmetricMemoryContext::NCCLSymmetricMemoryContext(const int64_t& nccl_comm,
     // Get LSA pointers for all LSA peers
     // TODO: check whether this is correct for network with RDMA
     nvl_window_ptrs.resize(num_nvl_ranks);
-    for (int i = 0; i < num_nvl_ranks; ++ i)
+    for (int i = 0; i < num_nvl_ranks; ++i)
         NCCL_CHECK(ncclGetLsaDevicePointer(window, 0, i, &nvl_window_ptrs[i]));
 }
 
