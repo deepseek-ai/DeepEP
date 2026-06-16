@@ -232,21 +232,31 @@ __forceinline__ __device__ void gpu_barrier(const handle::NCCLGin& gin,
     do_scaleout &= kNumScaleoutRanks > 1;
     do_scaleup &= kNumScaleupRanks > 1;
     if (do_scaleup and do_scaleout) {
-        // Do scaleup and scaleout barrier in parallel
-        EP_DEVICE_ASSERT(kNumSMs >= 2 and "At least 2 SMs for a hybrid barrier");
-        if (sm_idx == 0) {
-            // First SM do the scaleup barrier
+        EP_DEVICE_ASSERT(kNumSMs > 0 and "At least 1 SMs");
+        if (kNumSMs >= 2) {
+            // Do scaleup and scaleout barrier in parallel
+            if (sm_idx == 0) {
+                // First SM do the scaleup barrier
+                scaleup_barrier_wo_local_sync<kIsScaleupNVLink, kNumScaleupRanks, kNumSMs, kNumThreads, kNumQPs, kNumTimeoutCycles, kTag, kFlushStores>(
+                    gin, workspace, scaleup_rank_idx, sm_idx, thread_idx);
+
+                // We need an extra grid sync, as the scaleout barrier will do a sync after flush, before the barrier
+                // NOTES: this is kind of hacky
+                if constexpr (kFlushStores) 
+                    cooperative_groups::this_grid().sync();
+            } else {
+                // The remaining SMs do the scaleout barrier
+                scaleout_barrier_wo_local_sync<kNumScaleoutRanks, kNumSMs - 1, kNumThreads, kNumQPs, kNumTimeoutCycles, kTag, kFlushStores>(
+                    gin, scaleout_rank_idx, scaleup_rank_idx, sm_idx - 1, thread_idx);
+            }
+        } else {
+            scaleout_barrier_wo_local_sync<kNumScaleoutRanks, kNumSMs, kNumThreads, kNumQPs, kNumTimeoutCycles, kTag, kFlushStores>(
+                gin, scaleout_rank_idx, scaleup_rank_idx, sm_idx, thread_idx);
+
+            cooperative_groups::this_thread_block().sync();
+
             scaleup_barrier_wo_local_sync<kIsScaleupNVLink, kNumScaleupRanks, kNumSMs, kNumThreads, kNumQPs, kNumTimeoutCycles, kTag, kFlushStores>(
                 gin, workspace, scaleup_rank_idx, sm_idx, thread_idx);
-
-            // We need an extra grid sync, as the scaleout barrier will do a sync after flush, before the barrier
-            // NOTES: this is kind of hacky
-            if constexpr (kFlushStores) 
-                cooperative_groups::this_grid().sync();
-        } else {
-            // The remaining SMs do the scaleout barrier
-            scaleout_barrier_wo_local_sync<kNumScaleoutRanks, kNumSMs - 1, kNumThreads, kNumQPs, kNumTimeoutCycles, kTag, kFlushStores>(
-                gin, scaleout_rank_idx, scaleup_rank_idx, sm_idx - 1, thread_idx);
         }
     } else if (do_scaleup) {
         // Scaleup only
