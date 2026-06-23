@@ -64,9 +64,9 @@ combine_impl(nv_bfloat16* x,
         ptx::mbarrier_init_with_fence(mbarrier_ptr, 1);
     __syncwarp();
 
-    // Expanding mode must not be backward
-    if constexpr (kUseExpandedLayout)
-        EP_DEVICE_ASSERT(topk_weights == nullptr);
+    // Expand mode may carry `topk_weights` ([NvS] router weight gradient), delivered per k-slot in the
+    // expanded-send branch below (the only path taken when kUseExpandedLayout and not
+    // kAllowMultipleReduction).
 
     // Gin handle
     // We treat each warp as a "channel"
@@ -194,7 +194,19 @@ combine_impl(nv_bfloat16* x,
                             ptx::tma_store_1d(gin.get_sym_ptr<team_t>(token_buffer.get_base_ptr(), src_rank_idx),
                                               tma_buffer.get_base_ptr(), kNumHiddenBytes);
                             ptx::tma_store_commit();
+
+                            // Deliver this k-slot's router weight gradient scalar into the same remote
+                            // buffer slot's weight region (position 0). The reduce epilogue reads it back
+                            // and scatters to combined_topk_weights[src_token, k] — a direct store through
+                            // the NVLink symmetric pointer, covered by the final combine barrier.
+                            if (topk_weights != nullptr) {
+                                float* w_dst = gin.get_sym_ptr<team_t>(token_buffer.get_topk_weights_ptr(), src_rank_idx);
+                                *w_dst = __ldg(topk_weights + slot_idx);
+                            }
                         } else {
+                            // NOTE: the RDMA path does not carry the per-row weight. expand-combine with
+                            // topk_weights is host-asserted to a single NVLink domain (num_scaleout_ranks==1),
+                            // so nvlink_bypass is always true here for the supported config.
                             // Write to the RDMA send buffer
                             const auto send_token_buffer =
                                 send_buffer.get_rank_buffer(src_rank_idx).get_token_buffer(src_token_idx * kNumTopk + k);

@@ -126,18 +126,36 @@ combine_reduce_epilogue_impl(nv_bfloat16* combined_x,
 
         // Write top-k weights
         if (combined_topk_weights != nullptr) {
-            const auto master_lane_idx = ptx::get_master_lane_idx(ptx::match(stored_dst_rank_idx));
-            if (lane_idx < kNumTopk) {
-                float value = 0;
-                if (stored_dst_rank_idx >= 0) {
-                    const auto dst_ptr = comm_buffer
-                        .get_rank_buffer(kUseRankLayout ? stored_dst_rank_idx : master_lane_idx)
-                        .get_token_buffer(token_idx).get_topk_weights_ptr() + lane_idx;
-                    value = *dst_ptr;
+            if constexpr (kUseExpandedLayout) {
+                // In expand mode each selected k-slot's router weight gradient was delivered by the combine
+                // push (expanded-send) into that k-slot's own buffer slot at weight position 0. `lane_idx`
+                // is the k-slot; scatter the scalar straight to column lane_idx. Unselected slots
+                // (stored_dst_rank_idx < 0) contribute 0. This requires !kAllowMultipleReduction (so
+                // kUseRankLayout==false and slot index == k-slot, matching the push), host-asserted for
+                // expand-combine with weights.
+                if (lane_idx < kNumTopk) {
+                    float value = 0;
+                    if (stored_dst_rank_idx >= 0) {
+                        value = *(comm_buffer.get_rank_buffer(lane_idx)
+                                      .get_token_buffer(token_idx).get_topk_weights_ptr());
+                    }
+                    combined_topk_weights[token_idx * kNumTopk + lane_idx] = value;
                 }
-                combined_topk_weights[token_idx * kNumTopk + lane_idx] = value;
+                __syncwarp();
+            } else {
+                const auto master_lane_idx = ptx::get_master_lane_idx(ptx::match(stored_dst_rank_idx));
+                if (lane_idx < kNumTopk) {
+                    float value = 0;
+                    if (stored_dst_rank_idx >= 0) {
+                        const auto dst_ptr = comm_buffer
+                            .get_rank_buffer(kUseRankLayout ? stored_dst_rank_idx : master_lane_idx)
+                            .get_token_buffer(token_idx).get_topk_weights_ptr() + lane_idx;
+                        value = *dst_ptr;
+                    }
+                    combined_topk_weights[token_idx * kNumTopk + lane_idx] = value;
+                }
+                __syncwarp();
             }
-            __syncwarp();
         }
     }
 }

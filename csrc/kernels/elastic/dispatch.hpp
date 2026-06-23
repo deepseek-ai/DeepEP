@@ -106,6 +106,7 @@ public:
 
         // Parameters
         void* x; sf_pack_t* sf; topk_idx_t* topk_idx; float* topk_weights;
+        float* aux_weights;   // second per-(t,k) scalar (router-weight gradient)
         topk_idx_t* copied_topk_idx;
         int* cumulative_local_expert_recv_stats;
         int* psum_num_recv_tokens_per_scaleup_rank;
@@ -168,6 +169,7 @@ static void __instantiate_kernel() {{
             EP_CUDA_UNIFIED_CHECK(jit::launch_kernel(
                 kernel, config,
                 args.x, args.sf, args.topk_idx, args.topk_weights,
+                args.aux_weights,
                 args.copied_topk_idx,
                 args.cumulative_local_expert_recv_stats,
                 args.psum_num_recv_tokens_per_scaleup_rank,
@@ -213,6 +215,7 @@ static layout::TokenLayout get_dispatch_token_layout(
 
 static void launch_dispatch(void* x, void* sf,
                             topk_idx_t* topk_idx, float* topk_weights,
+                            float* aux_weights,
                             topk_idx_t* copied_topk_idx,
                             int* cumulative_local_expert_recv_stats,
                             int* psum_num_recv_tokens_per_scaleup_rank,
@@ -287,6 +290,7 @@ static void launch_dispatch(void* x, void* sf,
         .num_experts = num_experts, .num_topk = num_topk, .expert_alignment = expert_alignment,
         .num_qps = num_qps, .num_timeout_cycles = num_timeout_cycles,
         .x = x, .sf = static_cast<sf_pack_t*>(sf), .topk_idx = topk_idx, .topk_weights = topk_weights,
+        .aux_weights = aux_weights,
         .copied_topk_idx = copied_topk_idx,
         .cumulative_local_expert_recv_stats = cumulative_local_expert_recv_stats,
         .psum_num_recv_tokens_per_scaleup_rank = psum_num_recv_tokens_per_scaleup_rank,
@@ -310,7 +314,7 @@ class DispatchCopyEpilogueRuntime final : public jit::LaunchRuntime<DispatchCopy
 public:
     struct Args {
         // Templated arguments
-        bool do_expand, cached_mode;
+        bool do_expand, cached_mode, do_scatter_to_nvs;
         int num_channels;
         int num_warps;
         int num_scaleout_ranks, num_scaleup_ranks;
@@ -324,11 +328,13 @@ public:
         int* psum_num_recv_tokens_per_expert;
         void* recv_x; void* recv_sf;
         topk_idx_t* recv_topk_idx; float* recv_topk_weights;
+        float* recv_aux_weights;   // per-row router-weight gradient scalar output
         int* recv_src_metadata;
         int* channel_linked_list;
         int num_recv_tokens;
         int recv_sf_token_stride, recv_sf_hidden_stride;
         int scaleout_rank_idx, scaleup_rank_idx;
+        const int* scatter_src_metadata; void* out_nvs;
 
         jit::LaunchArgs launch_args;
     };
@@ -340,10 +346,10 @@ public:
 using namespace deep_ep::elastic;
 
 static void __instantiate_kernel() {{
-    auto ptr = reinterpret_cast<void*>(&dispatch_copy_epilogue_impl<{}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}>);
+    auto ptr = reinterpret_cast<void*>(&dispatch_copy_epilogue_impl<{}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}>);
 }}
 )",
-                           args.do_expand, args.cached_mode,
+                           args.do_expand, args.cached_mode, args.do_scatter_to_nvs,
                            args.launch_args.grid_dim.first, args.num_channels, args.num_warps,
                            args.num_scaleout_ranks, args.num_scaleup_ranks,
                            args.num_hidden_bytes, args.num_sf_packs,
@@ -357,11 +363,13 @@ static void __instantiate_kernel() {{
                                                  args.psum_num_recv_tokens_per_scaleup_rank,
                                                  args.psum_num_recv_tokens_per_expert,
                                                  args.recv_x, args.recv_sf, args.recv_topk_idx, args.recv_topk_weights,
+                                                 args.recv_aux_weights,
                                                  args.recv_src_metadata,
                                                  args.channel_linked_list,
                                                  args.num_recv_tokens,
                                                  args.recv_sf_token_stride, args.recv_sf_hidden_stride,
-                                                 args.scaleout_rank_idx, args.scaleup_rank_idx));
+                                                 args.scaleout_rank_idx, args.scaleup_rank_idx,
+                                                 args.scatter_src_metadata, args.out_nvs));
     }
 };
 
@@ -370,6 +378,7 @@ static void launch_dispatch_copy_epilogue(void* buffer, void* workspace,
                                           int* psum_num_recv_tokens_per_expert,
                                           void* recv_x, void* recv_sf,
                                           topk_idx_t* recv_topk_idx, float* recv_topk_weights,
+                                          float* recv_aux_weights,
                                           int* recv_src_metadata,
                                           int* channel_linked_list,
                                           const int& num_recv_tokens, const int& num_max_tokens_per_rank,
@@ -381,6 +390,8 @@ static void launch_dispatch_copy_epilogue(void* buffer, void* workspace,
                                           const int& num_sms, const int& num_smem_bytes,
                                           const int& num_channels,
                                           const bool& do_expand, const bool& cached_mode,
+                                          const bool& do_scatter_to_nvs,
+                                          const int* scatter_src_metadata, void* out_nvs,
                                           const at::cuda::CUDAStream& stream) {
     // Maximize shared memory utilization
     const auto token_layout = layout::TokenLayout(num_hidden_bytes, num_sf_packs * sizeof(sf_pack_t), num_topk, true);
@@ -389,7 +400,7 @@ static void launch_dispatch_copy_epilogue(void* buffer, void* workspace,
 
     // Generate, build and launch
     const DispatchCopyEpilogueRuntime::Args args = {
-        .do_expand = do_expand, .cached_mode = cached_mode,
+        .do_expand = do_expand, .cached_mode = cached_mode, .do_scatter_to_nvs = do_scatter_to_nvs,
         .num_channels = num_channels, .num_warps = num_warps,
         .num_scaleout_ranks = num_scaleout_ranks, .num_scaleup_ranks = num_scaleup_ranks,
         .num_hidden_bytes = num_hidden_bytes, .num_sf_packs = num_sf_packs,
@@ -400,11 +411,13 @@ static void launch_dispatch_copy_epilogue(void* buffer, void* workspace,
         .psum_num_recv_tokens_per_expert = psum_num_recv_tokens_per_expert,
         .recv_x = recv_x, .recv_sf = recv_sf,
         .recv_topk_idx = recv_topk_idx, .recv_topk_weights = recv_topk_weights,
+        .recv_aux_weights = recv_aux_weights,
         .recv_src_metadata = recv_src_metadata,
         .channel_linked_list = channel_linked_list,
         .num_recv_tokens = num_recv_tokens,
         .recv_sf_token_stride = recv_sf_token_stride, .recv_sf_hidden_stride = recv_sf_hidden_stride,
         .scaleout_rank_idx = scaleout_rank_idx, .scaleup_rank_idx = scaleup_rank_idx,
+        .scatter_src_metadata = scatter_src_metadata, .out_nvs = out_nvs,
         .launch_args = jit::LaunchArgs(num_sms, num_threads, num_smem_bytes, 1, false, true)};
     const auto code = DispatchCopyEpilogueRuntime::generate(args);
     const auto runtime = jit::compiler->build("dispatch_copy_epilogue", code);
