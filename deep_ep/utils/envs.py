@@ -243,9 +243,44 @@ def check_fast_rdma_atomic_support(nic_name: str = _DEFAULT_NIC_NAME) -> bool:
 
 
 @functools.lru_cache()
+def _query_num_lag_ports(nic_name: str) -> int:
+    """
+    Number of physical LAG ports underneath an mlx5 RoCE device.
+
+    Mellanox RoCE LAG presents N physical rails as a single logical port,
+    so ``ibstat`` reports the per-rail rate, not the aggregated bandwidth.
+    Querying the mlx5 direct-verbs interface for ``num_lag_ports`` is the
+    canonical way to recover the rail count without an `ib_write_bw` probe.
+
+    Returns 1 (legacy behaviour) when ``pyverbs`` is unavailable or the
+    query fails for any reason.
+    """
+    # noinspection PyBroadException
+    try:
+        from pyverbs.providers.mlx5.mlx5dv import Mlx5Context, Mlx5DVContextAttr
+    except ImportError:
+        return 1
+    try:
+        ctx = Mlx5Context(attr=Mlx5DVContextAttr(), name=nic_name)
+        try:
+            num_lag_ports = int(ctx.query_mlx5_device().num_lag_ports or 0)
+        finally:
+            ctx.close()
+        return max(num_lag_ports, 1)
+    except Exception:
+        return 1
+
+
+@functools.lru_cache()
 def get_rdma_gbs(nic_name: str = _DEFAULT_NIC_NAME) -> float:
     """
     Get the RDMA bandwidth in GB/s, cached.
+
+    On RoCE LAG fabrics the value is automatically scaled by the number of
+    underlying physical ports reported by the mlx5 direct-verbs interface,
+    so a 2-rail bond delivers ``2 * ibstat_rate / 8`` instead of half of it.
+    Setting ``EP_RDMA_GBS=<gbps>`` skips detection and uses the supplied
+    value directly (handy when ``ibstat`` is missing or behaves oddly).
 
     Arguments:
         nic_name: the NIC device name.
@@ -253,6 +288,14 @@ def get_rdma_gbs(nic_name: str = _DEFAULT_NIC_NAME) -> float:
     Returns:
         gbs: the RDMA bandwidth in GB/s (0 if detection fails).
     """
+    override = os.getenv('EP_RDMA_GBS')
+    if override:
+        # noinspection PyBroadException
+        try:
+            return float(override) / 8
+        except ValueError:
+            print(f'Invalid EP_RDMA_GBS={override!r}, ignoring and falling back to ibstat')
+
     # noinspection PyBroadException
     try:
         result = subprocess.run(['ibstat'], capture_output=True, text=True, check=True)
@@ -261,8 +304,9 @@ def get_rdma_gbs(nic_name: str = _DEFAULT_NIC_NAME) -> float:
         pattern = rf"CA '{nic_name}'.*?Port \d+:\s*.*?Rate:\s*(\d+)"
         match = re.search(pattern, output, re.DOTALL)
         assert match
-        rate = int(match.group(1))
-        return rate / 8
+        rate_per_port = int(match.group(1))
     except Exception as e:
         print(f'Failed to get RDMA connection speed: {e}')
         return 0
+
+    return rate_per_port * _query_num_lag_ports(nic_name) / 8
