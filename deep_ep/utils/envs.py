@@ -242,6 +242,13 @@ def check_fast_rdma_atomic_support(nic_name: str = _DEFAULT_NIC_NAME) -> bool:
         return False
 
 
+# MLX5DV_CONTEXT_MASK_NUM_LAG_PORTS from <infiniband/mlx5dv.h>; pyverbs does not
+# re-export this constant, and ``query_mlx5_device()`` 's default comp_mask=-1
+# (which ORs the masks pyverbs knows about) skips it on at least some versions,
+# leaving ``num_lag_ports`` at 0. Pass the bit explicitly.
+_MLX5DV_CONTEXT_MASK_NUM_LAG_PORTS = 1 << 9
+
+
 @functools.lru_cache()
 def _query_num_lag_ports(nic_name: str) -> int:
     """
@@ -263,7 +270,8 @@ def _query_num_lag_ports(nic_name: str) -> int:
     try:
         ctx = Mlx5Context(attr=Mlx5DVContextAttr(), name=nic_name)
         try:
-            num_lag_ports = int(ctx.query_mlx5_device().num_lag_ports or 0)
+            dv = ctx.query_mlx5_device(comp_mask=_MLX5DV_CONTEXT_MASK_NUM_LAG_PORTS)
+            num_lag_ports = int(dv.num_lag_ports or 0)
         finally:
             ctx.close()
         return max(num_lag_ports, 1)
