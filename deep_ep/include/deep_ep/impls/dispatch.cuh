@@ -31,6 +31,7 @@ template <bool kIsScaleupNVLink,
 __global__ void __launch_bounds__(kNumThreads, 1)
 dispatch_impl(
     void* x, sf_pack_t* sf, topk_idx_t* topk_idx, float* topk_weights,
+    float* aux_weights,   // second per-(t,k) scalar (router-weight gradient); no effect when nullptr
     topk_idx_t* copied_topk_idx,
     int* cumulative_local_expert_recv_stats,
     int* psum_num_recv_tokens_per_scaleup_rank,
@@ -315,6 +316,8 @@ dispatch_impl(
                 tma_buffer.get_topk_idx_ptr()[lane_idx] = dst_expert_idx;
                 if (topk_weights != nullptr)
                     tma_buffer.get_topk_weights_ptr()[lane_idx] = __ldg(topk_weights + token_idx * kNumTopk + lane_idx);
+                if (aux_weights != nullptr)   // write the aux scalar per (t,k), alongside topk_weights
+                    tma_buffer.get_aux_weights_ptr()[lane_idx] = __ldg(aux_weights + token_idx * kNumTopk + lane_idx);
                 if (copied_topk_idx != nullptr)
                     copied_topk_idx[token_idx * kNumTopk + lane_idx] = uncasted_dst_expert_idx;
             }

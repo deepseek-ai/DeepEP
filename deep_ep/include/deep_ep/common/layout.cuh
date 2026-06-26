@@ -192,7 +192,8 @@ struct TokenLayout {
         with_metadata(with_metadata),
         num_topk(num_topk),
         num_metadata_bytes(num_topk * (sizeof(int) + sizeof(float)) +
-                           (with_metadata ? (1 + num_topk) * sizeof(int) : 0)),
+                           (with_metadata ? (1 + num_topk) * sizeof(int) : 0) +
+                           num_topk * sizeof(float)),   // trailing aux-weight region (K floats) for the second scalar
         base(base) {
         EP_STATIC_ASSERT(sizeof(int) == sizeof(float), "Invalid size assumption");
         EP_UNIFIED_ASSERT(num_hidden_bytes % ptx::kNumTMAAlignBytes == 0);
@@ -241,6 +242,15 @@ struct TokenLayout {
 
     __forceinline__ __device__ __host__ int* get_linked_list_idx_ptr() const {
         return get_src_token_global_idx_ptr() + 1;
+    }
+
+    // Second per-(t,k) scalar (router-weight gradient) region at the end of the metadata (after
+    // topk_weights/src/linked_list), so it changes no existing offset; num_metadata_bytes is +K*float
+    // accordingly. Lets dispatch carry routing and this scalar together.
+    __forceinline__ __device__ __host__ float* get_aux_weights_ptr() const {
+        const int off = num_topk * static_cast<int>(sizeof(int) + sizeof(float)) +
+                        (with_metadata ? (1 + num_topk) * static_cast<int>(sizeof(int)) : 0);
+        return math::advance_ptr<float>(get_metadata_ptr(), off);
     }
 
     __forceinline__ __device__ ptx::mbarrier* get_mbarrier_ptr() const {

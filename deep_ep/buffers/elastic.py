@@ -65,7 +65,8 @@ class EPHandle:
                  recv_src_metadata: torch.Tensor,
                  dst_buffer_slot_idx: torch.Tensor,
                  token_metadata_at_forward: Optional[torch.Tensor],
-                 channel_linked_list: Optional[torch.Tensor]):
+                 channel_linked_list: Optional[torch.Tensor],
+                 recv_aux_weights: Optional[torch.Tensor] = None):  # per-row router-weight gradient scalar in NvS
         # NOTES: remember to copy the original users' input to prevent uncasual modifications on them
         assert topk_idx is not None
 
@@ -82,6 +83,7 @@ class EPHandle:
         self.dst_buffer_slot_idx = dst_buffer_slot_idx
         self.token_metadata_at_forward = token_metadata_at_forward
         self.channel_linked_list = channel_linked_list
+        self.recv_aux_weights = recv_aux_weights  # pass as combine(topk_weights=handle.recv_aux_weights) to reduce d_route
 
         # Inferred value, may not accurate without CPU sync
         self.num_recv_tokens = recv_src_metadata.shape[0]
@@ -379,16 +381,18 @@ class ElasticBuffer:
     def _unpack_handle(handle: Optional[EPHandle] = None) \
         -> Tuple[Optional[int], Optional[list],
                  Optional[torch.Tensor], Optional[torch.Tensor],
-                 Optional[torch.Tensor], Optional[torch.Tensor], Optional[torch.Tensor]]:
+                 Optional[torch.Tensor], Optional[torch.Tensor], Optional[torch.Tensor],
+                 Optional[torch.Tensor]]:
         if handle is None:
-            return None, None, None, None, None, None, None
+            return None, None, None, None, None, None, None, None
         return (handle.num_recv_tokens,
                 handle.num_recv_tokens_per_expert_list,
                 handle.psum_num_recv_tokens_per_scaleup_rank,
                 handle.psum_num_recv_tokens_per_expert,
                 handle.dst_buffer_slot_idx,
                 handle.token_metadata_at_forward,
-                handle.channel_linked_list)
+                handle.channel_linked_list,
+                handle.recv_src_metadata)  # reused by cached+expand replay to reproduce the expanded-row layout
 
     @staticmethod
     def capture() -> EventHandle:
@@ -709,6 +713,7 @@ class ElasticBuffer:
                  x: Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]],
                  topk_idx: Optional[torch.Tensor] = None,
                  topk_weights: Optional[torch.Tensor] = None,
+                 aux_weights: Optional[torch.Tensor] = None,  # second per-(t,k) router-weight gradient scalar
                  cumulative_local_expert_recv_stats: Optional[torch.Tensor] = None,
                  num_experts: Optional[int] = None,
                  num_max_tokens_per_rank: Optional[int] = None,
@@ -722,7 +727,8 @@ class ElasticBuffer:
                  do_handle_copy: bool = True,
                  do_cpu_sync: Optional[bool] = None,
                  do_expand: bool = False,
-                 use_tma_aligned_col_major_sf: bool = False) \
+                 use_tma_aligned_col_major_sf: bool = False,
+                 scatter_to_nvs_out: Optional[torch.Tensor] = None) \
             -> Tuple[Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]],
                      Optional[torch.Tensor], Optional[torch.Tensor],
                      EPHandle, EventOverlap]:
@@ -799,12 +805,22 @@ class ElasticBuffer:
          cached_psum_num_recv_tokens_per_scaleup_rank, cached_psum_num_recv_tokens_per_expert,
          cached_dst_buffer_slot_idx,
          cached_token_metadata_at_forward,
-         cached_channel_linked_list) = self._unpack_handle(handle)
+         cached_channel_linked_list,
+         cached_recv_src_metadata) = self._unpack_handle(handle)  # last item used by cached+expand replay
 
         # Some default values
         num_max_tokens_per_rank = value_or(num_max_tokens_per_rank, self.num_max_tokens_per_rank)
         expert_alignment = value_or(expert_alignment, 1)
         do_cpu_sync = value_or(do_cpu_sync, True)
+
+        # Fused combine-backward scatter: when an output buffer is given, the copy epilogue scatters each
+        # received row directly into it, using the forward handle's recv_src_metadata ([:, 2:] holds the
+        # NvS destinations recorded by the forward expand dispatch). Only valid for the non-expand cached
+        # backward; this fuses the Python-side gather + index_copy into the dispatch kernel.
+        if scatter_to_nvs_out is not None:
+            assert handle is not None, 'scatter_to_nvs_out requires a cached forward handle'
+            assert not do_expand, 'scatter_to_nvs_out is only valid for non-expand (combine backward)'
+        scatter_src_metadata = handle.recv_src_metadata if scatter_to_nvs_out is not None else None
 
         # Do dispatch
         (recv_x, recv_sf,
@@ -817,7 +833,9 @@ class ElasticBuffer:
          dst_buffer_slot_idx,
          token_metadata_at_forward,
          channel_linked_list,
+         recv_aux_weights,  # per-row router-weight gradient scalar in NvS
          event) = self.runtime.dispatch(x, sf, topk_idx, topk_weights,
+                                        aux_weights,  # matches the C++ dispatch param (after topk_weights)
                                         cumulative_local_expert_recv_stats,
                                         cached_num_recv_tokens,
                                         cached_num_recv_tokens_per_expert_list,
@@ -826,6 +844,7 @@ class ElasticBuffer:
                                         cached_dst_buffer_slot_idx,
                                         cached_token_metadata_at_forward,
                                         cached_channel_linked_list,
+                                        cached_recv_src_metadata,  # matches the C++ dispatch param
                                         num_max_tokens_per_rank,
                                         num_experts, expert_alignment,
                                         num_sms, num_qps,
@@ -833,7 +852,8 @@ class ElasticBuffer:
                                         previous_event_before_epilogue,
                                         async_with_compute_stream, allocate_on_comm_stream,
                                         do_handle_copy, do_cpu_sync, do_expand,
-                                        use_tma_aligned_col_major_sf)
+                                        use_tma_aligned_col_major_sf,
+                                        scatter_to_nvs_out, scatter_src_metadata)
         if handle is None:
             handle = EPHandle(do_expand,
                               num_experts, expert_alignment,
@@ -846,7 +866,8 @@ class ElasticBuffer:
                               recv_src_metadata,
                               dst_buffer_slot_idx,
                               token_metadata_at_forward,
-                              channel_linked_list)
+                              channel_linked_list,
+                              recv_aux_weights)  # per-row router-weight gradient scalar in NvS
 
         # Repack SF
         recv_x = (recv_x, recv_sf) if recv_sf is not None else recv_x
@@ -883,8 +904,13 @@ class ElasticBuffer:
         Arguments:
             x: `[num_tokens, hidden]` with `torch.bfloat16`, the tokens to send for reducing to its original ranks.
             handle: a must-set communication handle, you can obtain this from the `dispatch` function.
-            topk_weights: `[num_tokens, num_topk]` with `torch.float`, the tokens' top-k weights for reducing to
-                its original ranks. Not used in expand mode.
+            topk_weights: in non-expand mode, `[num_tokens, num_topk]` with `torch.float`, the tokens'
+                top-k weights for reducing to its original ranks.
+                In expand mode it may instead be a 1D `[num_tokens]` (= `[NvS]`) `torch.float` tensor —
+                the per-expanded-row router weight gradient (droute_weights_nvs) — and combine will reduce
+                it back to `combined_topk_weights` `[S, num_topk]` (droute_weights_sk).
+                Requires the buffer built with `allow_multiple_reduction=False` and a single NVLink
+                domain. Leave as `None` for a plain hidden-only combine.
             bias: 0, 1 or 2 `[num_combined_tokens, hidden]` with `torch.bfloat16` final bias to the output.
             num_sms: the number of SMs to use (0 to reuse the SM count from the dispatch handle).
             num_qps: the number of RDMA QPs to use (0 for automatic via `get_theoretical_num_qps`).

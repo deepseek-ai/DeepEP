@@ -8,7 +8,7 @@
 
 namespace deep_ep::elastic {
 
-template <bool kDoExpand, bool kCachedMode,
+template <bool kDoExpand, bool kCachedMode, bool kDoScatterToNvS,
           // NOTES: this channel concept only applies for scale-out ranks
           int kNumSMs, int kNumChannels, int kNumWarps,
           int kNumScaleoutRanks, int kNumScaleupRanks,
@@ -25,11 +25,16 @@ dispatch_copy_epilogue_impl(void* buffer, void* workspace,
                             int* psum_num_recv_tokens_per_expert,
                             void* recv_x, sf_pack_t* recv_sf,
                             topk_idx_t* recv_topk_idx, float* recv_topk_weights,
+                            float* recv_aux_weights,   // per-row router-weight gradient scalar output
                             int* recv_src_metadata,
                             int* channel_linked_list,
                             int num_recv_tokens,
                             const int recv_sf_token_stride, const int recv_sf_hidden_stride,
-                            const int scaleout_rank_idx, const int scaleup_rank_idx) {
+                            const int scaleout_rank_idx, const int scaleup_rank_idx,
+                            // Fused combine-backward scatter. When kDoScatterToNvS, additionally scatter
+                            // each received row to out_nvs[scatter_src_metadata[i, 2+k]] (the
+                            // forward-recorded NvS destinations). Both null/unused otherwise.
+                            const int* scatter_src_metadata, void* out_nvs) {
     // Utils
     const auto sm_idx = static_cast<int>(blockIdx.x), thread_idx = static_cast<int>(threadIdx.x);
     const auto warp_idx = ptx::get_warp_idx(), lane_idx = ptx::get_lane_idx();
@@ -110,8 +115,20 @@ dispatch_copy_epilogue_impl(void* buffer, void* workspace,
 
         // Calculate target indices in the tensor
         int dst_tensor_idx = -1;
-        if (not kDoExpand and ptx::elect_one_sync()) {
-            dst_tensor_idx = i;
+        if constexpr (not kDoExpand) {
+            if (ptx::elect_one_sync())
+                dst_tensor_idx = i;
+        } else if constexpr (kCachedMode) {
+            // Cached+expand replay. The fresh expand dispatch that built this handle recorded, per
+            // (recv-token i, k-slot lane), the atomically-assigned expanded row into
+            // recv_src_metadata[:, 2+lane] (see the write near the end of this loop). The expanded row
+            // order within an expert is otherwise race-dependent and not reproducible across dispatch
+            // calls, so a cached replay must reuse that recorded map (passed in via the handle's
+            // recv_src_metadata) instead of re-running the racy atomicAdd, guaranteeing the replay is
+            // row-for-row aligned with the forward. `-1` rows (unselected k-slots) stay -1 and are
+            // skipped by the `dst_tensor_idx >= 0` store guards below.
+            if (lane_idx < kNumTopk)
+                dst_tensor_idx = recv_src_metadata[i * (2 + kNumTopk) + 2 + lane_idx];
         } else if (kDoExpand and dst_expert_idx >= 0) {
             dst_tensor_idx = atomicAdd(psum_num_recv_tokens_per_expert + dst_expert_idx, 1);
         }
@@ -136,6 +153,24 @@ dispatch_copy_epilogue_impl(void* buffer, void* workspace,
             ptx::tma_store_commit();
         }
         __syncwarp();
+
+        // Fused combine-backward scatter (non-expand path). Each valid lane k additionally writes the same
+        // received hidden row to out_nvs[scatter_src_metadata[i, 2+k]] -- the NvS destinations recorded by
+        // the forward expand dispatch (deterministic, no atomicAdd). This is bit-identical to the Python
+        // gather path out[meta[i,2+k]] = d_base[i]: same bytes, same destinations, no reduction. Mirrors the
+        // expand store above (per-lane TMA store from the same shared source to a per-lane destination).
+        if constexpr (kDoScatterToNvS) {
+            constexpr int kScatterMetadataStride = 2 + kNumTopk;
+            if (lane_idx < kNumTopk) {
+                const int nvs_row = scatter_src_metadata[i * kScatterMetadataStride + 2 + lane_idx];
+                if (nvs_row >= 0) {
+                    ptx::tma_store_1d(math::advance_ptr(out_nvs, static_cast<int64_t>(nvs_row) * kNumHiddenBytes),
+                                      tma_buffer.get_hidden_ptr(), kNumHiddenBytes);
+                    ptx::tma_store_commit();
+                }
+            }
+            __syncwarp();
+        }
 
         // Store SF
         if constexpr (kNumSFPacks > 0) {
@@ -177,6 +212,10 @@ dispatch_copy_epilogue_impl(void* buffer, void* workspace,
         } else if (not kDoExpand and recv_topk_weights != nullptr and lane_idx < kNumTopk) {
             // For backward, weights are optional
             recv_topk_weights[i * kNumTopk + lane_idx] = tma_buffer.get_topk_weights_ptr()[lane_idx];
+        }
+        // Aux scalar in parallel with recv_topk_weights, expand mode only (the per-row [NvS] scalar)
+        if (kDoExpand and recv_aux_weights != nullptr and dst_tensor_idx >= 0) {
+            recv_aux_weights[dst_tensor_idx] = tma_buffer.get_aux_weights_ptr()[lane_idx];
         }
         __syncwarp();
 
