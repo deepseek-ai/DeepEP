@@ -432,25 +432,25 @@ def test_hybrid_ep_benchmark(buffer: deep_ep.HybridEPBuffer, group: dist.Process
     t = bench(lambda: buffer.dispatch(**dispatch_args))[0]
     _report_bw(f'dispatch ({dtype_str}, probs=True)', t, nvl_dispatch_actual, 'nvl_recv_bytes', rdma_dispatch, 'rdma_send_bytes')
     t = bench(lambda: buffer.combine(**combine_args))[0]
-    _report_bw('combine (probs=True)', t, nvl_combine, 'combine_send_bytes', rdma_combine, 'rdma_recv_bytes')
+    _report_bw(f'combine ({dtype_str}, probs=True)', t, nvl_combine, 'combine_send_bytes', rdma_combine, 'rdma_recv_bytes')
 
     # Non-permute (probs=False)
     t = bench(lambda: buffer.dispatch(**dispatch_noprob_args))[0]
     _report_bw(f'dispatch ({dtype_str}, probs=False)', t, nvl_dispatch_actual, 'nvl_recv_bytes', rdma_dispatch, 'rdma_send_bytes')
     t = bench(lambda: buffer.combine(**combine_noprob_args))[0]
-    _report_bw('combine (probs=False)', t, nvl_combine, 'combine_send_bytes', rdma_combine, 'rdma_recv_bytes')
+    _report_bw(f'combine ({dtype_str}, probs=False)', t, nvl_combine, 'combine_send_bytes', rdma_combine, 'rdma_recv_bytes')
 
     # Permute (non-fused)
     t = bench(lambda: buffer.dispatch_with_permute(**dispatch_wp_args))[0]
-    _report_bw(f'dispatch+permute ({dtype_str})', t, nvl_dispatch_actual, 'nvl_recv_bytes', rdma_dispatch, 'rdma_send_bytes')
+    _report_bw(f'dispatch+permute ({dtype_str}, probs=True)', t, nvl_dispatch_actual, 'nvl_recv_bytes', rdma_dispatch, 'rdma_send_bytes')
     t = bench(lambda: buffer.combine_with_unpermute(**combine_wp_args))[0]
-    _report_bw('combine+unpermute', t, nvl_combine, 'combine_send_bytes', rdma_combine, 'rdma_recv_bytes')
+    _report_bw(f'combine+unpermute ({dtype_str}, probs=True)', t, nvl_combine, 'combine_send_bytes', rdma_combine, 'rdma_recv_bytes')
 
     # Fused
     t = bench(lambda: buffer.dispatch_with_permute(**dispatch_fused_args))[0]
-    _report_bw(f'fused dispatch+permute ({dtype_str})', t, nvl_dispatch_actual, 'nvl_recv_bytes', rdma_dispatch, 'rdma_send_bytes')
+    _report_bw(f'fused dispatch+permute ({dtype_str}, probs=True)', t, nvl_dispatch_actual, 'nvl_recv_bytes', rdma_dispatch, 'rdma_send_bytes')
     t = bench(lambda: buffer.combine_with_unpermute(**combine_fused_args))[0]
-    _report_bw('fused combine+unpermute', t, nvl_combine, 'combine_send_bytes', rdma_combine, 'rdma_recv_bytes')
+    _report_bw(f'fused combine+unpermute ({dtype_str}, probs=True)', t, nvl_combine, 'combine_send_bytes', rdma_combine, 'rdma_recv_bytes')
 
     # ---- Kineto / nsys profiling ----
     # Kineto measures pure GPU kernel time only (no CPU overhead, no d2d, no device_sync)
@@ -465,7 +465,7 @@ def test_hybrid_ep_benchmark(buffer: deep_ep.HybridEPBuffer, group: dist.Process
         dispatch_t, combine_t = bench_kineto(
             lambda: (buffer.dispatch(**dispatch_args), buffer.combine(**combine_args)),
             kernel_names=('dispatch_kernel', 'combine_kernel'), barrier_comm_profiling=True, suppress_kineto_output=True)
-        _report_kineto(f'dispatch kernel ({dtype_str}, probs=True)', 'combine kernel (probs=True)',
+        _report_kineto(f'dispatch kernel ({dtype_str}, probs=True)', f'combine kernel ({dtype_str}, probs=True)',
                        dispatch_t, nvl_dispatch_actual, combine_t, nvl_combine, rdma_dispatch, rdma_combine)
 
         # Non-fused kernel profiling (probs=False)
@@ -473,7 +473,7 @@ def test_hybrid_ep_benchmark(buffer: deep_ep.HybridEPBuffer, group: dist.Process
         dispatch_t, combine_t = bench_kineto(
             lambda: (buffer.dispatch(**dispatch_noprob_args), buffer.combine(**combine_noprob_args)),
             kernel_names=('dispatch_kernel', 'combine_kernel'), barrier_comm_profiling=True, suppress_kineto_output=True)
-        _report_kineto(f'dispatch kernel ({dtype_str}, probs=False)', 'combine kernel (probs=False)',
+        _report_kineto(f'dispatch kernel ({dtype_str}, probs=False)', f'combine kernel ({dtype_str}, probs=False)',
                        dispatch_t, nvl_dispatch_actual, combine_t, nvl_combine, rdma_dispatch, rdma_combine)
 
         # Fused kernel profiling
@@ -481,7 +481,7 @@ def test_hybrid_ep_benchmark(buffer: deep_ep.HybridEPBuffer, group: dist.Process
         dispatch_t, combine_t = bench_kineto(
             lambda: (buffer.dispatch_with_permute(**dispatch_fused_args), buffer.combine_with_unpermute(**combine_fused_args)),
             kernel_names=('dispatch_kernel', 'combine_kernel'), barrier_comm_profiling=True, suppress_kineto_output=True)
-        _report_kineto(f'fused dispatch+permute kernel ({dtype_str})', 'fused combine+unpermute kernel',
+        _report_kineto(f'fused dispatch+permute kernel ({dtype_str}, probs=True)', f'fused combine+unpermute kernel ({dtype_str}, probs=True)',
                        dispatch_t, nvl_dispatch_actual, combine_t, nvl_combine, rdma_dispatch, rdma_combine)
 
         # Non-fused permute/unpermute kernel profiling (isolate permute_kernel and unpermute_kernel times)
@@ -505,32 +505,32 @@ def test_hybrid_ep_benchmark(buffer: deep_ep.HybridEPBuffer, group: dist.Process
     else:
         if torch.distributed.get_rank() == 0:
             torch.cuda.profiler.start()
-        with torch.cuda.nvtx.range(f"hybrid-ep dispatch ({dtype_str})"):
+        with torch.cuda.nvtx.range(f"hybrid-ep dispatch ({dtype_str}, probs=True)"):
             if rank == 0:
-                print(f"profile hybrid-ep dispatch ({dtype_str})", flush=True)
+                print(f"profile hybrid-ep dispatch ({dtype_str}, probs=True)", flush=True)
             nsys_dispatch_args = {'hidden': hidden, 'scaling_factor': scaling_factor, 'topk_idx': topk_idx, 'topk_weights': topk_weights, 'num_of_experts': NUM_OF_EXPERTS}
             bench(lambda: buffer.dispatch(**nsys_dispatch_args))
-        with torch.cuda.nvtx.range("hybrid-ep combine"):
+        with torch.cuda.nvtx.range(f"hybrid-ep combine ({dtype_str}, probs=True)"):
             if rank == 0:
-                print(f"profile hybrid-ep combine", flush=True)
+                print(f"profile hybrid-ep combine ({dtype_str}, probs=True)", flush=True)
             bench(lambda: buffer.combine(**combine_args))
-        with torch.cuda.nvtx.range(f"hybrid-ep dispatch+permute ({dtype_str})"):
+        with torch.cuda.nvtx.range(f"hybrid-ep dispatch+permute ({dtype_str}, probs=True)"):
             if rank == 0:
-                print(f"profile hybrid-ep dispatch+permute ({dtype_str})", flush=True)
+                print(f"profile hybrid-ep dispatch+permute ({dtype_str}, probs=True)", flush=True)
             nsys_dispatch_wp_args = {'hidden': hidden, 'scaling_factor': scaling_factor, 'routing_map': routing_map, 'probs': probs, 'pad_multiple': PAD_MULTIPLE}
             bench(lambda: buffer.dispatch_with_permute(**nsys_dispatch_wp_args))
-        with torch.cuda.nvtx.range("hybrid-ep combine+unpermute"):
+        with torch.cuda.nvtx.range(f"hybrid-ep combine+unpermute ({dtype_str}, probs=True)"):
             if rank == 0:
-                print(f"profile hybrid-ep combine+unpermute", flush=True)
+                print(f"profile hybrid-ep combine+unpermute ({dtype_str}, probs=True)", flush=True)
             bench(lambda: buffer.combine_with_unpermute(**combine_wp_args))
-        with torch.cuda.nvtx.range(f"hybrid-ep dispatch+permute fused"):
+        with torch.cuda.nvtx.range(f"hybrid-ep dispatch+permute fused ({dtype_str}, probs=True)"):
             if rank == 0:
-                print(f"profile hybrid-ep dispatch+permute fused", flush=True)
+                print(f"profile hybrid-ep dispatch+permute fused ({dtype_str}, probs=True)", flush=True)
             nsys_dispatch_fused_args = {'hidden': hidden, 'scaling_factor': scaling_factor, 'routing_map': routing_map, 'probs': probs, 'pad_multiple': PAD_MULTIPLE, 'fuse_permute_dispatch': True}
             bench(lambda: buffer.dispatch_with_permute(**nsys_dispatch_fused_args))
-        with torch.cuda.nvtx.range("hybrid-ep combine+unpermute fused"):
+        with torch.cuda.nvtx.range(f"hybrid-ep combine+unpermute fused ({dtype_str}, probs=True)"):
             if rank == 0:
-                print(f"profile hybrid-ep combine+unpermute", flush=True)
+                print(f"profile hybrid-ep combine+unpermute fused ({dtype_str}, probs=True)", flush=True)
             bench(lambda: buffer.combine_with_unpermute(**combine_fused_args))
         time.sleep(1)
         if torch.distributed.get_rank() == 0:
