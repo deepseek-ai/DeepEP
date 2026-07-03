@@ -1,4 +1,5 @@
 import os
+import time
 
 import torch
 import torch.distributed as dist
@@ -38,25 +39,27 @@ class NCCLCommHandle:
 _storage = dict()
 
 
-def get_nccl_comm_handle(group: dist.ProcessGroup) -> NCCLCommHandle:
+def get_nccl_comm_handle(group: dist.ProcessGroup, force_new_comm: bool = False) -> NCCLCommHandle:
     """
     Get or create an NCCL communicator handle for the given process group.
     Results are cached, so subsequent calls with the same group return the same handle.
 
     Arguments:
         group: the communication group.
+        force_new_comm: if set, never reuse PyTorch's communicator and never hit the cache; always
+            create a fresh DeepEP-managed comm.
 
     Returns:
         handle: the NCCL communicator handle.
     """
     # Check cache hit
     global _storage
-    if group in _storage:
+    if not force_new_comm and group in _storage:
         return _storage[group]
 
     # New PyTorch has such API
     backend = group._get_backend(torch.device('cuda'))
-    if hasattr(backend, '_comm_ptr') and int(os.getenv('EP_REUSE_NCCL_COMM', '1')):
+    if not force_new_comm and hasattr(backend, '_comm_ptr') and int(os.getenv('EP_REUSE_NCCL_COMM', '1')):
         _storage[group] = NCCLCommHandle(backend._comm_ptr(), False)
         return _storage[group]
 
@@ -66,9 +69,10 @@ def get_nccl_comm_handle(group: dist.ProcessGroup) -> NCCLCommHandle:
     root_unique_id = nccl_unique_ids[0]
 
     # Create a new communicator
-    _storage[group] = NCCLCommHandle(
+    key = time.time_ns() if force_new_comm else group
+    _storage[key] = NCCLCommHandle(
         _C.create_nccl_comm(root_unique_id, group.size(), group.rank()), True)
-    return _storage[group]
+    return _storage[key]
 
 
 def destroy_all_managed_nccl_comm() -> None:

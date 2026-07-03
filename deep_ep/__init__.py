@@ -94,4 +94,4 @@ from .utils.envs import get_physical_domain_size, get_logical_domain_size
 # noinspection PyUnresolvedReferences
 from deep_ep._C import Config, topk_idx_t
 
-__version__ = '2.0.0'
+__version__ = '2.1.0'

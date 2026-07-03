@@ -2,6 +2,7 @@
 
 #include <cuda_runtime.h>
 #include <memory>
+#include <numeric>
 #include <vector>
 #include <pybind11/functional.h>
 
@@ -36,9 +37,6 @@ class ElasticBuffer {
     // CUDA streams
     at::cuda::CUDAStream comm_stream;
 
-    // Whether to use deterministic algorithms
-    bool deterministic;
-
     // Whether to use hybrid mode (scale-out with scale-up)
     bool allow_hybrid_mode;
 
@@ -62,6 +60,7 @@ class ElasticBuffer {
 
     // Some Engram storage settings
     int num_engram_entries = 0, engram_hidden = 0;
+    std::optional<torch::Tensor> engram_sf;
 
     // PP settings
     int prev_rank_idx = 0, next_rank_idx = 0;
@@ -82,7 +81,6 @@ public:
     ElasticBuffer(const int& rank_idx, const int& num_ranks,
                   const int64_t& nccl_comm, const symmetric::cpu_comm_t& cpu_comm,
                   const int64_t& num_buffer_bytes, const int64_t& num_cpu_buffer_bytes,
-                  const bool& deterministic,
                   const bool& allow_hybrid_mode,
                   const bool& allow_multiple_reduction,
                   const bool& prefer_overlap_with_compute,
@@ -93,7 +91,6 @@ public:
         num_cpu_buffer_bytes(num_cpu_buffer_bytes),
         explicitly_destroy(explicitly_destroy),
         comm_stream(get_global_comm_stream()),
-        deterministic(deterministic),
         allow_hybrid_mode(allow_hybrid_mode),
         allow_multiple_reduction(allow_multiple_reduction),
         prefer_overlap_with_compute(prefer_overlap_with_compute) {
@@ -181,7 +178,7 @@ public:
     }
 
     // ReSharper disable once CppMemberFunctionMayBeStatic
-    void barrier(const bool& use_comm_stream, const bool& with_cpu_sync) const {
+    void barrier(const bool& use_comm_stream, const bool& with_cpu_sync, const bool& sequential = true) const {
         const auto compute_stream = at::cuda::getCurrentCUDAStream();
         const auto stream = use_comm_stream ? comm_stream : compute_stream;
         if (use_comm_stream)
@@ -198,6 +195,7 @@ public:
                        nccl_context->num_scaleout_ranks, nccl_context->num_scaleup_ranks,
                        num_gpu_timeout_cycles,
                        nccl_context->is_scaleup_nvlink,
+                       sequential,
                        stream);
 
         // Let CPU wait
@@ -209,7 +207,7 @@ public:
             stream_wait(compute_stream, comm_stream);
     }
 
-    void engram_write(const torch::Tensor& storage) {
+    void engram_write(const torch::Tensor& storage, const std::optional<torch::Tensor>& sf) {
         // Ensure previous fetch are finished
         barrier(false, true);
 
@@ -217,9 +215,16 @@ public:
 
         // Check storage
         const auto [num_entries, hidden] = get_shape<2>(storage);
-        EP_HOST_ASSERT(storage.scalar_type() == torch::kBFloat16);
+        EP_HOST_ASSERT(storage.scalar_type() == torch::kBFloat16 or
+                       storage.scalar_type() == torch::kFloat8_e4m3fn);
         EP_HOST_ASSERT(storage.is_cuda() and storage.is_contiguous());
         num_engram_entries = num_entries, engram_hidden = hidden;
+
+        // Store globally-replicated FP8 scaling factors for local gather during fetch.
+        if (sf.has_value())
+            EP_HOST_ASSERT(sf->dim() == 2 and sf->is_cuda() and sf->is_contiguous() and
+                           sf->element_size() == sizeof(sf_pack_t));
+        engram_sf = sf;
 
         // Write storage to CPU segment at back of buffer
         EP_HOST_ASSERT(storage.nbytes() <= num_cpu_buffer_bytes and "Engram storage exceeds CPU buffer size");
@@ -234,23 +239,45 @@ public:
         barrier(false, true);
     }
 
-    std::function<torch::Tensor()> engram_fetch(const torch::Tensor& indices, int num_qps) const {
-        const auto [num_tokens] = get_shape<1>(indices);
+    std::function<std::tuple<torch::Tensor, std::optional<torch::Tensor>>()>
+    engram_fetch(const torch::Tensor& indices, int num_qps, const bool& use_tma_aligned_col_major_sf) const {
+        const auto use_fp8 = engram_sf.has_value();
+        const auto fetched_dtype = use_fp8 ? torch::kFloat8_e4m3fn : torch::kBFloat16;
+        const int elem_size = use_fp8 ? sizeof(__nv_fp8_e4m3) : sizeof(nv_bfloat16);
+        const auto [num_tokens, num_entries_per_token] = get_shape<2>(indices);
         EP_HOST_ASSERT(indices.scalar_type() == torch::kInt);
         EP_HOST_ASSERT(indices.is_cuda() and indices.is_contiguous());
-        EP_HOST_ASSERT(num_tokens * engram_hidden * sizeof(nv_bfloat16) <= num_gpu_buffer_bytes);
+        EP_HOST_ASSERT(num_tokens * num_entries_per_token * engram_hidden * elem_size <= num_gpu_buffer_bytes);
 
         // Calculate a QP count
         if (num_qps == 0)
             num_qps = nccl_context->num_allocated_qps;
 
-        // Return tensor from the raw buffer
+        // Return tensor from the raw buffer: each token's entries are concatenated along hidden
         EP_HOST_ASSERT(num_engram_entries > 0);
         const auto fetched = torch::from_blob(
             buffer,
-            {num_tokens, engram_hidden},
-            torch::TensorOptions().dtype(torch::kBFloat16).device(torch::kCUDA)
+            {num_tokens, engram_hidden * num_entries_per_token},
+            torch::TensorOptions().dtype(fetched_dtype).device(torch::kCUDA)
         );
+
+        auto fetched_sf = std::optional<torch::Tensor>();
+        void* sf_table_ptr = nullptr;
+        void* fetched_sf_ptr = nullptr;
+        int num_sf_packs = 0, sf_token_stride = 0, sf_hidden_stride = 0;
+        if (use_fp8) {
+            num_sf_packs = static_cast<int>(engram_sf->size(1));
+            if (use_tma_aligned_col_major_sf) {
+                // TMA-aligned column-major layout for the next GEMM input
+                sf_token_stride = 1, sf_hidden_stride = math::align(num_tokens, kNumAlignedSFPacks);
+            } else {
+                sf_token_stride = num_entries_per_token * num_sf_packs, sf_hidden_stride = 1;
+            }
+            fetched_sf = torch::empty_strided({num_tokens, num_entries_per_token * num_sf_packs},
+                                              {sf_token_stride, sf_hidden_stride}, engram_sf->options());
+            sf_table_ptr = engram_sf->data_ptr();
+            fetched_sf_ptr = fetched_sf->data_ptr();
+        }
 
         // Last issued Gin requests
         const auto num_gin_ranks = allow_hybrid_mode
@@ -268,7 +295,10 @@ public:
             fetched.data_ptr(),
             indices.data_ptr<int>(),
             static_cast<ncclGinRequest_t*>(last_gin_requests.data_ptr()),
-            num_engram_entries, engram_hidden,
+            sf_table_ptr, fetched_sf_ptr, sf_token_stride, sf_hidden_stride,
+            num_engram_entries,
+            engram_hidden, elem_size, num_sf_packs,
+            num_entries_per_token,
             num_tokens,
             nccl_context->num_scaleout_ranks,
             nccl_context->num_scaleup_ranks,
@@ -278,7 +308,7 @@ public:
             at::cuda::getCurrentCUDAStream()
         );
 
-        return [=, this]() {
+        return [=, this]() -> std::tuple<torch::Tensor, std::optional<torch::Tensor>> {
             // Wait for all RDMA gets to complete
             launch_engram_fetch_wait(
                 static_cast<ncclGinRequest_t*>(last_gin_requests.data_ptr()),
@@ -290,7 +320,7 @@ public:
                 allow_hybrid_mode,
                 at::cuda::getCurrentCUDAStream()
             );
-            return fetched;
+            return {fetched, fetched_sf};
         };
     }
 
@@ -663,8 +693,10 @@ public:
     std::tuple<torch::Tensor, std::optional<torch::Tensor>,
                std::optional<torch::Tensor>, std::optional<torch::Tensor>,
                std::optional<torch::Tensor>,
+               int, int,
                std::vector<int>,
-               torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor,
+               torch::Tensor, torch::Tensor, torch::Tensor,
+               torch::Tensor, torch::Tensor,
                std::optional<torch::Tensor>, std::optional<torch::Tensor>,
                std::optional<EventHandle>>
     dispatch(const torch::Tensor& x,
@@ -673,11 +705,14 @@ public:
              const std::optional<torch::Tensor>& topk_weights,
              const std::optional<torch::Tensor>& cumulative_local_expert_recv_stats,
              const std::optional<int>& cached_num_recv_tokens,
+             const std::optional<int>& cached_num_expanded_tokens,
              const std::optional<std::vector<int>>& cached_num_recv_tokens_per_expert_list,
              const std::optional<torch::Tensor>& cached_psum_num_recv_tokens_per_scaleup_rank,
              const std::optional<torch::Tensor>& cached_psum_num_recv_tokens_per_expert,
+             const std::optional<torch::Tensor>& cached_num_unaligned_recv_tokens_per_expert,
              const std::optional<torch::Tensor>& cached_dst_buffer_slot_idx,
              const std::optional<torch::Tensor>& cached_token_metadata_at_forward,
+             const std::optional<torch::Tensor>& cached_recv_src_metadata,
              const std::optional<torch::Tensor>& cached_channel_linked_list,
              const int& num_max_tokens_per_rank,
              const int& num_experts, const int& expert_alignment,
@@ -686,16 +721,21 @@ public:
              const std::optional<EventHandle>& previous_event_before_epilogue,
              const bool& async_with_compute_stream,
              const bool& allocate_on_comm_stream,
-             const bool& do_handle_copy, const bool& do_cpu_sync, const bool& do_expand,
+             const bool& do_handle_copy, const bool& do_cpu_sync,
+             const bool& do_expand, const bool& do_zero_padding,
              const bool& use_tma_aligned_col_major_sf) const {
         // Check SM count
         EP_HOST_ASSERT(num_sms > 0);
+
+        // Zero padding only makes sense with expand mode
+        EP_HOST_ASSERT(not do_zero_padding or do_expand);
 
         // Cached mode must have responding handles
         const bool cached_mode = cached_num_recv_tokens.has_value();
         if (cached_mode) {
             EP_HOST_ASSERT(cached_num_recv_tokens.has_value());
             EP_HOST_ASSERT(cached_num_recv_tokens_per_expert_list.has_value());
+            EP_HOST_ASSERT(cached_num_expanded_tokens.has_value());
             EP_HOST_ASSERT(cached_psum_num_recv_tokens_per_scaleup_rank.has_value());
             EP_HOST_ASSERT(cached_psum_num_recv_tokens_per_expert.has_value());
             EP_HOST_ASSERT(cached_dst_buffer_slot_idx.has_value());
@@ -775,6 +815,21 @@ public:
                 {num_local_experts + 1}, at::TensorOptions(torch::kCUDA).dtype(torch::kInt));
         }
 
+        // The unaligned (actual) number of received tokens per expert
+        // Written by the dispatch kernel's notify warps, used by the epilogue for zero padding
+        auto num_unaligned_recv_tokens_per_expert = cached_num_unaligned_recv_tokens_per_expert.value_or(torch::Tensor());
+        int* num_unaligned_recv_tokens_per_expert_ptr = nullptr;
+        if (cached_mode) {
+            const auto& [num_local_experts_] = get_shape<1>(num_unaligned_recv_tokens_per_expert);
+            EP_HOST_ASSERT(num_local_experts == num_local_experts_);
+            EP_HOST_ASSERT(num_unaligned_recv_tokens_per_expert.is_cuda() and num_unaligned_recv_tokens_per_expert.is_contiguous());
+            EP_HOST_ASSERT(num_unaligned_recv_tokens_per_expert.scalar_type() == torch::kInt);
+        } else {
+            num_unaligned_recv_tokens_per_expert = torch::empty(
+                {num_local_experts}, at::TensorOptions(torch::kCUDA).dtype(torch::kInt));
+        }
+        num_unaligned_recv_tokens_per_expert_ptr = num_unaligned_recv_tokens_per_expert.data_ptr<int>();
+
         // The prefix sum tensor of number of received tokens from each rank
         // Will also be used in combine as the dispatch handle
         auto psum_num_recv_tokens_per_scaleup_rank = cached_psum_num_recv_tokens_per_scaleup_rank.value_or(torch::Tensor());
@@ -812,7 +867,6 @@ public:
         }
 
         // Non-hybrid mode handles
-        std::optional<torch::Tensor> deterministic_rank_count_buffer = std::nullopt;
         auto dst_buffer_slot_idx = cached_dst_buffer_slot_idx.value_or(torch::Tensor());
         if (nccl_context->num_scaleout_ranks == 1) {
             if (cached_mode) {
@@ -820,26 +874,6 @@ public:
                 EP_HOST_ASSERT(num_tokens == num_tokens__ and num_topk == num_topk_);
                 EP_HOST_ASSERT(dst_buffer_slot_idx.is_cuda() and dst_buffer_slot_idx.is_contiguous());
                 EP_HOST_ASSERT(dst_buffer_slot_idx.scalar_type() == torch::kInt);
-            } else if (deterministic) {
-                const auto prologue_num_sms = jit::device_runtime->get_num_sms();
-
-                // Allocate new tensors
-                deterministic_rank_count_buffer = torch::empty(
-                    {prologue_num_sms, nccl_context->num_scaleup_ranks},
-                    torch::TensorOptions(torch::kCUDA).dtype(torch::kInt));
-                dst_buffer_slot_idx = torch::empty(
-                    {num_tokens, num_topk}, torch::TensorOptions(torch::kCUDA).dtype(torch::kInt));
-
-                // Launch a kernel to preprocess the destination slot indices
-                launch_dispatch_deterministic_prologue(topk_idx.data_ptr<topk_idx_t>(),
-                                                       deterministic_rank_count_buffer->data_ptr<int>(),
-                                                       dst_buffer_slot_idx.data_ptr<int>(),
-                                                       num_tokens, num_max_tokens_per_rank,
-                                                       num_experts, num_topk,
-                                                       nccl_context->scaleup_rank_idx, nccl_context->num_scaleup_ranks,
-                                                       prologue_num_sms,
-                                                       jit::device_runtime->get_num_smem_bytes(),
-                                                       comm_stream);
             } else {
                 // Allocate a new tensor
                 dst_buffer_slot_idx = torch::empty(
@@ -851,8 +885,6 @@ public:
         std::optional<torch::Tensor> token_metadata_at_forward, channel_linked_list;
         int *token_metadata_at_forward_ptr = nullptr, *channel_linked_list_ptr = nullptr;
         if (nccl_context->num_scaleout_ranks > 1) {
-            EP_HOST_ASSERT(not deterministic);
-
             // The token destination slot idx during forward
             // `[i, j, k, l]` means: from channel i from scale-out peer k, the j-th token's index in the l-th rank buffer
             // NOTES: Used primarily for cached mode
@@ -951,6 +983,7 @@ public:
                         cumulative_local_expert_recv_stats_ptr,
                         psum_num_recv_tokens_per_scaleup_rank.data_ptr<int>(),
                         psum_num_recv_tokens_per_expert.data_ptr<int>(),
+                        num_unaligned_recv_tokens_per_expert_ptr,
                         dst_buffer_slot_idx.data_ptr<int>(),
                         token_metadata_at_forward_ptr,
                         num_tokens, num_max_tokens_per_rank,
@@ -966,7 +999,7 @@ public:
                         num_sms, num_channels_per_sm,
                         num_smem_bytes,
                         num_qps, num_gpu_timeout_cycles,
-                        cached_mode, deterministic, do_cpu_sync,
+                        cached_mode, do_cpu_sync,
                         comm_stream);
 
         // Received token counters
@@ -977,12 +1010,10 @@ public:
         // Assign these values according to modes
         if (cached_mode) {
             // Cached mode
-            // TODO: support to expand for MoE training backward with cached handles from non-expanding forward,
-            // which requires maintaining the same expanding order between forward and backward
-            EP_HOST_ASSERT(not do_expand and "Cannot do expand with cached mode");
             EP_HOST_ASSERT(not do_cpu_sync and "Cannot do CPU sync with cached mode");
             num_recv_tokens = cached_num_recv_tokens.value();
             num_recv_tokens_per_expert_list = cached_num_recv_tokens_per_expert_list.value();
+            num_expanded_tokens = cached_num_expanded_tokens.value();
         } else if (do_cpu_sync) {
             // Non-cached mode with sync
             const auto start_cpu_time = std::chrono::high_resolution_clock::now();
@@ -1046,9 +1077,10 @@ public:
         auto recv_sf = std::optional<torch::Tensor>();
         auto recv_topk_idx = std::optional<torch::Tensor>();
         auto recv_topk_weights = std::optional<torch::Tensor>();
-        auto recv_src_metadata = torch::empty(
-            {num_recv_tokens, num_topk + 2},
-            torch::TensorOptions(torch::kCUDA).dtype(torch::kInt));
+        auto recv_src_metadata = cached_mode ?
+            cached_recv_src_metadata.value() :
+            torch::empty({num_recv_tokens, num_topk + 2},
+                         torch::TensorOptions(torch::kCUDA).dtype(torch::kInt));
 
         // Optional tensors
         void* recv_sf_ptr = nullptr;
@@ -1079,13 +1111,14 @@ public:
         }
 
         // Process prefix sum, in expanding mode, it is also atomic counters
-        if (do_expand) {
-            // Slice and exclusive part and do atomic additions into inclusive
-            EP_HOST_ASSERT(not cached_mode);
-            psum_num_recv_tokens_per_expert = psum_num_recv_tokens_per_expert.slice(0, 0, num_local_experts);
-        } else if (not cached_mode) {
-            // Slice the inclusive part (and will not be used in the epilogue)
-            psum_num_recv_tokens_per_expert = psum_num_recv_tokens_per_expert.slice(0, 1, num_local_experts + 1);
+        if (not cached_mode) {
+            if (do_expand) {
+                // Slice the exclusive part and do atomic additions into inclusive
+                psum_num_recv_tokens_per_expert = psum_num_recv_tokens_per_expert.slice(0, 0, num_local_experts);
+            } else {
+                // Slice the inclusive part (and will not be used in the epilogue)
+                psum_num_recv_tokens_per_expert = psum_num_recv_tokens_per_expert.slice(0, 1, num_local_experts + 1);
+            }
         }
         EP_HOST_ASSERT(psum_num_recv_tokens_per_expert.size(0) == num_local_experts);
 
@@ -1098,16 +1131,18 @@ public:
                                       recv_topk_idx_ptr, recv_topk_weights_ptr,
                                       recv_src_metadata.data_ptr<int>(),
                                       channel_linked_list_ptr,
+                                      num_unaligned_recv_tokens_per_expert_ptr,
                                       num_recv_tokens, num_max_tokens_per_rank,
                                       num_hidden_bytes,
                                       num_sf_packs, recv_sf_token_stride, recv_sf_hidden_stride,
-                                      num_experts, num_topk,
+                                      num_experts, num_topk, expert_alignment,
                                       nccl_context->scaleout_rank_idx, nccl_context->scaleup_rank_idx,
                                       nccl_context->num_scaleout_ranks, nccl_context->num_scaleup_ranks,
                                       jit::device_runtime->get_num_sms(),
                                       jit::device_runtime->get_num_smem_bytes(),
                                       num_channels,
                                       do_expand, cached_mode,
+                                      do_zero_padding,
                                       comm_stream);
 
         // Stream control
@@ -1118,8 +1153,8 @@ public:
              copied_topk_idx,
              psum_num_recv_tokens_per_scaleup_rank,
              psum_num_recv_tokens_per_expert,
+             num_unaligned_recv_tokens_per_expert,
              recv_src_metadata,
-             deterministic_rank_count_buffer,
              dst_buffer_slot_idx,
              token_metadata_at_forward,
              channel_linked_list},
@@ -1129,9 +1164,11 @@ public:
         return {recv_x, recv_sf,
                 recv_topk_idx, recv_topk_weights,
                 copied_topk_idx,
+                num_recv_tokens, num_expanded_tokens,
                 num_recv_tokens_per_expert_list,
                 psum_num_recv_tokens_per_scaleup_rank,
                 psum_num_recv_tokens_per_expert,
+                num_unaligned_recv_tokens_per_expert,
                 recv_src_metadata,
                 dst_buffer_slot_idx,
                 token_metadata_at_forward,
@@ -1185,12 +1222,14 @@ public:
         EP_HOST_ASSERT(src_metadata.scalar_type() == torch::kInt);
 
         // Check optional tensors
-        if (use_expanded_layout) {
-            // Reduction should be done with SwiGLU
-            EP_HOST_ASSERT(not topk_weights.has_value());
-        } else if (topk_weights.has_value()) {
-            const auto [num_tokens__, num_topk__] = get_shape<2>(topk_weights.value());
-            EP_HOST_ASSERT(num_tokens == num_tokens__ and num_topk == num_topk__);
+        if (topk_weights.has_value()) {
+            if (use_expanded_layout) {
+                const auto [num_tokens__] = get_shape<1>(topk_weights.value());
+                EP_HOST_ASSERT(num_tokens == num_tokens__);
+            } else {
+                const auto [num_tokens__, num_topk__] = get_shape<2>(topk_weights.value());
+                EP_HOST_ASSERT(num_tokens == num_tokens__ and num_topk == num_topk__);
+            }
             EP_HOST_ASSERT(topk_weights->is_cuda() and topk_weights->is_contiguous());
             EP_HOST_ASSERT(topk_weights->scalar_type() == torch::kFloat);
         }
@@ -1306,7 +1345,7 @@ public:
 
 static void register_apis(pybind11::module_& m) {
     pybind11::class_<ElasticBuffer>(m, "ElasticBuffer")
-        .def(pybind11::init<int, int, int64_t, symmetric::cpu_comm_t, int64_t, int64_t, bool, bool, bool, bool, int, int, int, int, bool>())
+        .def(pybind11::init<int, int, int64_t, symmetric::cpu_comm_t, int64_t, int64_t, bool, bool, bool, int, int, int, int, bool>())
         .def("destroy", &ElasticBuffer::destroy)
         .def("get_comm_stream", &ElasticBuffer::get_comm_stream)
         .def("get_physical_domain_size", &ElasticBuffer::get_physical_domain_size)
