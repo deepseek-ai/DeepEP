@@ -235,9 +235,7 @@ dispatch_copy_epilogue_impl(void* buffer, void* workspace,
         __syncwarp();
 
         // Zero out the TMA buffer's hidden region in smem
-        if (ptx::elect_one_sync())
-            ptx::st_bulk<kNumHiddenBytes>(tma_buffer.get_hidden_ptr());
-        __syncwarp();
+        ptx::st_bulk<kNumHiddenBytes>(tma_buffer.get_hidden_ptr());
 
         // Read all expert unaligned counts in parallel
         constexpr int kNumExpertsPerLane = math::constexpr_ceil_div(kNumExpertsPerRank, 32);
