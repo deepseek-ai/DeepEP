@@ -14,5 +14,13 @@
 #define LEGACY_FINISHED_SUM_TAG 1024
 #define LEGACY_NUM_WAIT_NANOSECONDS 500
 
+// Overridable at build time (e.g. -DLEGACY_NUM_CPU_TIMEOUT_SECS=1800) for consumers
+// whose first-step warmup legitimately exceeds the default: JIT kernel compilation
+// (e.g. DeepGEMM) on a subset of ranks holds the others inside dispatch past 100 s,
+// which the watchdog then misreports as a communication timeout.
+#ifndef LEGACY_NUM_CPU_TIMEOUT_SECS
 #define LEGACY_NUM_CPU_TIMEOUT_SECS 100
+#endif
+#ifndef LEGACY_NUM_TIMEOUT_CYCLES
 #define LEGACY_NUM_TIMEOUT_CYCLES 200000000000ull  // 200G cycles ~= 100s
+#endif
