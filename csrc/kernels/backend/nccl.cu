@@ -85,18 +85,45 @@ NCCLSymmetricMemoryContext::NCCLSymmetricMemoryContext(const int64_t& nccl_comm,
         // Query NCCL supported Gin Type
         ncclCommProperties props = NCCL_COMM_PROPERTIES_INITIALIZER;
         NCCL_CHECK(ncclCommQueryProperties(comm, &props));
-        EP_HOST_ASSERT(
-            (allow_hybrid_mode ? props.railedGinType : props.ginType) != NCCL_GIN_TYPE_NONE and
-            "NCCL GIN is unavailable. This is usually due to a network configuration issue, "
-            "such as `allow_hybrid_mode=0` (disable direct RDMA kernels) in multi-plane network.");
+        const int local_gin_type = allow_hybrid_mode ? props.railedGinType : props.ginType;
+        int gin_available = (local_gin_type != NCCL_GIN_TYPE_NONE) ? 1 : 0;
 
-        reqs.ginContextCount = num_allocated_qps;
-        reqs.ginExclusiveContexts = true;
-        reqs.ginQueueDepth = kGinQPDepth;
-        reqs.ginTrafficClass = sl_idx;
-        // Customized RDMA barrier needs extra signals
-        reqs.ginSignalCount = num_ranks + 2 * 2;
-        reqs.ginConnectionType = allow_hybrid_mode ? NCCL_GIN_CONNECTION_RAIL: NCCL_GIN_CONNECTION_FULL;
+        // All ranks must agree on GIN usage: if ranks disagree, ncclDevCommCreate
+        // will hang (some ranks configure GIN contexts, others do not). Use an
+        // all-reduce to reach consensus.
+        {
+            int* d_gin;
+            cudaStream_t stream;
+            CUDA_RUNTIME_CHECK(cudaMalloc(&d_gin, sizeof(int)));
+            CUDA_RUNTIME_CHECK(cudaStreamCreate(&stream));
+            CUDA_RUNTIME_CHECK(cudaMemcpyAsync(d_gin, &gin_available, sizeof(int), cudaMemcpyHostToDevice, stream));
+            NCCL_CHECK(ncclAllReduce(d_gin, d_gin, 1, ncclInt, ncclMin, comm, stream));
+            CUDA_RUNTIME_CHECK(cudaMemcpyAsync(&gin_available, d_gin, sizeof(int), cudaMemcpyDeviceToHost, stream));
+            CUDA_RUNTIME_CHECK(cudaStreamSynchronize(stream));
+            CUDA_RUNTIME_CHECK(cudaStreamDestroy(stream));
+            CUDA_RUNTIME_CHECK(cudaFree(d_gin));
+        }
+
+        if (gin_available == 0) {
+            if (get_env<int>("EP_BUFFER_DEBUG"))
+                printf(
+                    "NCCL GIN is unavailable (ginType=%d, railedGinType=%d). "
+                    "This may happen with older MLNX_OFED versions (e.g. 24.10); "
+                    "DeepEP will fall back to non-GIN path. "
+                    "Upgrade to MLNX_OFED 25.x or later for full GIN support.\n",
+                    static_cast<int>(props.ginType), static_cast<int>(props.railedGinType));
+            // NOTE: when GIN is disabled, kernel code that accesses ncclGin(dev_comm, qp_idx)
+            // with qp_idx > 0 will target nonexistent contexts. Callers must ensure they do
+            // not issue GIN operations when EP_DISABLE_GIN is set or GIN is unavailable.
+        } else {
+            reqs.ginContextCount = num_allocated_qps;
+            reqs.ginExclusiveContexts = true;
+            reqs.ginQueueDepth = kGinQPDepth;
+            reqs.ginTrafficClass = sl_idx;
+            // Customized RDMA barrier needs extra signals
+            reqs.ginSignalCount = num_ranks + 2 * 2;
+            reqs.ginConnectionType = allow_hybrid_mode ? NCCL_GIN_CONNECTION_RAIL: NCCL_GIN_CONNECTION_FULL;
+        }
     }
     NCCL_CHECK(ncclDevCommCreate(comm, &reqs, &dev_comm));
 
