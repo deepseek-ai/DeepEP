@@ -1,9 +1,11 @@
 import filecmp
 import functools
 import glob
-import subprocess
-import torch
 import os
+import subprocess
+import warnings
+
+import torch
 
 from .utils.find_pkgs import find_nccl_root
 
@@ -43,6 +45,27 @@ def find_cuda_home() -> str:
     return cuda_home
 
 
+def check_numa_balancing():
+    """
+    Check whether Linux NUMA balancing is enabled. When enabled, the kernel
+    auto-migrates pages across NUMA nodes, which can significantly hurt
+    performance of bandwidth-intensive RDMA/NVLink communication patterns.
+    """
+    if int(os.environ.get('EP_SUPPRESS_NUMA_CHECK', 0)):
+        return
+    try:
+        with open('/proc/sys/kernel/numa_balancing', 'r') as f:
+            if f.read().strip() != '0':
+                warnings.warn(
+                    'NUMA balancing is enabled (/proc/sys/kernel/numa_balancing != 0). '
+                    'This can cause severe performance degradation for internode dispatch/combine kernels. '
+                    'Disable it with: echo 0 | sudo tee /proc/sys/kernel/numa_balancing',
+                    stacklevel=2,
+                )
+    except OSError:
+        pass
+
+
 def check_nccl_so():
     """
     Verify that the NCCL library loaded at runtime matches the linked version.
@@ -80,6 +103,7 @@ def init_jit():
                 find_nccl_root())   # NCCL root
 
 # Run initialization
+check_numa_balancing()
 check_nccl_so()
 init_jit()
 
