@@ -22,7 +22,7 @@ Software requirements:
 ### 1. Install NVSHMEM binaries
 
 NVSHMEM 3.3.9 binaries are available in several formats:
-   - Tarballs for  [x86_64](https://developer.download.nvidia.com/compute/nvshmem/redist/libnvshmem/linux-x86_64/libnvshmem-linux-x86_64-3.3.9_cuda12-archive.tar.xz) and [aarch64](https://developer.download.nvidia.com/compute/nvshmem/redist/libnvshmem/linux-sbsa/libnvshmem-linux-sbsa-3.3.9_cuda12-archive.tar.xz)
+   - Tarballs for [x86_64](https://developer.download.nvidia.com/compute/nvshmem/redist/libnvshmem/linux-x86_64/libnvshmem-linux-x86_64-3.3.9_cuda12-archive.tar.xz) and [aarch64](https://developer.download.nvidia.com/compute/nvshmem/redist/libnvshmem/linux-sbsa/libnvshmem-linux-sbsa-3.3.9_cuda12-archive.tar.xz)
    - RPM and deb packages: instructions can be found on the [NVSHMEM installer page](https://developer.nvidia.com/nvshmem-downloads?target_os=Linux)
    - Conda packages through conda-forge
    - pip wheels through PyPI: `pip install nvidia-nvshmem-cu12`
@@ -55,8 +55,9 @@ sudo reboot
 This configuration enables IBGDA through asynchronous post-send operations assisted by the CPU. More information about CPU-assisted IBGDA can be found in [this blog](https://developer.nvidia.com/blog/enhancing-application-portability-and-compatibility-across-new-platforms-using-nvidia-magnum-io-nvshmem-3-0/#cpu-assisted_infiniband_gpu_direct_async%C2%A0).
 It comes with a small performance penalty, but can be used when modifying the driver regkeys is not an option.
 
-Download GDRCopy
-GDRCopy is available as prebuilt deb and rpm packages [here](https://developer.download.nvidia.com/compute/redist/gdrcopy/). or as source code on the [GDRCopy github repository](https://github.com/NVIDIA/gdrcopy).
+#### Download GDRCopy
+
+GDRCopy is available as prebuilt deb and rpm packages [here](https://developer.download.nvidia.com/compute/redist/gdrcopy/), or as source code on the [GDRCopy github repository](https://github.com/NVIDIA/gdrcopy).
 
 Install GDRCopy following the instructions on the [GDRCopy github repository](https://github.com/NVIDIA/gdrcopy?tab=readme-ov-file#build-and-installation).
 

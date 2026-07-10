@@ -53,7 +53,7 @@ We test low-latency kernels on H800 with each connected to a CX7 InfiniBand 400 
 
 ### Download and install NVSHMEM dependency
 
-DeepEP V1 depends on NVSHMEM. Please refer to the NVSHMEM Installation Guide for instructions.
+DeepEP V1 depends on NVSHMEM. Please refer to the [NVSHMEM Installation Guide](nvshmem.md) for instructions.
 
 ### Development
 
