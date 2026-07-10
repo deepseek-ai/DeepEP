@@ -49,7 +49,7 @@ class HybridEPBuffer:
         # Experimental features
         load_cached_kernels: bool = False,  
         use_shared_buffer: bool = True,
-        enable_custom_allgather: bool = True,
+        enable_custom_allgather: bool = False,
         # Deprecated parameters
         num_of_hybrid_ep_ranks_per_nvlink_domain: int = None,
         use_mnnvl: bool = None

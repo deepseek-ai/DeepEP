@@ -4,7 +4,7 @@
 #include "allgather.cuh"
 
 #define MAX_BLOCKS 256
-#define TIMEOUT 20000000000ull
+#define TIMEOUT 200000000000ull
 
 template<int SHARED_SIZE = 1024>
 __global__ void ag_nvl_kernel(
@@ -83,7 +83,7 @@ __global__ void ag_nvl_kernel(
         if (clock64() - s > 2ull * TIMEOUT) {
           printf("HYBRID-EP ALLGATHER TIMEOUT:SM %d [%d]:expecting %llu got %llu\n", blockIdx.x,
                   threadIdx.x, (unsigned long long)expected, flag_data);
-          break;
+          __trap();
         }
       }while(flag_data < expected);
     }
