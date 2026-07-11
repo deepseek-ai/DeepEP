@@ -157,12 +157,17 @@ public:
             // NOTES: avoid `std::filesystem::remove_all` here — it can segfault on
             // distributed filesystems, when concurrent processes operate
             // on the same parent directory, causing stale directory entries
+            if (get_env<int>("EP_JIT_DEBUG"))
+                printf("Rename to %s lost, loading own artifacts from %s\n", dir_path.c_str(), tmp_dir_path.c_str());
             const auto runtime = kernel_runtime_cache->put(dir_path, tmp_dir_path);
             safe_remove_all(tmp_dir_path);
             return runtime;
         }
 
         // Put into the runtime cache
+        // NOTES: only the rename winner reaches this `get`, and its own client just created
+        // `dir_path`, so the lookup is served from fresh positive local state — the stale
+        // negative-entry hazard above only applies to clients that lost the rename
         const auto runtime = kernel_runtime_cache->get(dir_path);
         EP_HOST_ASSERT(runtime != nullptr);
         return runtime;
