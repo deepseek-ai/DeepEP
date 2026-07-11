@@ -31,7 +31,7 @@ DeepEP is compatible with upstream NVSHMEM 3.3.9 and later.
 
 ### 2. Enable NVSHMEM IBGDA support
 
-NVSHMEM Supports two modes with different requirements. Either of the following methods can be used to enable IBGDA support.
+NVSHMEM supports two modes with different requirements. Either of the following methods can be used to enable IBGDA support.
 
 #### 2.1 Configure NVIDIA driver
 
