@@ -55,7 +55,7 @@ sudo reboot
 This configuration enables IBGDA through asynchronous post-send operations assisted by the CPU. More information about CPU-assisted IBGDA can be found in [this blog](https://developer.nvidia.com/blog/enhancing-application-portability-and-compatibility-across-new-platforms-using-nvidia-magnum-io-nvshmem-3-0/#cpu-assisted_infiniband_gpu_direct_async%C2%A0).
 It comes with a small performance penalty, but can be used when modifying the driver regkeys is not an option.
 
-#### Download GDRCopy
+#### 2.2.1 Download GDRCopy
 
 GDRCopy is available as prebuilt deb and rpm packages [here](https://developer.download.nvidia.com/compute/redist/gdrcopy/), or as source code on the [GDRCopy github repository](https://github.com/NVIDIA/gdrcopy).
 
