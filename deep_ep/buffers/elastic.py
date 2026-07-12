@@ -924,8 +924,11 @@ class ElasticBuffer:
         check_torch_deterministic()
 
         # Automatic decide SM and QP count
+        # NOTES: with a cached handle, reuse its SM count (as `combine` does), since the handle's channel
+        # metadata was laid out under it; `num_experts` is also not inferred from the handle until below
         num_topk = (handle.topk_idx if topk_idx is None else topk_idx).shape[1]
-        num_sms = self.get_theoretical_num_sms(num_experts, num_topk) if num_sms == 0 else num_sms
+        if num_sms == 0:
+            num_sms = handle.num_sms if handle is not None else self.get_theoretical_num_sms(num_experts, num_topk)
         num_qps = self.get_theoretical_num_qps(num_sms) if num_qps == 0 else num_qps
         assert num_qps <= self.num_allocated_qps, f'Allocated QPs are not enough'
 
