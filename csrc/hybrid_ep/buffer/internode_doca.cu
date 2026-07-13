@@ -2,9 +2,13 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES.
 // All rights reserved
 #include "buffer/internode_doca.cuh"
+#include <torch/extension.h>
+#include <pybind11/pybind11.h>
 #include <sstream>
 #include <cstdlib>
 #include <unordered_map>
+
+namespace py = pybind11;
 
 // Functions realted to get RDMA context.
 ibv_device *ctx_find_dev(const char *ib_devname) {

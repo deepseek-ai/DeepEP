@@ -181,6 +181,11 @@ def get_extension_hybrid_ep_cpp():
                 os.path.join(DOCA_OBJ_PATH, "doca_gpunetio_log.o"),
             ]
 
+    linrary_path_env=os.getenv('LIBRARY_PATH', None)
+    if "stubs" in linrary_path_env:
+        for i in range(len(extra_link_args)):
+            if "libnvidia-ml.so.1" in extra_link_args[i]:
+                extra_link_args[i] = "-lnvidia-ml" # link to $CUDA_HOME/lib64/stubs/libnvidia-ml.so
 
     print(f'Build summary:')
     print(f' > Sources: {sources}')
