@@ -21,7 +21,7 @@ public:
         int64_t num_timeout_cycles;
 
         // Parameters
-        ncclDevComm_t nccl_dev_comm;
+        ncclDevComm_t* nccl_dev_comm;
         ncclWindow_t nccl_window;
         void* x;
         int64_t num_x_bytes;
@@ -52,7 +52,7 @@ static void __instantiate_kernel() {{
     static void launch_impl(const jit::KernelHandle& kernel, const jit::LaunchConfigHandle& config, Args args) {
         EP_CUDA_UNIFIED_CHECK(jit::launch_kernel(
             kernel, config,
-            args.nccl_dev_comm, args.nccl_window,
+            *args.nccl_dev_comm, args.nccl_window,
             args.x, args.num_x_bytes,
             args.buffer, args.workspace,
             args.rank_idx, args.dst_rank_idx,
@@ -61,7 +61,7 @@ static void __instantiate_kernel() {{
     }
 };
 
-static void launch_pp_send(const ncclDevComm_t& nccl_dev_comm,
+static void launch_pp_send(ncclDevComm_t* nccl_dev_comm,
                            const ncclWindow_t& nccl_window,
                            void* x, const int64_t& num_x_bytes,
                            void* buffer, void* workspace,
@@ -103,7 +103,7 @@ public:
         int64_t num_timeout_cycles;
 
         // Parameters
-        ncclDevComm_t nccl_dev_comm;
+        ncclDevComm_t* nccl_dev_comm;
         ncclWindow_t nccl_window;
         void* x;
         int64_t num_x_bytes;
@@ -135,7 +135,7 @@ static void __instantiate_kernel() {{
     static void launch_impl(const jit::KernelHandle& kernel, const jit::LaunchConfigHandle& config, Args args) {
         EP_CUDA_UNIFIED_CHECK(jit::launch_kernel(
             kernel, config,
-            args.nccl_dev_comm, args.nccl_window,
+            *args.nccl_dev_comm, args.nccl_window,
             args.x, args.num_x_bytes,
             args.buffer, args.workspace,
             args.rank_idx, args.src_rank_idx,
@@ -145,7 +145,7 @@ static void __instantiate_kernel() {{
     }
 };
 
-static void launch_pp_recv(const ncclDevComm_t& nccl_dev_comm,
+static void launch_pp_recv(ncclDevComm_t* nccl_dev_comm,
                            const ncclWindow_t& nccl_window,
                            void* x,
                            const int64_t& num_x_bytes,

@@ -25,7 +25,7 @@ public:
         bool allow_hybrid_mode;
 
         // Parameters
-        ncclDevComm_t nccl_dev_comm;
+        ncclDevComm_t* nccl_dev_comm;
         ncclWindow_t nccl_window;
         void* storage;
         void* fetched;
@@ -69,7 +69,7 @@ static void __instantiate_kernel() {{
     static void launch_impl(const jit::KernelHandle& kernel, const jit::LaunchConfigHandle& config, Args args) {
         EP_CUDA_UNIFIED_CHECK(jit::launch_kernel(
             kernel, config,
-            args.nccl_dev_comm, args.nccl_window,
+            *args.nccl_dev_comm, args.nccl_window,
             args.storage, args.fetched,
             args.indices,
             args.last_gin_requests,
@@ -80,7 +80,7 @@ static void __instantiate_kernel() {{
     }
 };
 
-static void launch_engram_fetch(const ncclDevComm_t& nccl_dev_comm, const ncclWindow_t& nccl_window,
+static void launch_engram_fetch(ncclDevComm_t* nccl_dev_comm, const ncclWindow_t& nccl_window,
                                 void* storage, void* fetched,
                                 int* indices,
                                 ncclGinRequest_t* last_gin_requests,
@@ -132,7 +132,7 @@ public:
         int num_scaleout_ranks, num_scaleup_ranks;
         bool allow_hybrid_mode;
 
-        ncclDevComm_t nccl_dev_comm;
+        ncclDevComm_t* nccl_dev_comm;
         ncclWindow_t nccl_window;
         ncclGinRequest_t* last_gin_requests;
 
@@ -160,14 +160,14 @@ static void __instantiate_kernel() {{
     static void launch_impl(const jit::KernelHandle& kernel, const jit::LaunchConfigHandle& config, Args args) {
         EP_CUDA_UNIFIED_CHECK(jit::launch_kernel(
             kernel, config,
-            args.nccl_dev_comm, args.nccl_window,
+            *args.nccl_dev_comm, args.nccl_window,
             args.last_gin_requests
         ));
     }
 };
 
 static void launch_engram_fetch_wait(ncclGinRequest_t* last_gin_requests,
-                                     const ncclDevComm_t& nccl_dev_comm, const ncclWindow_t& nccl_window,
+                                     ncclDevComm_t* nccl_dev_comm, const ncclWindow_t& nccl_window,
                                      const int& num_scaleout_ranks, const int& num_scaleup_ranks,
                                      const int& num_qps,
                                      const bool& allow_hybrid_mode,

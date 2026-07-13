@@ -65,11 +65,11 @@ NCCLSymmetricMemoryContext::NCCLSymmetricMemoryContext(const int64_t& nccl_comm,
                                                        const bool& allow_hybrid_mode,
                                                        const int& sl_idx, const int& num_allocated_qps):
     rank_idx(rank_idx), num_ranks(num_ranks), num_allocated_qps(num_allocated_qps) {
+    int nccl_runtime_version;
+    NCCL_CHECK(ncclGetVersion(&nccl_runtime_version));
     if (get_env("EP_BUFFER_DEBUG", 0)) {
-        int nccl_version;
-        NCCL_CHECK(ncclGetVersion(&nccl_version));
         printf("DeepEP initialized with NCCL version: %d.%d.%d (loaded library)\n",
-               nccl_version / 10000, (nccl_version % 10000) / 100, nccl_version % 100);
+            nccl_runtime_version / 10000, (nccl_runtime_version % 10000) / 100, nccl_runtime_version % 100);
     }
 
     // Reuse the NCCL communicator
@@ -80,11 +80,10 @@ NCCLSymmetricMemoryContext::NCCLSymmetricMemoryContext(const int64_t& nccl_comm,
         printf("EP NCCL device communicator has %d allocated QPs\n", num_allocated_qps);
 
     // Initialize NCCL device communicator
+    ncclCommProperties props = NCCL_COMM_PROPERTIES_INITIALIZER;
+    NCCL_CHECK(ncclCommQueryProperties(comm, &props));
     ncclDevCommRequirements_t reqs = NCCL_DEV_COMM_REQUIREMENTS_INITIALIZER;
     if (num_ranks > 1 and get_env("EP_DISABLE_GIN", 0) == 0) {
-        // Query NCCL supported Gin Type
-        ncclCommProperties props = NCCL_COMM_PROPERTIES_INITIALIZER;
-        NCCL_CHECK(ncclCommQueryProperties(comm, &props));
         EP_HOST_ASSERT(
             (allow_hybrid_mode ? props.railedGinType : props.ginType) != NCCL_GIN_TYPE_NONE and
             "NCCL GIN is unavailable. This is usually due to a network configuration issue, "
@@ -98,10 +97,19 @@ NCCLSymmetricMemoryContext::NCCLSymmetricMemoryContext(const int64_t& nccl_comm,
         reqs.ginSignalCount = num_ranks + 2 * 2;
         reqs.ginConnectionType = allow_hybrid_mode ? NCCL_GIN_CONNECTION_RAIL: NCCL_GIN_CONNECTION_FULL;
     }
-    NCCL_CHECK(ncclDevCommCreate(comm, &reqs, &dev_comm));
+#if NCCL_VERSION_CODE >= NCCL_VERSION(2, 31, 0)
+    reqs.useRuntimeVersion = true;
+    dev_comm = static_cast<ncclDevComm_t*>(malloc(props.devCommRuntimeVersionSize));
+#else
+    EP_HOST_ASSERT(NCCL_VERSION_CODE == nccl_runtime_version and "Prior to NCCL 2.31, NCCL compile-time and runtime versions must be the same. Please re-compile DeepEP.");
+    dev_comm = static_cast<ncclDevComm_t*>(malloc(sizeof(ncclDevComm_t)));
+#endif
+    EP_HOST_ASSERT(dev_comm != nullptr);
+    NCCL_CHECK(ncclDevCommCreate(comm, &reqs, dev_comm));
 
     // Now we know the NVLink domain size
-    num_nvl_ranks = dev_comm.lsaSize, nvl_rank_idx = dev_comm.lsaRank;
+    ncclTeam_t lsaTeam = ncclTeamLsa(comm);
+    num_nvl_ranks = lsaTeam.nRanks, nvl_rank_idx = lsaTeam.rank;
     num_rdma_ranks = num_ranks / num_nvl_ranks, rdma_rank_idx = rank_idx / num_nvl_ranks;
     EP_HOST_ASSERT(num_ranks % num_nvl_ranks == 0 and nvl_rank_idx == rank_idx % num_nvl_ranks);
     EP_HOST_ASSERT(rank_idx == rdma_rank_idx * num_nvl_ranks + nvl_rank_idx);
@@ -150,7 +158,8 @@ void NCCLSymmetricMemoryContext::finalize() {
     symmetric_memory.reset();
 
     // Destroy device communicator
-    NCCL_CHECK(ncclDevCommDestroy(comm, &dev_comm));
+    NCCL_CHECK(ncclDevCommDestroy(comm, dev_comm));
+    free(dev_comm);
 }
 
 }  // namespace deep_ep::nccl

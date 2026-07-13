@@ -21,7 +21,7 @@ public:
         bool sequential;
 
         // Parameters
-        ncclDevComm_t nccl_dev_comm;
+        ncclDevComm_t* nccl_dev_comm;
         ncclWindow_t nccl_window;
         void* workspace;
         int scaleout_rank_idx, scaleup_rank_idx;
@@ -47,13 +47,13 @@ static void __instantiate_kernel() {{
     static void launch_impl(const jit::KernelHandle& kernel, const jit::LaunchConfigHandle& config, Args args) {
         EP_CUDA_UNIFIED_CHECK(jit::launch_kernel(
             kernel, config,
-            args.nccl_dev_comm, args.nccl_window,
+            *args.nccl_dev_comm, args.nccl_window,
             args.workspace, args.scaleout_rank_idx, args.scaleup_rank_idx
         ));
     }
 };
 
-static void launch_barrier(const ncclDevComm_t& nccl_dev_comm, const ncclWindow_t& nccl_window,
+static void launch_barrier(ncclDevComm_t* nccl_dev_comm, const ncclWindow_t& nccl_window,
                            void* workspace,
                            const int& scaleout_rank_idx, const int& scaleup_rank_idx,
                            const int& num_scaleout_ranks, const int& num_scaleup_ranks,

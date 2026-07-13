@@ -32,7 +32,7 @@ public:
         int* psum_num_recv_tokens_per_scaleup_rank;
         int* token_metadata_at_forward;
         int* channel_linked_list;
-        ncclDevComm_t nccl_dev_comm;
+        ncclDevComm_t* nccl_dev_comm;
         ncclWindow_t nccl_window;
         void* buffer;
         void* workspace;
@@ -87,7 +87,7 @@ static void __instantiate_kernel() {{
             EP_CUDA_UNIFIED_CHECK(jit::launch_kernel(kernel, config,
                                                      args.x, args.topk_weights,
                                                      args.src_metadata, args.psum_num_recv_tokens_per_scaleup_rank,
-                                                     args.nccl_dev_comm, args.nccl_window,
+                                                     *args.nccl_dev_comm, args.nccl_window,
                                                      args.buffer, args.workspace,
                                                      args.scaleup_rank_idx,
                                                      args.num_reduced_tokens));
@@ -98,7 +98,7 @@ static void __instantiate_kernel() {{
                                                      args.psum_num_recv_tokens_per_scaleup_rank,
                                                      args.token_metadata_at_forward,
                                                      args.channel_linked_list,
-                                                     args.nccl_dev_comm, args.nccl_window,
+                                                     *args.nccl_dev_comm, args.nccl_window,
                                                      args.buffer, args.workspace,
                                                      args.scaleout_rank_idx, args.scaleup_rank_idx,
                                                      args.num_reduced_tokens));
@@ -117,7 +117,7 @@ static void* launch_combine(void* x,
                             int* psum_num_recv_tokens_per_scaleup_rank,
                             int* token_metadata_at_forward,
                             int* channel_linked_list,
-                            const ncclDevComm_t& nccl_dev_comm, const ncclWindow_t& nccl_window,
+                            ncclDevComm_t* nccl_dev_comm, const ncclWindow_t& nccl_window,
                             void* buffer, void* workspace,
                             const int& num_reduced_tokens, const int& num_max_tokens_per_rank,
                             const int& hidden,

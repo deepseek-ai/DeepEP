@@ -65,7 +65,7 @@ public:
 
     // NCCL handles
     ncclComm_t comm;
-    ncclDevComm_t dev_comm;
+    ncclDevComm_t* dev_comm;
     ncclWindow_t window;
     void* mapped_window_ptr;
     std::vector<void*> nvl_window_ptrs;

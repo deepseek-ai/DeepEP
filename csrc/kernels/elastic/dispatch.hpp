@@ -39,7 +39,7 @@ public:
         int* token_metadata_at_forward;
         int num_tokens;
         int sf_token_stride, sf_hidden_stride;
-        ncclDevComm_t nccl_dev_comm;
+        ncclDevComm_t* nccl_dev_comm;
         ncclWindow_t nccl_window;
         void* buffer;
         void* workspace; void* mapped_host_workspace;
@@ -101,7 +101,7 @@ static void __instantiate_kernel() {{
                 args.dst_buffer_slot_idx,
                 args.num_tokens,
                 args.sf_token_stride, args.sf_hidden_stride,
-                args.nccl_dev_comm, args.nccl_window,
+                *args.nccl_dev_comm, args.nccl_window,
                 args.buffer,
                 args.workspace, args.mapped_host_workspace,
                 args.scaleup_rank_idx));
@@ -118,7 +118,7 @@ static void __instantiate_kernel() {{
                 args.token_metadata_at_forward,
                 args.num_tokens,
                 args.sf_token_stride, args.sf_hidden_stride,
-                args.nccl_dev_comm, args.nccl_window,
+                *args.nccl_dev_comm, args.nccl_window,
                 args.buffer,
                 args.workspace, args.mapped_host_workspace,
                 args.scaleout_rank_idx, args.scaleup_rank_idx
@@ -151,7 +151,7 @@ static void launch_dispatch(void* x, void* sf,
                             const int& hidden, const int& elem_size,
                             const int& num_sf_packs, const int& sf_token_stride, const int& sf_hidden_stride,
                             const int& num_experts, const int& num_topk, const int& expert_alignment,
-                            const ncclDevComm_t& nccl_dev_comm, const ncclWindow_t& nccl_window,
+                            ncclDevComm_t* nccl_dev_comm, const ncclWindow_t& nccl_window,
                             void* buffer,
                             void* workspace, void* mapped_host_workspace,
                             const int& scaleout_rank_idx, const int& scaleup_rank_idx,
