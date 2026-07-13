@@ -195,7 +195,6 @@ class HybridEPBuffer:
         num_dispatched_tokens_tensor: torch.Tensor = None,
         num_dispatched_tokens: int = None,
         handle: tuple = None,
-        dense_routing: bool = False,
     ):
         """
         Dispatch the data to the experts.
@@ -206,45 +205,30 @@ class HybridEPBuffer:
         Backward direction:
         combine_in_backward <- local_unpermute -> expert_mlp -> local_permute -> dispatch_in_backward
 
-        When dense_routing=True, topk_idx is passed directly as int16 (skipping indices_to_map).
+        When routing_map is omitted, topk_idx is passed directly as int16 (skipping indices_to_map).
         This reduces allgather size from T*E_total to T*K*2 bytes.
         Dropped tokens should use -1 as sentinel (naturally ignored by range checks in the kernel).
         """
         num_of_tokens, hidden_dim = hidden.shape
 
-        if dense_routing:
-            assert topk_idx is not None or handle is not None, \
-                "topk_idx is required for dense_routing mode when handle is None"
-            assert num_of_experts is not None or topk_idx is None, \
-                "num_of_experts is required for dense_routing mode"
-            assert num_of_experts is None or num_of_experts <= INT16_EXPERT_LIMIT, \
-                "dense_routing uses int16 topk_idx, so num_of_experts must be <= 32768"
-            routing_data = None
-            if topk_idx is not None:
-                topk = topk_idx.size(-1)
-                routing_data = topk_idx.to(torch.int16).contiguous()
-                if probs is None and topk_weights is not None:
-                    probs = dense_indices_to_probs(
-                        topk_idx, topk_weights, num_of_tokens, num_of_experts
-                    )
-            else:
-                topk = 0
-        elif routing_map is not None:
+        if routing_map is not None:
             assert routing_map.dtype == torch.bool
             num_of_experts = routing_map.size(-1)
             topk = 0
             routing_data = routing_map
-        else:
-            # Generate the routing map and the probs according to the topk_idx and topk_weights.
-            assert (
-                num_of_experts is not None
-            ), "The number of experts should be provided on index-based routing."
-            topk = 0
-            if topk_idx is not None:
-                routing_map, probs = indices_to_map(
+        elif topk_idx is not None:
+            assert num_of_experts is not None, "num_of_experts is required with topk_idx"
+            assert num_of_experts <= INT16_EXPERT_LIMIT, \
+                "dense topk_idx routing uses int16 expert IDs, so num_of_experts must be <= 32768"
+            topk = topk_idx.size(-1)
+            routing_data = topk_idx.to(torch.int16).contiguous()
+            if probs is None and topk_weights is not None:
+                probs = dense_indices_to_probs(
                     topk_idx, topk_weights, num_of_tokens, num_of_experts
                 )
-            routing_data = routing_map
+        else:
+            topk = 0
+            routing_data = None
 
         assert (
             handle is not None or routing_data is not None
@@ -366,14 +350,13 @@ class HybridEPBuffer:
         # Otherwise, tokens_per_expert is copied through pinned memory so Python can derive num_permuted_tokens.
         non_blocking: bool = False,
         fuse_permute_dispatch: bool = False,
-        dense_routing: bool = False,
         # Deprecated parameters
         num_dispatched_tokens: int = None,
         use_host_meta: bool = None,
     ):
         """
         Dispatch the data to the experts with permute.
-        When dense_routing=True, topk_idx is passed directly as int16 (skipping indices_to_map).
+        When routing_map is omitted, topk_idx is passed directly as int16 (skipping indices_to_map).
         """
         if num_dispatched_tokens is not None:
             warnings.warn("The num_dispatched_tokens is deprecated, it will be removed in the future.")
@@ -383,39 +366,24 @@ class HybridEPBuffer:
 
         with torch.cuda.nvtx.range("hybrid-ep dispatch with permute phase"):
             num_of_tokens_per_rank, hidden_dim = hidden.shape
-            if dense_routing:
-                assert topk_idx is not None or handle is not None, \
-                    "topk_idx is required for dense_routing mode when handle is None"
-                assert num_of_experts is not None or topk_idx is None, \
-                    "num_of_experts is required for dense_routing mode"
-                assert num_of_experts is None or num_of_experts <= INT16_EXPERT_LIMIT, \
-                    "dense_routing uses int16 topk_idx, so num_of_experts must be <= 32768"
-                routing_data = None
-                if topk_idx is not None:
-                    topk = topk_idx.size(-1)
-                    routing_data = topk_idx.to(torch.int16).contiguous()
-                    if probs is None and topk_weights is not None:
-                        probs = dense_indices_to_probs(
-                            topk_idx, topk_weights, num_of_tokens_per_rank, num_of_experts
-                        )
-                else:
-                    topk = 0
-            elif routing_map is not None:
+            if routing_map is not None:
                 assert routing_map.dtype == torch.bool
                 num_of_experts = routing_map.size(-1)
                 topk = 0
                 routing_data = routing_map
-            else:
-                # Generate the routing map and the probs according to the topk_idx and topk_weights.
-                if topk_idx is not None:
-                    assert (
-                        num_of_experts is not None
-                    ), "The number of experts should be provided on index-based routing."
-                    routing_map, probs = indices_to_map(
+            elif topk_idx is not None:
+                assert num_of_experts is not None, "num_of_experts is required with topk_idx"
+                assert num_of_experts <= INT16_EXPERT_LIMIT, \
+                    "dense topk_idx routing uses int16 expert IDs, so num_of_experts must be <= 32768"
+                topk = topk_idx.size(-1)
+                routing_data = topk_idx.to(torch.int16).contiguous()
+                if probs is None and topk_weights is not None:
+                    probs = dense_indices_to_probs(
                         topk_idx, topk_weights, num_of_tokens_per_rank, num_of_experts
                     )
+            else:
                 topk = 0
-                routing_data = routing_map
+                routing_data = None
             if non_blocking:
                 assert num_permuted_tokens is not None and num_permuted_tokens >= 0, \
                     "The num_permuted_tokens is required for non-blocking mode."
