@@ -39,7 +39,7 @@ public:
         int* token_metadata_at_forward;
         int num_tokens;
         int sf_token_stride, sf_hidden_stride;
-        ncclDevComm_t nccl_dev_comm;
+        jit::NoRefPtr nccl_dev_comm;
         ncclWindow_t nccl_window;
         void* buffer;
         void* workspace; void* mapped_host_workspace;
@@ -151,7 +151,7 @@ static void launch_dispatch(void* x, void* sf,
                             const int& hidden, const int& elem_size,
                             const int& num_sf_packs, const int& sf_token_stride, const int& sf_hidden_stride,
                             const int& num_experts, const int& num_topk, const int& expert_alignment,
-                            const ncclDevComm_t& nccl_dev_comm, const ncclWindow_t& nccl_window,
+                            const jit::NoRefPtr& nccl_dev_comm, const ncclWindow_t& nccl_window,
                             void* buffer,
                             void* workspace, void* mapped_host_workspace,
                             const int& scaleout_rank_idx, const int& scaleup_rank_idx,

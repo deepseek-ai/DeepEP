@@ -32,7 +32,7 @@ public:
         int* psum_num_recv_tokens_per_scaleup_rank;
         int* token_metadata_at_forward;
         int* channel_linked_list;
-        ncclDevComm_t nccl_dev_comm;
+        jit::NoRefPtr nccl_dev_comm;
         ncclWindow_t nccl_window;
         void* buffer;
         void* workspace;
@@ -117,7 +117,7 @@ static void* launch_combine(void* x,
                             int* psum_num_recv_tokens_per_scaleup_rank,
                             int* token_metadata_at_forward,
                             int* channel_linked_list,
-                            const ncclDevComm_t& nccl_dev_comm, const ncclWindow_t& nccl_window,
+                            const jit::NoRefPtr& nccl_dev_comm, const ncclWindow_t& nccl_window,
                             void* buffer, void* workspace,
                             const int& num_reduced_tokens, const int& num_max_tokens_per_rank,
                             const int& hidden,

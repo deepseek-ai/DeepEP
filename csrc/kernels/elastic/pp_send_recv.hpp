@@ -21,7 +21,7 @@ public:
         int64_t num_timeout_cycles;
 
         // Parameters
-        ncclDevComm_t nccl_dev_comm;
+        jit::NoRefPtr nccl_dev_comm;
         ncclWindow_t nccl_window;
         void* x;
         int64_t num_x_bytes;
@@ -61,7 +61,7 @@ static void __instantiate_kernel() {{
     }
 };
 
-static void launch_pp_send(const ncclDevComm_t& nccl_dev_comm,
+static void launch_pp_send(const jit::NoRefPtr& nccl_dev_comm,
                            const ncclWindow_t& nccl_window,
                            void* x, const int64_t& num_x_bytes,
                            void* buffer, void* workspace,
@@ -103,7 +103,7 @@ public:
         int64_t num_timeout_cycles;
 
         // Parameters
-        ncclDevComm_t nccl_dev_comm;
+        jit::NoRefPtr nccl_dev_comm;
         ncclWindow_t nccl_window;
         void* x;
         int64_t num_x_bytes;
@@ -145,7 +145,7 @@ static void __instantiate_kernel() {{
     }
 };
 
-static void launch_pp_recv(const ncclDevComm_t& nccl_dev_comm,
+static void launch_pp_recv(const jit::NoRefPtr& nccl_dev_comm,
                            const ncclWindow_t& nccl_window,
                            void* x,
                            const int64_t& num_x_bytes,

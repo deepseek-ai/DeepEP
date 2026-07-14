@@ -8,6 +8,7 @@
 #include <nccl_device.h>
 
 #include "symmetric.hpp"
+#include "../../jit/no_ref.hpp"
 
 // TODO: make a unified API
 namespace deep_ep::nvshmem {
@@ -65,7 +66,7 @@ public:
 
     // NCCL handles
     ncclComm_t comm;
-    ncclDevComm_t dev_comm;
+    jit::NoRefPtr dev_comm;
     ncclWindow_t window;
     void* mapped_window_ptr;
     std::vector<void*> nvl_window_ptrs;
