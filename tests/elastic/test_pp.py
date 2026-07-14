@@ -48,13 +48,16 @@ def test(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
         group, explicitly_destroy=True, allow_hybrid_mode=False,
         num_bytes=deep_ep.ElasticBuffer.get_pp_buffer_size_hint(
             num_max_tensor_bytes, num_max_inflight_tensors))
-    buffer.pp_set_config(num_max_tensor_bytes, num_max_inflight_tensors)
+    requested_num_qps = args.num_qps
+    buffer.pp_set_config(num_max_tensor_bytes, num_max_inflight_tensors, num_qps=requested_num_qps)
+    num_qps = buffer.num_pp_qps
 
     # Print configs
     assert num_ranks > 1
     dist_print(f'Config:\n'
                f' > Ranks: {num_ranks}\n'
                f' > Shape: {shape}\n'
+               f' > QPs: {num_qps}/{buffer.num_allocated_qps}\n'
                f' > Max inflight tensors: {num_max_inflight_tensors}\n',
                once_in_node=True)
 
@@ -127,6 +130,7 @@ if __name__ == '__main__':
     parser.add_argument('--num-tokens', type=int, default=4096)
     parser.add_argument('--hidden', type=int, default=7168)
     parser.add_argument('--num-max-inflight-tensors', type=int, default=4)
+    parser.add_argument('--num_qps', type=int, default=0)
     parser.add_argument('--num-stress-iterations', type=int, default=4)
     parser.add_argument('--num-sends', type=int, default=128)
     parser.add_argument('--num-sleep-cycles', type=int, default=10 ** 7)

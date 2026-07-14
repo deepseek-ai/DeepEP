@@ -66,6 +66,7 @@ class ElasticBuffer {
     int prev_rank_idx = 0, next_rank_idx = 0;
     int64_t num_max_pp_tensor_bytes = 0;
     int num_max_pp_inflight_tensors = 0;
+    int num_pp_qps = 0;
 
     // AGRS session settings
     int64_t num_max_agrs_session_bytes = 0;
@@ -324,20 +325,23 @@ public:
         };
     }
 
-    void pp_set_config(const int64_t& num_max_tensor_bytes, const int& num_max_inflight_tensors) {
+    void pp_set_config(const int64_t& num_max_tensor_bytes, const int& num_max_inflight_tensors, const int& num_qps) {
         // Flush previous operations
         barrier(false, true);
 
         EP_HOST_ASSERT(num_max_tensor_bytes > 0 and num_max_inflight_tensors > 0);
         EP_HOST_ASSERT(num_max_tensor_bytes * num_max_inflight_tensors * 2 * 2 <= num_buffer_bytes);
+        const auto actual_num_qps = num_qps == 0 ? nccl_context->num_allocated_qps : num_qps;
+        EP_HOST_ASSERT(actual_num_qps > 0 and actual_num_qps <= nccl_context->num_allocated_qps);
         this->prev_rank_idx = (nccl_context->rank_idx + nccl_context->num_ranks - 1) % nccl_context->num_ranks;
         this->next_rank_idx = (nccl_context->rank_idx + 1) % nccl_context->num_ranks;
         this->num_max_pp_tensor_bytes = math::align<int64_t>(num_max_tensor_bytes, 32);
         this->num_max_pp_inflight_tensors = num_max_inflight_tensors;
+        this->num_pp_qps = actual_num_qps;
     }
 
     void pp_send(const torch::Tensor& x, const int& dst_rank_idx, const int& num_sms) const {
-        EP_HOST_ASSERT(num_max_pp_tensor_bytes > 0 and num_max_pp_inflight_tensors > 0);
+        EP_HOST_ASSERT(num_max_pp_tensor_bytes > 0 and num_max_pp_inflight_tensors > 0 and num_pp_qps > 0);
         EP_HOST_ASSERT(x.is_cuda() and x.is_contiguous() and x.nbytes() <= num_max_pp_tensor_bytes);
         EP_HOST_ASSERT(dst_rank_idx == prev_rank_idx or dst_rank_idx == next_rank_idx);
 
@@ -349,6 +353,7 @@ public:
             num_max_pp_tensor_bytes,
             num_max_pp_inflight_tensors,
             num_sms == 0 ? jit::device_runtime->get_num_sms() : num_sms,
+            num_pp_qps,
             num_gpu_timeout_cycles,
             jit::device_runtime->get_num_smem_bytes(),
             at::cuda::getCurrentCUDAStream()
@@ -356,7 +361,7 @@ public:
     }
 
     void pp_recv(const torch::Tensor& x, const int& src_rank_idx, const int& num_sms) const {
-        EP_HOST_ASSERT(num_max_pp_tensor_bytes > 0 and num_max_pp_inflight_tensors > 0);
+        EP_HOST_ASSERT(num_max_pp_tensor_bytes > 0 and num_max_pp_inflight_tensors > 0 and num_pp_qps > 0);
         EP_HOST_ASSERT(x.is_cuda() and x.is_contiguous() and x.nbytes() <= num_max_pp_tensor_bytes);
         EP_HOST_ASSERT(src_rank_idx == prev_rank_idx or src_rank_idx == next_rank_idx);
 
@@ -368,6 +373,7 @@ public:
             num_max_pp_tensor_bytes,
             num_max_pp_inflight_tensors,
             num_sms == 0 ? jit::device_runtime->get_num_sms() : num_sms,
+            num_pp_qps,
             num_gpu_timeout_cycles,
             jit::device_runtime->get_num_smem_bytes(),
             at::cuda::getCurrentCUDAStream()
@@ -1353,9 +1359,12 @@ static void register_apis(pybind11::module_& m) {
         .def("barrier", &ElasticBuffer::barrier)
         .def("engram_write", &ElasticBuffer::engram_write)
         .def("engram_fetch", &ElasticBuffer::engram_fetch)
-        .def("pp_set_config", &ElasticBuffer::pp_set_config)
-        .def("pp_send", &ElasticBuffer::pp_send)
-        .def("pp_recv", &ElasticBuffer::pp_recv)
+        .def("pp_set_config", &ElasticBuffer::pp_set_config,
+             pybind11::arg("num_max_tensor_bytes"), pybind11::arg("num_max_inflight_tensors"), pybind11::arg("num_qps") = 0)
+        .def("pp_send", &ElasticBuffer::pp_send,
+             pybind11::arg("x"), pybind11::arg("dst_rank_idx"), pybind11::arg("num_sms") = 0)
+        .def("pp_recv", &ElasticBuffer::pp_recv,
+             pybind11::arg("x"), pybind11::arg("src_rank_idx"), pybind11::arg("num_sms") = 0)
         .def("create_agrs_session", &ElasticBuffer::create_agrs_session)
         .def("destroy_agrs_session", &ElasticBuffer::destroy_agrs_session)
         .def("agrs_set_config", &ElasticBuffer::agrs_set_config)
