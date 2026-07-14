@@ -129,7 +129,7 @@ static void __instantiate_kernel() {{
 
 constexpr int kNumNotifyWarps = 4;
 constexpr int kNumDirectNVLinkDispatchWarps = 14;
-constexpr int kNumDirectNVLinkTmaBuffers = 2;
+constexpr int kNumDirectNVLinkTmaBuffers = 3;
 
 static int get_num_notify_smem_bytes(const int& num_ranks, const int& num_experts) {
     return math::align(num_ranks + num_experts, kNumNotifyWarps * 32) * sizeof(int);
