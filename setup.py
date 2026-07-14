@@ -58,16 +58,17 @@ def get_package_version():
         status_output = subprocess.check_output(status_cmd).decode('ascii').strip()
         if status_output:
             print(f'Warning: Git working directory is not clean. Uncommitted changes:\n{status_output}')
-            assert False, 'Git working directory is not clean'
+            raise AssertionError('Git working directory is not clean')
 
         cmd = ['git', 'rev-parse', '--short', 'HEAD']
         revision = '+' + subprocess.check_output(cmd).decode('ascii').rstrip()
-    except:
+    except Exception:
         revision = '+local'
     return f'{public_version}{revision}'
 
 
 class CustomBuildPy(build_py):
+
     def run(self):
         # Make clusters' cache setting default into `envs.py`
         self.generate_default_envs()
@@ -98,9 +99,7 @@ if __name__ == '__main__':
     cxx_flags = ['-O3', '-Wno-deprecated-declarations', '-Wno-unused-variable', '-Wno-sign-compare', '-Wno-reorder', '-Wno-attributes']
     nvcc_flags = ['-O3', '-Xcompiler', '-O3', '--extended-lambda', '--diag-suppress=128,2417']
     sources = ['csrc/python_api.cpp', 'csrc/kernels/legacy/layout.cu', 'csrc/kernels/legacy/intranode.cu']
-    include_dirs = [f'{current_dir}/deep_ep/include',
-                    f'{current_dir}/third-party/fmt/include',
-                    '/usr/local/cuda/include/cccl']
+    include_dirs = [f'{current_dir}/deep_ep/include', f'{current_dir}/third-party/fmt/include', '/usr/local/cuda/include/cccl']
     library_dirs = []
     nvcc_dlink = []
     extra_link_args = ['-lcuda']
@@ -120,6 +119,7 @@ if __name__ == '__main__':
     # ``libnccl.so.2`` only, so resolve the real name dynamically.
     sources.extend(['csrc/kernels/backend/nccl.cu'])
     include_dirs.extend([f'{nccl_root_dir}/include'])
+    library_dirs.extend([f'{nccl_root_dir}/lib'])
     nccl_lib = get_nccl_lib_name(nccl_root_dir)
     extra_link_args.extend([f'-l:{nccl_lib}', f'-Wl,-rpath,{nccl_root_dir}/lib'])
 
@@ -136,7 +136,7 @@ if __name__ == '__main__':
         nvcc_flags.append('-DDISABLE_SM90_FEATURES')
 
         # Disable internode and low-latency kernels
-        assert False, 'Not implemented'
+        raise AssertionError('Not implemented')
     else:
         # Prefer H800 series
         os.environ['TORCH_CUDA_ARCH_LIST'] = os.getenv('TORCH_CUDA_ARCH_LIST', '9.0')
@@ -189,30 +189,26 @@ if __name__ == '__main__':
         if name in os.environ:
             persistent_envs.append((name, os.environ[name]))
     if len(persistent_envs) > 0:
-        print(f' > Persistent envs:')
+        print(' > Persistent envs:')
         for k, v in persistent_envs:
             print(f'   > {k}: {v}')
     print()
 
-    setuptools.setup(
-        name='deep_ep',
-        version=get_package_version(),
-        packages=setuptools.find_packages(include=['deep_ep', 'deep_ep.*']),
-        package_data={
-            'deep_ep': [
-                'include/deep_ep/**/*',
-            ]
-        },
-        ext_modules=[
-            CUDAExtension(name='deep_ep._C',
-                          include_dirs=include_dirs,
-                          library_dirs=library_dirs,
-                          sources=sources,
-                          extra_compile_args=extra_compile_args,
-                          extra_link_args=extra_link_args)
-        ],
-        cmdclass={
-            'build_ext': BuildExtension,
-            'build_py': CustomBuildPy
-        }
-    )
+    setuptools.setup(name='deep_ep',
+                     version=get_package_version(),
+                     packages=setuptools.find_packages(include=['deep_ep', 'deep_ep.*']),
+                     package_data={'deep_ep': [
+                         'include/deep_ep/**/*',
+                     ]},
+                     ext_modules=[
+                         CUDAExtension(name='deep_ep._C',
+                                       include_dirs=include_dirs,
+                                       library_dirs=library_dirs,
+                                       sources=sources,
+                                       extra_compile_args=extra_compile_args,
+                                       extra_link_args=extra_link_args)
+                     ],
+                     cmdclass={
+                         'build_ext': BuildExtension,
+                         'build_py': CustomBuildPy
+                     })
