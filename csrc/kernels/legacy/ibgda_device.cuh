@@ -152,10 +152,11 @@ __device__ static __forceinline__ void ibgda_submit_requests(nvshmemi_ibgda_devi
     // WQE writes must be finished first
     __threadfence();
 
-    unsigned long long int* ready_idx =
-        (unsigned long long int*)(state->use_async_postsend ? qp->tx_wq.prod_idx : &mvars->tx_wq.ready_head);
-
-    // Wait for prior WQE slots to be filled first
+    // Wait for prior WQE slots to be filled first. Submissions must always be ordered
+    // through `ready_head`: NVSHMEM's own submit path CASes on it for QPs shared with
+    // DeepEP (e.g. the barrier inside `Buffer::destroy`), so leaving it stale deadlocks
+    // the first NVSHMEM-side submission.
+    unsigned long long int* ready_idx = (unsigned long long int*)(&mvars->tx_wq.ready_head);
     while (atomicCAS(ready_idx, base_wqe_idx, new_wqe_idx) != base_wqe_idx)
         ;
 
@@ -164,6 +165,19 @@ __device__ static __forceinline__ void ibgda_submit_requests(nvshmemi_ibgda_devi
         constexpr int kNumRequestInBatch = 4;
         if (kAlwaysDoPostSend or (message_idx + 1) % kNumRequestInBatch == 0)
             ibgda_post_send(qp, new_wqe_idx);
+    } else {
+        // CPU-assisted (async post-send) mode: publish the new producer index to the CPU
+        // proxy thread. NVSHMEM wires `tx_wq.bf` to the proxy-polled producer slot in this
+        // mode (the UAR is only mapped for the GPU handler), so a system-scope monotonic
+        // max mirrors NVSHMEM's own `ibgda_proxy_post_send`. The old code CASed on
+        // `tx_wq.prod_idx`, which NVSHMEM wires to a device-side counter the proxy never
+        // reads, so submissions were invisible to the proxy and the first dispatch hung
+        // waiting for a doorbell that was never rung. The slot is a dedicated 8-byte,
+        // naturally aligned uint64_t per QP (NVSHMEM allocates the proxy slot array as
+        // uint64_t entries and the proxy reads them back as uint64_t), matching the
+        // 64-bit atomic width used here.
+        atomicMax_system((unsigned long long int*)qp->tx_wq.bf,
+                         (unsigned long long int)new_wqe_idx);
     }
 }
 
@@ -488,8 +502,12 @@ __device__ static __forceinline__ void ibgda_poll_cq(nvshmemi_ibgda_device_cq_t*
 // Wait until wqe `idx - 1` is completed.
 __device__ static __forceinline__ void nvshmemi_ibgda_quiet(int dst_pe, int qp_id) {
     auto qp = ibgda_get_rc(dst_pe, qp_id);
-    auto state = ibgda_get_state();
-    uint64_t prod_idx = state->use_async_postsend ? ld_na_relaxed(qp->tx_wq.prod_idx) : ld_na_relaxed(&qp->mvars.tx_wq.ready_head);
+    // `ready_head` is the submitted frontier in both modes now that
+    // `ibgda_submit_requests` always orders through it. The async branch used to read
+    // `tx_wq.prod_idx`, which the fixed submit path no longer advances (the async
+    // publish goes to `tx_wq.bf` instead), so reading it here would make the drain a
+    // no-op under the CPU handlers.
+    uint64_t prod_idx = ld_na_relaxed(&qp->mvars.tx_wq.ready_head);
     ibgda_poll_cq(qp->tx_wq.cq, prod_idx);
 }
 
