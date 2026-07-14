@@ -12,6 +12,7 @@ namespace deep_ep::elastic {
 
 template <bool kDoCPUSync,
           bool kReuseSlotIndices,
+          bool kDirectRecvX,
           int kNumSMs,
           int kNumNotifyWarps, int kNumScaleoutWarps, int kNumForwardWarps,
           int kNumScaleoutRanks, int kNumScaleupRanks,
@@ -40,6 +41,7 @@ hybrid_dispatch_impl(
     int* num_unaligned_recv_tokens_per_expert,
     int* dst_buffer_slot_idx,
     int* token_metadata_at_forward,
+    void* direct_recv_x,
     const int num_tokens,
     const int sf_token_stride, const int sf_hidden_stride,
     // TODO(NCCL): so many params, plans to optimize?
@@ -85,6 +87,12 @@ hybrid_dispatch_impl(
 
     // The golden layout during the whole process for both scale-out and forward warps
     const auto token_layout = layout::TokenLayout(kNumHiddenBytes, kNumSFPacks * sizeof(sf_pack_t), kNumTopk, true);
+    constexpr int kNumMetadataBytes = math::constexpr_align(
+        kNumTopk * (int(sizeof(int)) + int(sizeof(float))) + (1 + kNumTopk) * int(sizeof(int)),
+        ptx::kNumTMAAlignBytes);
+    constexpr int kNumSidecarBytes =
+        math::constexpr_align(kNumSFPacks * int(sizeof(sf_pack_t)), ptx::kNumTMAAlignBytes) +
+        kNumMetadataBytes;
     const auto tma_buffer = layout::BufferLayout<true>(token_layout, kNumScaleoutWarps + kNumForwardWarps, 1,
             math::advance_ptr<int>(smem, kNumSmemBytesForNotify)).get_rank_buffer(warp_idx - kNumNotifyWarps).get_token_buffer(0);
 
@@ -324,6 +332,19 @@ hybrid_dispatch_impl(
             } else if (warp_idx == 1) {
                 // Exclusive prefix sum for later expanding
                 do_psum(expert_count, psum_num_recv_tokens_per_expert, kNumExpertsPerRank, 1);
+            }
+
+            if constexpr (kDirectRecvX) {
+                int prefix = 0;
+                #pragma unroll
+                for (int i = 0; i < kNumScaleupRanks; ++ i) {
+                    if (thread_idx == i)
+                        gin.put_value<ncclTeamTagLsa>(
+                            workspace_layout.get_scaleup_rank_count_ptr<true>() + scaleup_rank_idx,
+                            math::encode_decode_positive(static_cast<int64_t>(prefix)), i);
+                    prefix += rank_count[i];
+                }
+                __syncwarp();
             }
         }
     } else if (warp_idx < kNumNotifyWarps + kNumScaleoutWarps) {
@@ -591,10 +612,51 @@ hybrid_dispatch_impl(
 
                 // Issue TMAs
                 if (stored_dst_slot_idx >= 0) {
-                    const auto dst_ptr = gin.get_sym_ptr<ncclTeamTagLsa>(
-                        scaleup_buffer.get_token_buffer(stored_dst_slot_idx).get_base_ptr(),
-                        stored_dst_scaleup_rank_idx);
-                    ptx::tma_store_1d(dst_ptr, tma_buffer.get_base_ptr(), tma_buffer.get_num_bytes<false>());
+                    int direct_recv_x_idx = -1;
+                    if constexpr (kDirectRecvX) {
+                        const auto direct_recv_x_base_ptr =
+                            workspace_layout.get_scaleup_rank_count_ptr<true>() + stored_dst_scaleup_rank_idx;
+                        int decoded_base = -1;
+                        comm::timeout_while<kNumTimeoutCycles>([&](const bool& is_last_check) {
+                            if (direct_recv_x_base_ptr == nullptr)
+                                return false;
+                            const auto decoded_base_i64 = math::encode_decode_positive(
+                                ptx::ld_acquire_sys<int64_t>(direct_recv_x_base_ptr));
+                            decoded_base = static_cast<int>(decoded_base_i64);
+                            if (math::is_decoded_positive_ready(decoded_base_i64))
+                                return true;
+
+                            if (is_last_check) {
+                                printf("DeepEP hybrid direct recv_x prefix timeout, "
+                                       "scale-out: %d/%d, scale-up: %d/%d, "
+                                       "channel: %d, src scale-up: %d, dst scale-up: %d, slot: %d, decoded base: %d\n",
+                                       scaleout_rank_idx, kNumScaleoutRanks, scaleup_rank_idx, kNumScaleupRanks,
+                                       channel_idx, scaleup_rank_idx, stored_dst_scaleup_rank_idx, stored_dst_slot_idx, decoded_base);
+                            }
+                            return false;
+                        });
+                        EP_DEVICE_ASSERT(decoded_base >= 0);
+                        direct_recv_x_idx = decoded_base + stored_dst_slot_idx;
+                    }
+
+                    const auto dst_token = scaleup_buffer.get_token_buffer(stored_dst_slot_idx);
+                    if constexpr (kDirectRecvX) {
+                        const auto dst_sidecar_ptr = gin.get_sym_ptr<ncclTeamTagLsa>(
+                            dst_token.get_sf_ptr(), stored_dst_scaleup_rank_idx);
+                        const auto dst_x_ptr = direct_recv_x_idx >= 0 ?
+                            gin.get_sym_ptr<ncclTeamTagLsa>(
+                                math::advance_ptr(direct_recv_x, static_cast<int64_t>(direct_recv_x_idx) * kNumHiddenBytes),
+                                stored_dst_scaleup_rank_idx) :
+                            nullptr;
+                        if (dst_sidecar_ptr != nullptr)
+                            ptx::tma_store_1d(dst_sidecar_ptr, tma_buffer.get_sf_ptr(), kNumSidecarBytes);
+                        if (dst_x_ptr != nullptr)
+                            ptx::tma_store_1d(dst_x_ptr, tma_buffer.get_hidden_ptr(), kNumHiddenBytes);
+                    } else {
+                        const auto dst_ptr = gin.get_sym_ptr<ncclTeamTagLsa>(
+                            dst_token.get_base_ptr(), stored_dst_scaleup_rank_idx);
+                        ptx::tma_store_1d(dst_ptr, tma_buffer.get_base_ptr(), tma_buffer.get_num_bytes<false>());
+                    }
                     ptx::tma_store_commit();
                 }
                 __syncwarp();
@@ -672,6 +734,10 @@ hybrid_dispatch_impl(
     EP_STATIC_ASSERT(kNumScaleupRanks <= kNumThreads, "Insufficient threads");
     if (not kReuseSlotIndices and sm_idx == 0 and thread_idx < kNumScaleupRanks)
         workspace_layout.get_scaleup_atomic_sender_counter()[thread_idx] = 0;
+    if constexpr (kDirectRecvX) {
+        if (sm_idx == 0 and thread_idx < kNumScaleupRanks)
+            workspace_layout.get_scaleup_rank_count_ptr<true>()[thread_idx] = 0;
+    }
 }
 
 }  // namespace deep_ep::elastic
