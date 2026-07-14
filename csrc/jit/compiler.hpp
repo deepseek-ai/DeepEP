@@ -146,14 +146,28 @@ public:
         std::error_code error_code;
         std::filesystem::rename(tmp_dir_path, dir_path, error_code);
         if (error_code) {
-            // Another rank beat us, then clean up our dir and use the existing one
+            // Another rank beat us. Do not read `dir_path` here: on a shared filesystem
+            // (e.g. an NFS-mounted `$HOME/.deep_ep`) the winner's rename is not necessarily
+            // visible to this client yet — the cache miss above may have primed a negative
+            // lookup cache entry that outlives the failed rename, so a stat can still report
+            // the directory as missing until the attribute cache expires. Our own artifacts
+            // are equivalent (the cache key hashes the kernel name, source, flags, and
+            // compiler signature), so load them and leave the winner's directory for
+            // future processes.
             // NOTES: avoid `std::filesystem::remove_all` here — it can segfault on
             // distributed filesystems, when concurrent processes operate
             // on the same parent directory, causing stale directory entries
+            if (get_env<int>("EP_JIT_DEBUG"))
+                printf("Rename to %s lost, loading own artifacts from %s\n", dir_path.c_str(), tmp_dir_path.c_str());
+            const auto runtime = kernel_runtime_cache->put(dir_path, tmp_dir_path);
             safe_remove_all(tmp_dir_path);
+            return runtime;
         }
 
         // Put into the runtime cache
+        // NOTES: only the rename winner reaches this `get`, and its own client just created
+        // `dir_path`, so the lookup is served from fresh positive local state — the stale
+        // negative-entry hazard above only applies to clients that lost the rename
         const auto runtime = kernel_runtime_cache->get(dir_path);
         EP_HOST_ASSERT(runtime != nullptr);
         return runtime;

@@ -27,6 +27,18 @@ public:
             return cache[dir_path] = std::make_shared<KernelRuntime>(dir_path);
         return nullptr;
     }
+
+    // Load a runtime from `load_path` and cache it under `key_path`. Used by the losing
+    // side of the build rename race: its just-compiled artifacts are equivalent to the
+    // winner's (the cache key hashes the kernel name, source, flags, and compiler
+    // signature), and the winner's directory may not be visible to this client yet on
+    // shared filesystems.
+    std::shared_ptr<KernelRuntime> put(const std::filesystem::path& key_path, const std::filesystem::path& load_path) {
+        // Share `get`'s validity/diagnostic path so a bad artifact directory is reported
+        // identically no matter which write path caches it
+        EP_HOST_ASSERT(KernelRuntime::check_validity(load_path));
+        return cache[key_path] = std::make_shared<KernelRuntime>(load_path);
+    }
 };
 
 static auto kernel_runtime_cache = std::make_shared<KernelRuntimeCache>();
