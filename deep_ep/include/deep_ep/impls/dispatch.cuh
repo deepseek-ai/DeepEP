@@ -261,27 +261,39 @@ dispatch_impl(
 
         // Buffer layouts
         const auto token_layout = layout::TokenLayout(kNumHiddenBytes, kNumSFPacks * sizeof(sf_pack_t), kNumTopk, true);
-        const auto tma_buffer = layout::BufferLayout<true>(token_layout, kNumDispatchWarps, 1,
-            math::advance_ptr<int>(smem, kNumSmemBytesForNotify)).get_rank_buffer(dispatch_warp_idx).get_token_buffer(0);
+        constexpr int kNumTmaBuffers = kIsScaleupNVLink ? 2 : 1;
+        const auto warp_tma_buffers = layout::BufferLayout<true>(token_layout, kNumDispatchWarps, kNumTmaBuffers,
+            math::advance_ptr<int>(smem, kNumSmemBytesForNotify)).get_rank_buffer(dispatch_warp_idx);
         auto recv_buffer = layout::BufferLayout<false>(token_layout, kNumRanks, kNumMaxTokensPerRank, buffer);
         auto send_buffer = layout::BufferLayout<false>(token_layout, 1, kNumMaxTokensPerRank, recv_buffer.get_buffer_end_ptr());
         recv_buffer = recv_buffer.get_rank_buffer(rank_idx);
 
         // Init TMA
-        ptx::arrival_phase phase = 0;
-        const auto mbarrier_ptr = tma_buffer.get_mbarrier_ptr();
-        if (ptx::elect_one_sync())
-            ptx::mbarrier_init_with_fence(mbarrier_ptr, 1);
+        ptx::arrival_phase phase_0 = 0, phase_1 = 0;
+        #pragma unroll
+        for (int i = 0; i < kNumTmaBuffers; ++ i) {
+            const auto tma_buffer = warp_tma_buffers.get_token_buffer(i);
+            if (ptx::elect_one_sync())
+                ptx::mbarrier_init_with_fence(tma_buffer.get_mbarrier_ptr(), 1);
+        }
         __syncwarp();
 
         // Iterate all tokens
         const auto token_start = dispatch_warp_idx * kNumSMs + sm_idx;
         const auto token_stride = kNumDispatchWarps * kNumSMs;
-        for (int token_idx = token_start; token_idx < num_tokens; token_idx += token_stride) {
+        for (int token_idx = token_start, token_iter = 0;
+             token_idx < num_tokens; token_idx += token_stride, ++ token_iter) {
             const auto token_i64_idx = static_cast<int64_t>(token_idx);
+            const int tma_buffer_idx = token_iter & (kNumTmaBuffers - 1);
+            const auto tma_buffer = warp_tma_buffers.get_token_buffer(tma_buffer_idx);
+            const auto mbarrier_ptr = tma_buffer.get_mbarrier_ptr();
+            auto& phase = tma_buffer_idx == 0 ? phase_0 : phase_1;
 
             // Wait TMA store arrivals
-            ptx::tma_store_wait();
+            if constexpr (kIsScaleupNVLink)
+                ptx::tma_store_wait<1>();
+            else
+                ptx::tma_store_wait();
             __syncwarp();
 
             // Issue data TMA

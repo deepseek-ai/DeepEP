@@ -128,6 +128,8 @@ static void __instantiate_kernel() {{
 };
 
 constexpr int kNumNotifyWarps = 4;
+constexpr int kNumDirectNVLinkDispatchWarps = 14;
+constexpr int kNumDirectNVLinkTmaBuffers = 2;
 
 static int get_num_notify_smem_bytes(const int& num_ranks, const int& num_experts) {
     return math::align(num_ranks + num_experts, kNumNotifyWarps * 32) * sizeof(int);
@@ -185,8 +187,14 @@ static void launch_dispatch(void* x, void* sf,
     // Maximize shared memory utilization
     if (num_scaleout_ranks == 1) {
         const auto token_layout = get_dispatch_token_layout(hidden, elem_size, num_sf_packs, num_topk);
+        const int num_tma_buffers = is_scaleup_nvlink ? kNumDirectNVLinkTmaBuffers : 1;
+        const int max_num_dispatch_warps = is_scaleup_nvlink ?
+            kNumDirectNVLinkDispatchWarps : 32 - num_notify_warps;
         num_dispatch_warps = std::min<int>(
-            (num_smem_bytes - num_notify_smem_bytes) / token_layout.get_num_bytes<true>(), 32 - num_notify_warps);
+            (num_smem_bytes - num_notify_smem_bytes) /
+                (token_layout.get_num_bytes<true>() * num_tma_buffers),
+            std::min(32 - num_notify_warps, max_num_dispatch_warps));
+        EP_HOST_ASSERT(num_dispatch_warps > 0);
         num_threads = (num_notify_warps + num_dispatch_warps) * 32;
     } else {
         // Hybrid kernels
