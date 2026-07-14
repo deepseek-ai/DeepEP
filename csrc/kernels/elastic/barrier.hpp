@@ -21,7 +21,7 @@ public:
         bool sequential;
 
         // Parameters
-        ncclDevComm_t nccl_dev_comm;
+        jit::NoRefPtr nccl_dev_comm;
         ncclWindow_t nccl_window;
         void* workspace;
         int scaleout_rank_idx, scaleup_rank_idx;
@@ -53,7 +53,7 @@ static void __instantiate_kernel() {{
     }
 };
 
-static void launch_barrier(const ncclDevComm_t& nccl_dev_comm, const ncclWindow_t& nccl_window,
+static void launch_barrier(const jit::NoRefPtr& nccl_dev_comm, const ncclWindow_t& nccl_window,
                            void* workspace,
                            const int& scaleout_rank_idx, const int& scaleup_rank_idx,
                            const int& num_scaleout_ranks, const int& num_scaleup_ranks,

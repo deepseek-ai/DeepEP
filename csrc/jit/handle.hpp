@@ -2,11 +2,22 @@
 
 #include <cuda.h>
 #include <filesystem>
+#include <type_traits>
 #include <deep_ep/common/exception.cuh>
 
 #include "../utils/lazy_driver.hpp"
+#include "no_ref.hpp"
 
 namespace deep_ep::jit {
+
+template <typename arg_t>
+static void* get_kernel_arg_ptr(arg_t& arg) {
+    if constexpr (std::is_base_of_v<NoRefPtr, std::decay_t<arg_t>>) {
+        return arg.ptr;
+    } else {
+        return const_cast<void*>(static_cast<const void*>(&arg));
+    }
+}
 
 #if CUDART_VERSION >= 12080 and defined(EP_JIT_USE_RUNTIME_API)
 
@@ -63,9 +74,9 @@ static LaunchConfigHandle construct_launch_config(const KernelHandle& kernel,
     return config;
 }
 
-template<typename... ActTypes>
-static auto launch_kernel(const KernelHandle& kernel, const LaunchConfigHandle& config, ActTypes&&... args) {
-    void *ptr_args[] = { &args... };
+template <typename... arg_ts>
+static auto launch_kernel(const KernelHandle& kernel, const LaunchConfigHandle& config, arg_ts&&... args) {
+    void *ptr_args[] = {get_kernel_arg_ptr(args)...};
     return cudaLaunchKernelExC(&config, kernel, ptr_args);
 }
 
@@ -144,9 +155,9 @@ static LaunchConfigHandle construct_launch_config(const KernelHandle& kernel,
     return config;
 }
 
-template<typename... ActTypes>
-static auto launch_kernel(const KernelHandle& kernel, const LaunchConfigHandle& config, ActTypes&&... args) {
-    void *ptr_args[] = { &args... };
+template <typename... arg_ts>
+static auto launch_kernel(const KernelHandle& kernel, const LaunchConfigHandle& config, arg_ts&&... args) {
+    void *ptr_args[] = {get_kernel_arg_ptr(args)...};
     return lazy_cuLaunchKernelEx(&config, kernel, ptr_args, nullptr);
 }
 
