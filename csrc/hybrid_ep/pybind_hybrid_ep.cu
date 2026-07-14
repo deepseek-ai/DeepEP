@@ -9,6 +9,7 @@
 #include "hybrid_ep.cuh"
 #include "utils.cuh"
 #include "config.cuh"
+#include "pybind_hybrid_ep_utils.cuh"
 
 namespace py = pybind11;
 
@@ -109,6 +110,10 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
                        &HybridEpConfigInstance::num_of_stages_g2s_combine_api)
         .def_readwrite("num_of_stages_s2g_combine_api",
                        &HybridEpConfigInstance::num_of_stages_s2g_combine_api)
+        .def_readwrite("num_of_stages_g2s_unpermute_block",
+                       &HybridEpConfigInstance::num_of_stages_g2s_unpermute_block)
+        .def_readwrite("num_of_stages_s2g_unpermute_block",
+                       &HybridEpConfigInstance::num_of_stages_s2g_unpermute_block)
         .def_readwrite("num_of_tokens_per_chunk_combine_api",
                        &HybridEpConfigInstance::num_of_tokens_per_chunk_combine_api)
         .def_readwrite("num_of_tokens_per_group_combine_api",
@@ -118,6 +123,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         .def_readwrite(
             "num_of_additional_in_flight_s2g_combine_api",
             &HybridEpConfigInstance::num_of_additional_in_flight_s2g_combine_api)
+        .def_readwrite(
+            "num_of_additional_in_flight_s2g_unpermute_block_combine_api",
+            &HybridEpConfigInstance::num_of_additional_in_flight_s2g_unpermute_block_combine_api)
         .def_readwrite("backward_combine_api",
                        &HybridEpConfigInstance::backward_combine_api)
         .def_readwrite("device_side_sync_combine_api",
@@ -170,7 +178,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         .def_readwrite("dense_to_expert_map", &HandleImpl::dense_to_expert_map);
 
     pybind11::class_<HybridEPBuffer>(m, "HybridEPBuffer")
-        .def(py::init<py::object, BufferConfig, int, int, int, std::string, bool, bool, bool>(),
+        .def(py::init(&hybrid_ep_buffer_init),
             py::arg("process_group"),
             py::arg("config"),
             py::arg("local_rank"),
@@ -180,8 +188,11 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
             py::arg("load_cached_kernels") = false,
             py::arg("use_shared_buffer") = true,
             py::arg("enable_custom_allgather") = true)
-        .def("update_buffer", &HybridEPBuffer::update_buffer, py::arg("config"))
-        .def("metadata_preprocessing", &HybridEPBuffer::metadata_preprocessing,
+        .def("update_buffer", 
+             hybrid_ep_buffer_update_buffer(&HybridEPBuffer::update_buffer),
+             py::arg("config"))
+        .def("metadata_preprocessing", 
+             hybrid_ep_buffer_metadata_preprocessing(&HybridEPBuffer::metadata_preprocessing),
              py::kw_only(),
              py::arg("config"),
              py::arg("routing_map"),
@@ -191,18 +202,24 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
              py::arg("enable_permute") = false,
              py::arg("fuse_permute_dispatch") = false,
              py::arg("non_blocking") = false)
-        .def("dispatch", &HybridEPBuffer::dispatch, py::kw_only(),
+        .def("dispatch", 
+             hybrid_ep_buffer_dispatch(&HybridEPBuffer::dispatch),
+             py::kw_only(),
              py::arg("hidden"),
              py::arg("probs") = c10::nullopt,
              py::arg("scaling_factor") = c10::nullopt,
              py::arg("handle"),
              py::arg("with_probs"))
-        .def("combine", &HybridEPBuffer::combine, py::kw_only(),
+        .def("combine", 
+             hybrid_ep_buffer_combine(&HybridEPBuffer::combine),
+             py::kw_only(),
              py::arg("hidden"),
              py::arg("probs") = c10::nullopt,
              py::arg("handle"),
              py::arg("with_probs"))
-        .def("dispatch_with_permute", &HybridEPBuffer::dispatch_with_permute, py::kw_only(),
+        .def("dispatch_with_permute", 
+             hybrid_ep_buffer_dispatch_with_permute(&HybridEPBuffer::dispatch_with_permute),
+             py::kw_only(),
              py::arg("hidden"),
              py::arg("probs") = c10::nullopt,
              py::arg("scaling_factor") = c10::nullopt,
@@ -211,7 +228,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
              py::arg("fuse_permute_dispatch") = false,
              py::arg("non_blocking") = false,
              py::arg("with_probs") = false)
-        .def("combine_with_unpermute", &HybridEPBuffer::combine_with_unpermute, py::kw_only(),
+        .def("combine_with_unpermute", 
+             hybrid_ep_buffer_combine_with_unpermute(&HybridEPBuffer::combine_with_unpermute),
+             py::kw_only(),
              py::arg("hidden"),
              py::arg("probs") = c10::nullopt,
              py::arg("handle"),
