@@ -649,6 +649,32 @@ public:
         }
     }
 
+    static int64_t get_comm_buffer_size(const int& num_max_tokens_per_rank,
+                                        const int& hidden, const int& num_sf_packs, const int& num_topk,
+                                        const int& elem_size,
+                                        const int& num_scaleout_ranks, const int& num_scaleup_ranks,
+                                        const bool& is_scaleup_nvlink,
+                                        const bool& allow_multiple_reduction) {
+        const auto num_dispatch_bytes = get_dispatch_buffer_size(
+            num_max_tokens_per_rank, hidden, num_sf_packs, num_topk, elem_size,
+            num_scaleout_ranks, num_scaleup_ranks,
+            is_scaleup_nvlink);
+        const auto num_combine_bytes = get_combine_buffer_size(
+            num_max_tokens_per_rank, hidden, num_topk,
+            num_scaleout_ranks, num_scaleup_ranks,
+            is_scaleup_nvlink, allow_multiple_reduction);
+        return math::align(std::max(num_dispatch_bytes, num_combine_bytes), symmetric::kNumAlignmentBytes);
+    }
+
+    static int64_t get_direct_recv_x_buffer_size(const int& num_max_tokens_per_rank,
+                                                 const int& hidden, const int& elem_size,
+                                                 const int& num_scaleout_ranks, const int& num_scaleup_ranks) {
+        const auto num_ranks = num_scaleup_ranks * num_scaleout_ranks;
+        return math::align<int64_t>(
+            static_cast<int64_t>(num_ranks) * num_max_tokens_per_rank * hidden * elem_size,
+            symmetric::kNumAlignmentBytes);
+    }
+
     static int64_t calculate_buffer_size(const int64_t& nccl_comm,
                                          const int& num_max_tokens_per_rank, const int& hidden,
                                          int num_topk, const bool& use_fp8_dispatch,
@@ -670,19 +696,21 @@ public:
         // Dispatch size
         const auto elem_size = use_fp8_dispatch ? sizeof(__nv_fp8_e4m3) : sizeof(nv_bfloat16);
         const auto num_sf_packs = use_fp8_dispatch ? math::ceil_div(hidden, 32) : 0; // An approximation for number of SF packs
-        const auto num_dispatch_bytes = get_dispatch_buffer_size(
-            num_max_tokens_per_rank, hidden, num_sf_packs, num_topk, elem_size,
-            num_scaleout_ranks, num_scaleup_ranks,
-            is_scaleup_nvlink);
-
-        // Combine layout
-        const auto num_combine_bytes = get_combine_buffer_size(
-            num_max_tokens_per_rank, hidden, num_topk,
+        auto num_comm_bytes = get_comm_buffer_size(
+            num_max_tokens_per_rank, hidden, num_sf_packs, num_topk,
+            elem_size,
             num_scaleout_ranks, num_scaleup_ranks,
             is_scaleup_nvlink, allow_multiple_reduction);
 
-        // Return the maximum of those layouts, aligned to 2 MB
-        return math::align(std::max(num_dispatch_bytes, num_combine_bytes), symmetric::kNumAlignmentBytes);
+        if (get_env<int>("EP_V2_EXPERIMENTAL_DIRECT_RECV_X", 0) != 0) {
+            num_comm_bytes += get_direct_recv_x_buffer_size(
+                num_max_tokens_per_rank, hidden, elem_size,
+                num_scaleout_ranks, num_scaleup_ranks);
+        }
+
+        // Return the maximum of dispatch/combine layouts, aligned to 2 MB.
+        // Direct recv_x appends a window-backed output region.
+        return num_comm_bytes;
     }
 
     static symmetric::cpu_handle_t create_cpu_handle(const int64_t& num_cpu_bytes) {
@@ -964,6 +992,28 @@ public:
                        num_max_tokens_per_rank, hidden, num_sf_packs, num_topk, x.element_size(),
                        nccl_context->num_scaleout_ranks, nccl_context->num_scaleup_ranks,
                        nccl_context->is_scaleup_nvlink) <= num_buffer_bytes);
+        const bool use_direct_recv_x = get_env<int>("EP_V2_EXPERIMENTAL_DIRECT_RECV_X", 0) != 0;
+        if (use_direct_recv_x) {
+            EP_HOST_ASSERT(not cached_mode and
+                           "EP_V2_EXPERIMENTAL_DIRECT_RECV_X currently supports non-cached dispatch only");
+            EP_HOST_ASSERT(not do_expand and
+                           "EP_V2_EXPERIMENTAL_DIRECT_RECV_X currently supports non-expanded dispatch only");
+            EP_HOST_ASSERT(not previous_event_before_epilogue.has_value() and
+                           "EP_V2_EXPERIMENTAL_DIRECT_RECV_X writes recv_x in dispatch and cannot honor previous_event_before_epilogue");
+        }
+        const auto direct_recv_x_buffer_offset = use_direct_recv_x ? get_comm_buffer_size(
+            num_max_tokens_per_rank, hidden, num_sf_packs, num_topk, x.element_size(),
+            nccl_context->num_scaleout_ranks, nccl_context->num_scaleup_ranks,
+            nccl_context->is_scaleup_nvlink, allow_multiple_reduction) : 0;
+        void* direct_recv_x_ptr = use_direct_recv_x ? math::advance_ptr(buffer, direct_recv_x_buffer_offset) : nullptr;
+        if (use_direct_recv_x) {
+            const auto direct_recv_x_bytes = get_direct_recv_x_buffer_size(
+                num_max_tokens_per_rank, hidden, x.element_size(),
+                nccl_context->num_scaleout_ranks, nccl_context->num_scaleup_ranks);
+            EP_HOST_ASSERT(direct_recv_x_buffer_offset + direct_recv_x_bytes <= num_gpu_buffer_bytes and
+                           "EP_V2_EXPERIMENTAL_DIRECT_RECV_X requires extra GPU buffer bytes; "
+                           "pass a larger num_bytes if the buffer was sized manually");
+        }
 
         // Ready and clean host workspace for this round
         const auto host_workspace_layout = layout::WorkspaceLayout(
@@ -1000,6 +1050,8 @@ public:
                         num_smem_bytes,
                         num_qps, num_gpu_timeout_cycles,
                         cached_mode, do_cpu_sync,
+                        use_direct_recv_x,
+                        direct_recv_x_ptr,
                         comm_stream);
 
         // Received token counters
@@ -1073,7 +1125,17 @@ public:
         // Allocate received tensors
         // `recv_src_metadata` includes source token indices and buffer slot indices
         const auto num_allocated_tokens = do_expand ? num_expanded_tokens : num_recv_tokens;
-        auto recv_x = torch::empty({num_allocated_tokens, hidden}, x.options());
+        torch::Tensor recv_x;
+        if (use_direct_recv_x) {
+            // Experimental: `recv_x` is carved from the registered NCCL symmetric window tail.
+            // Dispatch writes hidden states here directly and uses the epilogue only for metadata/top-k.
+            recv_x = torch::from_blob(
+                direct_recv_x_ptr,
+                {num_allocated_tokens, hidden},
+                x.options());
+        } else {
+            recv_x = torch::empty({num_allocated_tokens, hidden}, x.options());
+        }
         auto recv_sf = std::optional<torch::Tensor>();
         auto recv_topk_idx = std::optional<torch::Tensor>();
         auto recv_topk_weights = std::optional<torch::Tensor>();
@@ -1141,6 +1203,7 @@ public:
                                       jit::device_runtime->get_num_sms(),
                                       jit::device_runtime->get_num_smem_bytes(),
                                       num_channels,
+                                      use_direct_recv_x,
                                       do_expand, cached_mode,
                                       do_zero_padding,
                                       comm_stream);

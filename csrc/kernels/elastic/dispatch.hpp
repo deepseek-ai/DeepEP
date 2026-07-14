@@ -18,6 +18,7 @@ public:
         bool is_scaleup_nvlink;
         bool do_cpu_sync;
         bool reuse_slot_indices;
+        bool direct_recv_x;
         int num_notify_warps;
         int num_dispatch_warps; // For hybrid dispatch
         int num_scaleout_warps, num_forward_warps; // For direct dispatch
@@ -37,6 +38,7 @@ public:
         int* num_unaligned_recv_tokens_per_expert;
         int* dst_buffer_slot_idx;
         int* token_metadata_at_forward;
+        void* direct_recv_x_ptr;
         int num_tokens;
         int sf_token_stride, sf_hidden_stride;
         jit::NoRefPtr nccl_dev_comm;
@@ -52,10 +54,11 @@ public:
         std::string header_name, func_name;
         if (args.num_scaleout_ranks == 1) {
             header_name = "dispatch";
-            func_name = fmt::format("dispatch_impl<{}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}>",
+            func_name = fmt::format("dispatch_impl<{}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}>",
                 args.is_scaleup_nvlink,
                 args.do_cpu_sync,
                 args.reuse_slot_indices,
+                args.direct_recv_x,
                 args.launch_args.grid_dim.first,
                 args.num_notify_warps, args.num_dispatch_warps,
                 args.num_scaleup_ranks,
@@ -65,9 +68,10 @@ public:
                 args.num_qps, args.num_timeout_cycles);
         } else {
             header_name = "hybrid_dispatch";
-            func_name = fmt::format("hybrid_dispatch_impl<{}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}>",
+            func_name = fmt::format("hybrid_dispatch_impl<{}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}>",
                 args.do_cpu_sync,
                 args.reuse_slot_indices,
+                args.direct_recv_x,
                 args.launch_args.grid_dim.first,
                 args.num_notify_warps, args.num_scaleout_warps, args.num_forward_warps,
                 args.num_scaleout_ranks, args.num_scaleup_ranks,
@@ -99,6 +103,7 @@ static void __instantiate_kernel() {{
                 args.psum_num_recv_tokens_per_expert,
                 args.num_unaligned_recv_tokens_per_expert,
                 args.dst_buffer_slot_idx,
+                args.direct_recv_x_ptr,
                 args.num_tokens,
                 args.sf_token_stride, args.sf_hidden_stride,
                 args.nccl_dev_comm, args.nccl_window,
@@ -116,6 +121,7 @@ static void __instantiate_kernel() {{
                 args.num_unaligned_recv_tokens_per_expert,
                 args.dst_buffer_slot_idx,
                 args.token_metadata_at_forward,
+                args.direct_recv_x_ptr,
                 args.num_tokens,
                 args.sf_token_stride, args.sf_hidden_stride,
                 args.nccl_dev_comm, args.nccl_window,
@@ -162,10 +168,13 @@ static void launch_dispatch(void* x, void* sf,
                             const int& num_qps, const int64_t& num_timeout_cycles,
                             const bool& cached_mode,
                             const bool& do_cpu_sync,
+                            const bool& direct_recv_x,
+                            void* direct_recv_x_ptr,
                             const at::cuda::CUDAStream& stream) {
     // Cached mode does not support expert token counting
     if (cached_mode)
         EP_HOST_ASSERT(cumulative_local_expert_recv_stats == nullptr);
+    EP_HOST_ASSERT(not (cached_mode and direct_recv_x));
 
     // Utils
     const auto num_ranks = num_scaleout_ranks * num_scaleup_ranks;
@@ -200,6 +209,7 @@ static void launch_dispatch(void* x, void* sf,
         .is_scaleup_nvlink = is_scaleup_nvlink,
         .do_cpu_sync = do_cpu_sync,
         .reuse_slot_indices = reuse_slot_indices,
+        .direct_recv_x = direct_recv_x,
         .num_notify_warps = num_notify_warps,
         .num_dispatch_warps = num_dispatch_warps,
         .num_scaleout_warps = num_scaleout_warps, .num_forward_warps = num_forward_warps,
@@ -216,6 +226,7 @@ static void launch_dispatch(void* x, void* sf,
         .num_unaligned_recv_tokens_per_expert = num_unaligned_recv_tokens_per_expert,
         .dst_buffer_slot_idx = dst_buffer_slot_idx,
         .token_metadata_at_forward = token_metadata_at_forward,
+        .direct_recv_x_ptr = direct_recv_x_ptr,
         .num_tokens = num_tokens,
         .sf_token_stride = sf_token_stride, .sf_hidden_stride = sf_hidden_stride,
         .nccl_dev_comm = nccl_dev_comm, .nccl_window = nccl_window,
@@ -234,6 +245,7 @@ public:
     struct Args {
         // Templated arguments
         bool do_expand, cached_mode, do_zero_padding;
+        bool skip_recv_x_copy;
         int num_channels;
         int num_warps;
         int num_scaleout_ranks, num_scaleup_ranks;
@@ -264,10 +276,11 @@ public:
 using namespace deep_ep::elastic;
 
 static void __instantiate_kernel() {{
-    auto ptr = reinterpret_cast<void*>(&dispatch_copy_epilogue_impl<{}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}>);
+    auto ptr = reinterpret_cast<void*>(&dispatch_copy_epilogue_impl<{}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}>);
 }}
 )",
                            args.do_expand, args.cached_mode, args.do_zero_padding,
+                           args.skip_recv_x_copy,
                            args.launch_args.grid_dim.first, args.num_channels, args.num_warps,
                            args.num_scaleout_ranks, args.num_scaleup_ranks,
                            args.num_hidden_bytes, args.num_sf_packs,
@@ -306,6 +319,7 @@ static void launch_dispatch_copy_epilogue(void* buffer, void* workspace,
                                           const int& num_scaleout_ranks, const int& num_scaleup_ranks,
                                           const int& num_sms, const int& num_smem_bytes,
                                           const int& num_channels,
+                                          const bool& skip_recv_x_copy,
                                           const bool& do_expand, const bool& cached_mode,
                                           const bool& do_zero_padding,
                                           const at::cuda::CUDAStream& stream) {
@@ -317,6 +331,7 @@ static void launch_dispatch_copy_epilogue(void* buffer, void* workspace,
     // Generate, build and launch
     const DispatchCopyEpilogueRuntime::Args args = {
         .do_expand = do_expand, .cached_mode = cached_mode, .do_zero_padding = do_zero_padding,
+        .skip_recv_x_copy = skip_recv_x_copy,
         .num_channels = num_channels, .num_warps = num_warps,
         .num_scaleout_ranks = num_scaleout_ranks, .num_scaleup_ranks = num_scaleup_ranks,
         .num_hidden_bytes = num_hidden_bytes, .num_sf_packs = num_sf_packs,

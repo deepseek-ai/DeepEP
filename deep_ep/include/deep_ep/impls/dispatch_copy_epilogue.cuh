@@ -9,6 +9,7 @@
 namespace deep_ep::elastic {
 
 template <bool kDoExpand, bool kCachedMode, bool kDoZeroPadding,
+          bool kSkipRecvXCopy,
           // NOTES: this channel concept only applies for scale-out ranks
           int kNumSMs, int kNumChannels, int kNumWarps,
           int kNumScaleoutRanks, int kNumScaleupRanks,
@@ -44,9 +45,16 @@ dispatch_copy_epilogue_impl(void* buffer, void* workspace,
     // Buffer layouts
     extern __shared__ __align__(ptx::kNumTMAAlignBytes) int8_t smem[];
     const auto token_layout = layout::TokenLayout(kNumHiddenBytes, kNumSFPacks * sizeof(sf_pack_t), kNumTopk, true);
+    constexpr int kNumMetadataBytes = math::constexpr_align(
+        kNumTopk * (int(sizeof(int)) + int(sizeof(float))) + (1 + kNumTopk) * int(sizeof(int)),
+        ptx::kNumTMAAlignBytes);
+    constexpr int kNumSidecarBytes =
+        math::constexpr_align(kNumSFPacks * int(sizeof(sf_pack_t)), ptx::kNumTMAAlignBytes) +
+        kNumMetadataBytes;
     const auto tma_buffer = layout::BufferLayout<true>(token_layout, kNumWarps, 1, smem)
         .get_rank_buffer(warp_idx).get_token_buffer(0);
     const auto scaleup_buffer = layout::BufferLayout<false>(token_layout, kNumScaleupRanks, kNumScaleoutRanks * kNumMaxTokensPerRank, buffer);
+    const auto workspace_layout = layout::WorkspaceLayout(workspace, kNumScaleoutRanks, kNumScaleupRanks, kNumExperts);
 
     // Init TMA
     ptx::arrival_phase phase = 0;
@@ -78,7 +86,8 @@ dispatch_copy_epilogue_impl(void* buffer, void* workspace,
             current_rank_start = current_rank_end;
             current_rank_end = ptx::exchange(stored_psum_num_recv_tokens, stored_lane_idx);
         }
-        const auto buffer_token = scaleup_buffer.get_rank_buffer(current_rank_idx).get_token_buffer(i - current_rank_start);
+        const auto current_rank_token_idx = i - current_rank_start;
+        const auto buffer_token = scaleup_buffer.get_rank_buffer(current_rank_idx).get_token_buffer(current_rank_token_idx);
 
         // Wait buffer releases
         ptx::tma_store_wait();
@@ -87,9 +96,15 @@ dispatch_copy_epilogue_impl(void* buffer, void* workspace,
         // Issue TMA loads
         // Including all stuffs: data, SF, top-k metadata
         if (ptx::elect_one_sync()) {
-            ptx::tma_load_1d(tma_buffer.get_base_ptr(), buffer_token.get_base_ptr(),
-                             mbarrier_ptr, tma_buffer.get_num_bytes<false>());
-            ptx::mbarrier_arrive_and_set_tx(mbarrier_ptr, tma_buffer.get_num_bytes<false>());
+            if constexpr (kSkipRecvXCopy) {
+                ptx::tma_load_1d(tma_buffer.get_sf_ptr(), buffer_token.get_sf_ptr(),
+                                 mbarrier_ptr, kNumSidecarBytes);
+                ptx::mbarrier_arrive_and_set_tx(mbarrier_ptr, kNumSidecarBytes);
+            } else {
+                ptx::tma_load_1d(tma_buffer.get_base_ptr(), buffer_token.get_base_ptr(),
+                                 mbarrier_ptr, tma_buffer.get_num_bytes<false>());
+                ptx::mbarrier_arrive_and_set_tx(mbarrier_ptr, tma_buffer.get_num_bytes<false>());
+            }
         }
         __syncwarp();
 
@@ -135,10 +150,12 @@ dispatch_copy_epilogue_impl(void* buffer, void* workspace,
         }
 
         // Issue TMA stores for data
-        if (kDoExpand ? (dst_tensor_idx >= 0) : ptx::elect_one_sync()) {
-            ptx::tma_store_1d(math::advance_ptr(recv_x, static_cast<int64_t>(dst_tensor_idx) * kNumHiddenBytes),
-                              tma_buffer.get_hidden_ptr(), kNumHiddenBytes);
-            ptx::tma_store_commit();
+        if constexpr (not kSkipRecvXCopy) {
+            if (kDoExpand ? (dst_tensor_idx >= 0) : ptx::elect_one_sync()) {
+                ptx::tma_store_1d(math::advance_ptr(recv_x, static_cast<int64_t>(dst_tensor_idx) * kNumHiddenBytes),
+                                  tma_buffer.get_hidden_ptr(), kNumHiddenBytes);
+                ptx::tma_store_commit();
+            }
         }
         __syncwarp();
 
@@ -207,11 +224,11 @@ dispatch_copy_epilogue_impl(void* buffer, void* workspace,
         }
     }
 
+
     // Maintain linked list's ending
     // Or you can understand it as writing the tail at once
     if constexpr (kDoCreateLinkedList) {
         constexpr int kNumScaleupRanksPerLane = math::constexpr_ceil_div(kNumScaleupRanks, 32);
-        const auto workspace_layout = layout::WorkspaceLayout(workspace, kNumScaleoutRanks, kNumScaleupRanks, kNumExperts);
         for (int i = global_warp_idx; i < kNumChannels; i += kNumSMs * kNumWarps) {
             #pragma unroll
             for (int j = 0; j < kNumScaleupRanksPerLane; ++ j) {
@@ -320,6 +337,7 @@ dispatch_copy_epilogue_impl(void* buffer, void* workspace,
             pad_idx += kNumSMs * kNumWarps;
         }
     }
+
 }
 
 }  // namespace deep_ep::elastic
