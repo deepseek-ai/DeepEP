@@ -113,7 +113,9 @@ struct HybridEpConfigInstance {
   int num_of_ranks_per_node;
   int num_of_nodes;
   int pad_multiple;
-  int topk;  // 0 = sparse bool routing map; >0 = dense int16 topk_idx mode
+  // 0 = sparse bool routing map; >0 = dense int16 topk_idx mode. Dense mode
+  // specializes preprocessing kernels by TOPK, so expected K values should be bounded.
+  int topk;
 
   /*
    *  Metadata-preprocessing API Config

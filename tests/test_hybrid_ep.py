@@ -79,6 +79,8 @@ def assert_bitwise_equal(name: str, ref: torch.Tensor, test: torch.Tensor, conte
 def supports_dense_topk_routing() -> bool:
     """Return whether the installed HybridEP supports dense topk_idx metadata."""
     try:
+        # Test-only compatibility check: production code still falls back to sparse routing
+        # when a dense-capable build receives a layout outside dense kernel limits.
         return hasattr(hybrid_ep_cpp.HybridEpConfigInstance(), "topk")
     except (TypeError, ValueError, AttributeError):
         return False
@@ -137,72 +139,28 @@ def test_hybrid_ep_correctness(buffer: deep_ep.HybridEPBuffer, ref: TorchRef, us
     if dist.get_rank() == 0:
         print(f'\n=== Correctness Check ({dtype_str}, {dist.get_world_size()} ranks) ===', flush=True)
 
-    # Dispatch correctness check
-    for with_probs in [True, False]:
-        # The check for the dispatch
-        dispatched_hidden_ref, dispatched_probs_ref, dispatched_scaling_factor_ref = (
-            ref.dispatch(
-                hidden, routing_map, probs if with_probs else None, scaling_factor
-            )
-        )
-        (
-            dispatched_hidden,
-            dispatched_probs,
-            dispatched_scaling_factor,
-            handle,
-        ) = buffer.dispatch(
-            hidden=hidden, scaling_factor=scaling_factor, routing_map=routing_map,
-            probs=probs if with_probs else None,
-        )
-
-        assert bitwise_equal(dispatched_hidden_ref, dispatched_hidden)
-        if dispatched_probs is not None and dispatched_probs_ref is not None:
-            start, end = ref._local_expert_range_per_node()
-            masked_probs = torch.zeros_like(dispatched_probs)
-            masked_probs[:, start:end] = dispatched_probs[:, start:end]
-            assert bitwise_equal(dispatched_probs_ref, dispatched_probs[:, start:end])
-            dispatched_probs = masked_probs
-        if (
-            dispatched_scaling_factor is not None
-            and dispatched_scaling_factor_ref is not None
-        ):
-            assert bitwise_equal(
-                dispatched_scaling_factor_ref, dispatched_scaling_factor
-            )
-
-        _, _, _, num_dispatched_tokens, local_expert_routing_map, _, _ = handle
-        num_dispatched_tokens = num_dispatched_tokens.cpu()
-        local_expert_routing_map = local_expert_routing_map[
-            : num_dispatched_tokens.item()
-        ]
-        # Simulate the permute and expert and unpermute. The expert is identity op
-        copy_times = local_expert_routing_map.sum(dim=1)
-        dispatched_hidden = dispatched_hidden.to(torch.bfloat16)  
-        # The combine only support bf16
-        hidden_to_combine = dispatched_hidden * copy_times.unsqueeze(1)
-        probs_to_combine = dispatched_probs
-
-        # The check for the combine
-        combined_hidden, combined_probs = buffer.combine(
-            hidden_to_combine, probs_to_combine, handle
-        )
-
-        # The reconstucted value should be TOPK times larger than the input hidden
-        combined_hidden = combined_hidden / TOPK
-
-        assert torch.allclose(combined_hidden, hidden.to(torch.bfloat16), atol=2e-5, rtol=1e-2)
-        if combined_probs is not None and probs is not None:
-            assert bitwise_equal(combined_probs, probs)
-
-    dist.barrier()
-    if dist.get_rank() == 0:
-        print('  dispatch+combine API: PASS', flush=True)
-
-    # Dense top-k routing dispatch correctness check. Older hybrid-ep branches do
-    # not expose dense topk_idx metadata yet, so skip this block when unsupported.
+    # Dispatch correctness check. Older hybrid-ep branches do not expose dense
+    # topk_idx metadata yet, so skip the dense routing mode when unsupported.
+    routing_modes = [("sparse routing", False)]
     if supports_dense_topk:
+        routing_modes.append(("dense topk_idx", True))
+
+    for routing_label, use_dense_topk in routing_modes:
         for with_probs in [True, False]:
-            context = f" (dense topk_idx, with_probs={with_probs})"
+            context = f" ({routing_label}, with_probs={with_probs})"
+            dispatch_kwargs = {"hidden": hidden, "scaling_factor": scaling_factor}
+            if use_dense_topk:
+                dispatch_kwargs.update({
+                    "topk_idx": topk_idx,
+                    "topk_weights": topk_weights if with_probs else None,
+                    "num_of_experts": NUM_OF_EXPERTS,
+                })
+            else:
+                dispatch_kwargs.update({
+                    "routing_map": routing_map,
+                    "probs": probs if with_probs else None,
+                })
+
             dispatched_hidden_ref, dispatched_probs_ref, dispatched_scaling_factor_ref = (
                 ref.dispatch(
                     hidden, routing_map, probs if with_probs else None, scaling_factor
@@ -213,16 +171,13 @@ def test_hybrid_ep_correctness(buffer: deep_ep.HybridEPBuffer, ref: TorchRef, us
                 dispatched_probs_dense,
                 dispatched_scaling_factor_dense,
                 handle_dense,
-            ) = buffer.dispatch(
-                hidden=hidden, scaling_factor=scaling_factor, topk_idx=topk_idx,
-                topk_weights=topk_weights if with_probs else None, num_of_experts=NUM_OF_EXPERTS,
-            )
+            ) = buffer.dispatch(**dispatch_kwargs)
 
-            assert_bitwise_equal("Dense dispatch hidden", dispatched_hidden_ref, dispatched_hidden_dense, context)
-            assert_bitwise_equal("Dense dispatch scaling_factor", dispatched_scaling_factor_ref, dispatched_scaling_factor_dense, context)
+            assert_bitwise_equal("Dispatch hidden", dispatched_hidden_ref, dispatched_hidden_dense, context)
+            assert_bitwise_equal("Dispatch scaling_factor", dispatched_scaling_factor_ref, dispatched_scaling_factor_dense, context)
             if dispatched_probs_dense is not None and dispatched_probs_ref is not None:
                 start, end = ref._local_expert_range_per_node()
-                assert_bitwise_equal("Dense dispatch probs", dispatched_probs_ref, dispatched_probs_dense[:, start:end], context)
+                assert_bitwise_equal("Dispatch probs", dispatched_probs_ref, dispatched_probs_dense[:, start:end], context)
                 masked_probs = torch.zeros_like(dispatched_probs_dense)
                 masked_probs[:, start:end] = dispatched_probs_dense[:, start:end]
                 dispatched_probs_dense = masked_probs
@@ -240,14 +195,16 @@ def test_hybrid_ep_correctness(buffer: deep_ep.HybridEPBuffer, ref: TorchRef, us
             combined_hidden = combined_hidden / TOPK
 
             assert torch.allclose(combined_hidden, hidden.to(torch.bfloat16), atol=2e-5, rtol=1e-2), \
-                f"Dense combine hidden mismatch{context}"
+                f"Combine hidden mismatch{context}"
             if combined_probs is not None and probs is not None:
-                assert_bitwise_equal("Dense combine probs", probs, combined_probs, context)
+                assert_bitwise_equal("Combine probs", probs, combined_probs, context)
 
         dist.barrier()
         if dist.get_rank() == 0:
-            print('  dispatch+combine API (dense routing): PASS', flush=True)
-    else:
+            dense_suffix = " (dense routing)" if use_dense_topk else ""
+            print(f'  dispatch+combine API{dense_suffix}: PASS', flush=True)
+
+    if not supports_dense_topk:
         dist.barrier()
         if dist.get_rank() == 0:
             print('  dispatch+combine API (dense routing): SKIP (unsupported)', flush=True)
@@ -255,10 +212,6 @@ def test_hybrid_ep_correctness(buffer: deep_ep.HybridEPBuffer, ref: TorchRef, us
     # Dispatch with permute correctness check. Dense topk_idx mode exercises
     # scan with enable_permute=True, i.e. the path that produces
     # dense_chunk_layout and dense_to_expert_map.
-    routing_modes = [("sparse routing", False)]
-    if supports_dense_topk:
-        routing_modes.append(("dense topk_idx", True))
-
     for routing_label, use_dense_topk in routing_modes:
         for fuse_permute_dispatch in [False, True]:
             for with_probs in [True, False]:

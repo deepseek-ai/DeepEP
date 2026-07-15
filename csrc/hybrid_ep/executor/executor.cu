@@ -33,6 +33,8 @@ torch::Tensor Executor::allgather_routing_map(
     auto num_of_tokens_per_rank = local_routing_map.size(-2);
     auto group_size = process_group.attr("size")().cast<int>();
     bool dense_routing = (config.topk > 0);
+    // Custom allgather requires 16B-aligned payloads. Dense int16 routing falls back
+    // to NCCL when num_tokens * TOPK * sizeof(int16_t) is not aligned.
     bool custom_allgather_aligned = (local_routing_map.numel() * local_routing_map.element_size()) % 16 == 0;
     if (!dense_routing) {
         assert(num_cols == config.num_of_experts_per_rank * config.num_of_ranks_per_node * config.num_of_nodes);
