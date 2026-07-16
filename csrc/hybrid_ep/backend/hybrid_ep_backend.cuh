@@ -76,6 +76,14 @@ using Copy_t =
     >::type
   >::type;
 
+template<int NUM_OF_FLOATS>
+inline __device__ void scalar_copy_float_slice(float* dst, const float* src) {
+  #pragma unroll
+  for(int i = 0; i < NUM_OF_FLOATS; i++){
+    dst[i] = src[i];
+  }
+}
+
 enum scan_state{
   EMPTY = 0, 
   PRIV_SUM = 1 
@@ -399,17 +407,22 @@ struct combine_kernel_dynamic_shared_memory_buffer_t<NUM_OF_STAGES_G2S, NUM_OF_S
   alignas(128) uint16_t inter_node_token_S2G_buffer[NUM_OF_STAGES_S2G][HIDDEN_DIM];
 
   // Shared memory prob buffer for intra node red warp group G2S data movement. Should be 16B alignment so can be used with TMA. 128B is too strict.
-  // Only used in BW combine.
-  alignas(16) float intra_node_prob_G2S_buffer[NUM_OF_STAGES_G2S][NUM_OF_EXPERTS_PER_RANK * NUM_OF_RANKS_PER_NODE];
+  // Only used in BW combine. Only the source rank's E_per_rank slice is loaded (sparse prob optimization).
+  alignas(16) float intra_node_prob_G2S_buffer[NUM_OF_STAGES_G2S][NUM_OF_EXPERTS_PER_RANK];
   // Shared memory prob buffer for intra node red warp group S2G data movement. Should be 16B alignment so can be used with TMA. 128B is too strict.
   // Only used in BW combine.
   alignas(16) float intra_node_prob_S2G_buffer[NUM_OF_STAGES_S2G][NUM_OF_EXPERTS_PER_RANK * NUM_OF_RANKS_PER_NODE];
   // Shared memory prob buffer for inter node red warp group G2S data movement. Should be 16B alignment so can be used with TMA. 128B is too strict.
-  // Only used in BW combine.
+  // Only used in BW combine. Local NVLink sources load one E_per_rank slice; remote RDMA sources load a full E*R vector.
   alignas(16) float inter_node_prob_G2S_buffer[NUM_OF_STAGES_G2S][NUM_OF_EXPERTS_PER_RANK * NUM_OF_RANKS_PER_NODE];
   // Shared memory prob buffer for inter node red warp group S2G data movement. Should be 16B alignment so can be used with TMA. 128B is too strict.
   // Only used in BW combine.
   alignas(16) float inter_node_prob_S2G_buffer[NUM_OF_STAGES_S2G][NUM_OF_EXPERTS_PER_RANK * NUM_OF_RANKS_PER_NODE * NUM_OF_NODES];
+
+  // Source rank ID for each intra-node G2S prob stage, so the reduction warp group knows where to place the E_per_rank slice.
+  int intra_node_prob_src_rank_G2S_buffer[NUM_OF_STAGES_G2S];
+  // Source rank ID for each local-source inter-node G2S prob stage.
+  int inter_node_prob_src_rank_G2S_buffer[NUM_OF_STAGES_G2S];
 
   // Shared memory mbarrier that protect intra node red warp group G2S token entry. 1st for producer->consumer, 2nd for consumer->producer. Should be 8B alignment(natural alignment).
   alignas(8) uint64_t intra_node_mbarrier_G2S_buffer[NUM_OF_STAGES_G2S][2];
@@ -446,11 +459,14 @@ struct combine_kernel_dynamic_shared_memory_buffer_t<NUM_OF_STAGES_G2S, NUM_OF_S
   alignas(128) uint16_t inter_node_token_S2G_buffer[NUM_OF_STAGES_S2G][HIDDEN_DIM];
 
   // Shared memory prob buffer for inter node red warp group G2S data movement. Should be 16B alignment so can be used with TMA. 128B is too strict.
-  // Only used in BW combine.
-  alignas(16) float inter_node_prob_G2S_buffer[NUM_OF_STAGES_G2S][NUM_OF_EXPERTS_PER_RANK * NUM_OF_RANKS_PER_NODE];
+  // Only used in BW combine. Only the source rank's E_per_rank slice is loaded (sparse prob optimization).
+  alignas(16) float inter_node_prob_G2S_buffer[NUM_OF_STAGES_G2S][NUM_OF_EXPERTS_PER_RANK];
   // Shared memory prob buffer for inter node red warp group S2G data movement. Should be 16B alignment so can be used with TMA. 128B is too strict.
   // Only used in BW combine.
   alignas(16) float inter_node_prob_S2G_buffer[NUM_OF_STAGES_S2G][NUM_OF_EXPERTS_PER_RANK * NUM_OF_RANKS_PER_NODE];
+
+  // Source rank ID for each G2S prob stage, so the reduction warp group knows where to place the E_per_rank slice.
+  int inter_node_prob_src_rank_G2S_buffer[NUM_OF_STAGES_G2S];
 
   // Shared memory mbarrier that protect inter node red warp group G2S token entry. 1st for producer->consumer, 2nd for consumer->producer. Should be 8B alignment(natural alignment).
   alignas(8) uint64_t inter_node_mbarrier_G2S_buffer[NUM_OF_STAGES_G2S][2];
@@ -1637,13 +1653,24 @@ inline __device__ void S2G_warp_group_device_function(const int local_rank,
                                              (uint32_t)(HIDDEN_DIM * sizeof(TOKEN_DATA_TYPE)));
 
                     // Store the prob from shared to remote global for FW dispatch.
+                    // Only send the destination rank's E_per_rank slice (not the full E*R vector).
+                    // The source SMEM prob buffer contains the full E*R probs (mostly zeros for sparse routing).
+                    // Each rank's E_per_rank slice already has zeros at non-active expert positions.
                     if constexpr(FORWARD_DISPATCH){
-                      float* remote_prob_addr = remote_expert_output_prob[remote_rank_id] + (output_buffer_index * (NUM_OF_EXPERTS_PER_RANK * NUM_OF_RANKS_PER_NODE));
-                      cuda::ptx::cp_async_bulk(cuda::ptx::space_global,
-                                               cuda::ptx::space_shared,
-                                               reinterpret_cast<void*>(remote_prob_addr),
-                                               reinterpret_cast<const void*>(&smem_buffer_ptr->intra_node_prob_buffer[stage][0]),
-                                               (uint32_t)((NUM_OF_EXPERTS_PER_RANK * NUM_OF_RANKS_PER_NODE) * sizeof(float)));
+                      float* remote_prob_addr = remote_expert_output_prob[remote_rank_id]
+                          + output_buffer_index * static_cast<int64_t>(NUM_OF_EXPERTS_PER_RANK * NUM_OF_RANKS_PER_NODE)
+                          + remote_rank_id * NUM_OF_EXPERTS_PER_RANK;
+                      const float* local_prob_addr = &smem_buffer_ptr->intra_node_prob_buffer[stage][remote_rank_id * NUM_OF_EXPERTS_PER_RANK];
+                      if constexpr(NUM_OF_EXPERTS_PER_RANK * sizeof(float) >= 16 &&
+                                   (NUM_OF_EXPERTS_PER_RANK * sizeof(float)) % 16 == 0){
+                        cuda::ptx::cp_async_bulk(cuda::ptx::space_global,
+                                                 cuda::ptx::space_shared,
+                                                 reinterpret_cast<void*>(remote_prob_addr),
+                                                 reinterpret_cast<const void*>(local_prob_addr),
+                                                 (uint32_t)(NUM_OF_EXPERTS_PER_RANK * sizeof(float)));
+                      } else {
+                        scalar_copy_float_slice<NUM_OF_EXPERTS_PER_RANK>(remote_prob_addr, local_prob_addr);
+                      }
 
                     }
 
@@ -2359,14 +2386,28 @@ inline __device__ void intra_node_G2S_warp_group_device_function(const int node_
                   total_tx_size += (uint32_t)(HIDDEN_DIM * sizeof(uint16_t));
 
                   if constexpr(BACKWARD_COMBINE){
-                    cuda::ptx::cp_async_bulk(cuda::ptx::space_shared,
-                                             cuda::ptx::space_global,
-                                             reinterpret_cast<void*>(&smem_buffer_ptr->intra_node_prob_G2S_buffer[token_stage][0]),
-                                             reinterpret_cast<const void*>(remote_expert_input_prob[current_src_token_id] + (sparse_to_dense_map_value * (NUM_OF_EXPERTS_PER_RANK * NUM_OF_RANKS_PER_NODE))),
-                                             (uint32_t)((NUM_OF_EXPERTS_PER_RANK * NUM_OF_RANKS_PER_NODE) * sizeof(float)),
-                                             &smem_buffer_ptr->intra_node_mbarrier_G2S_buffer[token_stage][0]);
+                    // Sparse prob optimization: only read the source rank's E_per_rank slice.
+                    // The source rank (current_src_token_id) wrote its probs at offset
+                    // current_src_token_id * E_per_rank within the E*R_per_node prob vector.
+                    float* local_prob_addr = &smem_buffer_ptr->intra_node_prob_G2S_buffer[token_stage][0];
+                    const float* remote_prob_addr = remote_expert_input_prob[current_src_token_id]
+                        + sparse_to_dense_map_value * static_cast<int64_t>(NUM_OF_EXPERTS_PER_RANK * NUM_OF_RANKS_PER_NODE)
+                        + current_src_token_id * NUM_OF_EXPERTS_PER_RANK;
+                    if constexpr(NUM_OF_EXPERTS_PER_RANK * sizeof(float) >= 16 &&
+                                 (NUM_OF_EXPERTS_PER_RANK * sizeof(float)) % 16 == 0){
+                      cuda::ptx::cp_async_bulk(cuda::ptx::space_shared,
+                                               cuda::ptx::space_global,
+                                               reinterpret_cast<void*>(local_prob_addr),
+                                               reinterpret_cast<const void*>(remote_prob_addr),
+                                               (uint32_t)(NUM_OF_EXPERTS_PER_RANK * sizeof(float)),
+                                               &smem_buffer_ptr->intra_node_mbarrier_G2S_buffer[token_stage][0]);
 
-                    total_tx_size += (uint32_t)((NUM_OF_EXPERTS_PER_RANK * NUM_OF_RANKS_PER_NODE) * sizeof(float));
+                      total_tx_size += (uint32_t)(NUM_OF_EXPERTS_PER_RANK * sizeof(float));
+                    } else {
+                      scalar_copy_float_slice<NUM_OF_EXPERTS_PER_RANK>(local_prob_addr, remote_prob_addr);
+                    }
+                    // Store the source rank ID so the reduction warp group can place probs at the correct offset.
+                    smem_buffer_ptr->intra_node_prob_src_rank_G2S_buffer[token_stage] = current_src_token_id;
                   }
 
                   if(current_src_token_id == last_src_token_id){
@@ -2578,12 +2619,16 @@ inline __device__ void intra_node_red_warp_group_device_function(const int node_
             }
 
             if constexpr(BACKWARD_COMBINE){
+              // Sparse prob optimization: SMEM only has E_per_rank elements for the source rank's slice.
+              // Read the source rank ID and accumulate into the correct position in acc_prob.
+              int src_rank = smem_buffer_ptr->intra_node_prob_src_rank_G2S_buffer[token_stage];
+              int prob_offset = src_rank * NUM_OF_EXPERTS_PER_RANK;
               #pragma unroll
               for(int n = 0; n < NUM_OF_PROB_VEC_ELEMENT_PER_THREAD; n++){
-                int element_id = INTRA_NODE_RED_GROUP::thread_rank() + n * INTRA_NODE_RED_GROUP::size();
-                if(element_id < NUM_OF_EXPERTS_PER_RANK * NUM_OF_RANKS_PER_NODE){
-                  float src_data = load_prob_base_ptr[element_id];
-                  acc_prob[n] += src_data;
+                int global_element_id = INTRA_NODE_RED_GROUP::thread_rank() + n * INTRA_NODE_RED_GROUP::size();
+                int local_element_id = global_element_id - prob_offset;
+                if(local_element_id >= 0 && local_element_id < NUM_OF_EXPERTS_PER_RANK){
+                  acc_prob[n] += load_prob_base_ptr[local_element_id];
                 }
               }
             }
@@ -3082,14 +3127,26 @@ inline __device__ void inter_node_G2S_warp_group_device_function(const int node_
                   total_tx_size += (uint32_t)(HIDDEN_DIM * sizeof(uint16_t));
 
                   if constexpr(BACKWARD_COMBINE){
-                    cuda::ptx::cp_async_bulk(cuda::ptx::space_shared,
-                                             cuda::ptx::space_global,
-                                             reinterpret_cast<void*>(&smem_buffer_ptr->inter_node_prob_G2S_buffer[token_stage][0]),
-                                             reinterpret_cast<const void*>(remote_expert_input_prob[current_src_token_id] + (sparse_to_dense_map_value * (NUM_OF_EXPERTS_PER_RANK * NUM_OF_RANKS_PER_NODE))),
-                                             (uint32_t)((NUM_OF_EXPERTS_PER_RANK * NUM_OF_RANKS_PER_NODE) * sizeof(float)),
-                                             &smem_buffer_ptr->inter_node_mbarrier_G2S_buffer[token_stage][0]);
+                    // Sparse prob optimization: only read the source rank's E_per_rank slice.
+                    float* local_prob_addr = &smem_buffer_ptr->inter_node_prob_G2S_buffer[token_stage][0];
+                    const float* remote_prob_addr = remote_expert_input_prob[current_src_token_id]
+                        + sparse_to_dense_map_value * static_cast<int64_t>(NUM_OF_EXPERTS_PER_RANK * NUM_OF_RANKS_PER_NODE)
+                        + current_src_token_id * NUM_OF_EXPERTS_PER_RANK;
+                    if constexpr(NUM_OF_EXPERTS_PER_RANK * sizeof(float) >= 16 &&
+                                 (NUM_OF_EXPERTS_PER_RANK * sizeof(float)) % 16 == 0){
+                      cuda::ptx::cp_async_bulk(cuda::ptx::space_shared,
+                                               cuda::ptx::space_global,
+                                               reinterpret_cast<void*>(local_prob_addr),
+                                               reinterpret_cast<const void*>(remote_prob_addr),
+                                               (uint32_t)(NUM_OF_EXPERTS_PER_RANK * sizeof(float)),
+                                               &smem_buffer_ptr->inter_node_mbarrier_G2S_buffer[token_stage][0]);
 
-                    total_tx_size += (uint32_t)((NUM_OF_EXPERTS_PER_RANK * NUM_OF_RANKS_PER_NODE) * sizeof(float));
+                      total_tx_size += (uint32_t)(NUM_OF_EXPERTS_PER_RANK * sizeof(float));
+                    } else {
+                      scalar_copy_float_slice<NUM_OF_EXPERTS_PER_RANK>(local_prob_addr, remote_prob_addr);
+                    }
+                    // Store the source rank ID so the reduction warp group can place probs at the correct offset.
+                    smem_buffer_ptr->inter_node_prob_src_rank_G2S_buffer[token_stage] = current_src_token_id;
                   }
 
                   if(current_src_token_id == last_src_token_id){
@@ -3376,12 +3433,16 @@ inline __device__ void inter_node_red_warp_group_device_function(const int node_
             }
 
             if constexpr(BACKWARD_COMBINE){
+              // Sparse prob optimization: SMEM only has E_per_rank elements for the source rank's slice.
+              // Read the source rank ID and accumulate into the correct position in acc_prob[0].
+              int src_rank = smem_buffer_ptr->inter_node_prob_src_rank_G2S_buffer[token_stage];
+              int prob_offset = src_rank * NUM_OF_EXPERTS_PER_RANK;
               #pragma unroll
               for(int n = 0; n < NUM_OF_PROB_VEC_ELEMENT_PER_THREAD; n++){
-                int element_id = thread_rank_within_pipeline + n * NUM_OF_THREADS_PER_PIPELINE;
-                if(element_id < NUM_OF_EXPERTS_PER_RANK * NUM_OF_RANKS_PER_NODE){
-                  float src_data = load_prob_base_ptr[element_id];
-                  acc_prob[0][n] += src_data;
+                int global_element_id = thread_rank_within_pipeline + n * NUM_OF_THREADS_PER_PIPELINE;
+                int local_element_id = global_element_id - prob_offset;
+                if(local_element_id >= 0 && local_element_id < NUM_OF_EXPERTS_PER_RANK){
+                  acc_prob[0][n] += load_prob_base_ptr[local_element_id];
                 }
               }
             }
@@ -4797,12 +4858,14 @@ __global__ void combine_kernel(const __grid_constant__ combine_kernel_param_t pa
 template<int NUM_THREADS_PER_BLOCK,
          int NUM_OF_BLOCKS,
          int LOCAL_EXPERTS_PADDING_SIZE, 
+         int MAX_NUM_OF_TOKENS_PER_RANK,
          int NUM_OF_TOKENS_PER_CHUNK, 
          int NUM_OF_RANKS_PER_NODE,
          int NUM_OF_NODES,
-         int NUM_OF_EXPERTS_PER_RANK>
+         int NUM_OF_EXPERTS_PER_RANK,
+         int TOPK = 0>  // 0 = bool routing map mode; >0 = dense topk_idx mode with this K value
 __launch_bounds__(NUM_THREADS_PER_BLOCK, 1)
-__global__ void scan(const bool* input_routing_map, 
+__global__ void scan(const void* input_routing_data,  // bool* (TOPK==0) or int16_t* (TOPK>0)
                      tmp_state_t* tmp, 
                      tmp_state_t* local_experts_tmp, 
                      int32_t* sparse_to_dense_map, 
@@ -4819,6 +4882,12 @@ __global__ void scan(const bool* input_routing_map,
                      const int local_experts_tokens_limit, // This size MUST be multiple of LOCAL_EXPERTS_PADDING_SIZE!
                      const int num_of_tokens_per_rank)
 {
+  // Dense vs sparse routing mode.
+  constexpr bool DENSE_ROUTING = (TOPK > 0);
+  // Cast input pointer to the correct type.
+  const bool* input_routing_map = DENSE_ROUTING ? nullptr : reinterpret_cast<const bool*>(input_routing_data);
+  const int16_t* input_topk_idx = DENSE_ROUTING ? reinterpret_cast<const int16_t*>(input_routing_data) : nullptr;
+
   // Calculate the warps per block.
   constexpr int WARP_SIZE = 32;
   constexpr int NUM_OF_WARPS_PER_BLOCK = NUM_THREADS_PER_BLOCK / WARP_SIZE;
@@ -4846,7 +4915,7 @@ __global__ void scan(const bool* input_routing_map,
 #endif
   // For each token(row in routing map), calculate how many bytes need to be loaded from the routing map and how to load them.
   static_assert(sizeof(bool) == 1, "Bool is not 1 byte???");
-  constexpr int NUM_OF_BYTES_TO_LOAD_FOR_EACH_TOKEN = NUM_OF_EXPERTS_PER_RANK * NUM_OF_RANKS_PER_NODE;
+  constexpr int NUM_OF_BYTES_TO_LOAD_FOR_EACH_TOKEN = DENSE_ROUTING ? (TOPK * sizeof(int16_t)) : (NUM_OF_EXPERTS_PER_RANK * NUM_OF_RANKS_PER_NODE);
   using copy_t = Copy_t<NUM_OF_BYTES_TO_LOAD_FOR_EACH_TOKEN>;
   static_assert(NUM_OF_BYTES_TO_LOAD_FOR_EACH_TOKEN % sizeof(copy_t) == 0, "NUM_OF_BYTES_TO_LOAD_FOR_EACH_TOKEN and copy_t mismatch");
   constexpr int ROUTING_MAP_LOAD_ITER = NUM_OF_BYTES_TO_LOAD_FOR_EACH_TOKEN / sizeof(copy_t);
@@ -4873,6 +4942,10 @@ __global__ void scan(const bool* input_routing_map,
   //using rank_to_node_t = Reduce_t<NUM_OF_RANKS_PER_NODE>;
   //static_assert(NUM_OF_RANKS_PER_NODE % sizeof(rank_to_node_t) == 0, "NUM_OF_RANKS_PER_NODE and rank_to_node_t mismatch");
   //constexpr int RANKS_TO_NODE_REDUCE_ITER = NUM_OF_RANKS_PER_NODE / sizeof(rank_to_node_t);
+
+  constexpr int NUM_RANK_MASK_WORDS = (NUM_OF_RANKS_PER_NODE + 31) / 32;
+  static_assert(!DENSE_ROUTING || NUM_RANK_MASK_WORDS <= 16,
+                "Dense scan supports up to 512 ranks per node.");
 
   // How do a warp save per-rank routing info back to shared memory. What's the max number of elements does each thread save back.
   constexpr int NUM_OF_RANKS_PER_THREAD = ((NUM_OF_RANKS_PER_NODE - 1) / WARP_SIZE) + 1;
@@ -4949,47 +5022,108 @@ __global__ void scan(const bool* input_routing_map,
     // We need to calculate the per-node routing info and save back to rdma_to_attn_map.
     bool per_node_routing_info = (current_token_local_rank == local_rank);
     int current_token_rdma_to_attn_map_id = current_token_node_rank * rdma_to_attn_map_size_per_node + current_token_local_id;
-    // Global routing map load base addr for current token.
-    const copy_t* routing_map_load_base_addr = reinterpret_cast<const copy_t*>(input_routing_map + 
-                                                                               current_token_id * (NUM_OF_EXPERTS_PER_RANK * NUM_OF_RANKS_PER_NODE * NUM_OF_NODES) + 
-                                                                               node_rank * (NUM_OF_EXPERTS_PER_RANK * NUM_OF_RANKS_PER_NODE));
-
-    // Load the routing map for current token.
-    bool token_routing_map[NUM_OF_EXPERTS_PER_RANK * NUM_OF_RANKS_PER_NODE];
-    #pragma unroll
-    for(int j = 0; j < ROUTING_MAP_LOAD_ITER; j++){
-      *(reinterpret_cast<copy_t*>(token_routing_map) + j) = routing_map_load_base_addr[j];
+    // Load routing data and compute per-rank routing info.
+    bool token_needed_by_this_node = false;
+    // Per-rank routing flags. Dense mode uses a compact bitset to avoid a large
+    // per-thread bool array when the NVL domain has many ranks.
+    bool token_needed_by_rank[DENSE_ROUTING ? 1 : NUM_OF_RANKS_PER_NODE];
+    uint32_t rank_mask[DENSE_ROUTING ? NUM_RANK_MASK_WORDS : 1];
+    if constexpr(DENSE_ROUTING){
+      #pragma unroll
+      for(int j = 0; j < NUM_RANK_MASK_WORDS; j++){
+        rank_mask[j] = 0;
+      }
+    } else {
+      #pragma unroll
+      for(int j = 0; j < NUM_OF_RANKS_PER_NODE; j++){
+        token_needed_by_rank[j] = false;
+      }
     }
 
-    // Convert the routing map to per rank routing info and accumulate to accumulator.
-    // Also convert the per rank routing info to per node routing info.
-    // When permute fusion is enabled, also accumulate local experts to accumulator.
-    bool token_needed_by_this_node = false;
-    #pragma unroll
-    for(int j = 0; j < NUM_OF_RANKS_PER_NODE; j++){
-      bool token_needed_by_this_rank = false;
+    if constexpr(DENSE_ROUTING){
+      // Dense mode: load TOPK int16 expert indices and check against rank ranges.
+      // Input layout: [num_total_tokens, TOPK] int16_t (NOT per-node sliced — global expert IDs).
+      // Dropped tokens use -1 as sentinel (negative, so naturally excluded by range checks).
+      const copy_t* topk_load_base_addr = reinterpret_cast<const copy_t*>(input_topk_idx + current_token_id * TOPK);
+      int16_t topk_experts[TOPK];
       #pragma unroll
-      for(int k = 0; k < EXPERTS_TO_RANK_REDUCE_ITER; k++){
-        int current_expert_to_rank_t_id = j * EXPERTS_TO_RANK_REDUCE_ITER + k;
-        expert_to_rank_t reduction_data = *(reinterpret_cast<expert_to_rank_t*>(token_routing_map) + current_expert_to_rank_t_id);
-        if(reduction_data != (expert_to_rank_t)0){
-          token_needed_by_this_rank = true;
-          break;
+      for(int j = 0; j < ROUTING_MAP_LOAD_ITER; j++){
+        *(reinterpret_cast<copy_t*>(topk_experts) + j) = topk_load_base_addr[j];
+      }
+      // Compute per-rank and per-node routing from topk expert indices.
+      // Expert global_id maps to node = global_id / (E_per_rank * R_per_node), rank_within_node = (global_id / E_per_rank) % R_per_node.
+      // We only care about experts on the local node (node_rank).
+      constexpr int EXPERTS_PER_NODE = NUM_OF_EXPERTS_PER_RANK * NUM_OF_RANKS_PER_NODE;
+      int node_expert_start = node_rank * EXPERTS_PER_NODE;
+      int node_expert_end = node_expert_start + EXPERTS_PER_NODE;
+      #pragma unroll
+      for(int k = 0; k < TOPK; k++){
+        int expert_id = (int)topk_experts[k];
+        if(expert_id >= node_expert_start && expert_id < node_expert_end){
+          int local_expert_id = expert_id - node_expert_start;
+          int rank_within_node = local_expert_id / NUM_OF_EXPERTS_PER_RANK;
+          rank_mask[rank_within_node / 32] |= 1u << (rank_within_node % 32);
+          token_needed_by_this_node = true;
         }
       }
-      if(token_needed_by_this_rank){
-        token_routing_map_sum[j] += 1;
-        token_needed_by_this_node = true;
+      // Accumulate per-rank sums.
+      #pragma unroll
+      for(int j = 0; j < NUM_OF_RANKS_PER_NODE; j++){
+        if(((rank_mask[j / 32] >> (j % 32)) & 1u) != 0){
+          token_routing_map_sum[j] += 1;
+        }
       }
 #ifdef HYBRID_EP_BUILD_PERMUTE_FUSION_ENABLE
-      if(j == local_rank){
-        int current_local_expert_id = j * NUM_OF_EXPERTS_PER_RANK;
-        #pragma unroll
-        for(int k = 0; k < NUM_OF_EXPERTS_PER_RANK; k++){
-          token_local_experts_routing_map_sum[k] += (int32_t)(token_routing_map[current_local_expert_id + k]);
+      // For permute fusion: compute per-local-expert routing.
+      #pragma unroll
+      for(int k = 0; k < TOPK; k++){
+        int expert_id = (int)topk_experts[k];
+        int local_expert_start = node_expert_start + local_rank * NUM_OF_EXPERTS_PER_RANK;
+        int local_expert_end = local_expert_start + NUM_OF_EXPERTS_PER_RANK;
+        if(expert_id >= local_expert_start && expert_id < local_expert_end){
+          int local_expert_idx = expert_id - local_expert_start;
+          token_local_experts_routing_map_sum[local_expert_idx] += 1;
         }
       }
 #endif
+    } else {
+      // Sparse bool mode: load E_per_rank * R_per_node bools for local node slice.
+      const copy_t* routing_map_load_base_addr = reinterpret_cast<const copy_t*>(input_routing_map +
+                                                                                  current_token_id * (NUM_OF_EXPERTS_PER_RANK * NUM_OF_RANKS_PER_NODE * NUM_OF_NODES) +
+                                                                                  node_rank * (NUM_OF_EXPERTS_PER_RANK * NUM_OF_RANKS_PER_NODE));
+      bool token_routing_map[NUM_OF_EXPERTS_PER_RANK * NUM_OF_RANKS_PER_NODE];
+      #pragma unroll
+      for(int j = 0; j < ROUTING_MAP_LOAD_ITER; j++){
+        *(reinterpret_cast<copy_t*>(token_routing_map) + j) = routing_map_load_base_addr[j];
+      }
+      // Convert per-expert bools to per-rank bools.
+      #pragma unroll
+      for(int j = 0; j < NUM_OF_RANKS_PER_NODE; j++){
+        bool token_needed_by_this_rank = false;
+        #pragma unroll
+        for(int k = 0; k < EXPERTS_TO_RANK_REDUCE_ITER; k++){
+          int current_expert_to_rank_t_id = j * EXPERTS_TO_RANK_REDUCE_ITER + k;
+          expert_to_rank_t reduction_data = *(reinterpret_cast<expert_to_rank_t*>(token_routing_map) + current_expert_to_rank_t_id);
+          if(reduction_data != (expert_to_rank_t)0){
+            token_needed_by_this_rank = true;
+            break;
+          }
+        }
+        token_needed_by_rank[j] = token_needed_by_this_rank;
+        if(token_needed_by_this_rank){
+          token_routing_map_sum[j] += 1;
+          token_needed_by_this_node = true;
+        }
+#ifdef HYBRID_EP_BUILD_PERMUTE_FUSION_ENABLE
+        if(j == local_rank){
+          int current_local_expert_id = j * NUM_OF_EXPERTS_PER_RANK;
+          #pragma unroll
+          for(int k = 0; k < NUM_OF_EXPERTS_PER_RANK; k++){
+            token_local_experts_routing_map_sum[k] += (int32_t)(token_routing_map[current_local_expert_id + k]);
+          }
+        }
+#endif
+      }
     }
 
     // Save the per node routing info back to rdma_to_attn_map if needed.
@@ -5331,74 +5465,98 @@ __global__ void scan(const bool* input_routing_map,
     bool token_needed_by_dense_chunk_layout = first_token_of_a_chunk && current_token_global_chunk_id > 0 && current_token_global_chunk_id < num_of_total_attn_chunks;
 #endif
 
-    // Global routing map load base addr for current token.
-    const copy_t* routing_map_load_base_addr = reinterpret_cast<const copy_t*>(input_routing_map + 
-                                                                               current_token_id * (NUM_OF_EXPERTS_PER_RANK * NUM_OF_RANKS_PER_NODE * NUM_OF_NODES) + 
-                                                                               node_rank * (NUM_OF_EXPERTS_PER_RANK * NUM_OF_RANKS_PER_NODE));
-
-    // Load the routing map for current token. Only load when the token is not out-of-bound.
-    bool token_routing_map[NUM_OF_EXPERTS_PER_RANK * NUM_OF_RANKS_PER_NODE];
-    if(token_out_of_bound == 0){
+    // Load routing data for current token (reuse for all ranks).
+    // In dense mode: load TOPK int16 expert indices.
+    // In sparse mode: load E_per_rank * R_per_node bools for local node slice.
+    // Also compute per-rank routing flags.
+    bool token_needed_by_rank_step2[DENSE_ROUTING ? 1 : NUM_OF_RANKS_PER_NODE];
+    // Sparse mode needs the full routing map for local_expert_routing_map writes later.
+    bool token_routing_map[DENSE_ROUTING ? 1 : (NUM_OF_EXPERTS_PER_RANK * NUM_OF_RANKS_PER_NODE)];
+    constexpr int NUM_LOCAL_EXPERT_MASK_WORDS = (NUM_OF_EXPERTS_PER_RANK + 31) / 32;
+    static_assert(!DENSE_ROUTING || NUM_LOCAL_EXPERT_MASK_WORDS <= 16,
+                  "Dense scan supports up to 512 local experts per rank.");
+    uint32_t local_expert_mask[DENSE_ROUTING ? NUM_LOCAL_EXPERT_MASK_WORDS : 1];
+    uint32_t rank_mask[DENSE_ROUTING ? NUM_RANK_MASK_WORDS : 1];
+    if constexpr(DENSE_ROUTING){
       #pragma unroll
-      for(int j = 0; j < ROUTING_MAP_LOAD_ITER; j++){
-        *(reinterpret_cast<copy_t*>(token_routing_map) + j) = routing_map_load_base_addr[j];
+      for(int k = 0; k < NUM_LOCAL_EXPERT_MASK_WORDS; k++){
+        local_expert_mask[k] = 0;
+      }
+      #pragma unroll
+      for(int k = 0; k < NUM_RANK_MASK_WORDS; k++){
+        rank_mask[k] = 0;
+      }
+    } else {
+      #pragma unroll
+      for(int j = 0; j < NUM_OF_RANKS_PER_NODE; j++){
+        token_needed_by_rank_step2[j] = false;
       }
     }
-    
-    // Convert the routing map to per rank routing info for current token, 
-    // then produce the per-rank final exclusive scan within the warp for this tile.
+
+    if constexpr(DENSE_ROUTING){
+      if(token_out_of_bound == 0){
+        const copy_t* topk_load_base_addr = reinterpret_cast<const copy_t*>(input_topk_idx + current_token_id * TOPK);
+        int16_t topk_experts[TOPK];
+        #pragma unroll
+        for(int j = 0; j < ROUTING_MAP_LOAD_ITER; j++){
+          *(reinterpret_cast<copy_t*>(topk_experts) + j) = topk_load_base_addr[j];
+        }
+        constexpr int EXPERTS_PER_NODE = NUM_OF_EXPERTS_PER_RANK * NUM_OF_RANKS_PER_NODE;
+        int node_expert_start = node_rank * EXPERTS_PER_NODE;
+        int node_expert_end = node_expert_start + EXPERTS_PER_NODE;
+        #pragma unroll
+        for(int k = 0; k < TOPK; k++){
+          int expert_id = (int)topk_experts[k];
+          if(expert_id >= node_expert_start && expert_id < node_expert_end){
+            int local_expert_id = expert_id - node_expert_start;
+            int rank_within_node = local_expert_id / NUM_OF_EXPERTS_PER_RANK;
+            rank_mask[rank_within_node / 32] |= 1u << (rank_within_node % 32);
+            int local_expert_start = local_rank * NUM_OF_EXPERTS_PER_RANK;
+            int local_expert_end = local_expert_start + NUM_OF_EXPERTS_PER_RANK;
+            if(local_expert_id >= local_expert_start && local_expert_id < local_expert_end){
+              int local_expert_idx = local_expert_id - local_expert_start;
+              local_expert_mask[local_expert_idx / 32] |= 1u << (local_expert_idx % 32);
+            }
+          }
+        }
+      }
+    } else {
+      // Sparse bool mode: load and reduce as before.
+      const copy_t* routing_map_load_base_addr = reinterpret_cast<const copy_t*>(input_routing_map +
+                                                                                  current_token_id * (NUM_OF_EXPERTS_PER_RANK * NUM_OF_RANKS_PER_NODE * NUM_OF_NODES) +
+                                                                                  node_rank * (NUM_OF_EXPERTS_PER_RANK * NUM_OF_RANKS_PER_NODE));
+      if(token_out_of_bound == 0){
+        #pragma unroll
+        for(int j = 0; j < ROUTING_MAP_LOAD_ITER; j++){
+          *(reinterpret_cast<copy_t*>(token_routing_map) + j) = routing_map_load_base_addr[j];
+        }
+      }
+      if(token_out_of_bound == 0){
+        #pragma unroll
+        for(int j = 0; j < NUM_OF_RANKS_PER_NODE; j++){
+          #pragma unroll
+          for(int k = 0; k < EXPERTS_TO_RANK_REDUCE_ITER; k++){
+            int current_expert_to_rank_t_id = j * EXPERTS_TO_RANK_REDUCE_ITER + k;
+            expert_to_rank_t reduction_data = *(reinterpret_cast<expert_to_rank_t*>(token_routing_map) + current_expert_to_rank_t_id);
+            if(reduction_data != (expert_to_rank_t)0){
+              token_needed_by_rank_step2[j] = true;
+              break;
+            }
+          }
+        }
+      }
+    }
+
+    // Convert the per-rank routing flags to per-rank final exclusive scan within the warp for this tile.
     int32_t final_ex_scan[NUM_OF_RANKS_PER_NODE];
     #pragma unroll
     for(int j = 0; j < NUM_OF_RANKS_PER_NODE; j++){
       int32_t temp_scan = 0;
-      bool token_needed_by_this_rank = false;
-      // Old warp-level scan implementation, using warp shuffle, suitable for general data type, but not fast enough for bool type.
-      // If the token is not out-of-bound, check whether this rank need this token.
-      /*if(token_out_of_bound == 0){
-        #pragma unroll
-        for(int k = 0; k < EXPERTS_TO_RANK_REDUCE_ITER; k++){
-          int current_expert_to_rank_t_id = j * EXPERTS_TO_RANK_REDUCE_ITER + k;
-          expert_to_rank_t reduction_data = *(reinterpret_cast<expert_to_rank_t*>(token_routing_map) + current_expert_to_rank_t_id);
-          if(reduction_data != (expert_to_rank_t)0){
-            token_needed_by_this_rank = true;
-            break;
-          }
-        }
-        if(token_needed_by_this_rank){
-          temp_scan = 1;
-        }else{
-          temp_scan = 0;
-        }
-      }
-      
-      // Each warp perform a inclusive scan from all threads(lanes).
-      #pragma unroll
-      for(int k = 1; k < WARP_SIZE; k *= 2){
-        int32_t temp = __shfl_up_sync(~0, temp_scan, k);
-        if(lane_id >= k){
-          temp_scan += temp;
-        }
-      }
-
-      // The inclusive scan from last lane is the sum of this rank of this tile. Need to accumulate that for later tiles.
-      int32_t temp_sum = __shfl_sync(~0, temp_scan, WARP_SIZE - 1);
-
-      // Make scan exclusive.
-      int32_t exclusive_scan = __shfl_up_sync(~0, temp_scan, 1);
-      temp_scan = (lane_id >= 1) ? exclusive_scan : 0;*/
-
-      // New warp-level scan implementation for bool value, using warp vote instead of warp shuffle. Warp vote is way faster than warp shuffle.
-      // If the token is not out-of-bound, check whether this rank need this token.
-      if(token_out_of_bound == 0){
-        #pragma unroll
-        for(int k = 0; k < EXPERTS_TO_RANK_REDUCE_ITER; k++){
-          int current_expert_to_rank_t_id = j * EXPERTS_TO_RANK_REDUCE_ITER + k;
-          expert_to_rank_t reduction_data = *(reinterpret_cast<expert_to_rank_t*>(token_routing_map) + current_expert_to_rank_t_id);
-          if(reduction_data != (expert_to_rank_t)0){
-            token_needed_by_this_rank = true;
-            break;
-          }
-        }
+      bool token_needed_by_this_rank;
+      if constexpr(DENSE_ROUTING){
+        token_needed_by_this_rank = ((rank_mask[j / 32] >> (j % 32)) & 1u) != 0;
+      } else {
+        token_needed_by_this_rank = token_needed_by_rank_step2[j];
       }
 
       // Each warp vote to create a bit mask indicating which token is needed by this rank within this tile.
@@ -5420,7 +5578,12 @@ __global__ void scan(const bool* input_routing_map,
         for(int k = 0; k < NUM_OF_EXPERTS_PER_RANK; k++){
           bool token_needed_by_this_local_expert = false;
           if(token_out_of_bound == 0){
-            token_needed_by_this_local_expert = token_routing_map[j * NUM_OF_EXPERTS_PER_RANK + k];
+            if constexpr(DENSE_ROUTING){
+              token_needed_by_this_local_expert =
+                  ((local_expert_mask[k / 32] >> (k % 32)) & 1u) != 0;
+            } else {
+              token_needed_by_this_local_expert = token_routing_map[j * NUM_OF_EXPERTS_PER_RANK + k];
+            }
           }
           unsigned local_expert_vote_result = __ballot_sync(~0, token_needed_by_this_local_expert);
           int32_t local_expert_temp_sum = __popc(local_expert_vote_result);
@@ -5449,11 +5612,26 @@ __global__ void scan(const bool* input_routing_map,
 #else
       // Each thread save local routing map for this token of the local rank to local_expert_routing_map if this token is needed by the local rank.
       if(j == local_rank && token_needed_by_this_rank){
-        expert_to_rank_t* local_expert_routing_map_store_base_addr = reinterpret_cast<expert_to_rank_t*>(local_expert_routing_map + (final_ex_scan[j] * NUM_OF_EXPERTS_PER_RANK));
-        #pragma unroll
-        for(int k = 0; k < EXPERTS_TO_RANK_REDUCE_ITER; k++){
-          int current_expert_to_rank_t_id = j * EXPERTS_TO_RANK_REDUCE_ITER + k;
-          local_expert_routing_map_store_base_addr[k] = *(reinterpret_cast<expert_to_rank_t*>(token_routing_map) + current_expert_to_rank_t_id);
+        if constexpr(DENSE_ROUTING){
+          // Reconstruct per-expert bool routing map from topk indices for the local rank.
+          bool local_expert_bools[NUM_OF_EXPERTS_PER_RANK];
+          #pragma unroll
+          for(int k = 0; k < NUM_OF_EXPERTS_PER_RANK; k++){
+            local_expert_bools[k] = ((local_expert_mask[k / 32] >> (k % 32)) & 1u) != 0;
+          }
+          // Store as expert_to_rank_t chunks.
+          expert_to_rank_t* local_expert_routing_map_store_base_addr = reinterpret_cast<expert_to_rank_t*>(local_expert_routing_map + (final_ex_scan[j] * NUM_OF_EXPERTS_PER_RANK));
+          #pragma unroll
+          for(int k = 0; k < EXPERTS_TO_RANK_REDUCE_ITER; k++){
+            local_expert_routing_map_store_base_addr[k] = *(reinterpret_cast<expert_to_rank_t*>(local_expert_bools) + k);
+          }
+        } else {
+          expert_to_rank_t* local_expert_routing_map_store_base_addr = reinterpret_cast<expert_to_rank_t*>(local_expert_routing_map + (final_ex_scan[j] * NUM_OF_EXPERTS_PER_RANK));
+          #pragma unroll
+          for(int k = 0; k < EXPERTS_TO_RANK_REDUCE_ITER; k++){
+            int current_expert_to_rank_t_id = j * EXPERTS_TO_RANK_REDUCE_ITER + k;
+            local_expert_routing_map_store_base_addr[k] = *(reinterpret_cast<expert_to_rank_t*>(token_routing_map) + current_expert_to_rank_t_id);
+          }
         }
       }
 #endif
@@ -5502,37 +5680,54 @@ __global__ void scan(const bool* input_routing_map,
       int current_token_node_id = current_token_attn_to_rdma_map_node_id < node_rank ? current_token_attn_to_rdma_map_node_id : current_token_attn_to_rdma_map_node_id + 1;
       int current_token_local_id = current_token_id / (NUM_OF_NODES - 1);
 
-      const copy_t* routing_map_load_base_addr = reinterpret_cast<const copy_t*>(input_routing_map + 
-                                                                                ((node_rank * NUM_OF_RANKS_PER_NODE + local_rank) * num_of_tokens_per_rank + current_token_local_id) *
-                                                                                (NUM_OF_EXPERTS_PER_RANK * NUM_OF_RANKS_PER_NODE * NUM_OF_NODES) + 
-                                                                                (current_token_node_id * NUM_OF_EXPERTS_PER_RANK * NUM_OF_RANKS_PER_NODE));
-
       bool* attn_to_rdma_map_base_addr = attn_to_rdma_map + (current_token_local_id * (NUM_OF_NODES - 1) + current_token_attn_to_rdma_map_node_id);
 
-      // Load the routing map for current token row.
-      bool token_routing_map[NUM_OF_EXPERTS_PER_RANK * NUM_OF_RANKS_PER_NODE];
-      #pragma unroll
-      for(int j = 0; j < ROUTING_MAP_LOAD_ITER; j++){
-        *(reinterpret_cast<copy_t*>(token_routing_map) + j) = routing_map_load_base_addr[j];
-      }
-
-      // Convert the routing map to per rank routing info and then to per node routing info.
+      // Check if any expert on the target node is needed by this token.
       bool token_needed_by_this_node = false;
-      #pragma unroll
-      for(int j = 0; j < NUM_OF_RANKS_PER_NODE; j++){
-        bool token_needed_by_this_rank = false;
+
+      if constexpr(DENSE_ROUTING){
+        // Dense mode: check if any topk expert falls on current_token_node_id.
+        // The global token id for this local token on the local rank.
+        int global_token_id = (node_rank * NUM_OF_RANKS_PER_NODE + local_rank) * num_of_tokens_per_rank + current_token_local_id;
+        const int16_t* topk_base = input_topk_idx + global_token_id * TOPK;
+        constexpr int EXPERTS_PER_NODE = NUM_OF_EXPERTS_PER_RANK * NUM_OF_RANKS_PER_NODE;
+        int target_node_expert_start = current_token_node_id * EXPERTS_PER_NODE;
+        int target_node_expert_end = target_node_expert_start + EXPERTS_PER_NODE;
         #pragma unroll
-        for(int k = 0; k < EXPERTS_TO_RANK_REDUCE_ITER; k++){
-          int current_expert_to_rank_t_id = j * EXPERTS_TO_RANK_REDUCE_ITER + k;
-          expert_to_rank_t reduction_data = *(reinterpret_cast<expert_to_rank_t*>(token_routing_map) + current_expert_to_rank_t_id);
-          if(reduction_data != (expert_to_rank_t)0){
-            token_needed_by_this_rank = true;
+        for(int k = 0; k < TOPK; k++){
+          int expert_id = (int)topk_base[k];
+          if(expert_id >= target_node_expert_start && expert_id < target_node_expert_end){
+            token_needed_by_this_node = true;
             break;
           }
         }
-        if(token_needed_by_this_rank){
-          token_needed_by_this_node = true;
-          break;
+      } else {
+        // Sparse bool mode: load routing map for target node and reduce.
+        const copy_t* routing_map_load_base_addr = reinterpret_cast<const copy_t*>(input_routing_map +
+                                                                                   ((node_rank * NUM_OF_RANKS_PER_NODE + local_rank) * num_of_tokens_per_rank + current_token_local_id) *
+                                                                                   (NUM_OF_EXPERTS_PER_RANK * NUM_OF_RANKS_PER_NODE * NUM_OF_NODES) +
+                                                                                   (current_token_node_id * NUM_OF_EXPERTS_PER_RANK * NUM_OF_RANKS_PER_NODE));
+        bool token_routing_map_step3[NUM_OF_EXPERTS_PER_RANK * NUM_OF_RANKS_PER_NODE];
+        #pragma unroll
+        for(int j = 0; j < ROUTING_MAP_LOAD_ITER; j++){
+          *(reinterpret_cast<copy_t*>(token_routing_map_step3) + j) = routing_map_load_base_addr[j];
+        }
+        #pragma unroll
+        for(int j = 0; j < NUM_OF_RANKS_PER_NODE; j++){
+          bool token_needed_by_this_rank = false;
+          #pragma unroll
+          for(int k = 0; k < EXPERTS_TO_RANK_REDUCE_ITER; k++){
+            int current_expert_to_rank_t_id = j * EXPERTS_TO_RANK_REDUCE_ITER + k;
+            expert_to_rank_t reduction_data = *(reinterpret_cast<expert_to_rank_t*>(token_routing_map_step3) + current_expert_to_rank_t_id);
+            if(reduction_data != (expert_to_rank_t)0){
+              token_needed_by_this_rank = true;
+              break;
+            }
+          }
+          if(token_needed_by_this_rank){
+            token_needed_by_this_node = true;
+            break;
+          }
         }
       }
 
@@ -5599,8 +5794,10 @@ public:
            // Block size for preprocessing kernel.
            int NUM_THREADS_PER_BLOCK, 
            // Grid size for preprocessing kernel(1:1 block:SM mapping).
-           int NUM_OF_BLOCKS>
-  static void metadata_preprocessing(const bool* input_routing_map, 
+           int NUM_OF_BLOCKS,
+           // 0 = bool routing map mode; >0 = dense topk_idx mode with this K value
+           int TOPK = 0>
+  static void metadata_preprocessing(const void* input_routing_data,  // bool* (TOPK==0) or int16_t* (TOPK>0)
                                      tmp_state_t* preprocessing_tmp,
                                      tmp_state_t* preprocessing_local_experts_tmp,
                                      int32_t* sparse_to_dense_map,
@@ -5639,9 +5836,9 @@ public:
 #endif
 
     // Launch the preprocessing kernel to process the global routing map.
-    scan<NUM_THREADS_PER_BLOCK, NUM_OF_BLOCKS, LOCAL_EXPERTS_PADDING_SIZE, NUM_OF_TOKENS_PER_CHUNK, NUM_OF_RANKS_PER_NODE, NUM_OF_NODES, NUM_OF_EXPERTS_PER_RANK>
+    scan<NUM_THREADS_PER_BLOCK, NUM_OF_BLOCKS, LOCAL_EXPERTS_PADDING_SIZE, MAX_NUM_OF_TOKENS_PER_RANK, NUM_OF_TOKENS_PER_CHUNK, NUM_OF_RANKS_PER_NODE, NUM_OF_NODES, NUM_OF_EXPERTS_PER_RANK, TOPK>
     <<<NUM_OF_BLOCKS, NUM_THREADS_PER_BLOCK, 0, stream>>>
-    (input_routing_map, preprocessing_tmp, preprocessing_local_experts_tmp, sparse_to_dense_map, rdma_to_attn_map, attn_to_rdma_map, num_of_tokens_for_experts, local_expert_routing_map, 
+    (input_routing_data, preprocessing_tmp, preprocessing_local_experts_tmp, sparse_to_dense_map, rdma_to_attn_map, attn_to_rdma_map, num_of_tokens_for_experts, local_expert_routing_map,
     dense_chunk_layout, dense_to_expert_map, num_of_local_experts_tokens, token_drop_triggered, node_rank, local_rank, local_experts_tokens_limit, num_of_tokens_per_rank);
 
     // Check if there is any CUDA error.

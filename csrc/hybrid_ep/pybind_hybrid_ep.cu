@@ -73,6 +73,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
                        &HybridEpConfigInstance::num_of_ranks_per_node)
         .def_readwrite("num_of_nodes", &HybridEpConfigInstance::num_of_nodes)
         .def_readwrite("pad_multiple", &HybridEpConfigInstance::pad_multiple)
+        .def_readwrite("topk", &HybridEpConfigInstance::topk)
         // Metadata-preprocessing API Config
         .def_readwrite("num_of_tokens_per_chunk_preprocessing_api", &HybridEpConfigInstance::num_of_tokens_per_chunk_preprocessing_api)
         .def_readwrite(

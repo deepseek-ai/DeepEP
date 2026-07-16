@@ -70,7 +70,7 @@ public:
 
     void run_preprocess_kernel(
         HybridEpConfigInstance config, 
-        const bool* input_routing_map,
+        const void* input_routing_map,
         hybrid_ep::tmp_state_t* preprocessing_tmp,
         hybrid_ep::tmp_state_t* preprocessing_local_experts_tmp,
         int32_t* sparse_to_dense_map,

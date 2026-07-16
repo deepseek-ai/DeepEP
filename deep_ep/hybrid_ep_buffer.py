@@ -6,6 +6,10 @@ import shutil
 import hybrid_ep_cpp
 import warnings
 
+INT16_EXPERT_LIMIT = torch.iinfo(torch.int16).max + 1
+DENSE_ROUTING_EXPERTS_PER_RANK_LIMIT = 512
+DENSE_ROUTING_RANKS_PER_NODE_LIMIT = 512
+
 def indices_to_map(
     topk_idx: torch.Tensor,
     topk_weights: torch.Tensor,
@@ -17,18 +21,40 @@ def indices_to_map(
     """
     # Generate the routing map and the probs according to the topk_idx and topk_weights.
     assert topk_idx is not None
-    routing_map = torch.zeros(
-        num_of_tokens, num_of_experts, device="cuda", dtype=torch.bool
+    valid = (topk_idx >= 0) & (topk_idx < num_of_experts)
+    safe_idx = torch.where(valid, topk_idx, torch.zeros_like(topk_idx)).to(torch.int64)
+
+    routing_counts = torch.zeros(
+        num_of_tokens, num_of_experts, device=topk_idx.device, dtype=torch.int32
     )
-    routing_map = routing_map.scatter(1, topk_idx.to(torch.int64), 1).bool()
+    routing_counts.scatter_add_(1, safe_idx, valid.to(torch.int32))
+    routing_map = routing_counts.bool()
     if topk_weights is not None:
         probs = torch.zeros(
-            num_of_tokens, num_of_experts, device="cuda", dtype=torch.float32
+            num_of_tokens, num_of_experts, device=topk_idx.device, dtype=torch.float32
         )
-        probs = probs.scatter(1, topk_idx.to(torch.int64), topk_weights)
+        safe_weights = torch.where(valid, topk_weights, torch.zeros_like(topk_weights)).to(probs.dtype)
+        probs.scatter_add_(1, safe_idx, safe_weights)
     else:
         probs = None
     return routing_map, probs
+
+
+def dense_indices_to_probs(
+    topk_idx: torch.Tensor,
+    topk_weights: torch.Tensor,
+    num_of_tokens: int,
+    num_of_experts: int,
+):
+    probs = torch.zeros(
+        num_of_tokens, num_of_experts, device=topk_idx.device, dtype=torch.float32
+    )
+    # Valid top-k routing has distinct expert IDs per token. Duplicate IDs are malformed input.
+    valid = (topk_idx >= 0) & (topk_idx < num_of_experts)
+    safe_idx = torch.where(valid, topk_idx, torch.zeros_like(topk_idx)).long()
+    safe_weights = torch.where(valid, topk_weights, torch.zeros_like(topk_weights)).to(probs.dtype)
+    probs.scatter_add_(1, safe_idx, safe_weights)
+    return probs
 
 
 class HybridEPBuffer:
@@ -117,6 +143,78 @@ class HybridEPBuffer:
         if os.path.exists(jit_cache_path):
             shutil.rmtree(jit_cache_path)
 
+    def _expected_num_of_experts(self, num_of_experts_per_rank: int = None):
+        if num_of_experts_per_rank is None:
+            num_of_experts_per_rank = self.configurer.buffer_config.num_of_experts_per_rank
+        num_of_experts_per_rank = int(num_of_experts_per_rank)
+        return (
+            num_of_experts_per_rank,
+            num_of_experts_per_rank
+            * self.num_of_hybrid_ep_ranks_per_nvlink_domain
+            * self.num_of_nodes,
+        )
+
+    def _use_dense_topk_routing(self, num_of_experts: int, num_of_experts_per_rank: int):
+        return (
+            num_of_experts <= INT16_EXPERT_LIMIT
+            and num_of_experts_per_rank <= DENSE_ROUTING_EXPERTS_PER_RANK_LIMIT
+            and self.num_of_hybrid_ep_ranks_per_nvlink_domain <= DENSE_ROUTING_RANKS_PER_NODE_LIMIT
+        )
+
+    def _prepare_routing_data(
+        self,
+        *,
+        topk_idx: torch.Tensor,
+        topk_weights: torch.Tensor,
+        num_of_tokens: int,
+        num_of_experts: int,
+        probs: torch.Tensor,
+        routing_map: torch.Tensor,
+        num_of_experts_per_rank: int = None,
+    ):
+        if routing_map is not None:
+            assert routing_map.dtype == torch.bool
+            num_of_experts = routing_map.size(-1)
+            if probs is not None:
+                assert probs.size(0) == num_of_tokens and probs.size(-1) == num_of_experts
+            return 0, routing_map, probs, num_of_experts
+
+        if topk_idx is None:
+            return 0, None, probs, num_of_experts
+
+        assert num_of_experts is not None, "num_of_experts is required with topk_idx"
+        num_of_experts_per_rank, expected_num_of_experts = self._expected_num_of_experts(
+            num_of_experts_per_rank
+        )
+        assert num_of_experts == expected_num_of_experts, (
+            f"num_of_experts ({num_of_experts}) must match the HybridEP layout "
+            f"({expected_num_of_experts})"
+        )
+        if probs is not None:
+            assert probs.size(0) == num_of_tokens and probs.size(-1) == num_of_experts
+
+        topk = topk_idx.size(-1)
+        if self._use_dense_topk_routing(num_of_experts, num_of_experts_per_rank):
+            # Dense mode stores signed int16 global expert IDs. Valid IDs are
+            # [0, num_of_experts); -1 is the dropped-token sentinel.
+            routing_data = topk_idx.to(torch.int16).contiguous()
+            if probs is None and topk_weights is not None:
+                probs = dense_indices_to_probs(
+                    topk_idx, topk_weights, num_of_tokens, num_of_experts
+                )
+            return topk, routing_data, probs, num_of_experts
+
+        # Preserve the pre-dense topk_idx behavior for layouts outside dense kernel limits.
+        routing_data, inferred_probs = indices_to_map(
+            topk_idx,
+            topk_weights if probs is None else None,
+            num_of_tokens,
+            num_of_experts,
+        )
+        if probs is None:
+            probs = inferred_probs
+        return 0, routing_data, probs, num_of_experts
+
     def update_template_config(
         self,
         hidden_dim: int = None,
@@ -186,33 +284,36 @@ class HybridEPBuffer:
 
         Backward direction:
         combine_in_backward <- local_unpermute -> expert_mlp -> local_permute -> dispatch_in_backward
+
+        When routing_map is omitted, topk_idx is passed directly as int16 when dense routing
+        limits allow it (skipping indices_to_map), otherwise it falls back to the sparse map.
+        This reduces allgather size from T*E_total to T*K*2 bytes.
+        If both routing_map and topk_idx are provided, routing_map takes precedence.
+        Dropped tokens should use -1 as sentinel (naturally ignored by range checks in the kernel).
         """
         num_of_tokens, hidden_dim = hidden.shape
 
-        if routing_map is not None:
-            assert routing_map.dtype == torch.bool
-            num_of_experts = routing_map.size(-1)
-        else:
-            # Generate the routing map and the probs according to the topk_idx and topk_weights.
-            assert (
-                num_of_experts is not None
-            ), "The number of experts should be provided on index-based routing."
-            if topk_idx is not None:
-                routing_map, probs = indices_to_map(
-                    topk_idx, topk_weights, num_of_tokens, num_of_experts
-                )
+        topk, routing_data, probs, _ = self._prepare_routing_data(
+            topk_idx=topk_idx,
+            topk_weights=topk_weights,
+            num_of_tokens=num_of_tokens,
+            num_of_experts=num_of_experts,
+            probs=probs,
+            routing_map=routing_map,
+        )
 
         assert (
-            handle is not None or routing_map is not None
+            handle is not None or routing_data is not None
         ), "The handle and routing_map should not be both None"
         if handle is None:
             config = self.update_template_config(
                 hidden_dim=hidden_dim,
                 num_of_tokens_per_rank=num_of_tokens,
+                topk=topk,
             )
             handle_impl = self.runtime.metadata_preprocessing(
                 config=config,
-                routing_map=routing_map,
+                routing_map=routing_data,
                 num_of_tokens_per_rank=num_of_tokens,
                 enable_permute=False,
                 non_blocking=False,
@@ -327,6 +428,9 @@ class HybridEPBuffer:
     ):
         """
         Dispatch the data to the experts with permute.
+        When routing_map is omitted, topk_idx is passed directly as int16 when dense routing
+        limits allow it (skipping indices_to_map), otherwise it falls back to the sparse map.
+        If both routing_map and topk_idx are provided, routing_map takes precedence.
         """
         if num_dispatched_tokens is not None:
             warnings.warn("The num_dispatched_tokens is deprecated, it will be removed in the future.")
@@ -336,18 +440,15 @@ class HybridEPBuffer:
 
         with torch.cuda.nvtx.range("hybrid-ep dispatch with permute phase"):
             num_of_tokens_per_rank, hidden_dim = hidden.shape
-            if routing_map is not None:
-                assert routing_map.dtype == torch.bool
-                num_of_experts = routing_map.size(-1)
-            else:
-                # Generate the routing map and the probs according to the topk_idx and topk_weights.
-                if topk_idx is not None:
-                    assert (
-                        num_of_experts is not None
-                    ), "The number of experts should be provided on index-based routing."
-                    routing_map, probs = indices_to_map(
-                        topk_idx, topk_weights, num_of_tokens_per_rank, num_of_experts
-                    )
+            topk, routing_data, probs, _ = self._prepare_routing_data(
+                topk_idx=topk_idx,
+                topk_weights=topk_weights,
+                num_of_tokens=num_of_tokens_per_rank,
+                num_of_experts=num_of_experts,
+                probs=probs,
+                routing_map=routing_map,
+                num_of_experts_per_rank=num_of_experts_per_rank,
+            )
             if non_blocking:
                 assert num_permuted_tokens is not None and num_permuted_tokens >= 0, \
                     "The num_permuted_tokens is required for non-blocking mode."
@@ -356,9 +457,9 @@ class HybridEPBuffer:
                         f"num_permuted_tokens ({num_permuted_tokens}) must be a multiple of pad_multiple ({pad_multiple}) in non-blocking mode."
 
             if handle is None:
-                assert hidden.size(0) == routing_map.size(
+                assert hidden.size(0) == routing_data.size(
                     0
-                ), "The hidden and the routing_map should have the same row number."
+                ), "The hidden and the routing data should have the same row number."
                 config = self.update_template_config(
                     hidden_dim=hidden_dim,
                     num_of_tokens_per_rank=num_of_tokens_per_rank,
@@ -366,10 +467,11 @@ class HybridEPBuffer:
                     pad_multiple=pad_multiple,
                     use_fp8=use_fp8,
                     fuse_permute_dispatch=fuse_permute_dispatch,
+                    topk=topk,
                 )
                 handle_impl = self.runtime.metadata_preprocessing(
                     config=config,
-                    routing_map=routing_map,
+                    routing_map=routing_data,
                     num_of_tokens_per_rank=num_of_tokens_per_rank,
                     num_permuted_tokens=num_permuted_tokens,
                     pad_multiple=pad_multiple,

@@ -3,6 +3,9 @@
 
 #include "allgather.cuh"
 
+#include <algorithm>
+#include <cstdint>
+
 #define MAX_BLOCKS 256
 #define TIMEOUT 200000000000ull
 
@@ -115,6 +118,7 @@ void CustomAllgather::init(pybind11::object process_group, int rank_idx, BufferC
     this->num_of_experts_per_rank = buffer_config.num_of_experts_per_rank;
     this->num_of_tokens_per_rank = buffer_config.max_num_of_tokens_per_rank;
     this->num_of_nodes = buffer_config.num_of_nodes;
+    this->routing_bytes_per_token = num_of_experts_per_rank * num_of_ranks_per_node * num_of_nodes * sizeof(bool);
     this->allocator = allocator;
     this->process_group = process_group;
 }
@@ -125,6 +129,9 @@ bool CustomAllgather::grow_buffer_config(const HybridEpConfigInstance& config, B
     changed |= grow_to(buf_config.num_of_experts_per_rank, config.num_of_experts_per_rank);
     changed |= grow_to(buf_config.max_num_of_tokens_per_rank, config.max_num_of_tokens_per_rank);
     changed |= grow_to(buf_config.num_of_nodes, config.num_of_nodes);
+    int sparse_bytes_per_token = config.num_of_experts_per_rank * config.num_of_ranks_per_node * config.num_of_nodes * sizeof(bool);
+    int dense_bytes_per_token = config.topk > 0 ? config.topk * static_cast<int>(sizeof(int16_t)) : 0;
+    changed |= grow_to(routing_bytes_per_token, std::max(sparse_bytes_per_token, dense_bytes_per_token));
     return changed;
 }
 
@@ -141,9 +148,7 @@ void CustomAllgather::allocate_buffers() {
 
 void CustomAllgather::allocate_ag_buffer() {
     // Allocate the output buffer
-    auto num_of_expert = num_of_experts_per_rank * num_of_ranks_per_node * num_of_nodes;
-    auto gathered_elets = num_of_expert * num_of_tokens_per_rank * num_of_ranks_per_node * num_of_nodes;
-    auto gathered_bytes = gathered_elets * sizeof(bool);
+    auto gathered_bytes = routing_bytes_per_token * num_of_tokens_per_rank * num_of_ranks_per_node * num_of_nodes;
     allocator->allocate(&dst_buffer, gathered_bytes);
 
     if(num_of_nodes == 1) {

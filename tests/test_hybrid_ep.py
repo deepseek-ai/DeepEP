@@ -6,6 +6,7 @@ import torch
 import torch.distributed as dist
 import os
 import deep_ep
+import hybrid_ep_cpp
 
 from utils import TorchRef, bench, bench_kineto, init_dist, count_rdma_send_from_routing_map
 
@@ -54,6 +55,35 @@ def bitwise_equal(a: torch.Tensor, b: torch.Tensor) -> bool:
     a_bytes = a.contiguous().view(torch.uint8)
     b_bytes = b.contiguous().view(torch.uint8)
     return torch.equal(a_bytes, b_bytes)
+
+
+def assert_bitwise_equal(name: str, ref: torch.Tensor, test: torch.Tensor, context: str = ""):
+    if ref is None or test is None:
+        return
+    if bitwise_equal(ref, test):
+        return
+    mismatch = (ref.contiguous().view(torch.uint8) != test.contiguous().view(torch.uint8)).sum().item()
+    elem_mismatch = (ref != test).sum().item()
+    pct = 100.0 * elem_mismatch / max(ref.numel(), 1)
+    msg = (f"{name} mismatch{context}: {elem_mismatch}/{ref.numel()} elements "
+           f"({pct:.2f}%), {mismatch} bytes differ, shape={list(ref.shape)}")
+    flat_ref = ref.contiguous().view(-1)
+    flat_test = test.contiguous().view(-1)
+    diff_idx = (flat_ref != flat_test).nonzero(as_tuple=True)[0][:5]
+    for idx in diff_idx:
+        i = idx.item()
+        msg += f"\n    [{i}]: ref={flat_ref[i].item()}, got={flat_test[i].item()}"
+    assert False, msg
+
+
+def supports_dense_topk_routing() -> bool:
+    """Return whether the installed HybridEP supports dense topk_idx metadata."""
+    try:
+        # Test-only compatibility check: production code still falls back to sparse routing
+        # when a dense-capable build receives a layout outside dense kernel limits.
+        return hasattr(hybrid_ep_cpp.HybridEpConfigInstance(), "topk")
+    except (TypeError, ValueError, AttributeError):
+        return False
 
 def init_tensor(
     hidden_dim: int,
@@ -104,147 +134,161 @@ def test_hybrid_ep_correctness(buffer: deep_ep.HybridEPBuffer, ref: TorchRef, us
         use_fp8=use_fp8,
     )
     dtype_str = "FP8" if hidden.dtype == torch.uint8 else "BF16"
+    supports_dense_topk = supports_dense_topk_routing()
     dist.barrier()
     if dist.get_rank() == 0:
         print(f'\n=== Correctness Check ({dtype_str}, {dist.get_world_size()} ranks) ===', flush=True)
 
-    # Dispatch correctness check
-    for with_probs in [True, False]:
-        # The check for the dispatch
-        dispatched_hidden_ref, dispatched_probs_ref, dispatched_scaling_factor_ref = (
-            ref.dispatch(
-                hidden, routing_map, probs if with_probs else None, scaling_factor
-            )
-        )
-        (
-            dispatched_hidden,
-            dispatched_probs,
-            dispatched_scaling_factor,
-            handle,
-        ) = buffer.dispatch(
-            hidden=hidden, scaling_factor=scaling_factor, topk_idx=topk_idx, topk_weights=topk_weights if with_probs else None, num_of_experts=NUM_OF_EXPERTS,
-        )
+    # Dispatch correctness check. Older hybrid-ep branches do not expose dense
+    # topk_idx metadata yet, so skip the dense routing mode when unsupported.
+    routing_modes = [("sparse routing", False)]
+    if supports_dense_topk:
+        routing_modes.append(("dense topk_idx", True))
 
-        assert bitwise_equal(dispatched_hidden_ref, dispatched_hidden)
-        if dispatched_probs is not None and dispatched_probs_ref is not None:
-            start, end = ref._local_expert_range_per_node()
-            masked_probs = torch.zeros_like(dispatched_probs)
-            masked_probs[:, start:end] = dispatched_probs[:, start:end]
-            assert bitwise_equal(dispatched_probs_ref, dispatched_probs[:, start:end])
-            dispatched_probs = masked_probs
-        if (
-            dispatched_scaling_factor is not None
-            and dispatched_scaling_factor_ref is not None
-        ):
-            assert bitwise_equal(
-                dispatched_scaling_factor_ref, dispatched_scaling_factor
-            )
-
-        _, _, _, num_dispatched_tokens, local_expert_routing_map, _, _ = handle
-        num_dispatched_tokens = num_dispatched_tokens.cpu()
-        local_expert_routing_map = local_expert_routing_map[
-            : num_dispatched_tokens.item()
-        ]
-        # Simulate the permute and expert and unpermute. The expert is identity op
-        copy_times = local_expert_routing_map.sum(dim=1)
-        dispatched_hidden = dispatched_hidden.to(torch.bfloat16)  
-        # The combine only support bf16
-        hidden_to_combine = dispatched_hidden * copy_times.unsqueeze(1)
-        probs_to_combine = dispatched_probs
-
-        # The check for the combine
-        combined_hidden, combined_probs = buffer.combine(
-            hidden_to_combine, probs_to_combine, handle
-        )
-
-        # The reconstucted value should be TOPK times larger than the input hidden
-        combined_hidden = combined_hidden / TOPK
-
-        assert torch.allclose(combined_hidden, hidden.to(torch.bfloat16), atol=2e-5, rtol=1e-2)
-        if combined_probs is not None and probs is not None:
-            assert bitwise_equal(combined_probs, probs)
-
-    dist.barrier()
-    if dist.get_rank() == 0:
-        print('  dispatch+combine API: PASS', flush=True)
-
-    # Dispatch with permute correctness check
-    for fuse_permute_dispatch in [False, True]:
+    for routing_label, use_dense_topk in routing_modes:
         for with_probs in [True, False]:
-            # The check for the dispatch
+            context = f" ({routing_label}, with_probs={with_probs})"
+            dispatch_kwargs = {"hidden": hidden, "scaling_factor": scaling_factor}
+            if use_dense_topk:
+                dispatch_kwargs.update({
+                    "topk_idx": topk_idx,
+                    "topk_weights": topk_weights if with_probs else None,
+                    "num_of_experts": NUM_OF_EXPERTS,
+                })
+            else:
+                dispatch_kwargs.update({
+                    "routing_map": routing_map,
+                    "probs": probs if with_probs else None,
+                })
+
+            dispatched_hidden_ref, dispatched_probs_ref, dispatched_scaling_factor_ref = (
+                ref.dispatch(
+                    hidden, routing_map, probs if with_probs else None, scaling_factor
+                )
+            )
             (
-                dispatched_hidden,
-                dispatched_probs,
-                dispatched_scaling_factor,
-                tokens_per_expert,
-                handle,
-            ) = buffer.dispatch_with_permute(
-                hidden=hidden,
-                routing_map=routing_map,
-                probs=probs if with_probs else None,
-                scaling_factor=scaling_factor,
-                pad_multiple=PAD_MULTIPLE,
-                fuse_permute_dispatch=fuse_permute_dispatch,
+                dispatched_hidden_dense,
+                dispatched_probs_dense,
+                dispatched_scaling_factor_dense,
+                handle_dense,
+            ) = buffer.dispatch(**dispatch_kwargs)
+
+            assert_bitwise_equal("Dispatch hidden", dispatched_hidden_ref, dispatched_hidden_dense, context)
+            assert_bitwise_equal("Dispatch scaling_factor", dispatched_scaling_factor_ref, dispatched_scaling_factor_dense, context)
+            if dispatched_probs_dense is not None and dispatched_probs_ref is not None:
+                start, end = ref._local_expert_range_per_node()
+                assert_bitwise_equal("Dispatch probs", dispatched_probs_ref, dispatched_probs_dense[:, start:end], context)
+                masked_probs = torch.zeros_like(dispatched_probs_dense)
+                masked_probs[:, start:end] = dispatched_probs_dense[:, start:end]
+                dispatched_probs_dense = masked_probs
+
+            _, _, _, num_dispatched_tokens, local_expert_routing_map, _, _ = handle_dense
+            num_dispatched_tokens = num_dispatched_tokens.cpu()
+            local_expert_routing_map = local_expert_routing_map[
+                : num_dispatched_tokens.item()
+            ]
+            copy_times = local_expert_routing_map.sum(dim=1)
+            hidden_to_combine = dispatched_hidden_dense.to(torch.bfloat16) * copy_times.unsqueeze(1)
+            combined_hidden, combined_probs = buffer.combine(
+                hidden_to_combine, dispatched_probs_dense, handle_dense
             )
-            
-            (
-                dispatched_hidden_ref,
-                dispatched_probs_ref,
-                dispatched_scaling_factor_ref,
-            ) = ref.dispatch(
-                hidden,
-                routing_map,
-                probs if with_probs else None,
-                scaling_factor,
-                pad_multiple=PAD_MULTIPLE,
-                enable_permute=True,
-            )
-
-            assert bitwise_equal(dispatched_hidden_ref, dispatched_hidden), \
-                f"Dispatch hidden mismatch (with_probs={with_probs}, fuse={fuse_permute_dispatch})"
-            if dispatched_probs is not None and dispatched_probs_ref is not None:
-                assert bitwise_equal(dispatched_probs_ref, dispatched_probs), \
-                    f"Dispatch probs mismatch (with_probs={with_probs}, fuse={fuse_permute_dispatch})"
-            if (
-                dispatched_scaling_factor is not None
-                and dispatched_scaling_factor_ref is not None
-            ):
-                assert bitwise_equal(
-                    dispatched_scaling_factor_ref, dispatched_scaling_factor
-                ), f"Dispatch scaling_factor mismatch (with_probs={with_probs}, fuse={fuse_permute_dispatch})"
-
-            # The combine only support bf16
-            dispatched_hidden = dispatched_hidden.to(torch.bfloat16)
-            hidden_to_combine = dispatched_hidden
-            probs_to_combine = dispatched_probs
-
-            # The check for the combine
-            combined_hidden, combined_probs = buffer.combine_with_unpermute(
-                hidden=hidden_to_combine,
-                probs=probs_to_combine,
-                handle=handle,
-                pad_multiple=PAD_MULTIPLE,
-                fuse_unpermute_combine=fuse_permute_dispatch,
-            )
-
-            # The reconstucted value should be TOPK times larger than the input hidden
             combined_hidden = combined_hidden / TOPK
 
-            assert torch.allclose(
-                combined_hidden, hidden.to(torch.bfloat16), atol=2e-5, rtol=1e-2
-            ), f"Combine hidden mismatch (with_probs={with_probs}, fuse_permute_dispatch={fuse_permute_dispatch})"
+            assert torch.allclose(combined_hidden, hidden.to(torch.bfloat16), atol=2e-5, rtol=1e-2), \
+                f"Combine hidden mismatch{context}"
             if combined_probs is not None and probs is not None:
-                assert bitwise_equal(combined_probs, probs), \
-                    f"Combine probs mismatch (with_probs={with_probs}, fuse_permute_dispatch={fuse_permute_dispatch})"
+                assert_bitwise_equal("Combine probs", probs, combined_probs, context)
 
         dist.barrier()
         if dist.get_rank() == 0:
-            api_name = (
-                'dispatch_with_permute + combine_with_unpermute API (non-fused)'
-                if not fuse_permute_dispatch
-                else 'dispatch_with_permute + combine_with_unpermute API (fused)'
-            )
-            print(f'  {api_name}: PASS', flush=True)
+            dense_suffix = " (dense routing)" if use_dense_topk else ""
+            print(f'  dispatch+combine API{dense_suffix}: PASS', flush=True)
+
+    if not supports_dense_topk:
+        dist.barrier()
+        if dist.get_rank() == 0:
+            print('  dispatch+combine API (dense routing): SKIP (unsupported)', flush=True)
+
+    # Dispatch with permute correctness check. Dense topk_idx mode exercises
+    # scan with enable_permute=True, i.e. the path that produces
+    # dense_chunk_layout and dense_to_expert_map.
+    for routing_label, use_dense_topk in routing_modes:
+        for fuse_permute_dispatch in [False, True]:
+            for with_probs in [True, False]:
+                context = (f" ({routing_label}, with_probs={with_probs}, "
+                           f"fuse_permute_dispatch={fuse_permute_dispatch})")
+                dispatch_kwargs = {
+                    "hidden": hidden,
+                    "scaling_factor": scaling_factor,
+                    "pad_multiple": PAD_MULTIPLE,
+                    "fuse_permute_dispatch": fuse_permute_dispatch,
+                }
+                if use_dense_topk:
+                    dispatch_kwargs.update({
+                        "topk_idx": topk_idx,
+                        "topk_weights": topk_weights if with_probs else None,
+                        "num_of_experts": NUM_OF_EXPERTS,
+                    })
+                else:
+                    dispatch_kwargs.update({
+                        "routing_map": routing_map,
+                        "probs": probs if with_probs else None,
+                    })
+
+                (
+                    dispatched_hidden,
+                    dispatched_probs,
+                    dispatched_scaling_factor,
+                    _tokens_per_expert,
+                    handle,
+                ) = buffer.dispatch_with_permute(**dispatch_kwargs)
+
+                (
+                    dispatched_hidden_ref,
+                    dispatched_probs_ref,
+                    dispatched_scaling_factor_ref,
+                ) = ref.dispatch(
+                    hidden,
+                    routing_map,
+                    probs if with_probs else None,
+                    scaling_factor,
+                    pad_multiple=PAD_MULTIPLE,
+                    enable_permute=True,
+                )
+
+                assert_bitwise_equal("Dispatch+permute hidden", dispatched_hidden_ref, dispatched_hidden, context)
+                assert_bitwise_equal("Dispatch+permute probs", dispatched_probs_ref, dispatched_probs, context)
+                assert_bitwise_equal("Dispatch+permute scaling_factor", dispatched_scaling_factor_ref, dispatched_scaling_factor, context)
+
+                combined_hidden, combined_probs = buffer.combine_with_unpermute(
+                    hidden=dispatched_hidden.to(torch.bfloat16),
+                    probs=dispatched_probs,
+                    handle=handle,
+                    pad_multiple=PAD_MULTIPLE,
+                    fuse_unpermute_combine=fuse_permute_dispatch,
+                )
+                combined_hidden = combined_hidden / TOPK
+
+                assert torch.allclose(
+                    combined_hidden, hidden.to(torch.bfloat16), atol=2e-5, rtol=1e-2
+                ), f"Combine+unpermute hidden mismatch{context}"
+                if combined_probs is not None and probs is not None:
+                    assert_bitwise_equal("Combine+unpermute probs", probs, combined_probs, context)
+
+            dist.barrier()
+            if dist.get_rank() == 0:
+                dense_suffix = "dense routing, " if use_dense_topk else ""
+                api_name = (
+                    f'dispatch_with_permute + combine_with_unpermute API ({dense_suffix}non-fused)'
+                    if not fuse_permute_dispatch
+                    else f'dispatch_with_permute + combine_with_unpermute API ({dense_suffix}fused)'
+                )
+                print(f'  {api_name}: PASS', flush=True)
+
+    if not supports_dense_topk:
+        dist.barrier()
+        if dist.get_rank() == 0:
+            print('  dispatch_with_permute + combine_with_unpermute API (dense routing): SKIP (unsupported)', flush=True)
 
 
 def _gather_times(t):
@@ -309,7 +353,7 @@ def test_hybrid_ep_benchmark(buffer: deep_ep.HybridEPBuffer, group: dist.Process
     multinode = (NUM_OF_NODES > 1)
 
     # ---- Setup: collect handles, build args dicts (also serves as warmup) ----
-    # Non-permute
+    # Non-permute (forward dispatch with probs)
     dispatched_hidden, dispatched_probs, _, handle = (
         buffer.dispatch(hidden=hidden, scaling_factor=scaling_factor, topk_idx=topk_idx,
                         topk_weights=topk_weights, num_of_experts=NUM_OF_EXPERTS))
@@ -317,6 +361,11 @@ def test_hybrid_ep_benchmark(buffer: deep_ep.HybridEPBuffer, group: dist.Process
     dispatch_args = {'hidden': hidden, 'scaling_factor': scaling_factor, 'topk_idx': topk_idx,
                      'topk_weights': topk_weights, 'num_of_experts': NUM_OF_EXPERTS, 'handle': handle}
     combine_args = {'hidden': dispatched_hidden_bf16, 'probs': dispatched_probs, 'handle': handle}
+
+    # Dispatch/combine with probs=False variants
+    dispatch_noprob_args = {'hidden': hidden, 'scaling_factor': scaling_factor, 'topk_idx': topk_idx,
+                            'topk_weights': None, 'num_of_experts': NUM_OF_EXPERTS, 'handle': handle}
+    combine_noprob_args = {'hidden': dispatched_hidden_bf16, 'probs': None, 'handle': handle}
 
     # Permute (non-fused)
     dispatched_hidden_wp, dispatched_probs_wp, _, tpe_wp, handle_wp = (
@@ -365,23 +414,29 @@ def test_hybrid_ep_benchmark(buffer: deep_ep.HybridEPBuffer, group: dist.Process
         print(f'                combine  = fused_combine_unpermute_kernel + misc', flush=True)
         print(f'  (misc = device_sync, update_flag, etc.)', flush=True)
 
-    # Non-permute
+    # Non-permute (probs=True)
     t = bench(lambda: buffer.dispatch(**dispatch_args))[0]
-    _report_bw(f'dispatch ({dtype_str})', t, nvl_dispatch_actual, 'nvl_recv_bytes', rdma_dispatch, 'rdma_send_bytes')
+    _report_bw(f'dispatch ({dtype_str}, probs=True)', t, nvl_dispatch_actual, 'nvl_recv_bytes', rdma_dispatch, 'rdma_send_bytes')
     t = bench(lambda: buffer.combine(**combine_args))[0]
-    _report_bw('combine', t, nvl_combine, 'combine_send_bytes', rdma_combine, 'rdma_recv_bytes')
+    _report_bw(f'combine ({dtype_str}, probs=True)', t, nvl_combine, 'combine_send_bytes', rdma_combine, 'rdma_recv_bytes')
+
+    # Non-permute (probs=False)
+    t = bench(lambda: buffer.dispatch(**dispatch_noprob_args))[0]
+    _report_bw(f'dispatch ({dtype_str}, probs=False)', t, nvl_dispatch_actual, 'nvl_recv_bytes', rdma_dispatch, 'rdma_send_bytes')
+    t = bench(lambda: buffer.combine(**combine_noprob_args))[0]
+    _report_bw(f'combine ({dtype_str}, probs=False)', t, nvl_combine, 'combine_send_bytes', rdma_combine, 'rdma_recv_bytes')
 
     # Permute (non-fused)
     t = bench(lambda: buffer.dispatch_with_permute(**dispatch_wp_args))[0]
-    _report_bw(f'dispatch+permute ({dtype_str})', t, nvl_dispatch_actual, 'nvl_recv_bytes', rdma_dispatch, 'rdma_send_bytes')
+    _report_bw(f'dispatch+permute ({dtype_str}, probs=True)', t, nvl_dispatch_actual, 'nvl_recv_bytes', rdma_dispatch, 'rdma_send_bytes')
     t = bench(lambda: buffer.combine_with_unpermute(**combine_wp_args))[0]
-    _report_bw('combine+unpermute', t, nvl_combine, 'combine_send_bytes', rdma_combine, 'rdma_recv_bytes')
+    _report_bw(f'combine+unpermute ({dtype_str}, probs=True)', t, nvl_combine, 'combine_send_bytes', rdma_combine, 'rdma_recv_bytes')
 
     # Fused
     t = bench(lambda: buffer.dispatch_with_permute(**dispatch_fused_args))[0]
-    _report_bw(f'fused dispatch+permute ({dtype_str})', t, nvl_dispatch_actual, 'nvl_recv_bytes', rdma_dispatch, 'rdma_send_bytes')
+    _report_bw(f'fused dispatch+permute ({dtype_str}, probs=True)', t, nvl_dispatch_actual, 'nvl_recv_bytes', rdma_dispatch, 'rdma_send_bytes')
     t = bench(lambda: buffer.combine_with_unpermute(**combine_fused_args))[0]
-    _report_bw('fused combine+unpermute', t, nvl_combine, 'combine_send_bytes', rdma_combine, 'rdma_recv_bytes')
+    _report_bw(f'fused combine+unpermute ({dtype_str}, probs=True)', t, nvl_combine, 'combine_send_bytes', rdma_combine, 'rdma_recv_bytes')
 
     # ---- Kineto / nsys profiling ----
     # Kineto measures pure GPU kernel time only (no CPU overhead, no d2d, no device_sync)
@@ -391,12 +446,20 @@ def test_hybrid_ep_benchmark(buffer: deep_ep.HybridEPBuffer, group: dist.Process
             print(f'  Non-fused:  dispatch_kernel only  |  combine_kernel only', flush=True)
             print(f'  Fused:      fused_permute_dispatch_kernel only  |  fused_combine_unpermute_kernel only', flush=True)
 
-        # Non-fused kernel profiling
+        # Non-fused kernel profiling (probs=True)
         group.barrier()
         dispatch_t, combine_t = bench_kineto(
             lambda: (buffer.dispatch(**dispatch_args), buffer.combine(**combine_args)),
             kernel_names=('dispatch_kernel', 'combine_kernel'), barrier_comm_profiling=True, suppress_kineto_output=True)
-        _report_kineto(f'dispatch kernel ({dtype_str})', 'combine kernel',
+        _report_kineto(f'dispatch kernel ({dtype_str}, probs=True)', f'combine kernel ({dtype_str}, probs=True)',
+                       dispatch_t, nvl_dispatch_actual, combine_t, nvl_combine, rdma_dispatch, rdma_combine)
+
+        # Non-fused kernel profiling (probs=False)
+        group.barrier()
+        dispatch_t, combine_t = bench_kineto(
+            lambda: (buffer.dispatch(**dispatch_noprob_args), buffer.combine(**combine_noprob_args)),
+            kernel_names=('dispatch_kernel', 'combine_kernel'), barrier_comm_profiling=True, suppress_kineto_output=True)
+        _report_kineto(f'dispatch kernel ({dtype_str}, probs=False)', f'combine kernel ({dtype_str}, probs=False)',
                        dispatch_t, nvl_dispatch_actual, combine_t, nvl_combine, rdma_dispatch, rdma_combine)
 
         # Fused kernel profiling
@@ -404,37 +467,56 @@ def test_hybrid_ep_benchmark(buffer: deep_ep.HybridEPBuffer, group: dist.Process
         dispatch_t, combine_t = bench_kineto(
             lambda: (buffer.dispatch_with_permute(**dispatch_fused_args), buffer.combine_with_unpermute(**combine_fused_args)),
             kernel_names=('dispatch_kernel', 'combine_kernel'), barrier_comm_profiling=True, suppress_kineto_output=True)
-        _report_kineto(f'fused dispatch+permute kernel ({dtype_str})', 'fused combine+unpermute kernel',
+        _report_kineto(f'fused dispatch+permute kernel ({dtype_str}, probs=True)', f'fused combine+unpermute kernel ({dtype_str}, probs=True)',
                        dispatch_t, nvl_dispatch_actual, combine_t, nvl_combine, rdma_dispatch, rdma_combine)
+
+        # Non-fused permute/unpermute kernel profiling (isolate permute_kernel and unpermute_kernel times)
+        group.barrier()
+        dispatch_t, permute_t = bench_kineto(
+            lambda: buffer.dispatch_with_permute(**dispatch_wp_args),
+            kernel_names=('dispatch_kernel', 'permute_kernel'), barrier_comm_profiling=True, suppress_kineto_output=True)
+        combine_t, unpermute_t = bench_kineto(
+            lambda: buffer.combine_with_unpermute(**combine_wp_args),
+            kernel_names=('combine_kernel', 'unpermute_kernel'), barrier_comm_profiling=True, suppress_kineto_output=True)
+        d_times = _gather_times(dispatch_t)
+        p_times = _gather_times(permute_t)
+        c_times = _gather_times(combine_t)
+        u_times = _gather_times(unpermute_t)
+        if rank == 0:
+            fmt = lambda ts: f'avg={sum(ts)/len(ts)*1e6:.1f} us [min={min(ts)*1e6:.1f}, max={max(ts)*1e6:.1f}]'
+            print(f'  {"dispatch_kernel (in dispatch+permute):":<{LOG_LABEL_WIDTH}} {fmt(d_times)}', flush=True)
+            print(f'  {"permute_kernel:":<{LOG_LABEL_WIDTH}} {fmt(p_times)}', flush=True)
+            print(f'  {"unpermute_kernel:":<{LOG_LABEL_WIDTH}} {fmt(u_times)}', flush=True)
+            print(f'  {"combine_kernel (in combine+unpermute):":<{LOG_LABEL_WIDTH}} {fmt(c_times)}', flush=True)
     else:
         if torch.distributed.get_rank() == 0:
             torch.cuda.profiler.start()
-        with torch.cuda.nvtx.range(f"hybrid-ep dispatch ({dtype_str})"):
+        with torch.cuda.nvtx.range(f"hybrid-ep dispatch ({dtype_str}, probs=True)"):
             if rank == 0:
-                print(f"profile hybrid-ep dispatch ({dtype_str})", flush=True)
+                print(f"profile hybrid-ep dispatch ({dtype_str}, probs=True)", flush=True)
             nsys_dispatch_args = {'hidden': hidden, 'scaling_factor': scaling_factor, 'topk_idx': topk_idx, 'topk_weights': topk_weights, 'num_of_experts': NUM_OF_EXPERTS}
             bench(lambda: buffer.dispatch(**nsys_dispatch_args))
-        with torch.cuda.nvtx.range("hybrid-ep combine"):
+        with torch.cuda.nvtx.range(f"hybrid-ep combine ({dtype_str}, probs=True)"):
             if rank == 0:
-                print(f"profile hybrid-ep combine", flush=True)
+                print(f"profile hybrid-ep combine ({dtype_str}, probs=True)", flush=True)
             bench(lambda: buffer.combine(**combine_args))
-        with torch.cuda.nvtx.range(f"hybrid-ep dispatch+permute ({dtype_str})"):
+        with torch.cuda.nvtx.range(f"hybrid-ep dispatch+permute ({dtype_str}, probs=True)"):
             if rank == 0:
-                print(f"profile hybrid-ep dispatch+permute ({dtype_str})", flush=True)
+                print(f"profile hybrid-ep dispatch+permute ({dtype_str}, probs=True)", flush=True)
             nsys_dispatch_wp_args = {'hidden': hidden, 'scaling_factor': scaling_factor, 'routing_map': routing_map, 'probs': probs, 'pad_multiple': PAD_MULTIPLE}
             bench(lambda: buffer.dispatch_with_permute(**nsys_dispatch_wp_args))
-        with torch.cuda.nvtx.range("hybrid-ep combine+unpermute"):
+        with torch.cuda.nvtx.range(f"hybrid-ep combine+unpermute ({dtype_str}, probs=True)"):
             if rank == 0:
-                print(f"profile hybrid-ep combine+unpermute", flush=True)
+                print(f"profile hybrid-ep combine+unpermute ({dtype_str}, probs=True)", flush=True)
             bench(lambda: buffer.combine_with_unpermute(**combine_wp_args))
-        with torch.cuda.nvtx.range(f"hybrid-ep dispatch+permute fused"):
+        with torch.cuda.nvtx.range(f"hybrid-ep dispatch+permute fused ({dtype_str}, probs=True)"):
             if rank == 0:
-                print(f"profile hybrid-ep dispatch+permute fused", flush=True)
+                print(f"profile hybrid-ep dispatch+permute fused ({dtype_str}, probs=True)", flush=True)
             nsys_dispatch_fused_args = {'hidden': hidden, 'scaling_factor': scaling_factor, 'routing_map': routing_map, 'probs': probs, 'pad_multiple': PAD_MULTIPLE, 'fuse_permute_dispatch': True}
             bench(lambda: buffer.dispatch_with_permute(**nsys_dispatch_fused_args))
-        with torch.cuda.nvtx.range("hybrid-ep combine+unpermute fused"):
+        with torch.cuda.nvtx.range(f"hybrid-ep combine+unpermute fused ({dtype_str}, probs=True)"):
             if rank == 0:
-                print(f"profile hybrid-ep combine+unpermute", flush=True)
+                print(f"profile hybrid-ep combine+unpermute fused ({dtype_str}, probs=True)", flush=True)
             bench(lambda: buffer.combine_with_unpermute(**combine_fused_args))
         time.sleep(1)
         if torch.distributed.get_rank() == 0:
@@ -446,7 +528,8 @@ def test_main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
 
     stream = torch.cuda.Stream()
     with torch.cuda.stream(stream):
-        for use_fp8 in [False, True]:
+        fp8_modes = [False] if args.only_bf16 else [False, True]
+        for use_fp8 in fp8_modes:
             buffer = deep_ep.HybridEPBuffer(
                 group=group,
                 hidden_dim=HIDDEN_DIM,
@@ -487,5 +570,7 @@ if __name__ == "__main__":
                        help='Number of processes to spawn (default: 4)')
     parser.add_argument('--nsys-profile', action='store_true', default=False,
                        help='benchmark with nsys profile or not (default: False)')
+    parser.add_argument('--only-bf16', action='store_true', default=False,
+                       help='Skip FP8 tests, only run BF16 (default: False)')
     args = parser.parse_args()
     torch.multiprocessing.spawn(test_main, args=(args.num_processes, args), nprocs=args.num_processes)
