@@ -15,6 +15,7 @@
 namespace deep_ep::elastic {
 
 template <bool kIsScaleupNVLink,
+          int kNumTmaBuffers,
           bool kDoCPUSync,
           bool kReuseSlotIndices,
           int kNumSMs,
@@ -44,8 +45,11 @@ dispatch_impl(
     const int rank_idx
 ) {
     constexpr int kNumExpertsPerRank = kNumExperts / kNumRanks;
+    constexpr int kNumNVLinkStoreGroupsToKeep = 1;
     EP_STATIC_ASSERT(kNumExperts % kNumRanks == 0, "Invalid number of experts or ranks");
     EP_STATIC_ASSERT(kNumNotifyWarps % 4 == 0, "Invalid warpgroup size");
+    EP_STATIC_ASSERT(kIsScaleupNVLink ? kNumTmaBuffers > kNumNVLinkStoreGroupsToKeep + 1 : kNumTmaBuffers == 1,
+                     "Invalid number of dispatch TMA buffers");
 
     // Utils
     const auto sm_idx = static_cast<int>(blockIdx.x), thread_idx = static_cast<int>(threadIdx.x);
@@ -261,7 +265,6 @@ dispatch_impl(
 
         // Buffer layouts
         const auto token_layout = layout::TokenLayout(kNumHiddenBytes, kNumSFPacks * sizeof(sf_pack_t), kNumTopk, true);
-        constexpr int kNumTmaBuffers = kIsScaleupNVLink ? 3 : 1;
         const auto warp_tma_buffers = layout::BufferLayout<true>(token_layout, kNumDispatchWarps, kNumTmaBuffers,
             math::advance_ptr<int>(smem, kNumSmemBytesForNotify)).get_rank_buffer(dispatch_warp_idx);
         auto recv_buffer = layout::BufferLayout<false>(token_layout, kNumRanks, kNumMaxTokensPerRank, buffer);
@@ -373,10 +376,11 @@ dispatch_impl(
 
             if constexpr (kIsScaleupNVLink) {
                 if (next_token_idx < num_tokens) {
-                    // Reduce the outstanding stores to one. With three
-                    // buffers, the buffer selected for the next token belongs
-                    // to the group that this wait just retired.
-                    ptx::tma_store_wait<1>();
+                    // Keep only the youngest store groups before recycling a
+                    // staging buffer. Safety requires at least two other
+                    // buffers: one for the current token and one for every
+                    // store group that can remain in flight after this wait.
+                    ptx::tma_store_wait<kNumNVLinkStoreGroupsToKeep>();
                     __syncwarp();
                     prepare_token(next_token_idx, next_token_iter, next_dst_rank_idx, next_dst_slot_idx);
                 }

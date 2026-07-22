@@ -18,6 +18,7 @@ public:
         bool is_scaleup_nvlink;
         bool do_cpu_sync;
         bool reuse_slot_indices;
+        int num_tma_buffers;
         int num_notify_warps;
         int num_dispatch_warps; // For hybrid dispatch
         int num_scaleout_warps, num_forward_warps; // For direct dispatch
@@ -52,8 +53,9 @@ public:
         std::string header_name, func_name;
         if (args.num_scaleout_ranks == 1) {
             header_name = "dispatch";
-            func_name = fmt::format("dispatch_impl<{}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}>",
+            func_name = fmt::format("dispatch_impl<{}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}>",
                 args.is_scaleup_nvlink,
+                args.num_tma_buffers,
                 args.do_cpu_sync,
                 args.reuse_slot_indices,
                 args.launch_args.grid_dim.first,
@@ -183,11 +185,11 @@ static void launch_dispatch(void* x, void* sf,
     int num_dispatch_warps = 0;
     int num_scaleout_warps = 0, num_forward_warps = 0;
     int num_threads = 0;
+    const int num_tma_buffers = is_scaleup_nvlink ? kNumDirectNVLinkTmaBuffers : 1;
 
     // Maximize shared memory utilization
     if (num_scaleout_ranks == 1) {
         const auto token_layout = get_dispatch_token_layout(hidden, elem_size, num_sf_packs, num_topk);
-        const int num_tma_buffers = is_scaleup_nvlink ? kNumDirectNVLinkTmaBuffers : 1;
         const int max_num_dispatch_warps = is_scaleup_nvlink ?
             kNumDirectNVLinkDispatchWarps : 32 - num_notify_warps;
         num_dispatch_warps = std::min<int>(
@@ -208,6 +210,7 @@ static void launch_dispatch(void* x, void* sf,
         .is_scaleup_nvlink = is_scaleup_nvlink,
         .do_cpu_sync = do_cpu_sync,
         .reuse_slot_indices = reuse_slot_indices,
+        .num_tma_buffers = num_tma_buffers,
         .num_notify_warps = num_notify_warps,
         .num_dispatch_warps = num_dispatch_warps,
         .num_scaleout_warps = num_scaleout_warps, .num_forward_warps = num_forward_warps,
