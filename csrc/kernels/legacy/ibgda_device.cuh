@@ -15,6 +15,10 @@
 
 #include "utils.cuh"
 
+#if !defined(NVSHMEM_VENDOR_MAJOR_VERSION) || !defined(NVSHMEM_VENDOR_MINOR_VERSION) || !defined(NVSHMEM_VENDOR_PATCH_VERSION)
+#error "NVSHMEM vendor version macros are required"
+#endif
+
 namespace deep_ep::legacy {
 
 EP_STATIC_ASSERT(NVSHMEMI_IBGDA_MIN_QP_DEPTH >= 64, "Invalid QP minimum depth");
@@ -84,7 +88,8 @@ __device__ static __forceinline__ nvshmemi_ibgda_device_qp_t* ibgda_get_rc(int p
 #if NVSHMEM_VENDOR_MAJOR_VERSION > 3 || (NVSHMEM_VENDOR_MAJOR_VERSION == 3 && NVSHMEM_VENDOR_MINOR_VERSION > 5) || \
     (NVSHMEM_VENDOR_MAJOR_VERSION == 3 && NVSHMEM_VENDOR_MINOR_VERSION == 5 && NVSHMEM_VENDOR_PATCH_VERSION >= 19)
     // Since 3.5.19, NVSHMEM stores RC QPs in QP-major, PE-interleaved order.
-    return &state->globalmem.rcs[qp * nvshmemi_device_state_d.npes + pe];
+    const auto num_pes = nvshmemi_device_state_d.npes;
+    return &state->globalmem.rcs[qp * num_pes + pe];
 #else
     // Older NVSHMEM releases store RC QPs in PE-major order.
     return &state->globalmem.rcs[pe * num_rcs + qp];
