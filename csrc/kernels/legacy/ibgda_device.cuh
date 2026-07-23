@@ -7,12 +7,11 @@
 //  - nvshmem/src/include/non_abi/device/pt-to-pt/ibgda_device.cuh
 #pragma once
 
-
-#include <nvshmem.h>
 #include <device_host_transport/nvshmem_common_ibgda.h>
-#include <non_abi/device/threadgroup/nvshmemi_common_device_defines.cuh>
+#include <nvshmem.h>
 
 #include <deep_ep/common/exception.cuh>
+#include <non_abi/device/threadgroup/nvshmemi_common_device_defines.cuh>
 
 #include "utils.cuh"
 
@@ -80,9 +79,16 @@ __device__ static __forceinline__ nvshmemi_ibgda_device_state_t* ibgda_get_state
 
 __device__ static __forceinline__ nvshmemi_ibgda_device_qp_t* ibgda_get_rc(int pe, int id) {
     auto state = ibgda_get_state();
-    const auto num_rc_per_pe = ibgda_get_state()->num_rc_per_pe;
-    return &state->globalmem
-                .rcs[pe * num_rc_per_pe * state->num_devices_initialized + id % (num_rc_per_pe * state->num_devices_initialized)];
+    const auto num_rcs = state->num_rc_per_pe * state->num_devices_initialized;
+    const auto qp = id % num_rcs;
+#if NVSHMEM_VENDOR_MAJOR_VERSION > 3 || (NVSHMEM_VENDOR_MAJOR_VERSION == 3 && NVSHMEM_VENDOR_MINOR_VERSION > 5) || \
+    (NVSHMEM_VENDOR_MAJOR_VERSION == 3 && NVSHMEM_VENDOR_MINOR_VERSION == 5 && NVSHMEM_VENDOR_PATCH_VERSION >= 19)
+    // Since 3.5.19, NVSHMEM stores RC QPs in QP-major, PE-interleaved order.
+    return &state->globalmem.rcs[qp * nvshmemi_device_state_d.npes + pe];
+#else
+    // Older NVSHMEM releases store RC QPs in PE-major order.
+    return &state->globalmem.rcs[pe * num_rcs + qp];
+#endif
 }
 
 __device__ static __forceinline__ void ibgda_lock_acquire(int* lock) {
