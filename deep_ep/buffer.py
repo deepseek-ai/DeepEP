@@ -85,15 +85,22 @@ class Buffer:
             os.environ['NVSHMEM_IB_ENABLE_IBGDA'] = '1'
             os.environ['NVSHMEM_IBGDA_NUM_RC_PER_PE'] = f'{num_qps_per_rank}'
             # Make sure QP depth is always larger than the number of on-flight WRs, so that we can skip WQ slot check
-            os.environ['NVSHMEM_QP_DEPTH'] = '1024'
+            # Keep the upstream-safe default, but allow deployments to lower
+            # the IBGDA WQ depth after validating their maximum in-flight
+            # traffic.  Hard-overwriting this value makes the QP/CQ footprint
+            # dominate colocated training memory even when the low-latency
+            # token buffer itself is small.
+            os.environ.setdefault('NVSHMEM_QP_DEPTH', '1024')
 
             # Reduce gpu memory usage
             # 6 default teams + 1 extra team
             os.environ['NVSHMEM_MAX_TEAMS'] = '7'
             # Disable NVLink SHArP
             os.environ['NVSHMEM_DISABLE_NVLS'] = '1'
-            # NOTES: NVSHMEM initialization requires at least 256 MiB
-            os.environ['NVSHMEM_CUMEM_GRANULARITY'] = f'{2 ** 29}'
+            # NVSHMEM requires at least 256 MiB.  Keep DeepEP's historical
+            # 512-MiB default, but allow a deployment to select the supported
+            # 256-MiB floor to reduce the persistent CUMEM mapping footprint.
+            os.environ.setdefault('NVSHMEM_CUMEM_GRANULARITY', f'{2 ** 29}')
 
             if not allow_mnnvl:
                 # Disable multi-node NVLink detection

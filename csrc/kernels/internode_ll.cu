@@ -2,6 +2,7 @@
 #include "exception.cuh"
 #include "launch.cuh"
 #include "ibgda_device.cuh"
+#include <c10/util/Float8_e4m3fn.h>
 
 namespace deep_ep {
 
@@ -116,7 +117,15 @@ dispatch(void* packed_recv_x, void* packed_recv_x_scales,
                     // Calculate local amax
                     auto bf16_values = reinterpret_cast<nv_bfloat16*>(&int4_value);
                     float fp32_values[kNumElemsPerRead];
-                    float amax = kFP8Margin, scale, scale_inv;
+                    // Match SGLang's contiguous/training quantizer when
+                    // power-of-two scale rounding is disabled (the SM90
+                    // path): 1e-10 floor, divide to form the stored scale,
+                    // scalar divide to quantize, and scalar FP8 conversion.
+                    // DeepEP's historical 1e-4 floor, reciprocal multiply,
+                    // and packed FP8 conversion all move visible rounding
+                    // boundaries.
+                    float amax = round_scale ? kFP8Margin : 1e-10f;
+                    float scale, scale_inv;
                     #pragma unroll
                     for (int j = 0; j < kNumElemsPerRead; ++ j) {
                         fp32_values[j] = static_cast<float>(bf16_values[j]);
@@ -126,17 +135,42 @@ dispatch(void* packed_recv_x, void* packed_recv_x_scales,
                     // Reduce amax and scale
                     EP_STATIC_ASSERT(kNumElemsPerRead * 32 / kNumPerChannels == 2, "Invalid vectorization");
                     amax = warp_reduce_max<16>(amax);
-                    calculate_fp8_scales(amax, scale, scale_inv, round_scale);
+                    if (round_scale) {
+                        calculate_fp8_scales(
+                            amax, scale, scale_inv, /*round_scale=*/true);
+                    } else {
+                        scale_inv = __fdiv_rn(amax, kFinfoAmaxE4M3);
+                        scale = __fdiv_rn(1.0f, scale_inv);
+                    }
                     if (lane_id == 0 or lane_id == 16)
                         rdma_x_scales[i * kNumElemsPerRead / 128] = scale_inv;
 
                     // Cast into send buffer
                     vec_t int2_value;
-                    auto fp8x2_values = reinterpret_cast<__nv_fp8x2_storage_t*>(&int2_value);
-                    #pragma unroll
-                    for (int j = 0; j < kNumElemsPerRead; j += 2) {
-                        float2 fp32x2 = {fp32_values[j] * scale, fp32_values[j + 1] * scale};
-                        fp8x2_values[j / 2] = __nv_cvt_float2_to_fp8x2(fp32x2, __NV_SATFINITE, __NV_E4M3);
+                    if (round_scale) {
+                        auto fp8x2_values =
+                            reinterpret_cast<__nv_fp8x2_storage_t*>(&int2_value);
+                        #pragma unroll
+                        for (int j = 0; j < kNumElemsPerRead; j += 2) {
+                            float2 fp32x2 = {
+                                fp32_values[j] * scale,
+                                fp32_values[j + 1] * scale};
+                            fp8x2_values[j / 2] =
+                                __nv_cvt_float2_to_fp8x2(
+                                    fp32x2, __NV_SATFINITE, __NV_E4M3);
+                        }
+                    } else {
+                        auto fp8_values =
+                            reinterpret_cast<c10::Float8_e4m3fn*>(&int2_value);
+                        #pragma unroll
+                        for (int j = 0; j < kNumElemsPerRead; ++j) {
+                            auto quantized = fminf(
+                                fmaxf(
+                                    __fdiv_rn(fp32_values[j], scale_inv),
+                                    -kFinfoAmaxE4M3),
+                                kFinfoAmaxE4M3);
+                            fp8_values[j] = c10::Float8_e4m3fn(quantized);
+                        }
                     }
                     rdma_x_vec[i] = int2_value;
                 } else {
