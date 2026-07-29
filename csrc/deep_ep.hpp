@@ -148,7 +148,8 @@ public:
                          const std::optional<torch::Tensor>& cumulative_local_expert_recv_stats,
                          int num_max_dispatch_tokens_per_rank, int num_experts,
                          bool use_fp8, bool round_scale, bool use_ue8m0,
-                         bool async, bool return_recv_hook);
+                         bool async, bool return_recv_hook,
+                         bool align_fp8_quantization);
 
     std::tuple<torch::Tensor, std::optional<EventHandle>, std::optional<std::function<void()>>>
     low_latency_combine(const torch::Tensor& x, const torch::Tensor& topk_idx, const torch::Tensor& topk_weights,

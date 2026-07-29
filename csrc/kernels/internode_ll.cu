@@ -37,7 +37,7 @@ void clean_low_latency_buffer(int* clean_0, int num_clean_int_0,
                   clean_0, num_clean_int_0, clean_1, num_clean_int_1);
 }
 
-template <bool kUseFP8, bool kUseUE8M0, int kHidden>
+template <bool kUseFP8, bool kUseUE8M0, bool kAlignFP8Quantization, int kHidden>
 __global__ __launch_bounds__(1024, 1) void
 dispatch(void* packed_recv_x, void* packed_recv_x_scales,
          int* packed_recv_src_info, int64_t* packed_recv_layout_range,
@@ -117,14 +117,14 @@ dispatch(void* packed_recv_x, void* packed_recv_x_scales,
                     // Calculate local amax
                     auto bf16_values = reinterpret_cast<nv_bfloat16*>(&int4_value);
                     float fp32_values[kNumElemsPerRead];
-                    // Match SGLang's contiguous/training quantizer when
-                    // power-of-two scale rounding is disabled (the SM90
-                    // path): 1e-10 floor, divide to form the stored scale,
-                    // scalar divide to quantize, and scalar FP8 conversion.
-                    // DeepEP's historical 1e-4 floor, reciprocal multiply,
-                    // and packed FP8 conversion all move visible rounding
-                    // boundaries.
-                    float amax = round_scale ? kFP8Margin : 1e-10f;
+                    // The historical low-latency path remains the default.
+                    // Deterministic train/rollout alignment can opt into the
+                    // scalar SGLang/Megatron sequence for non-power-of-two
+                    // scales: 1e-10 floor, RN division, and scalar E4M3 cast.
+                    float amax =
+                        kAlignFP8Quantization and not round_scale
+                            ? 1e-10f
+                            : kFP8Margin;
                     float scale, scale_inv;
                     #pragma unroll
                     for (int j = 0; j < kNumElemsPerRead; ++ j) {
@@ -135,9 +135,9 @@ dispatch(void* packed_recv_x, void* packed_recv_x_scales,
                     // Reduce amax and scale
                     EP_STATIC_ASSERT(kNumElemsPerRead * 32 / kNumPerChannels == 2, "Invalid vectorization");
                     amax = warp_reduce_max<16>(amax);
-                    if (round_scale) {
+                    if (round_scale or not kAlignFP8Quantization) {
                         calculate_fp8_scales(
-                            amax, scale, scale_inv, /*round_scale=*/true);
+                            amax, scale, scale_inv, round_scale);
                     } else {
                         scale_inv = __fdiv_rn(amax, kFinfoAmaxE4M3);
                         scale = __fdiv_rn(1.0f, scale_inv);
@@ -147,7 +147,7 @@ dispatch(void* packed_recv_x, void* packed_recv_x_scales,
 
                     // Cast into send buffer
                     vec_t int2_value;
-                    if (round_scale) {
+                    if (round_scale or not kAlignFP8Quantization) {
                         auto fp8x2_values =
                             reinterpret_cast<__nv_fp8x2_storage_t*>(&int2_value);
                         #pragma unroll
@@ -370,6 +370,7 @@ void dispatch(void* packed_recv_x, void* packed_recv_x_scales,
               int num_tokens, int hidden, int num_max_dispatch_tokens_per_rank,
               int num_topk, int num_experts, int rank, int num_ranks,
               bool use_fp8, bool round_scale, bool use_ue8m0,
+              bool align_fp8_quantization,
               void* workspace, int num_device_sms,
               cudaStream_t stream, int phases) {
     constexpr int kNumMaxTopK = 9;
@@ -392,11 +393,13 @@ void dispatch(void* packed_recv_x, void* packed_recv_x_scales,
         EP_HOST_ASSERT(round_scale and "UE8M0 SF requires `round_scale=True`");
 
 #define DISPATCH_LAUNCH_CASE(hidden) { \
-auto dispatch_func = dispatch<false, false, hidden>; \
+auto dispatch_func = dispatch<false, false, false, hidden>; \
 if (use_fp8 and not use_ue8m0) \
-    dispatch_func = dispatch<true, false, hidden>; \
+    dispatch_func = align_fp8_quantization \
+        ? dispatch<true, false, true, hidden> \
+        : dispatch<true, false, false, hidden>; \
 if (use_fp8 and use_ue8m0) \
-    dispatch_func = dispatch<true, true, hidden>; \
+    dispatch_func = dispatch<true, true, false, hidden>; \
 LAUNCH_KERNEL(&cfg, dispatch_func, \
               packed_recv_x, packed_recv_x_scales, \
               packed_recv_src_info, packed_recv_layout_range, \

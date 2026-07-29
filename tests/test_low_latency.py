@@ -40,6 +40,15 @@ def test_main(num_tokens: int, hidden: int, num_experts: int, num_topk: int,
             for dispatch_use_fp8 in (False, True):
                 for round_scale in (False, True) if dispatch_use_fp8 else (False, ):
                     for use_ue8m0 in (False, True) if round_scale else (False, ):
+                        # Cover both compiled quantizers without doubling the
+                        # already large cross-product: structured input checks
+                        # the historical default and random input checks the
+                        # opt-in aligned path.
+                        align_fp8_quantization = (
+                            dispatch_use_fp8
+                            and not round_scale
+                            and current_x is x_pure_rand
+                        )
                         num_times += 1
                         for i in range((num_times % 2) + 1):
                             cumulative_local_expert_recv_stats = torch.zeros((num_local_experts, ), dtype=torch.int, device='cuda')
@@ -47,7 +56,8 @@ def test_main(num_tokens: int, hidden: int, num_experts: int, num_topk: int,
                                 buffer.low_latency_dispatch(current_x, topk_idx, num_tokens, num_experts,
                                                             use_fp8=dispatch_use_fp8, round_scale=round_scale, use_ue8m0=use_ue8m0,
                                                             cumulative_local_expert_recv_stats=cumulative_local_expert_recv_stats,
-                                                            async_finish=not return_recv_hook, return_recv_hook=return_recv_hook)
+                                                            async_finish=not return_recv_hook, return_recv_hook=return_recv_hook,
+                                                            align_fp8_quantization=align_fp8_quantization)
                             hook() if return_recv_hook else event.current_stream_wait()
                         packed_recv_x = (packed_recv_x[0], packed_recv_x[1].contiguous()) if dispatch_use_fp8 else packed_recv_x
                         simulated_gemm_x = per_token_cast_back(packed_recv_x[0].view(-1, hidden), packed_recv_x[1].view(-1, hidden // 128)).view(packed_recv_x[0].shape) \

@@ -1092,7 +1092,8 @@ Buffer::low_latency_dispatch(const torch::Tensor& x, const torch::Tensor& topk_i
                              const std::optional<torch::Tensor>& cumulative_local_expert_recv_stats,
                              int num_max_dispatch_tokens_per_rank, int num_experts,
                              bool use_fp8, bool round_scale, bool use_ue8m0,
-                             bool async, bool return_recv_hook) {
+                             bool async, bool return_recv_hook,
+                             bool align_fp8_quantization) {
 #ifndef DISABLE_NVSHMEM
     EP_HOST_ASSERT(low_latency_mode);
 
@@ -1169,6 +1170,7 @@ Buffer::low_latency_dispatch(const torch::Tensor& x, const torch::Tensor& topk_i
                                num_tokens, hidden, num_max_dispatch_tokens_per_rank,
                                num_topk, num_experts, rank, num_ranks,
                                use_fp8, round_scale, use_ue8m0,
+                               align_fp8_quantization,
                                workspace, num_device_sms,
                                launch_stream, phases);
     };
