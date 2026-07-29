@@ -8,6 +8,7 @@
 #include <chrono>
 #include <memory>
 #include <string>
+#include <vector>
 
 #include <deep_ep/common/compiled.cuh>
 #include <deep_ep/common/exception.cuh>
@@ -597,22 +598,29 @@ public:
                     if (waited_secs > LEGACY_NUM_CPU_TIMEOUT_SECS) {
                         // Attribute the stall: report which counter never became ready, so the
                         // failure is not silently attributed to whatever runs next.
-                        std::string stalled;
-                        if (num_recv_tokens < 0)
-                            stalled += "moe_recv_counter(total)=" + std::to_string(num_recv_tokens) + " ";
+                        // Snapshot once before formatting: volatile counters can change mid-format.
+                        const int total_snap = num_recv_tokens;
+                        std::vector<int> expert_snap(num_local_experts);
                         for (int i = 0; i < num_local_experts; ++i)
-                            if (moe_recv_expert_counter[i] < 0)
+                            expert_snap[i] = moe_recv_expert_counter[i];
+                        std::string stalled;
+                        if (total_snap < 0)
+                            stalled += "moe_recv_counter(total)=" + std::to_string(total_snap) + " ";
+                        for (int i = 0; i < num_local_experts; ++i)
+                            if (expert_snap[i] < 0)
                                 stalled += "moe_recv_expert_counter[" + std::to_string(i) + "]=" +
-                                           std::to_string(moe_recv_expert_counter[i]) + " ";
+                                           std::to_string(expert_snap[i]) + " ";
                         if (stalled.empty())
-                            stalled = "(none: all counters ready at throw time -- suspect a race) ";
+                            stalled = "(none: every counter read as ready in this snapshot, so the GPU "
+                                      "published between the timeout check and here) ";
                         throw std::runtime_error(
                             std::string("DeepEP error: CPU recv timeout") + " at " + __FILE__ + ":" +
                             std::to_string(__LINE__) + " [intranode dispatch] rank=" + std::to_string(rank) +
                             " waited=" + std::to_string(waited_secs) + "s limit=" +
                             std::to_string(LEGACY_NUM_CPU_TIMEOUT_SECS) + "s num_local_experts=" +
                             std::to_string(num_local_experts) + " stalled: " + stalled +
-                            "-- the GPU never published these counts; the dispatch kernel or its transport did not complete");
+                            "-- the GPU never published these counts; the dispatch kernel or "
+                            "its transport did not complete");
                     }
                 }
                 num_recv_tokens_per_expert_list = std::vector<int>(moe_recv_expert_counter, moe_recv_expert_counter + num_local_experts);
@@ -1126,24 +1134,34 @@ public:
                         printf("moe_recv_expert_counter[%d]: %d\n", i, moe_recv_expert_counter[i]);
                     // Attribute the stall in the exception itself: which counter never became ready.
                     // Without this the only signal is "-1", which says nothing about where it came from.
-                    std::string stalled;
-                    if (num_recv_tokens < 0)
-                        stalled += "moe_recv_counter(total)=" + std::to_string(num_recv_tokens) + " ";
-                    if (num_rdma_recv_tokens < 0)
-                        stalled += "moe_recv_rdma_counter=" + std::to_string(num_rdma_recv_tokens) + " ";
+                    // Snapshot every counter ONCE before formatting: these are volatile and the GPU may
+                    // publish a value mid-format, which would otherwise let the message contradict the
+                    // printf above it, or list an already-ready counter as stalled.
+                    const int total_snap = num_recv_tokens;
+                    const int rdma_snap = num_rdma_recv_tokens;
+                    std::vector<int> expert_snap(num_local_experts);
                     for (int i = 0; i < num_local_experts; ++i)
-                        if (moe_recv_expert_counter[i] < 0)
+                        expert_snap[i] = moe_recv_expert_counter[i];
+                    std::string stalled;
+                    if (total_snap < 0)
+                        stalled += "moe_recv_counter(total)=" + std::to_string(total_snap) + " ";
+                    if (rdma_snap < 0)
+                        stalled += "moe_recv_rdma_counter=" + std::to_string(rdma_snap) + " ";
+                    for (int i = 0; i < num_local_experts; ++i)
+                        if (expert_snap[i] < 0)
                             stalled += "moe_recv_expert_counter[" + std::to_string(i) + "]=" +
-                                       std::to_string(moe_recv_expert_counter[i]) + " ";
+                                       std::to_string(expert_snap[i]) + " ";
                     if (stalled.empty())
-                        stalled = "(none: all counters ready at throw time -- suspect a race) ";
+                        stalled = "(none: every counter read as ready in this snapshot, so the GPU "
+                                  "published between the timeout check and here) ";
                     throw std::runtime_error(
                         std::string("DeepEP error: timeout (dispatch CPU)") + " at " + __FILE__ + ":" +
                         std::to_string(__LINE__) + " [internode dispatch] rank=" + std::to_string(rank) +
                         " waited=" + std::to_string(waited_secs) + "s limit=" +
                         std::to_string(LEGACY_NUM_CPU_TIMEOUT_SECS) + "s num_local_experts=" +
                         std::to_string(num_local_experts) + " stalled: " + stalled +
-                        "-- the GPU never published these counts; the dispatch kernel or its transport (proxy/GIN/NVSHMEM) did not complete");
+                        "-- the GPU never published these counts; the dispatch kernel or its "
+                        "transport (proxy/GIN/NVSHMEM) did not complete");
                 }
             }
             num_recv_tokens_per_expert_list = std::vector<int>(moe_recv_expert_counter, moe_recv_expert_counter + num_local_experts);
