@@ -18,36 +18,55 @@ def add_module(name, **attributes):
 
 
 def load_elastic():
-    package = add_module('deep_ep')
-    package.__path__ = []
-    buffers = add_module('deep_ep.buffers')
-    buffers.__path__ = []
-    utils = add_module('deep_ep.utils')
-    utils.__path__ = []
-
-    add_module('deep_ep._C', EventHandle=type('EventHandle', (), {}))
-    add_module('deep_ep.utils.event', EventOverlap=type('EventOverlap', (), {}))
-    add_module('deep_ep.utils.math', align=lambda x, y: math.ceil(x / y) * y)
-    add_module(
+    module_names = (
+        'deep_ep',
+        'deep_ep.buffers',
+        'deep_ep._C',
+        'deep_ep.utils',
+        'deep_ep.utils.event',
+        'deep_ep.utils.math',
         'deep_ep.utils.semantic',
-        value_or=lambda value, default: default if value is None else value,
-        weak_lru=lambda *args, **kwargs: lambda function: function,
-    )
-    add_module(
         'deep_ep.utils.envs',
-        check_fast_rdma_atomic_support=lambda: True,
-        check_nvlink_connections=lambda group: None,
-        check_torch_deterministic=lambda: None,
-        get_nvlink_gbs=lambda: 0,
-        get_rdma_gbs=lambda: 0,
+        'deep_ep.utils.comm',
     )
-    add_module('deep_ep.utils.comm', get_nccl_comm_handle=lambda *args, **kwargs: None)
+    saved_modules = {name: sys.modules.get(name) for name in module_names}
+    try:
+        package = add_module('deep_ep')
+        package.__path__ = []
+        buffers = add_module('deep_ep.buffers')
+        buffers.__path__ = []
+        utils = add_module('deep_ep.utils')
+        utils.__path__ = []
 
-    path = Path(__file__).parents[2] / 'deep_ep' / 'buffers' / 'elastic.py'
-    spec = importlib.util.spec_from_file_location('deep_ep.buffers.elastic', path)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+        add_module('deep_ep._C', EventHandle=type('EventHandle', (), {}))
+        add_module('deep_ep.utils.event', EventOverlap=type('EventOverlap', (), {}))
+        add_module('deep_ep.utils.math', align=lambda x, y: math.ceil(x / y) * y)
+        add_module(
+            'deep_ep.utils.semantic',
+            value_or=lambda value, default: default if value is None else value,
+            weak_lru=lambda *args, **kwargs: lambda function: function,
+        )
+        add_module(
+            'deep_ep.utils.envs',
+            check_fast_rdma_atomic_support=lambda: True,
+            check_nvlink_connections=lambda group: None,
+            check_torch_deterministic=lambda: None,
+            get_nvlink_gbs=lambda: 0,
+            get_rdma_gbs=lambda: 0,
+        )
+        add_module('deep_ep.utils.comm', get_nccl_comm_handle=lambda *args, **kwargs: None)
+
+        path = Path(__file__).parents[2] / 'deep_ep' / 'buffers' / 'elastic.py'
+        spec = importlib.util.spec_from_file_location('deep_ep.buffers.elastic', path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+    finally:
+        for name, saved_module in saved_modules.items():
+            if saved_module is None:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = saved_module
 
 
 class TheoreticalSMTests(unittest.TestCase):
