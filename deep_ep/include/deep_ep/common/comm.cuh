@@ -220,6 +220,8 @@ __forceinline__ __device__ void gpu_barrier(const handle::NCCLGin& gin,
         ptx::tma_store_commit();
         ptx::tma_store_wait();
         __syncwarp();
+        if constexpr (not kIsScaleupNVLink)
+            ptx::fence_acq_rel_sys();
     }
 
     // All the SMs should wait
