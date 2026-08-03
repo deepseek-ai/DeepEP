@@ -91,7 +91,7 @@ class CustomBuildPy(build_py):
         # Create temporary build directory
         build_include_dir = os.path.join(self.build_lib, 'deep_ep')
         os.makedirs(build_include_dir, exist_ok=True)
-        with open(os.path.join(self.build_lib, 'deep_ep', 'envs.py'), 'w') as f:
+        with open(os.path.join(build_include_dir, 'envs.py'), 'w') as f:
             f.write(code)
 
 
