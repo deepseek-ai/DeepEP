@@ -69,16 +69,22 @@ def load_elastic():
                 sys.modules[name] = saved_module
 
 
+def make_hybrid_buffer(elastic):
+    """Build the minimal ElasticBuffer topology used by the host-only test."""
+    buffer = elastic.ElasticBuffer.__new__(elastic.ElasticBuffer)
+    buffer.num_rdma_ranks = 2
+    buffer.num_nvlink_ranks = 8
+    buffer.num_scaleout_ranks = 2
+    buffer.num_scaleup_ranks = 8
+    buffer.num_ranks = 16
+    buffer.prefer_overlap_with_compute = True
+    return buffer
+
+
 class TheoreticalSMTests(unittest.TestCase):
     def test_missing_hybrid_bandwidth_falls_back_to_device_sm_count(self):
         elastic = load_elastic()
-        buffer = elastic.ElasticBuffer.__new__(elastic.ElasticBuffer)
-        buffer.num_rdma_ranks = 2
-        buffer.num_nvlink_ranks = 8
-        buffer.num_scaleout_ranks = 2
-        buffer.num_scaleup_ranks = 8
-        buffer.num_ranks = 16
-        buffer.prefer_overlap_with_compute = True
+        buffer = make_hybrid_buffer(elastic)
 
         properties = types.SimpleNamespace(multi_processor_count=132)
         with patch.object(torch.cuda, 'get_device_properties', return_value=properties):

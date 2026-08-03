@@ -810,11 +810,13 @@ class ElasticBuffer:
         # instead of dividing by zero.
         def get_transfer_time(traffic: float, bandwidth: float) -> float:
             if traffic == 0:
-                return 0
+                return 0.0
             return traffic / bandwidth if bandwidth > 0 else math.inf
 
         rdma_time = get_transfer_time(rdma_traffic, rdma_gbs)
         nvlink_time = get_transfer_time(nvlink_traffic, nvlink_gbs)
+        # If both are unknown, either branch selects zero bandwidth and the
+        # calculation below conservatively retains the full device SM count.
         if self.num_scaleout_ranks > 1 and rdma_time > nvlink_time:
             bounded_traffic, bounded_gbs = rdma_traffic, rdma_gbs
         else:
