@@ -2,9 +2,27 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES.
 // All rights reserved
 #include "buffer/internode_doca.cuh"
+#include <torch/extension.h>
 #include <sstream>
 #include <cstdlib>
 #include <unordered_map>
+#include <climits>
+
+// Get IB Traffic Class value from environment variable with range validation.
+// Traffic Class valid range is 0-255 (8-bit field in RoCE/IB).
+int get_ib_tc_value() {
+    const char* val = std::getenv("HYBRID_EP_IB_TC");
+    if (val == nullptr) {
+        return 0;  // Default value
+    }
+    int tc = std::atoi(val);
+    // Validate range: Traffic Class is an 8-bit field
+    if (tc < 0 || tc > 255) {
+        fprintf(stderr, "[Warning] HYBRID_EP_IB_TC=%d is out of valid range [0, 255]. Using default value 0.\n", tc);
+        return 0;
+    }
+    return tc;
+}
 
 // Functions realted to get RDMA context.
 ibv_device *ctx_find_dev(const char *ib_devname) {
@@ -213,7 +231,7 @@ int setup_qp_attr_for_modify(struct ibv_port_attr *port_attr, struct doca_verbs_
   assert(status == 0);
   status = doca_verbs_ah_attr_set_hop_limit(ah, DEF_HOP_LIMIT);
   assert(status == 0);
-  status = doca_verbs_ah_attr_set_traffic_class(ah, DEF_IB_TC);
+  status = doca_verbs_ah_attr_set_traffic_class(ah, get_ib_tc_value());
   assert(status == 0);
   status = doca_verbs_qp_attr_set_ah_attr(qp_attr, ah);
   assert(status == 0);

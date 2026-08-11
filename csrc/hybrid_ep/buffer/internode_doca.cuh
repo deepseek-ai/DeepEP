@@ -44,7 +44,6 @@ enum memory_type {
 
 constexpr int32_t CONNECTION_TYPE = RC;
 constexpr int32_t DEF_HOP_LIMIT = 255;
-constexpr int32_t DEF_IB_TC = 0;
 constexpr int32_t DEF_RX_RDMA = 128;
 constexpr int32_t DEF_TX_BW = 512;
 constexpr int32_t EQ_NUM = 0;
@@ -110,6 +109,7 @@ struct remote_info {
 
 ibv_device *ctx_find_dev(const char *ib_devname);
 int get_gpu_handler(struct doca_gpu *handler, struct ibv_context *ib_context, int local_rank);
+int get_ib_tc_value();
 void setup_qp_init_attr(struct doca_gpu_verbs_qp_init_attr_hl *qp_init_attr,
                         struct doca_gpu *gpu_handler, struct ibv_pd *ib_pd, int tx_depth);
 int create_and_place_qps(struct gverbs_context *g_ctx,
