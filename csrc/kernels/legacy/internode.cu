@@ -1257,6 +1257,12 @@ void dispatch(void* recv_x,
     // Make sure never OOB
     EP_HOST_ASSERT(static_cast<int64_t>(num_scales) * scale_hidden_stride < std::numeric_limits<int>::max());
 
+    // The forwarder and receiver warps stage a whole token in their per-warp TMA buffer, so the
+    // hidden size is bounded by that buffer. Check it on the host: the in-kernel assertion traps,
+    // which only surfaces later as an unrelated asynchronous CUDA error
+    EP_HOST_ASSERT(get_num_bytes_per_token(hidden_int4, num_scales, num_topk, num_topk) + sizeof(uint64_t) <= kNumTMABytesPerWarp and
+                   "Hidden size is too large for the internode dispatch TMA buffer");
+
 #define DISPATCH_LAUNCH_CASE(num_rdma_ranks)                                                                                   \
     {                                                                                                                          \
         auto dispatch_func = low_latency_mode                                                                                  \
@@ -2310,10 +2316,21 @@ void combine(cudaDataType_t type,
              int num_channels,
              bool low_latency_mode) {
     constexpr int kNumCombineForwarderWarps = 24;
-    constexpr int kNumTMABytesPerSenderWarp = 16384;
     constexpr int kNumTMABytesPerForwarderWarp = 9248;
+    // NOTES: the senders stage a whole token, so this budget bounds the hidden size. The forwarders
+    // decide the kernel's shared memory size anyway, so the senders can use the same budget for free
+    constexpr int kNumTMABytesPerSenderWarp =
+        align_down((kNumTMABytesPerForwarderWarp * kNumCombineForwarderWarps) / LEGACY_NUM_MAX_NVL_PEERS, 16);
     constexpr int smem_size =
         std::max(kNumTMABytesPerSenderWarp * LEGACY_NUM_MAX_NVL_PEERS, kNumTMABytesPerForwarderWarp * kNumCombineForwarderWarps);
+    EP_STATIC_ASSERT(kNumTMABytesPerSenderWarp >= 16384, "Sender TMA buffer must not shrink");
+
+    // Check the sender's hidden size limit on the host: the in-kernel assertion traps, which only
+    // surfaces later as an unrelated asynchronous CUDA error
+    const auto num_combine_bytes_per_token =
+        get_num_bytes_per_token(static_cast<int>(hidden / (sizeof(int4) / sizeof(nv_bfloat16))), 0, 0, num_topk);
+    EP_HOST_ASSERT(num_combine_bytes_per_token + sizeof(uint64_t) <= kNumTMABytesPerSenderWarp and
+                   "Hidden size is too large for the internode combine TMA buffer");
 
 #define COMBINE_LAUNCH_CASE(num_rdma_ranks)                                           \
     {                                                                                 \

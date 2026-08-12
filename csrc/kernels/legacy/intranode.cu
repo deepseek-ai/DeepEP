@@ -293,15 +293,23 @@ __global__ void __launch_bounds__(kNumThreads, 1) dispatch(int4* recv_x,
     // TMA stuffs
 #ifndef DISABLE_SM90_FEATURES
     extern __shared__ __align__(1024) uint8_t smem_buffer[];
-    auto half_hidden_int4 = hidden_int4 / 2;
-    auto half_hidden_bytes = half_hidden_int4 * static_cast<int>(sizeof(int4));
+    // Stage each token through the per-warp TMA buffer, using as few chunks as the buffer can hold.
+    // NOTES: the m-barrier lives right after the staged chunk, so a chunk may only use
+    // `kNumTMABytesPerWarp - sizeof(uint64_t)` bytes. We always use at least 2 chunks, so that the
+    // store of one chunk overlaps the load of the next one (this keeps the original behavior for
+    // every hidden size that fitted into 2 chunks before)
+    constexpr int kNumMaxTMAChunkInt4 = (kNumTMABytesPerWarp - static_cast<int>(sizeof(uint64_t))) / static_cast<int>(sizeof(int4));
+    const auto num_min_tma_chunks = ceil_div(hidden_int4, kNumMaxTMAChunkInt4);
+    const auto num_tma_chunks = num_min_tma_chunks < 2 ? 2 : num_min_tma_chunks;
+    const auto tma_chunk_int4 = ceil_div(hidden_int4, num_tma_chunks);
+    const auto tma_chunk_bytes = tma_chunk_int4 * static_cast<int>(sizeof(int4));
     auto tma_buffer = smem_buffer + (thread_id / 32) * kNumTMABytesPerWarp;
-    auto tma_mbarrier = reinterpret_cast<uint64_t*>(tma_buffer + half_hidden_bytes);
+    auto tma_mbarrier = reinterpret_cast<uint64_t*>(tma_buffer + tma_chunk_bytes);
     uint32_t tma_phase = 0;
     if (elect_one_sync()) {
         mbarrier_init(tma_mbarrier, 1);
         fence_barrier_init();
-        EP_DEVICE_ASSERT(hidden_int4 % 2 == 0 and half_hidden_bytes + sizeof(uint64_t) <= kNumTMABytesPerWarp);
+        EP_DEVICE_ASSERT(tma_chunk_bytes + sizeof(uint64_t) <= kNumTMABytesPerWarp);
     }
     __syncwarp();
 #endif
@@ -477,14 +485,14 @@ __global__ void __launch_bounds__(kNumThreads, 1) dispatch(int4* recv_x,
                 auto shifted_buffer_x_int4 = channel_x_buffers.buffer() + token_idx_in_buffer * hidden_int4;
                 auto shifted_recv_x_int4 = recv_x + static_cast<int64_t>(total_offset + chunk_idx) * hidden_int4;
 #ifndef DISABLE_SM90_FEATURES
-                #pragma unroll
-                for (int i = 0; i < 2; ++i) {
+                for (int offset_int4 = 0; offset_int4 < hidden_int4; offset_int4 += tma_chunk_int4) {
+                    const auto num_chunk_bytes = min(tma_chunk_int4, hidden_int4 - offset_int4) * static_cast<int>(sizeof(int4));
                     tma_store_wait<0>();
                     if (elect_one_sync()) {
-                        tma_load_1d(tma_buffer, shifted_buffer_x_int4 + i * half_hidden_int4, tma_mbarrier, half_hidden_bytes);
-                        mbarrier_arrive_and_expect_tx(tma_mbarrier, half_hidden_bytes);
+                        tma_load_1d(tma_buffer, shifted_buffer_x_int4 + offset_int4, tma_mbarrier, num_chunk_bytes);
+                        mbarrier_arrive_and_expect_tx(tma_mbarrier, num_chunk_bytes);
                         mbarrier_wait(tma_mbarrier, tma_phase);
-                        tma_store_1d(tma_buffer, shifted_recv_x_int4 + i * half_hidden_int4, half_hidden_bytes, false);
+                        tma_store_1d(tma_buffer, shifted_recv_x_int4 + offset_int4, num_chunk_bytes, false);
                     }
                 }
                 __syncwarp();
