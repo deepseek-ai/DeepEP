@@ -167,7 +167,8 @@ __global__ void notify_dispatch(const int* num_tokens_per_rank,
             rdma_recv_num_tokens_mixed.send_buffer(i / num_rdma_experts)[LEGACY_NUM_MAX_NVL_PEERS + i % num_rdma_experts] =
                 num_tokens_per_expert[i];
         if (thread_id < kNumRDMARanks)
-            rdma_recv_num_tokens_mixed.send_buffer(thread_id)[LEGACY_NUM_MAX_NVL_PEERS + num_rdma_experts] = num_tokens_per_rdma_rank[thread_id];
+            rdma_recv_num_tokens_mixed.send_buffer(thread_id)[LEGACY_NUM_MAX_NVL_PEERS + num_rdma_experts] =
+                num_tokens_per_rdma_rank[thread_id];
         __syncthreads();
 
         // Issue send
@@ -324,7 +325,8 @@ __global__ void notify_dispatch(const int* num_tokens_per_rank,
             if (elect_one_sync()) {
                 #pragma unroll
                 for (int i = 0; i < LEGACY_NUM_MAX_NVL_PEERS; ++i)
-                    gbl_channel_prefix_matrix[(dst_rdma_rank * LEGACY_NUM_MAX_NVL_PEERS + i) * num_channels + channel_id] = per_nvl_rank_count[i];
+                    gbl_channel_prefix_matrix[(dst_rdma_rank * LEGACY_NUM_MAX_NVL_PEERS + i) * num_channels + channel_id] =
+                        per_nvl_rank_count[i];
                 rdma_channel_prefix_matrix[dst_rdma_rank * num_channels + channel_id] = total_count;
             }
         }
@@ -552,8 +554,9 @@ __global__ void __launch_bounds__(((kNumDispatchRDMASenderWarps + 1 + LEGACY_NUM
     auto nvl_channel_prefix_start =
         AsymBuffer<int>(ws_rr_buffer_ptr, kNumRDMARanks, LEGACY_NUM_MAX_NVL_PEERS, channel_id, num_channels, rs_wr_rank)
             .advance_also(rs_wr_buffer_ptr);
-    auto nvl_channel_prefix_end = AsymBuffer<int>(ws_rr_buffer_ptr, kNumRDMARanks, LEGACY_NUM_MAX_NVL_PEERS, channel_id, num_channels, rs_wr_rank)
-                                      .advance_also(rs_wr_buffer_ptr);
+    auto nvl_channel_prefix_end =
+        AsymBuffer<int>(ws_rr_buffer_ptr, kNumRDMARanks, LEGACY_NUM_MAX_NVL_PEERS, channel_id, num_channels, rs_wr_rank)
+            .advance_also(rs_wr_buffer_ptr);
     auto nvl_channel_head =
         AsymBuffer<int>(rs_wr_buffer_ptr, 1, LEGACY_NUM_MAX_NVL_PEERS, channel_id, num_channels, ws_rr_rank).advance_also(ws_rr_buffer_ptr);
     auto nvl_channel_tail =
@@ -596,13 +599,14 @@ __global__ void __launch_bounds__(((kNumDispatchRDMASenderWarps + 1 + LEGACY_NUM
                 dst_rdma_rank == rdma_rank ? rdma_channel_meta.recv_buffer(dst_rdma_rank) : rdma_channel_meta.send_buffer(dst_rdma_rank);
             if (lane_id < LEGACY_NUM_MAX_NVL_PEERS) {
                 dst_ptr[lane_id] =
-                    -(channel_id == 0
-                          ? 0
-                          : gbl_channel_prefix_matrix[(dst_rdma_rank * LEGACY_NUM_MAX_NVL_PEERS + lane_id) * num_channels + channel_id - 1]) -
+                    -(channel_id == 0 ? 0
+                                      : gbl_channel_prefix_matrix[(dst_rdma_rank * LEGACY_NUM_MAX_NVL_PEERS + lane_id) * num_channels +
+                                                                  channel_id - 1]) -
                     1;
             } else if (lane_id < LEGACY_NUM_MAX_NVL_PEERS * 2) {
                 dst_ptr[lane_id] =
-                    -gbl_channel_prefix_matrix[(dst_rdma_rank * LEGACY_NUM_MAX_NVL_PEERS + lane_id - LEGACY_NUM_MAX_NVL_PEERS) * num_channels +
+                    -gbl_channel_prefix_matrix[(dst_rdma_rank * LEGACY_NUM_MAX_NVL_PEERS + lane_id - LEGACY_NUM_MAX_NVL_PEERS) *
+                                                   num_channels +
                                                channel_id] -
                     1;
             } else if (lane_id == LEGACY_NUM_MAX_NVL_PEERS * 2) {
@@ -1600,7 +1604,8 @@ __device__ int combine_token(bool is_token_in_rank,
             return reinterpret_cast<int4*>(smem_ptr + i * kNumTMABufferBytesPerStage + LEGACY_NUM_MAX_NVL_PEERS * kNumTMALoadBytes);
         };
         auto tma_mbarrier = [=](const int& i) -> uint64_t* {
-            return reinterpret_cast<uint64_t*>(smem_ptr + i * kNumTMABufferBytesPerStage + (LEGACY_NUM_MAX_NVL_PEERS + 1) * kNumTMALoadBytes);
+            return reinterpret_cast<uint64_t*>(smem_ptr + i * kNumTMABufferBytesPerStage +
+                                               (LEGACY_NUM_MAX_NVL_PEERS + 1) * kNumTMALoadBytes);
         };
 
         // Prefetch
@@ -1806,8 +1811,9 @@ __global__ void __launch_bounds__((kNumForwarders + 1) * 32, 1) combine(int4* co
                                                  num_channels,
                                                  nvl_rank)
                                  .advance_also(local_buffer_ptr);
-        auto nvl_channel_head = AsymBuffer<int>(local_buffer_ptr, kNumRDMARanks, LEGACY_NUM_MAX_NVL_PEERS, channel_id, num_channels, dst_nvl_rank)
-                                    .advance_also(dst_buffer_ptr);
+        auto nvl_channel_head =
+            AsymBuffer<int>(local_buffer_ptr, kNumRDMARanks, LEGACY_NUM_MAX_NVL_PEERS, channel_id, num_channels, dst_nvl_rank)
+                .advance_also(dst_buffer_ptr);
         auto nvl_channel_tail = AsymBuffer<int>(dst_buffer_ptr, kNumRDMARanks, LEGACY_NUM_MAX_NVL_PEERS, channel_id, num_channels, nvl_rank)
                                     .advance_also(local_buffer_ptr);
 
@@ -1949,9 +1955,9 @@ __global__ void __launch_bounds__((kNumForwarders + 1) * 32, 1) combine(int4* co
             AsymBuffer<uint8_t>(
                 local_nvl_buffer, num_max_nvl_chunked_recv_tokens * num_bytes_per_token, LEGACY_NUM_MAX_NVL_PEERS, channel_id, num_channels)
                 .advance_also<LEGACY_NUM_MAX_NVL_PEERS>(nvl_buffers);
-        auto nvl_channel_head =
-            AsymBuffer<int, LEGACY_NUM_MAX_NVL_PEERS>(nvl_buffers, kNumRDMARanks, LEGACY_NUM_MAX_NVL_PEERS, channel_id, num_channels, nvl_rank)
-                .advance_also(local_nvl_buffer);
+        auto nvl_channel_head = AsymBuffer<int, LEGACY_NUM_MAX_NVL_PEERS>(
+                                    nvl_buffers, kNumRDMARanks, LEGACY_NUM_MAX_NVL_PEERS, channel_id, num_channels, nvl_rank)
+                                    .advance_also(local_nvl_buffer);
         auto nvl_channel_tail = AsymBuffer<int>(local_nvl_buffer, kNumRDMARanks, LEGACY_NUM_MAX_NVL_PEERS, channel_id, num_channels)
                                     .advance_also<LEGACY_NUM_MAX_NVL_PEERS>(nvl_buffers);
 
@@ -1988,7 +1994,8 @@ __global__ void __launch_bounds__((kNumForwarders + 1) * 32, 1) combine(int4* co
             extern __shared__ __align__(1024) uint8_t smem_buffer[];
             auto smem_ptr = smem_buffer + warp_id * kNumStages * kNumTMABufferBytesPerStage;
             auto tma_mbarrier = [=](const int& i) {
-                return reinterpret_cast<uint64_t*>(smem_ptr + i * kNumTMABufferBytesPerStage + kNumTMALoadBytes * (LEGACY_NUM_MAX_NVL_PEERS + 1));
+                return reinterpret_cast<uint64_t*>(smem_ptr + i * kNumTMABufferBytesPerStage +
+                                                   kNumTMALoadBytes * (LEGACY_NUM_MAX_NVL_PEERS + 1));
             };
             uint32_t tma_phase[kNumStages] = {0};
             if (lane_id < kNumStages) {
@@ -2274,7 +2281,8 @@ __global__ void __launch_bounds__((kNumForwarders + 1) * 32, 1) combine(int4* co
                         for (int j = 0; j < num_warps_per_rdma_rank; ++j)
                             if (not forwarder_retired[i * num_warps_per_rdma_rank + j])
                                 min_head = min(min_head, forwarder_nvl_head[i * num_warps_per_rdma_rank + j][dst_nvl_rank]);
-                        if (min_head != std::numeric_limits<int>::max() and min_head > last_nvl_head[i] and lane_id < LEGACY_NUM_MAX_NVL_PEERS)
+                        if (min_head != std::numeric_limits<int>::max() and min_head > last_nvl_head[i] and
+                            lane_id < LEGACY_NUM_MAX_NVL_PEERS)
                             st_relaxed_sys_global(nvl_channel_head.buffer_by(dst_nvl_rank) + i, last_nvl_head[i] = min_head);
                     }
                 }
