@@ -21,6 +21,38 @@
 
 namespace deep_ep::legacy {
 
+// Shared by the two CPU-timeout throw sites below (intranode + internode dispatch): format the
+// "which counter never became ready" attribution from a coherent snapshot taken by the caller.
+// Pass rdma_snap = nullptr on paths without an RDMA counter. When every snapshot value reads
+// ready, the timeout raced with a completion that landed just after the check -- say that,
+// instead of claiming the GPU never published.
+static inline std::string build_cpu_timeout_detail(const std::string& site,
+                                                   const int rank,
+                                                   const long long waited_secs,
+                                                   const long long limit_secs,
+                                                   const int total_snap,
+                                                   const int* rdma_snap,
+                                                   const std::vector<int>& expert_snap,
+                                                   const std::string& transport_hint) {
+    std::string stalled;
+    if (total_snap < 0)
+        stalled += "moe_recv_counter(total)=" + std::to_string(total_snap) + " ";
+    if (rdma_snap != nullptr and *rdma_snap < 0)
+        stalled += "moe_recv_rdma_counter=" + std::to_string(*rdma_snap) + " ";
+    for (size_t i = 0; i < expert_snap.size(); ++i)
+        if (expert_snap[i] < 0)
+            stalled += "moe_recv_expert_counter[" + std::to_string(i) + "]=" + std::to_string(expert_snap[i]) + " ";
+    std::string detail = site + " rank=" + std::to_string(rank) + " waited=" + std::to_string(waited_secs) +
+        "s limit=" + std::to_string(limit_secs) + "s num_local_experts=" + std::to_string(expert_snap.size()) + " stalled: ";
+    if (stalled.empty())
+        detail +=
+            "(none) -- every counter read as ready in this snapshot: the timeout raced with a "
+            "completion that landed just after the check";
+    else
+        detail += stalled + "-- the GPU never published these counts; the dispatch kernel or its " + transport_hint + " did not complete";
+    return detail;
+}
+
 struct Buffer {
     EP_STATIC_ASSERT(LEGACY_NUM_MAX_NVL_PEERS == 8, "The number of maximum NVLink peers must be 8");
 
@@ -603,24 +635,15 @@ public:
                         std::vector<int> expert_snap(num_local_experts);
                         for (int i = 0; i < num_local_experts; ++i)
                             expert_snap[i] = moe_recv_expert_counter[i];
-                        std::string stalled;
-                        if (total_snap < 0)
-                            stalled += "moe_recv_counter(total)=" + std::to_string(total_snap) + " ";
-                        for (int i = 0; i < num_local_experts; ++i)
-                            if (expert_snap[i] < 0)
-                                stalled += "moe_recv_expert_counter[" + std::to_string(i) + "]=" +
-                                           std::to_string(expert_snap[i]) + " ";
-                        if (stalled.empty())
-                            stalled = "(none: every counter read as ready in this snapshot, so the GPU "
-                                      "published between the timeout check and here) ";
-                        throw std::runtime_error(
-                            std::string("DeepEP error: CPU recv timeout") + " at " + __FILE__ + ":" +
-                            std::to_string(__LINE__) + " [intranode dispatch] rank=" + std::to_string(rank) +
-                            " waited=" + std::to_string(waited_secs) + "s limit=" +
-                            std::to_string(LEGACY_NUM_CPU_TIMEOUT_SECS) + "s num_local_experts=" +
-                            std::to_string(num_local_experts) + " stalled: " + stalled +
-                            "-- the GPU never published these counts; the dispatch kernel or "
-                            "its transport did not complete");
+                        throw EPExceptionWithLineInfo("DeepEP error: CPU recv timeout",
+                                                      build_cpu_timeout_detail("[intranode dispatch]",
+                                                                               rank,
+                                                                               waited_secs,
+                                                                               LEGACY_NUM_CPU_TIMEOUT_SECS,
+                                                                               total_snap,
+                                                                               nullptr,
+                                                                               expert_snap,
+                                                                               "transport"));
                     }
                 }
                 num_recv_tokens_per_expert_list = std::vector<int>(moe_recv_expert_counter, moe_recv_expert_counter + num_local_experts);
@@ -1142,26 +1165,15 @@ public:
                     std::vector<int> expert_snap(num_local_experts);
                     for (int i = 0; i < num_local_experts; ++i)
                         expert_snap[i] = moe_recv_expert_counter[i];
-                    std::string stalled;
-                    if (total_snap < 0)
-                        stalled += "moe_recv_counter(total)=" + std::to_string(total_snap) + " ";
-                    if (rdma_snap < 0)
-                        stalled += "moe_recv_rdma_counter=" + std::to_string(rdma_snap) + " ";
-                    for (int i = 0; i < num_local_experts; ++i)
-                        if (expert_snap[i] < 0)
-                            stalled += "moe_recv_expert_counter[" + std::to_string(i) + "]=" +
-                                       std::to_string(expert_snap[i]) + " ";
-                    if (stalled.empty())
-                        stalled = "(none: every counter read as ready in this snapshot, so the GPU "
-                                  "published between the timeout check and here) ";
-                    throw std::runtime_error(
-                        std::string("DeepEP error: timeout (dispatch CPU)") + " at " + __FILE__ + ":" +
-                        std::to_string(__LINE__) + " [internode dispatch] rank=" + std::to_string(rank) +
-                        " waited=" + std::to_string(waited_secs) + "s limit=" +
-                        std::to_string(LEGACY_NUM_CPU_TIMEOUT_SECS) + "s num_local_experts=" +
-                        std::to_string(num_local_experts) + " stalled: " + stalled +
-                        "-- the GPU never published these counts; the dispatch kernel or its "
-                        "transport (proxy/GIN/NVSHMEM) did not complete");
+                    throw EPExceptionWithLineInfo("DeepEP error: timeout (dispatch CPU)",
+                                                  build_cpu_timeout_detail("[internode dispatch]",
+                                                                           rank,
+                                                                           waited_secs,
+                                                                           LEGACY_NUM_CPU_TIMEOUT_SECS,
+                                                                           total_snap,
+                                                                           &rdma_snap,
+                                                                           expert_snap,
+                                                                           "transport (proxy/GIN/NVSHMEM)"));
                 }
             }
             num_recv_tokens_per_expert_list = std::vector<int>(moe_recv_expert_counter, moe_recv_expert_counter + num_local_experts);
