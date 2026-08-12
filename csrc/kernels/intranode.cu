@@ -34,9 +34,7 @@ notify_dispatch(const int* num_tokens_per_rank, int* moe_recv_counter_mapped,
         //  - `per_expert_buffer[rank][i, j]` means the number of tokens from rank i to local expert j
         int num_experts_per_rank = num_experts / kNumRanks;
         if (thread_id < kNumRanks) {
-            #pragma unroll
-            for (int i = 0; i < kNumRanks; ++ i)
-                per_rank_buffer[rank * kNumRanks + i] = num_tokens_per_rank[i];
+            per_rank_buffer[rank * kNumRanks + thread_id] = num_tokens_per_rank[thread_id];
             #pragma unroll
             for (int i = 0; i < num_experts_per_rank; ++ i)
                 per_expert_buffer[rank * num_experts_per_rank + i] = num_tokens_per_expert[thread_id * num_experts_per_rank + i];
