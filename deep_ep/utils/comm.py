@@ -60,8 +60,16 @@ def get_nccl_comm_handle(group: dist.ProcessGroup, force_new_comm: bool = False)
     # New PyTorch has such API
     backend = group._get_backend(torch.device('cuda'))
     if not force_new_comm and hasattr(backend, '_comm_ptr') and int(os.getenv('EP_REUSE_NCCL_COMM', '1')):
-        _storage[group] = NCCLCommHandle(backend._comm_ptr(), False)
-        return _storage[group]
+        # PyTorch creates NCCL communicators lazily: `_comm_ptr()` is a passive
+        # accessor that returns 0 when the group+device has no communicator yet
+        # (eager creation only happens when `init_process_group` received
+        # `device_id=...`). Reusing a null handle would crash later in C++
+        # (e.g. `ncclTeamWorld` dereferences `comm->nRanks`), so only reuse a
+        # real communicator and otherwise fall through to creating our own.
+        comm_ptr = backend._comm_ptr()
+        if comm_ptr != 0:
+            _storage[group] = NCCLCommHandle(comm_ptr, False)
+            return _storage[group]
 
     # For old PyTorch, we have to recreate a NCCL comm
     nccl_unique_ids = [None, ] * group.size()
