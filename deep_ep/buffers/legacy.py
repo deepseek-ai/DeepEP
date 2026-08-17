@@ -63,9 +63,7 @@ class Buffer:
                 Note: Releasing resources in the destructor may cause Python's exception handling process to hang.
             comm: the `mpi4py.MPI.Comm` communicator to use in case the group parameter is absent.
         """
-        check_nvlink_connections(group)
-
-        # Initialize the CPP runtime
+        # Initialize the communication group before allocating the CPP runtime.
         if group is not None:
             self.rank = group.rank()
             self.group = group
@@ -89,6 +87,12 @@ class Buffer:
         self.low_latency_mode = low_latency_mode
         self.explicitly_destroy = explicitly_destroy
         self.enable_shrink = enable_shrink
+
+        # Normal kernels directly access every intranode peer buffer. Validate the
+        # complete directed P2P matrix before allocating the large IPC buffer.
+        if num_nvl_bytes > 0:
+            check_nvlink_connections(self.group)
+
         self.runtime = _C.Buffer(self.rank, self.group_size, num_nvl_bytes, num_rdma_bytes, low_latency_mode,
                                  explicitly_destroy, enable_shrink, allow_mnnvl)
 

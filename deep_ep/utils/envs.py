@@ -3,15 +3,17 @@ import inspect
 import os
 import random
 import re
+import socket
 import subprocess
 import torch
 import torch.distributed as dist
-from typing import Tuple
+from typing import List, Tuple
 
 # noinspection PyUnresolvedReferences
 import deep_ep._C as _C
 
 from .comm import get_nccl_comm_handle
+from .p2p import build_local_peer_access_results, find_unsupported_peer_pairs, format_p2p_preflight_error
 
 _local_rank = None
 _local_seed = 0
@@ -142,42 +144,31 @@ def get_logical_domain_size(group: dist.ProcessGroup, allow_hybrid_mode: bool = 
     return _C.get_logical_domain_size(get_nccl_comm_handle(group).get(), allow_hybrid_mode)
 
 
-def check_nvlink_connections(group: dist.ProcessGroup) -> None:
+def _all_gather_object(group: object, obj: object) -> List[object]:
+    if hasattr(group, 'Get_rank'):
+        return group.allgather(obj)
+
+    object_list = [None] * group.size()
+    dist.all_gather_object(object_list, obj, group=group)
+    return object_list
+
+
+def check_nvlink_connections(group: object) -> None:
     """
-    Check NVLink connection between every pair of GPUs.
+    Check directed CUDA peer access between every pair of intranode GPUs.
 
     Arguments:
         group: the communication group.
     """
-    # Check NVLink connection
-    # NOTES: some A100 PCIE GPUs only have pairwise NVLink connection, so that we can only use EP2
-    # TODO: check all cases, all local-node GPUs in the group should be connected via NVLink
-    if 'PCIE' in torch.cuda.get_device_name():
-        assert group.size() <= 2, 'PCIe GPUs only have pairwise NVLink connections'
+    rank = group.Get_rank() if hasattr(group, 'Get_rank') else group.rank()
 
-        # noinspection PyUnresolvedReferences
-        import pynvml
-        pynvml.nvmlInit()
-
-        # noinspection PyTypeChecker
-        devices = os.environ.get('CUDA_VISIBLE_DEVICES', '0,1,2,3,4,5,6,7').strip(',').split(',')
-        physical_device_idx = int(devices[torch.cuda.current_device()])
-        physical_device_indices = [0, ] * group.size()
-        dist.all_gather_object(physical_device_indices, physical_device_idx, group)
-
-        # Check whether they are all connected via NVLink
-        # Reference: https://github.com/vllm-project/vllm/blob/b8e809a057765c574726a6077fd124db5077ce1f/vllm/platforms/cuda.py#L438
-        handles = [pynvml.nvmlDeviceGetHandleByIndex(i) for i in physical_device_indices]
-        for i, handle in enumerate(handles):
-            for j, peer_handle in enumerate(handles):
-                if i >= j:
-                    continue
-                status = pynvml.nvmlDeviceGetP2PStatus(handle, peer_handle, pynvml.NVML_P2P_CAPS_INDEX_NVLINK)
-                assert status == pynvml.NVML_P2P_STATUS_OK, \
-                    f'GPU {physical_device_indices[i]} and GPU {physical_device_indices[j]} are not connected via NVLink'
-
-        # Close NVML
-        pynvml.nvmlShutdown()
+    local_device = torch.cuda.current_device()
+    rank_devices = _all_gather_object(group, (socket.gethostname(), local_device))
+    local_access_results = build_local_peer_access_results(rank, rank_devices, torch.cuda.can_device_access_peer)
+    peer_access_results = _all_gather_object(group, local_access_results)
+    unsupported_pairs, num_required_pairs = find_unsupported_peer_pairs(rank_devices, peer_access_results)
+    if unsupported_pairs:
+        raise RuntimeError(format_p2p_preflight_error(unsupported_pairs, num_required_pairs))
 
 
 def check_torch_deterministic() -> None:
