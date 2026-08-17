@@ -93,8 +93,8 @@ class Buffer:
         if num_nvl_bytes > 0:
             check_nvlink_connections(self.group)
 
-        self.runtime = _C.Buffer(self.rank, self.group_size, num_nvl_bytes, num_rdma_bytes, low_latency_mode,
-                                 explicitly_destroy, enable_shrink, allow_mnnvl)
+        self.runtime = _C.Buffer(self.rank, self.group_size, num_nvl_bytes, num_rdma_bytes, low_latency_mode, explicitly_destroy,
+                                 enable_shrink, allow_mnnvl)
 
         # Synchronize device IDs
         local_device_id = self.runtime.get_local_device_id()

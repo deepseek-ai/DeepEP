@@ -1,13 +1,11 @@
 from typing import Callable, List, Sequence, Tuple
 
-
 RankDevice = Tuple[str, int]
 PeerAccessResult = Tuple[int, bool]
 UnsupportedPeerPair = Tuple[int, int, int, int]
 
 
-def build_local_peer_access_results(rank: int,
-                                    rank_devices: Sequence[RankDevice],
+def build_local_peer_access_results(rank: int, rank_devices: Sequence[RankDevice],
                                     can_access_peer: Callable[[int, int], bool]) -> List[PeerAccessResult]:
     """Query directed P2P access from one rank to every intranode peer."""
     if not 0 <= rank < len(rank_devices):
@@ -56,13 +54,10 @@ def find_unsupported_peer_pairs(rank_devices: Sequence[RankDevice],
 
 def format_p2p_preflight_error(unsupported_pairs: Sequence[UnsupportedPeerPair], num_required_pairs: int) -> str:
     """Build one deterministic, actionable error for all unsupported pairs."""
-    pair_list = ', '.join(
-        f'(rank {src_rank} GPU {src_device} -> rank {dst_rank} GPU {dst_device})'
-        for src_rank, src_device, dst_rank, dst_device in unsupported_pairs)
-    return (
-        'DeepEP P2P preflight failed. '
-        f'Unsupported directed pairs: {pair_list} '
-        f'({len(unsupported_pairs)}/{num_required_pairs} directed pairs). '
-        'DeepEP requires full CUDA peer access across all participating intranode devices. '
-        'Try a different MoE all-to-all backend or a topology with full P2P support.'
-    )
+    pair_list = ', '.join(f'(rank {src_rank} GPU {src_device} -> rank {dst_rank} GPU {dst_device})'
+                          for src_rank, src_device, dst_rank, dst_device in unsupported_pairs)
+    return ('DeepEP P2P preflight failed. '
+            f'Unsupported directed pairs: {pair_list} '
+            f'({len(unsupported_pairs)}/{num_required_pairs} directed pairs). '
+            'DeepEP requires full CUDA peer access across all participating intranode devices. '
+            'Try a different MoE all-to-all backend or a topology with full P2P support.')

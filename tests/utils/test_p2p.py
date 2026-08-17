@@ -3,7 +3,6 @@ from pathlib import Path
 
 import pytest
 
-
 # Load this pure control-plane module without importing ``deep_ep.__init__``,
 # which requires the CUDA extension to have been built first.
 _module_path = Path(__file__).parents[2] / 'deep_ep' / 'utils' / 'p2p.py'
@@ -57,11 +56,8 @@ def test_issue_584_partial_eight_gpu_topology_reports_48_of_56_pairs():
     rank_devices = [('node-a', device) for device in range(8)]
     peer_access_results = []
     for src_device in range(8):
-        peer_access_results.append([
-            (dst_device, src_device // 2 == dst_device // 2)
-            for dst_device in range(8)
-            if src_device != dst_device
-        ])
+        peer_access_results.append([(dst_device, src_device // 2 == dst_device // 2) for dst_device in range(8)
+                                    if src_device != dst_device])
 
     unsupported_pairs, num_required_pairs = find_unsupported_peer_pairs(rank_devices, peer_access_results)
 

@@ -3,7 +3,7 @@ import os
 import math
 import torch
 import torch.distributed as dist
-from typing import Callable, Optional, Tuple, Union, List, Sequence
+from typing import Callable, Optional, Tuple, Union, Sequence
 from contextlib import contextmanager
 
 # noinspection PyUnresolvedReferences
@@ -14,11 +14,7 @@ from deep_ep._C import EventHandle
 from ..utils.event import EventOverlap
 from ..utils.math import align
 from ..utils.semantic import value_or, weak_lru
-from ..utils.envs import (
-    check_fast_rdma_atomic_support,
-    check_nvlink_connections, check_torch_deterministic,
-    get_nvlink_gbs, get_rdma_gbs
-)
+from ..utils.envs import (check_fast_rdma_atomic_support, check_nvlink_connections, check_torch_deterministic, get_nvlink_gbs, get_rdma_gbs)
 from ..utils.comm import get_nccl_comm_handle
 
 
@@ -56,22 +52,11 @@ class EPHandle:
         num_recv_tokens: the total number of received tokens.
     """
 
-    def __init__(self,
-                 do_expand: bool,
-                 num_experts: int, expert_alignment: int,
-                 num_max_tokens_per_rank: int,
-                 num_sms: int,
-                 topk_idx: torch.Tensor,
-                 num_recv_tokens: int,
-                 num_expanded_tokens: int,
-                 num_recv_tokens_per_expert_list: list,
-                 psum_num_recv_tokens_per_scaleup_rank: torch.Tensor,
-                 psum_num_recv_tokens_per_expert: torch.Tensor,
-                 num_unaligned_recv_tokens_per_expert: torch.Tensor,
-                 recv_src_metadata: torch.Tensor,
-                 dst_buffer_slot_idx: torch.Tensor,
-                 token_metadata_at_forward: Optional[torch.Tensor],
-                 channel_linked_list: Optional[torch.Tensor]):
+    def __init__(self, do_expand: bool, num_experts: int, expert_alignment: int, num_max_tokens_per_rank: int, num_sms: int,
+                 topk_idx: torch.Tensor, num_recv_tokens: int, num_expanded_tokens: int, num_recv_tokens_per_expert_list: list,
+                 psum_num_recv_tokens_per_scaleup_rank: torch.Tensor, psum_num_recv_tokens_per_expert: torch.Tensor,
+                 num_unaligned_recv_tokens_per_expert: torch.Tensor, recv_src_metadata: torch.Tensor, dst_buffer_slot_idx: torch.Tensor,
+                 token_metadata_at_forward: Optional[torch.Tensor], channel_linked_list: Optional[torch.Tensor]):
         # NOTES: remember to copy the original users' input to prevent uncasual modifications on them
         assert topk_idx is not None
 
@@ -97,14 +82,8 @@ class EPHandle:
         # For deterministic features
         self.cached_recv_src_metadata_before_sort = None
 
-    def deterministic_sort(self,
-                           do_cpu_sync: bool,
-                           is_cached_dispatch: bool,
-                           recv_x: torch.Tensor,
-                           recv_sf: Optional[torch.Tensor],
-                           recv_topk_idx: torch.Tensor,
-                           recv_topk_weights: torch.Tensor,
-                           channel_linked_list: Optional[torch.Tensor]):
+    def deterministic_sort(self, do_cpu_sync: bool, is_cached_dispatch: bool, recv_x: torch.Tensor, recv_sf: Optional[torch.Tensor],
+                           recv_topk_idx: torch.Tensor, recv_topk_weights: torch.Tensor, channel_linked_list: Optional[torch.Tensor]):
         """
         Sort received tokens to guarantee deterministic dispatch output.
         The principle:
@@ -168,20 +147,24 @@ class EPHandle:
             #  - `expert_idx * src_token_global_index_max_x2`, for padding slots
             # This guarantees a two-key sort: first by expert, then by order within each expert.
             # Valid tokens precede padding tokens, and valid tokens are sorted by `src_token_global_idx`.
-            src_token_global_index_max_x2 = 10000000000    # 1e10
+            src_token_global_index_max_x2 = 10000000000  # 1e10
             tensor_dim0_after_expand = recv_x.shape[0]
 
             expert_token_idx_start = self.psum_num_recv_tokens_per_expert - self.num_unaligned_recv_tokens_per_expert
             token_idx2expert_idx = torch.bucketize(torch.arange(tensor_dim0_after_expand, device='cuda'),
-                                                   expert_token_idx_start[1:], right=True, out_int32=False)
+                                                   expert_token_idx_start[1:],
+                                                   right=True,
+                                                   out_int32=False)
             sort_keys_for_expanded_tensors = token_idx2expert_idx * src_token_global_index_max_x2
 
-            slots = self.cached_recv_src_metadata_before_sort[:, 2:]    # [num_recv_tokens, topk]
+            slots = self.cached_recv_src_metadata_before_sort[:, 2:]  # [num_recv_tokens, topk]
             src_global_idx = self.cached_recv_src_metadata_before_sort[:, 0]
             valid_mask = slots >= 0
             if not do_cpu_sync:
                 valid_mask[oob_tokens_mask] = False
-            sort_keys_for_expanded_tensors.scatter_add_(0, slots[valid_mask], -src_token_global_index_max_x2//2 + src_global_idx.unsqueeze(1).expand_as(slots)[valid_mask].to(torch.int64))
+            sort_keys_for_expanded_tensors.scatter_add_(
+                0, slots[valid_mask],
+                -src_token_global_index_max_x2 // 2 + src_global_idx.unsqueeze(1).expand_as(slots)[valid_mask].to(torch.int64))
 
             orig_indices_for_expanded_tensors = torch.sort(sort_keys_for_expanded_tensors, stable=True).indices.to(torch.int32)
             permute(recv_x, orig_indices_for_expanded_tensors)
@@ -225,25 +208,27 @@ class ElasticBuffer:
         runtime: the C++ runtime.
     """
 
-    def __init__(self,
-                 group: dist.ProcessGroup,
-                 # Provide `num_bytes` (GPU + CPU buffer, excludes workspace)
-                 num_bytes: Optional[int] = None,
-                 num_cpu_bytes: int = 0,
-                 # Or provide MoE settings (BF16 by default)
-                 num_max_tokens_per_rank: int = 0,
-                 hidden: int = 0,
-                 num_topk: int = 0,
-                 use_fp8_dispatch: bool = False,
-                 # Configs
-                 deterministic: bool = False,
-                 allow_hybrid_mode: bool = True,
-                 allow_multiple_reduction: bool = True,
-                 prefer_overlap_with_compute: bool = True,
-                 sl_idx: int = 3,
-                 num_allocated_qps: int = 0,
-                 num_cpu_timeout_secs: int = 300, num_gpu_timeout_secs: int = 100,
-                 explicitly_destroy: bool = False):
+    def __init__(
+            self,
+            group: dist.ProcessGroup,
+            # Provide `num_bytes` (GPU + CPU buffer, excludes workspace)
+            num_bytes: Optional[int] = None,
+            num_cpu_bytes: int = 0,
+            # Or provide MoE settings (BF16 by default)
+            num_max_tokens_per_rank: int = 0,
+            hidden: int = 0,
+            num_topk: int = 0,
+            use_fp8_dispatch: bool = False,
+            # Configs
+            deterministic: bool = False,
+            allow_hybrid_mode: bool = True,
+            allow_multiple_reduction: bool = True,
+            prefer_overlap_with_compute: bool = True,
+            sl_idx: int = 3,
+            num_allocated_qps: int = 0,
+            num_cpu_timeout_secs: int = 300,
+            num_gpu_timeout_secs: int = 100,
+            explicitly_destroy: bool = False):
         """
         Initialize the elastic communication buffer.
 
@@ -307,10 +292,8 @@ class ElasticBuffer:
         # Calculate buffer size (already 2 MB-aligned from hint functions / calculate_elastic_buffer_size)
         if num_bytes is None:
             # NOTES: we allow `num_topk == 0`, as the buffer size can also be calculated by number of ranks (maybe bigger though)
-            num_bytes = _C.calculate_elastic_buffer_size(
-                self.nccl_comm_handle.get(),
-                num_max_tokens_per_rank, hidden, num_topk, use_fp8_dispatch,
-                allow_hybrid_mode, allow_multiple_reduction)
+            num_bytes = _C.calculate_elastic_buffer_size(self.nccl_comm_handle.get(), num_max_tokens_per_rank, hidden, num_topk,
+                                                         use_fp8_dispatch, allow_hybrid_mode, allow_multiple_reduction)
 
         if os.environ.get('EP_BUFFER_DEBUG', 0):
             print(f'Initializing EP elastic buffer with {num_bytes} bytes '
@@ -344,15 +327,9 @@ class ElasticBuffer:
 
         # Create CPP handle
         self.explicitly_destroy = explicitly_destroy
-        self.runtime = _C.ElasticBuffer(group.rank(), group.size(),
-                                        self.nccl_comm_handle.get(), cpu_comm,
-                                        num_bytes, num_cpu_bytes,
-                                        allow_hybrid_mode,
-                                        allow_multiple_reduction,
-                                        prefer_overlap_with_compute,
-                                        sl_idx, num_allocated_qps,
-                                        num_cpu_timeout_secs, num_gpu_timeout_secs,
-                                        self.explicitly_destroy)
+        self.runtime = _C.ElasticBuffer(group.rank(), group.size(), self.nccl_comm_handle.get(), cpu_comm, num_bytes, num_cpu_bytes,
+                                        allow_hybrid_mode, allow_multiple_reduction, prefer_overlap_with_compute, sl_idx, num_allocated_qps,
+                                        num_cpu_timeout_secs, num_gpu_timeout_secs, self.explicitly_destroy)
 
         # Logical rank indices
         self.num_scaleout_ranks, self.num_scaleup_ranks = self.get_logical_domain_size()
@@ -380,8 +357,10 @@ class ElasticBuffer:
 
     @staticmethod
     def get_buffer_size_hint(group: dist.ProcessGroup,
-                             num_max_tokens_per_rank: int, hidden: int,
-                             num_topk: int = 0, use_fp8_dispatch: bool = False,
+                             num_max_tokens_per_rank: int,
+                             hidden: int,
+                             num_topk: int = 0,
+                             use_fp8_dispatch: bool = False,
                              allow_hybrid_mode: bool = True,
                              allow_multiple_reduction: bool = True) -> int:
         """
@@ -402,12 +381,12 @@ class ElasticBuffer:
         """
         # NOTES: calculate_elastic_buffer_size already returns 2 MB-aligned values
         return _C.calculate_elastic_buffer_size(
-            get_nccl_comm_handle(group).get(),
-            num_max_tokens_per_rank, hidden, num_topk, use_fp8_dispatch,
-            allow_hybrid_mode, allow_multiple_reduction)
+            get_nccl_comm_handle(group).get(), num_max_tokens_per_rank, hidden, num_topk, use_fp8_dispatch, allow_hybrid_mode,
+            allow_multiple_reduction)
 
     @staticmethod
-    def get_engram_storage_size_hint(num_entries: int, hidden: int,
+    def get_engram_storage_size_hint(num_entries: int,
+                                     hidden: int,
                                      num_max_tokens_per_rank: int,
                                      dtype: torch.dtype = torch.bfloat16) -> Tuple[int, int]:
         """
@@ -436,8 +415,7 @@ class ElasticBuffer:
         return num_gpu_bytes, num_cpu_bytes
 
     @staticmethod
-    def get_pp_buffer_size_hint(num_max_tensor_bytes: int,
-                                num_max_inflight_tensors: int) -> int:
+    def get_pp_buffer_size_hint(num_max_tensor_bytes: int, num_max_inflight_tensors: int) -> int:
         """
         (Experimental) Get a minimum buffer size requirement for pipeline-parallel (PP) send/recv.
         The returned value is aligned to 2 MB.
@@ -457,8 +435,8 @@ class ElasticBuffer:
         return align(num_max_tensor_bytes * num_max_inflight_tensors * 2 * 2, buffer_alignment)
 
     @staticmethod
-    def get_agrs_num_max_session_bytes(group: dist.ProcessGroup,
-                                       shapes: Union[Tuple[int, ...], torch.Size, Sequence[Union[Tuple[int, ...], torch.Size]]],
+    def get_agrs_num_max_session_bytes(group: dist.ProcessGroup, shapes: Union[Tuple[int, ...], torch.Size, Sequence[Union[Tuple[int, ...],
+                                                                                                                           torch.Size]]],
                                        dtype: torch.dtype) -> int:
         """
         (Experimental) Calculate the total buffer bytes required for all-gather reduce-scatter (AGRS)
@@ -474,12 +452,11 @@ class ElasticBuffer:
             size: the total number of bytes that will be used in this session.
         """
         if not isinstance(shapes[0], tuple):
-            shapes = (shapes,)
+            shapes = (shapes, )
         return sum(align(group.size() * math.prod(x) * dtype.itemsize, 32) for x in shapes)
 
     @staticmethod
-    def get_agrs_buffer_size_hint(group: dist.ProcessGroup,
-                                  num_max_session_bytes: int) -> int:
+    def get_agrs_buffer_size_hint(group: dist.ProcessGroup, num_max_session_bytes: int) -> int:
         """
         (Experimental) Get a minimum buffer size requirement for all-gather reduce-scatter (AGRS) sessions.
         The returned value is aligned to 2 MB.
@@ -516,16 +493,10 @@ class ElasticBuffer:
                  Optional[torch.Tensor], Optional[torch.Tensor]]:
         if handle is None:
             return None, None, None, None, None, None, None, None, None, None
-        return (handle.num_recv_tokens,
-                handle.num_expanded_tokens,
-                handle.num_recv_tokens_per_expert_list,
-                handle.psum_num_recv_tokens_per_scaleup_rank,
-                handle.psum_num_recv_tokens_per_expert,
-                handle.num_unaligned_recv_tokens_per_expert,
-                handle.dst_buffer_slot_idx,
-                handle.token_metadata_at_forward,
-                handle.recv_src_metadata,
-                handle.channel_linked_list)
+        return (handle.num_recv_tokens, handle.num_expanded_tokens, handle.num_recv_tokens_per_expert_list,
+                handle.psum_num_recv_tokens_per_scaleup_rank, handle.psum_num_recv_tokens_per_expert,
+                handle.num_unaligned_recv_tokens_per_expert, handle.dst_buffer_slot_idx, handle.token_metadata_at_forward,
+                handle.recv_src_metadata, handle.channel_linked_list)
 
     @staticmethod
     def capture() -> EventHandle:
@@ -567,8 +538,7 @@ class ElasticBuffer:
         """
         return self.runtime.get_logical_domain_size()
 
-    def engram_write(self, storage: torch.Tensor,
-                     sf: Optional[torch.Tensor] = None) -> None:
+    def engram_write(self, storage: torch.Tensor, sf: Optional[torch.Tensor] = None) -> None:
         """
         (Experimental) Write Engram storage data into the buffer.
         This call includes a barrier before and after the write to ensure visibility.
@@ -582,8 +552,7 @@ class ElasticBuffer:
         """
         self.runtime.engram_write(storage, sf)
 
-    def engram_fetch(self, indices: torch.Tensor, num_qps: int = 0,
-                     use_tma_aligned_col_major_sf: bool = False) -> Callable:
+    def engram_fetch(self, indices: torch.Tensor, num_qps: int = 0, use_tma_aligned_col_major_sf: bool = False) -> Callable:
         """
         (Experimental) Fetch Engram entries from remote ranks via RDMA.
         Returns a callable that, when invoked, waits for the RDMA gets to complete and returns the fetched tensor.
@@ -668,8 +637,7 @@ class ElasticBuffer:
         finally:
             self.runtime.destroy_agrs_session()
 
-    def agrs_set_config(self, num_max_session_bytes: int,
-                        num_max_all_gathers_per_session: int) -> None:
+    def agrs_set_config(self, num_max_session_bytes: int, num_max_all_gathers_per_session: int) -> None:
         """
         (Experimental) Configure AGRS session parameters. Includes a barrier to flush previous operations.
 
@@ -680,8 +648,7 @@ class ElasticBuffer:
         self.runtime.agrs_set_config(num_max_session_bytes, num_max_all_gathers_per_session)
 
     # noinspection PyTypeChecker
-    def agrs_get_inplace_tensor(self,
-                                shapes: Union[Tuple[int, ...], torch.Size, Sequence[Union[Tuple[int, ...], torch.Size]]],
+    def agrs_get_inplace_tensor(self, shapes: Union[Tuple[int, ...], torch.Size, Sequence[Union[Tuple[int, ...], torch.Size]]],
                                 dtype: torch.dtype) -> Union[torch.Tensor, Tuple[torch.Tensor, ...]]:
         """
         (Experimental) Get in-place tensor(s) from the AGRS buffer for this rank's slot, without copying.
@@ -698,9 +665,7 @@ class ElasticBuffer:
         is_batched_mode = isinstance(shapes[0], tuple)
         if not is_batched_mode:
             shapes = (shapes, )
-        tensors = self.runtime.agrs_get_inplace_tensor(
-            (math.prod(shape) * dtype.itemsize for shape in shapes)
-        )
+        tensors = self.runtime.agrs_get_inplace_tensor((math.prod(shape) * dtype.itemsize for shape in shapes))
         out = tuple(tensor.view(dtype).view(shape) for tensor, shape in zip(tensors, shapes, strict=True))
         return out if is_batched_mode else out[0]
 
@@ -719,7 +684,7 @@ class ElasticBuffer:
             For a sequence: `(*gathered_tensors, handle)` with one gathered tensor per input.
         """
         if isinstance(t, torch.Tensor):
-            tensors, handle = self.runtime.all_gather((t,))
+            tensors, handle = self.runtime.all_gather((t, ))
             return tensors[0], handle
 
         # Batched
@@ -727,11 +692,16 @@ class ElasticBuffer:
         return *tensors, handle
 
     @weak_lru(maxsize=None)
-    def get_theoretical_num_sms(self, num_experts: int, num_topk: int,
-                                num_scaleout_topk: int = 0,
-                                rdma_gbs: float = 0, nvlink_gbs: float = 0,
-                                # TODO: use different values for other architectures
-                                sm_read_gbs: float = 200, sm_write_gbs: float = 50) -> int:
+    def get_theoretical_num_sms(
+            self,
+            num_experts: int,
+            num_topk: int,
+            num_scaleout_topk: int = 0,
+            rdma_gbs: float = 0,
+            nvlink_gbs: float = 0,
+            # TODO: use different values for other architectures
+            sm_read_gbs: float = 200,
+            sm_write_gbs: float = 50) -> int:
         """
         Estimate the optimal number of SMs for dispatch/combine kernels based on bandwidth modeling.
         The result is cached. This assumes a balanced gate distribution.
@@ -928,7 +898,7 @@ class ElasticBuffer:
         num_topk = (handle.topk_idx if topk_idx is None else topk_idx).shape[1]
         num_sms = self.get_theoretical_num_sms(num_experts, num_topk) if num_sms == 0 else num_sms
         num_qps = self.get_theoretical_num_qps(num_sms) if num_qps == 0 else num_qps
-        assert num_qps <= self.num_allocated_qps, f'Allocated QPs are not enough'
+        assert num_qps <= self.num_allocated_qps, 'Allocated QPs are not enough'
 
         # Unpack SF
         x, sf = x if isinstance(x, tuple) else (x, None)
@@ -947,13 +917,9 @@ class ElasticBuffer:
             # Should be aligned with the handle context
             assert (num_experts, expert_alignment, num_max_tokens_per_rank) == \
                    (handle.num_experts, handle.expert_alignment, handle.num_max_tokens_per_rank)
-        (cached_num_recv_tokens, cached_num_expanded_tokens,
-         cached_num_recv_tokens_per_expert_list,
-         cached_psum_num_recv_tokens_per_scaleup_rank, cached_psum_num_recv_tokens_per_expert,
-         cached_num_unaligned_recv_tokens_per_expert,
-         cached_dst_buffer_slot_idx,
-         cached_token_metadata_at_forward,
-         cached_recv_src_metadata,
+        (cached_num_recv_tokens, cached_num_expanded_tokens, cached_num_recv_tokens_per_expert_list,
+         cached_psum_num_recv_tokens_per_scaleup_rank, cached_psum_num_recv_tokens_per_expert, cached_num_unaligned_recv_tokens_per_expert,
+         cached_dst_buffer_slot_idx, cached_token_metadata_at_forward, cached_recv_src_metadata,
          cached_channel_linked_list) = self._unpack_handle(handle)
 
         # Some default values
@@ -962,56 +928,24 @@ class ElasticBuffer:
         do_cpu_sync = value_or(do_cpu_sync, True)
 
         # Do dispatch
-        (recv_x, recv_sf,
-         recv_topk_idx, recv_topk_weights,
-         cloned_topk_idx,
-         num_recv_tokens, num_expanded_tokens,
-         num_recv_tokens_per_expert_list,
-         psum_num_recv_tokens_per_scaleup_rank,
-         psum_num_recv_tokens_per_expert,
-         num_unaligned_recv_tokens_per_expert,
-         recv_src_metadata,
-         dst_buffer_slot_idx,
-         token_metadata_at_forward,
-         channel_linked_list,
-         event) = self.runtime.dispatch(x, sf, topk_idx, topk_weights,
-                                        cumulative_local_expert_recv_stats,
-                                        cached_num_recv_tokens,
-                                        cached_num_expanded_tokens,
-                                        cached_num_recv_tokens_per_expert_list,
-                                        cached_psum_num_recv_tokens_per_scaleup_rank,
-                                        cached_psum_num_recv_tokens_per_expert,
-                                        cached_num_unaligned_recv_tokens_per_expert,
-                                        cached_dst_buffer_slot_idx,
-                                        cached_token_metadata_at_forward,
-                                        cached_recv_src_metadata,
-                                        cached_channel_linked_list,
-                                        num_max_tokens_per_rank,
-                                        num_experts, expert_alignment,
-                                        num_sms, num_qps,
-                                        previous_event,
-                                        previous_event_before_epilogue,
-                                        async_with_compute_stream, allocate_on_comm_stream,
-                                        do_handle_copy, do_cpu_sync, do_expand,
-                                        do_zero_padding,
-                                        use_tma_aligned_col_major_sf)
+        (recv_x, recv_sf, recv_topk_idx, recv_topk_weights, cloned_topk_idx, num_recv_tokens, num_expanded_tokens,
+         num_recv_tokens_per_expert_list, psum_num_recv_tokens_per_scaleup_rank, psum_num_recv_tokens_per_expert,
+         num_unaligned_recv_tokens_per_expert, recv_src_metadata,
+         dst_buffer_slot_idx, token_metadata_at_forward, channel_linked_list, event) = self.runtime.dispatch(
+             x, sf, topk_idx, topk_weights, cumulative_local_expert_recv_stats, cached_num_recv_tokens, cached_num_expanded_tokens,
+             cached_num_recv_tokens_per_expert_list, cached_psum_num_recv_tokens_per_scaleup_rank, cached_psum_num_recv_tokens_per_expert,
+             cached_num_unaligned_recv_tokens_per_expert, cached_dst_buffer_slot_idx, cached_token_metadata_at_forward,
+             cached_recv_src_metadata, cached_channel_linked_list, num_max_tokens_per_rank, num_experts, expert_alignment, num_sms, num_qps,
+             previous_event, previous_event_before_epilogue, async_with_compute_stream, allocate_on_comm_stream, do_handle_copy,
+             do_cpu_sync, do_expand, do_zero_padding, use_tma_aligned_col_major_sf)
 
         # Create handle
         is_cached_dispatch = handle is not None
         if not is_cached_dispatch:
-            handle = EPHandle(do_expand,
-                              num_experts, expert_alignment,
-                              num_max_tokens_per_rank,
-                              num_sms,
-                              cloned_topk_idx if do_handle_copy else topk_idx,
-                              num_recv_tokens, num_expanded_tokens,
-                              num_recv_tokens_per_expert_list,
-                              psum_num_recv_tokens_per_scaleup_rank,
-                              psum_num_recv_tokens_per_expert,
-                              num_unaligned_recv_tokens_per_expert,
-                              recv_src_metadata,
-                              dst_buffer_slot_idx,
-                              token_metadata_at_forward,
+            handle = EPHandle(do_expand, num_experts, expert_alignment, num_max_tokens_per_rank, num_sms,
+                              cloned_topk_idx if do_handle_copy else topk_idx, num_recv_tokens, num_expanded_tokens,
+                              num_recv_tokens_per_expert_list, psum_num_recv_tokens_per_scaleup_rank, psum_num_recv_tokens_per_expert,
+                              num_unaligned_recv_tokens_per_expert, recv_src_metadata, dst_buffer_slot_idx, token_metadata_at_forward,
                               channel_linked_list)
 
         # Create event
@@ -1020,11 +954,8 @@ class ElasticBuffer:
         # Deterministic epilogue
         # NOTES: when we change the metadata layout, the epilogue should also be changed
         if self.deterministic:
-            epilogue = functools.partial(
-                handle.deterministic_sort,
-                do_cpu_sync, is_cached_dispatch,
-                recv_x, recv_sf, recv_topk_idx, recv_topk_weights, channel_linked_list
-            )
+            epilogue = functools.partial(handle.deterministic_sort, do_cpu_sync, is_cached_dispatch, recv_x, recv_sf, recv_topk_idx,
+                                         recv_topk_weights, channel_linked_list)
             event_overlap.register_hook_after_wait(epilogue) if async_with_compute_stream else epilogue()
 
         # Repack SF
@@ -1086,7 +1017,7 @@ class ElasticBuffer:
         # Automatic decide SM and QP count
         num_sms = handle.num_sms if num_sms == 0 else num_sms
         num_qps = self.get_theoretical_num_qps(num_sms) if num_qps == 0 else num_qps
-        assert num_qps <= self.num_allocated_qps, f'Allocated QPs are not enough'
+        assert num_qps <= self.num_allocated_qps, 'Allocated QPs are not enough'
 
         bias_0, bias_1 = ElasticBuffer._unpack_bias(bias)
         combined_x, combined_topk_weights, event = \

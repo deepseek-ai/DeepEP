@@ -193,8 +193,7 @@ def get_nvlink_gbs(factor: float = 0.9) -> float:
     """
     # noinspection PyBroadException
     try:
-        result = subprocess.run(['nvidia-smi', 'nvlink', '-s'],
-                                capture_output=True, text=True, check=True)
+        result = subprocess.run(['nvidia-smi', 'nvlink', '-s'], capture_output=True, text=True, check=True)
         output = result.stdout
         pattern = r'GPU \d+:.*?(?=^GPU \d+:|^$)'
         match = re.search(pattern, output, re.MULTILINE | re.DOTALL)
