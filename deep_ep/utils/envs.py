@@ -7,13 +7,15 @@ import socket
 import subprocess
 import torch
 import torch.distributed as dist
-from typing import List, Tuple
+from contextlib import contextmanager
+from typing import Callable, Iterator, List, Tuple
 
 # noinspection PyUnresolvedReferences
 import deep_ep._C as _C
 
 from .comm import get_nccl_comm_handle
-from .p2p import build_local_peer_access_results, find_unsupported_peer_pairs, format_p2p_preflight_error
+from .p2p import (build_local_peer_access_results, build_physical_peer_access_checker, find_unsupported_peer_pairs,
+                  format_p2p_preflight_error)
 
 _local_rank = None
 _local_seed = 0
@@ -153,19 +155,106 @@ def _all_gather_object(group: object, obj: object) -> List[object]:
     return object_list
 
 
+def _get_physical_node_id() -> str:
+    # Containers on one machine can have different hostnames but share the
+    # kernel boot ID; different physical nodes have independent boot IDs.
+    try:
+        with open('/proc/sys/kernel/random/boot_id', encoding='utf-8') as file:
+            boot_id = file.read().strip()
+        if boot_id:
+            return f'boot:{boot_id}'
+    except OSError:
+        pass
+    return f'hostname:{socket.gethostname()}'
+
+
+def _get_physical_device_id(device: int) -> str:
+    device_uuid = getattr(torch.cuda.get_device_properties(device), 'uuid', None)
+    if device_uuid is None:
+        raise RuntimeError('PyTorch did not expose a UUID for the current CUDA device')
+    return str(device_uuid)
+
+
+def _normalize_nvml_enum(value: object) -> int:
+    # Some pynvml releases expose the READ enum as a one-element tuple.
+    if isinstance(value, tuple):
+        value = value[0]
+    return int(value)
+
+
+@contextmanager
+def _physical_peer_access_checker() -> Iterator[Callable[[str, str], bool]]:
+    visible_device_ids = [_get_physical_device_id(device) for device in range(torch.cuda.device_count())]
+    pynvml = None
+    nvml_initialized = False
+    nvml_handles = {}
+
+    def can_access_hidden_peer(device_id: str, peer_device_id: str) -> bool:
+        nonlocal pynvml, nvml_initialized
+        if pynvml is None:
+            try:
+                import pynvml as imported_pynvml
+            except ImportError as error:
+                raise RuntimeError('pynvml is required to validate a peer GPU hidden by CUDA_VISIBLE_DEVICES') from error
+            pynvml = imported_pynvml
+        if not nvml_initialized:
+            pynvml.nvmlInit()
+            nvml_initialized = True
+
+        def get_handle(physical_device_id: str):
+            if physical_device_id not in nvml_handles:
+                try:
+                    nvml_handles[physical_device_id] = pynvml.nvmlDeviceGetHandleByUUID(physical_device_id)
+                except pynvml.NVMLError as error:
+                    raise RuntimeError(f'NVML cannot resolve physical GPU {physical_device_id}') from error
+            return nvml_handles[physical_device_id]
+
+        device_handle = get_handle(device_id)
+        peer_device_handle = get_handle(peer_device_id)
+        p2p_status_ok = _normalize_nvml_enum(pynvml.NVML_P2P_STATUS_OK)
+        for capability_name, default_index in (('NVML_P2P_CAPS_INDEX_READ', 0), ('NVML_P2P_CAPS_INDEX_WRITE', 1)):
+            capability_index = _normalize_nvml_enum(getattr(pynvml, capability_name, default_index))
+            status = pynvml.nvmlDeviceGetP2PStatus(device_handle, peer_device_handle, capability_index)
+            if _normalize_nvml_enum(status) != p2p_status_ok:
+                return False
+        return True
+
+    checker = build_physical_peer_access_checker(visible_device_ids, torch.cuda.can_device_access_peer, can_access_hidden_peer)
+    try:
+        yield checker
+    finally:
+        if nvml_initialized:
+            pynvml.nvmlShutdown()
+
+
 def check_nvlink_connections(group: object) -> None:
     """
     Check directed CUDA peer access between every pair of intranode GPUs.
+
+    Physical GPU UUIDs avoid cross-process CUDA ordinal ambiguity, and the
+    NVML fallback covers peers hidden by per-rank CUDA_VISIBLE_DEVICES masks.
 
     Arguments:
         group: the communication group.
     """
     rank = group.Get_rank() if hasattr(group, 'Get_rank') else group.rank()
 
-    local_device = torch.cuda.current_device()
-    rank_devices = _all_gather_object(group, (socket.gethostname(), local_device))
-    local_access_results = build_local_peer_access_results(rank, rank_devices, torch.cuda.can_device_access_peer)
-    peer_access_results = _all_gather_object(group, local_access_results)
+    local_device_id = _get_physical_device_id(torch.cuda.current_device())
+    rank_devices = _all_gather_object(group, (_get_physical_node_id(), local_device_id))
+    local_access_results = []
+    local_query_error = None
+    try:
+        with _physical_peer_access_checker() as can_access_peer:
+            local_access_results = build_local_peer_access_results(rank, rank_devices, can_access_peer)
+    except Exception as error:
+        local_query_error = f'rank {rank}: {type(error).__name__}: {error}'
+
+    gathered_queries = _all_gather_object(group, (local_access_results, local_query_error))
+    query_errors = [error for _, error in gathered_queries if error is not None]
+    if query_errors:
+        raise RuntimeError('DeepEP P2P preflight could not query the physical topology: ' + '; '.join(query_errors))
+
+    peer_access_results = [access_results for access_results, _ in gathered_queries]
     unsupported_pairs, num_required_pairs = find_unsupported_peer_pairs(rank_devices, peer_access_results)
     if unsupported_pairs:
         raise RuntimeError(format_p2p_preflight_error(unsupported_pairs, num_required_pairs))
