@@ -48,8 +48,12 @@ We test low-latency kernels on H800 with each connected to a CX7 InfiniBand 400 
     - CUDA 11.0 and above for SM80 GPUs
     - CUDA 12.3 and above for SM90 GPUs
 - PyTorch 2.1 and above
-- NVLink for intranode communication
+- NVLink with full directed CUDA peer access between every pair of participating intranode GPUs
 - RDMA network for internode communication
+
+Before allocating an intranode communication buffer, DeepEP validates the complete P2P capability matrix. A partial topology is rejected
+with every unsupported directed GPU pair reported together. Use another MoE all-to-all backend when the participating GPUs do not form a
+full-P2P domain.
 
 ### Download and install NVSHMEM dependency
 

@@ -276,6 +276,10 @@ class ElasticBuffer:
         self.prefer_overlap_with_compute = prefer_overlap_with_compute
         self.deterministic = deterministic
 
+        # Validate the complete directed intranode P2P matrix before creating a
+        # communicator or calculating and allocating the symmetric buffer.
+        check_nvlink_connections(group)
+
         if os.environ.get('NCCL_GIN_CROSS_NIC') == '0':
             # TODO: move this variable into NCCL runtime
             # Multi-plane: all ranks share CPU segments, skip proxy re-export for sysmem handles
@@ -315,9 +319,6 @@ class ElasticBuffer:
 
         # Store default values
         self.num_max_tokens_per_rank = num_max_tokens_per_rank
-
-        # Check PCIe GPUs
-        check_nvlink_connections(group)
 
         # RDMA SL
         if 'EP_OVERRIDE_RDMA_SL' in os.environ:

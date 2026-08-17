@@ -68,8 +68,12 @@ For V1 performance data, see [docs/legacy.md](docs/legacy.md#performance).
   - CUDA 12.3 and above for SM90 GPUs
 - PyTorch 2.10 and above
 - NCCL 2.30.4 and above
-- NVLink for intranode communication
+- NVLink with full directed CUDA peer access between every pair of participating intranode GPUs
 - RDMA network for internode communication
+
+Before allocating an intranode communication buffer, DeepEP validates the complete P2P capability matrix. A partial topology is rejected
+with every unsupported directed GPU pair reported together. Use another MoE all-to-all backend when the participating GPUs do not form a
+full-P2P domain.
 
 ### Install NCCL dependency
 
