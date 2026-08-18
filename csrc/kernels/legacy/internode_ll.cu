@@ -490,7 +490,7 @@ void dispatch(void* packed_recv_x,
               int num_device_sms,
               cudaStream_t stream,
               int phases) {
-    constexpr int kNumMaxTopK = 11;
+    constexpr int kNumMaxTopK = 16;  // Kimi-K3 routes top-16
     const int num_warp_groups = ceil_div(num_experts, num_device_sms);
     const int num_warps_per_group = 32 / num_warp_groups;
     EP_HOST_ASSERT(num_warp_groups > 0 and num_warps_per_group > 0);
@@ -1163,7 +1163,7 @@ void combine(void* combined_x,
              cudaStream_t stream,
              int phases,
              bool zero_copy) {
-    constexpr int kNumMaxTopk = 11;
+    constexpr int kNumMaxTopk = 16;  // Kimi-K3 routes top-16
     const int num_warp_groups = ceil_div(num_experts, num_device_sms);
     const int num_warps_per_group = 32 / num_warp_groups;
     const int num_recv_per_sm = ceil_div(num_combined_tokens, num_device_sms);
