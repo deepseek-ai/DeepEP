@@ -1,11 +1,37 @@
 import filecmp
 import functools
 import glob
-import subprocess
-import torch
 import os
+import subprocess
+import sysconfig
+from pathlib import Path
+
+import torch
 
 from .utils.find_pkgs import find_nccl_root
+
+
+def find_nccl_location():
+    """Return the NCCL root and library directory for package or Ubuntu installs."""
+    try:
+        nccl_root = Path(find_nccl_root())
+    except AssertionError:
+        if not Path('/usr/include/nccl.h').is_file():
+            raise
+        multiarch = sysconfig.get_config_var('MULTIARCH')
+        lib_dirs = []
+        if multiarch:
+            lib_dirs.extend([
+                Path('/usr/lib') / multiarch,
+                Path('/lib') / multiarch,
+            ])
+        lib_dirs.extend([Path('/usr/lib'), Path('/usr/local/lib')])
+        for lib_dir in lib_dirs:
+            candidates = [lib_dir / 'libnccl.so', *sorted(lib_dir.glob('libnccl.so.*'))]
+            if any(candidate.is_file() for candidate in candidates):
+                return Path('/usr'), lib_dir
+        raise
+    return nccl_root, nccl_root / 'lib'
 
 # Set some default environment provided at setup
 try:
@@ -57,8 +83,9 @@ def check_nccl_so():
         for so in [line.strip().split(' ')[-1] for line in f if 'libnccl' in line]:
             loaded_nccl_so = so if loaded_nccl_so is None else loaded_nccl_so
             assert so == loaded_nccl_so, f'Duplicate NCCL runtime found in the current system: {so} and {loaded_nccl_so}'
-    linked_nccl_so_candidates = sorted(glob.glob(f'{find_nccl_root()}/lib/libnccl.so*'))
-    assert linked_nccl_so_candidates, f'No libnccl.so found in {find_nccl_root()}/lib/'
+    nccl_root, nccl_lib_dir = find_nccl_location()
+    linked_nccl_so_candidates = sorted(glob.glob(f'{nccl_lib_dir}/libnccl.so*'))
+    assert linked_nccl_so_candidates, f'No libnccl.so found in {nccl_lib_dir}/'
     linked_nccl_so = linked_nccl_so_candidates[0]
 
     # So checking binary-level equalness is necessary
@@ -75,9 +102,10 @@ def init_jit():
     # noinspection PyUnresolvedReferences
     import deep_ep._C as _C
     library_root_path = os.path.dirname(os.path.abspath(__file__))
+    nccl_root, _ = find_nccl_location()
     _C.init_jit(library_root_path,  # Library root directory path
                 find_cuda_home(),   # CUDA home
-                find_nccl_root())   # NCCL root
+                str(nccl_root))     # NCCL root
 
 # Run initialization
 check_nccl_so()

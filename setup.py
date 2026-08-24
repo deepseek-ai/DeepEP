@@ -4,6 +4,7 @@ import os
 import subprocess
 import setuptools
 import importlib
+import sysconfig
 
 from pathlib import Path
 from setuptools.command.build_py import build_py
@@ -45,6 +46,29 @@ def get_nvshmem_host_lib_name(base_dir):
 
 def get_nccl_lib_name(base_dir):
     return _find_versioned_so(base_dir, 'libnccl')
+
+
+def find_system_nccl():
+    """Find the conventional Ubuntu NCCL development installation."""
+    include_dir = Path('/usr/include')
+    if not (include_dir / 'nccl.h').is_file():
+        return None
+
+    multiarch = sysconfig.get_config_var('MULTIARCH')
+    lib_dirs = []
+    if multiarch:
+        lib_dirs.extend([
+            Path('/usr/lib') / multiarch,
+            Path('/lib') / multiarch,
+        ])
+    lib_dirs.extend([Path('/usr/lib'), Path('/usr/local/lib')])
+
+    for lib_dir in lib_dirs:
+        candidates = [lib_dir / 'libnccl.so', *sorted(lib_dir.glob('libnccl.so.*'))]
+        for candidate in candidates:
+            if candidate.is_file():
+                return include_dir, lib_dir, candidate.name
+    return None
 
 
 def get_package_version():
@@ -92,7 +116,21 @@ class CustomBuildPy(build_py):
 if __name__ == '__main__':
     # TODO: make NVSHMEM and legacy optional
     nvshmem_root_dir = find_pkgs.find_nvshmem_root()
-    nccl_root_dir = find_pkgs.find_nccl_root()
+    nccl_root_dir = find_pkgs.find_nccl_root(optional=True)
+    if nccl_root_dir is not None:
+        nccl_include_dir = Path(nccl_root_dir) / 'include'
+        nccl_lib_dir = Path(nccl_root_dir) / 'lib'
+        nccl_lib = get_nccl_lib_name(nccl_root_dir)
+        nccl_use_rpath = True
+    else:
+        system_nccl = find_system_nccl()
+        if system_nccl is None:
+            raise RuntimeError(
+                'NCCL not found. Install libnccl-dev, set EP_NCCL_ROOT_DIR, '
+                'or provide a supported NCCL installation.'
+            )
+        nccl_include_dir, nccl_lib_dir, nccl_lib = system_nccl
+        nccl_use_rpath = False
 
     # `128,2417` is used to suppress warnings of `fmt`
     cxx_flags = ['-O3', '-Wno-deprecated-declarations', '-Wno-unused-variable', '-Wno-sign-compare', '-Wno-reorder', '-Wno-attributes']
@@ -119,9 +157,11 @@ if __name__ == '__main__':
     # NCCL flags. Same story as NVSHMEM above — pip wheels ship
     # ``libnccl.so.2`` only, so resolve the real name dynamically.
     sources.extend(['csrc/kernels/backend/nccl.cu'])
-    include_dirs.extend([f'{nccl_root_dir}/include'])
-    nccl_lib = get_nccl_lib_name(nccl_root_dir)
-    extra_link_args.extend([f'-l:{nccl_lib}', f'-Wl,-rpath,{nccl_root_dir}/lib'])
+    include_dirs.append(str(nccl_include_dir))
+    library_dirs.append(str(nccl_lib_dir))
+    extra_link_args.append(f'-l:{nccl_lib}')
+    if nccl_use_rpath:
+        extra_link_args.append(f'-Wl,-rpath,{nccl_lib_dir}')
 
     # CUDA driver sources
     sources.extend(['csrc/kernels/backend/cuda_driver.cu'])
@@ -182,7 +222,7 @@ if __name__ == '__main__':
     print(f' > Link flags: {extra_link_args}')
     print(f' > Arch list: {os.environ["TORCH_CUDA_ARCH_LIST"]}')
     print(f' > NVSHMEM path: {nvshmem_root_dir}')
-    print(f' > NCCL path: {nccl_root_dir}')
+    print(f' > NCCL path: {nccl_include_dir}, {nccl_lib_dir}')
     # Print persistent env variables
     persistent_envs = []
     for name in persistent_env_names:
