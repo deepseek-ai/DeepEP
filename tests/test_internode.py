@@ -22,7 +22,9 @@ def test_main(args: argparse.Namespace,
               rank: int,
               buffer: deep_ep.Buffer,
               group: dist.ProcessGroup,
-              skip_benchmark: bool = False):
+              skip_benchmark: bool = False,
+              normal_dispatch_stats=None,
+              normal_combine_stats=None):
     # Settings
     num_tokens, hidden = args.num_tokens, args.hidden
     num_topk_groups, num_topk, num_experts = args.num_topk_groups, args.num_topk, args.num_experts
@@ -129,7 +131,8 @@ def test_main(args: argparse.Namespace,
                         'is_token_in_rank': is_token_in_rank,
                         'num_tokens_per_expert': num_tokens_per_expert,
                         'config': config,
-                        'async_finish': async_mode
+                        'async_finish': async_mode,
+                        'normal_dispatch_stats': normal_dispatch_stats
                     }
                     if with_topk:
                         dispatch_args.update({'topk_idx': topk_idx, 'topk_weights': topk_weights_pure_rand if is_rand else topk_weights})
@@ -188,7 +191,7 @@ def test_main(args: argparse.Namespace,
 
                     # Test cached dispatch (must without top-k staffs)
                     if not with_topk:
-                        dispatch_args = {'x': current_x, 'handle': handle, 'config': config, 'async_finish': async_mode}
+                        dispatch_args = {'x': current_x, 'handle': handle, 'config': config, 'async_finish': async_mode, 'normal_dispatch_stats': normal_dispatch_stats}
                         if previous_mode:
                             dispatch_args.update({'previous_event': buffer.capture()})
                         recv_x, _, _, _, _, event = buffer.dispatch(**dispatch_args)
@@ -200,7 +203,7 @@ def test_main(args: argparse.Namespace,
                     # Test combine
                     bias_0 = torch.ones((num_tokens, hidden), dtype=torch.bfloat16, device='cuda')
                     bias_1 = torch.randn((num_tokens, hidden), dtype=torch.bfloat16, device='cuda')
-                    combine_args = {'x': recv_x, 'bias': (bias_0, bias_1), 'handle': handle, 'config': config, 'async_finish': async_mode}
+                    combine_args = {'x': recv_x, 'bias': (bias_0, bias_1), 'handle': handle, 'config': config, 'async_finish': async_mode, 'normal_combine_stats': normal_combine_stats}
                     if with_topk:
                         combine_args.update({'topk_weights': recv_topk_weights})
                     if previous_mode:
@@ -242,7 +245,7 @@ def test_main(args: argparse.Namespace,
         for nvl_chunk_size in range(4, 45, 4):
             for rdma_chunk_size in range(4, 33, 4):
                 config = deep_ep.Config(num_sms, nvl_chunk_size, nvl_buffer_size, rdma_chunk_size, rdma_buffer_size)
-                tune_args = {'x': current_x, 'handle': handle, 'config': config}
+                tune_args = {'x': current_x, 'handle': handle, 'config': config, 'normal_dispatch_stats': normal_dispatch_stats}
                 t, notify_t = bench_kineto(
                     lambda: buffer.dispatch(**tune_args),  # noqa: B023
                     ('dispatch', 'notify'),
@@ -278,7 +281,8 @@ def test_main(args: argparse.Namespace,
         'num_tokens_per_rdma_rank': num_tokens_per_rdma_rank,
         'is_token_in_rank': is_token_in_rank,
         'num_tokens_per_expert': num_tokens_per_expert,
-        'config': dispatch_config if dispatch_config is not None else config
+        'config': dispatch_config if dispatch_config is not None else config,
+        'normal_dispatch_stats': normal_dispatch_stats
     }
     recv_x, _, _, _, handle, _ = buffer.dispatch(**dispatch_args)
 
@@ -287,7 +291,7 @@ def test_main(args: argparse.Namespace,
     for nvl_chunk_size in range(1, 8, 1):
         for rdma_chunk_size in range(12 if num_nodes == 2 else 8, 33, 4):
             config = deep_ep.Config(num_sms, nvl_chunk_size, nvl_buffer_size, rdma_chunk_size, rdma_buffer_size)
-            tune_args = {'x': recv_x, 'handle': handle, 'config': config}
+            tune_args = {'x': recv_x, 'handle': handle, 'config': config, 'normal_combine_stats': normal_combine_stats}
             t, notify_t = bench_kineto(
                 lambda: buffer.combine(**tune_args),  # noqa: B023
                 ('combine', 'notify'),
@@ -330,6 +334,23 @@ def test_loop(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
                             explicitly_destroy=True)
     assert num_local_ranks == 8 and num_ranks > 8
 
+    diagnose = None
+    normal_dispatch_stats = None
+    normal_combine_stats = None
+    if args.test_normal_deepxtrace:
+        os.environ['DEEPEP_DIAGNOSE_ENABLE'] = '1'
+        from deepxtrace import diagnose as ds
+
+        diagnose = ds.Diagnose.create_from_env(
+            group=group,
+            enable_ll_diagnose=False,
+            enable_normal_diagnose=True,
+            snapshot_stream=buffer.get_comm_stream())
+        assert diagnose is not None
+        normal_dispatch_stats = diagnose.get_normal_dispatch_stats_tensor()
+        normal_combine_stats = diagnose.get_normal_combine_stats_tensor()
+        diagnose.start()
+
     for seed in range(int(1e9)):
         if local_rank == 0:
             print(f'Testing with seed {seed} ...', flush=True)
@@ -337,7 +358,9 @@ def test_loop(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
         ref_hash = 0
         for i in (num_sms, ):
             ref_hash += test_main(args, i, local_rank, num_local_ranks, num_ranks, num_nodes, rank, buffer, group,
-                                  args.pressure_test_mode == 1)
+                                  args.pressure_test_mode == 1, normal_dispatch_stats, normal_combine_stats)
+            if diagnose is not None and not diagnose.enable_async:
+                diagnose.diagnose_normal_sync(diagnose_step=1)
             if local_rank == 0:
                 print('', flush=True)
         if args.pressure_test_mode == 0:
@@ -352,7 +375,9 @@ def test_loop(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
             current_hash = 0
             for i in (num_sms, ):
                 current_hash += test_main(args, i, local_rank, num_local_ranks, num_ranks, num_nodes, rank, buffer, group,
-                                          args.pressure_test_mode == 1)
+                                          args.pressure_test_mode == 1, normal_dispatch_stats, normal_combine_stats)
+                if diagnose is not None and not diagnose.enable_async:
+                    diagnose.diagnose_normal_sync(diagnose_step=1)
                 if local_rank == 0:
                     print('', flush=True)
             assert current_hash == ref_hash
@@ -363,6 +388,8 @@ def test_loop(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
         test_low_latency.test_main(ll_num_tokens, ll_hidden, ll_num_experts, ll_num_topk, rank, num_ranks, group, buffer, seed=1)
 
     # Destroy the buffer runtime and communication group
+    if diagnose is not None:
+        diagnose.stop()
     buffer.destroy()
     dist.barrier()
     dist.destroy_process_group()
@@ -382,6 +409,7 @@ if __name__ == '__main__':
         help='Pressure test mode. 0: don\'t do pressure test, 1: do pressure test without benchmarks, 2: do pressure test with benchmarks')
     parser.add_argument('--num-experts', type=int, default=256, help='Number of experts (default: 256')
     parser.add_argument('--test-ll-compatibility', action='store_true', help='whether to test compatibility with low-latency kernels')
+    parser.add_argument('--test-normal-deepxtrace', action='store_true', help='whether to test DeepXTrace with normal kernels')
     args = parser.parse_args()
 
     # Set default `num_topk_groups` if not provided

@@ -4,7 +4,7 @@ import setuptools
 import importlib
 
 from pathlib import Path
-from torch.utils.cpp_extension import BuildExtension, CUDAExtension
+from torch.utils.cpp_extension import BuildExtension, CUDAExtension, CUDA_HOME
 
 
 # Wheel specific: the wheels only include the soname of the host library `libnvshmem_host.so.X`
@@ -39,6 +39,9 @@ if __name__ == '__main__':
     nvcc_flags = ['-O3', '-Xcompiler', '-O3']
     sources = ['csrc/deep_ep.cpp', 'csrc/kernels/runtime.cu', 'csrc/kernels/layout.cu', 'csrc/kernels/intranode.cu']
     include_dirs = ['csrc/']
+    cuda_cccl_include = Path(CUDA_HOME, 'include', 'cccl') if CUDA_HOME else None
+    if cuda_cccl_include and cuda_cccl_include.exists():
+        include_dirs.append(str(cuda_cccl_include))
     library_dirs = []
     nvcc_dlink = []
     extra_link_args = ['-lcuda']

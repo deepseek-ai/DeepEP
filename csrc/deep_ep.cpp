@@ -125,6 +125,49 @@ void SharedMemoryAllocator::close_mem_handle(void* ptr) {
 
 namespace deep_ep {
 
+namespace {
+
+internode::NormalNotifyStats prepare_normal_notify_stats(const NormalNotifyStats& stats, int64_t* timer_state) {
+    const bool enabled = stats.duration_ns.has_value();
+    EP_HOST_ASSERT(stats.count.has_value() == enabled);
+    if (not enabled)
+        return {};
+
+    EP_HOST_ASSERT(stats.duration_ns->is_cuda() and stats.count->is_cuda());
+    EP_HOST_ASSERT(stats.duration_ns->scalar_type() == torch::kInt64 and stats.count->scalar_type() == torch::kInt64);
+    EP_HOST_ASSERT(stats.duration_ns->dim() == 1 and stats.duration_ns->numel() == 1 and stats.duration_ns->is_contiguous());
+    EP_HOST_ASSERT(stats.count->dim() == 1 and stats.count->numel() == 1 and stats.count->is_contiguous());
+
+    return {
+        stats.duration_ns->data_ptr<int64_t>(),
+        stats.count->data_ptr<int64_t>(),
+        timer_state,
+    };
+}
+
+internode::NormalCompletionStats prepare_normal_completion_stats(const NormalCompletionStats& stats, int num_ranks) {
+    const bool enabled = stats.cost.has_value();
+    EP_HOST_ASSERT(stats.sample_count.has_value() == enabled);
+    EP_HOST_ASSERT(stats.token_count.has_value() == enabled);
+    if (not enabled)
+        return {};
+
+    for (const auto& tensor : {stats.cost, stats.sample_count, stats.token_count}) {
+        EP_HOST_ASSERT(tensor->is_cuda());
+        EP_HOST_ASSERT(tensor->scalar_type() == torch::kInt64);
+        EP_HOST_ASSERT(tensor->dim() == 1 and tensor->is_contiguous());
+        EP_HOST_ASSERT(tensor->numel() == num_ranks);
+    }
+
+    return {
+        stats.cost->data_ptr<int64_t>(),
+        stats.sample_count->data_ptr<int64_t>(),
+        stats.token_count->data_ptr<int64_t>(),
+    };
+}
+
+}  // namespace
+
 Buffer::Buffer(int rank,
                int num_ranks,
                int64_t num_nvl_bytes,
@@ -198,6 +241,7 @@ Buffer::Buffer(int rank,
     // Create 32 MiB workspace
     CUDA_CHECK(cudaMalloc(&workspace, NUM_WORKSPACE_BYTES));
     CUDA_CHECK(cudaMemsetAsync(workspace, 0, NUM_WORKSPACE_BYTES, comm_stream));
+    CUDA_CHECK(cudaMalloc(&normal_notify_full_kernel_timer_states, 3 * 2 * sizeof(int64_t)));
 
     // MoE counter
     CUDA_CHECK(cudaMallocHost(&moe_recv_counter, sizeof(int64_t), cudaHostAllocMapped));
@@ -316,6 +360,7 @@ void Buffer::destroy() {
 
     // Free workspace and MoE counter
     CUDA_CHECK(cudaFree(workspace));
+    CUDA_CHECK(cudaFree(normal_notify_full_kernel_timer_states));
     CUDA_CHECK(cudaFreeHost(const_cast<int*>(moe_recv_counter)));
 
     // Free chunked mode staffs
@@ -946,7 +991,8 @@ Buffer::internode_dispatch(const torch::Tensor& x,
                            const Config& config,
                            std::optional<EventHandle>& previous_event,
                            bool async,
-                           bool allocate_on_comm_stream) {
+                           bool allocate_on_comm_stream,
+                           const NormalDispatchStats& normal_stats) {
 #ifndef DISABLE_NVSHMEM
     // In dispatch, CPU will busy-wait until GPU receive tensor size metadata from other ranks, which can be quite long.
     // If users of DeepEP need to execute other Python code on other threads, such as KV transfer, their code will get stuck due to GIL
@@ -1004,6 +1050,10 @@ Buffer::internode_dispatch(const torch::Tensor& x,
         EP_HOST_ASSERT(num_tokens_per_expert->size(0) % num_ranks == 0);
         EP_HOST_ASSERT(num_tokens_per_expert->size(0) / num_ranks <= NUM_MAX_LOCAL_EXPERTS);
     }
+    const auto notify_stats = prepare_normal_notify_stats(normal_stats.notify, normal_notify_full_kernel_timer_states);
+    const auto cached_notify_stats = prepare_normal_notify_stats(normal_stats.cached_notify, normal_notify_full_kernel_timer_states + 2);
+    const auto final_completion_stats = prepare_normal_completion_stats(normal_stats.final_completion, num_ranks);
+    const auto rdma_recv_completion_stats = prepare_normal_completion_stats(normal_stats.rdma_recv_completion, num_ranks);
 
     auto num_tokens = static_cast<int>(x.size(0)), hidden = static_cast<int>(x.size(1)),
          hidden_int4 = static_cast<int>(x.size(1) * x.element_size() / sizeof(int4));
@@ -1094,7 +1144,8 @@ Buffer::internode_dispatch(const torch::Tensor& x,
                                  config.get_rdma_buffer_size_hint(hidden_int4 * sizeof(int4), num_ranks),
                                  num_nvl_bytes,
                                  true,
-                                 low_latency_mode);
+                                 low_latency_mode,
+                                 cached_notify_stats);
     } else {
         rdma_channel_prefix_matrix = torch::empty({num_rdma_ranks, num_channels}, dtype(torch::kInt32).device(torch::kCUDA));
         recv_rdma_rank_prefix_sum = torch::empty({num_rdma_ranks}, dtype(torch::kInt32).device(torch::kCUDA));
@@ -1134,7 +1185,8 @@ Buffer::internode_dispatch(const torch::Tensor& x,
                                    comm_stream,
                                    config.get_rdma_buffer_size_hint(hidden_int4 * sizeof(int4), num_ranks),
                                    num_nvl_bytes,
-                                   low_latency_mode);
+                                   low_latency_mode,
+                                   notify_stats);
 
         // Synchronize total received tokens and tokens per expert
         if (num_worst_tokens > 0) {
@@ -1235,6 +1287,8 @@ Buffer::internode_dispatch(const torch::Tensor& x,
                         buffer_ptrs_gpu,
                         config.num_max_nvl_chunked_send_tokens,
                         config.num_max_nvl_chunked_recv_tokens,
+                        final_completion_stats,
+                        rdma_recv_completion_stats,
                         rank,
                         num_ranks,
                         cached_mode,
@@ -1324,7 +1378,8 @@ std::tuple<torch::Tensor, std::optional<torch::Tensor>, std::optional<EventHandl
     const Config& config,
     std::optional<EventHandle>& previous_event,
     bool async,
-    bool allocate_on_comm_stream) {
+    bool allocate_on_comm_stream,
+    const NormalCombineStats& normal_stats) {
 #ifndef DISABLE_NVSHMEM
     const int num_channels = config.num_sms / 2;
     EP_HOST_ASSERT(config.num_sms % 2 == 0);
@@ -1356,6 +1411,8 @@ std::tuple<torch::Tensor, std::optional<torch::Tensor>, std::optional<EventHandl
     EP_HOST_ASSERT(combined_rdma_head.dim() == 2 and combined_rdma_head.size(0) == num_combined_tokens and
                    combined_rdma_head.size(1) == num_rdma_ranks);
     EP_HOST_ASSERT(combined_nvl_head.dim() == 2 and combined_nvl_head.size(1) == NUM_MAX_NVL_PEERS);
+    const auto cached_notify_stats = prepare_normal_notify_stats(normal_stats.cached_notify, normal_notify_full_kernel_timer_states + 4);
+    const auto logical_recv_completion_stats = prepare_normal_completion_stats(normal_stats.logical_recv_completion, num_ranks);
 
     // Allocate all tensors on comm stream if set
     // NOTES: do not allocate tensors upfront!
@@ -1413,7 +1470,8 @@ std::tuple<torch::Tensor, std::optional<torch::Tensor>, std::optional<EventHandl
                              config.get_rdma_buffer_size_hint(hidden_int4 * sizeof(int4), num_ranks),
                              num_nvl_bytes,
                              false,
-                             low_latency_mode);
+                             low_latency_mode,
+                             cached_notify_stats);
 
     // Assign bias pointers
     auto bias_opts = std::vector<std::optional<torch::Tensor>>({bias_0, bias_1});
@@ -1453,6 +1511,7 @@ std::tuple<torch::Tensor, std::optional<torch::Tensor>, std::optional<EventHandl
                        buffer_ptrs_gpu,
                        config.num_max_nvl_chunked_send_tokens,
                        config.num_max_nvl_chunked_recv_tokens,
+                       logical_recv_completion_stats,
                        rank,
                        num_ranks,
                        comm_stream,
@@ -1866,6 +1925,71 @@ void Buffer::low_latency_clean_mask_buffer() {
 
 }  // namespace deep_ep
 
+namespace {
+
+std::optional<torch::Tensor> cast_optional_tensor(pybind11::handle value) {
+    return value.is_none() ? std::nullopt : std::make_optional(pybind11::cast<torch::Tensor>(value));
+}
+
+pybind11::sequence require_normal_stats_sequence(pybind11::handle source, size_t expected_size, const char* argument_name) {
+    if (not pybind11::isinstance<pybind11::tuple>(source) and not pybind11::isinstance<pybind11::list>(source))
+        throw pybind11::value_error(std::string("`") + argument_name + "` must be a tuple or list");
+
+    auto sequence = pybind11::reinterpret_borrow<pybind11::sequence>(source);
+    if (static_cast<size_t>(sequence.size()) != expected_size)
+        throw pybind11::value_error(std::string("`") + argument_name + "` must contain " + std::to_string(expected_size) +
+                                    " tensors, but got " + std::to_string(sequence.size()));
+    return sequence;
+}
+
+}  // namespace
+
+namespace pybind11::detail {
+
+template <>
+struct type_caster<deep_ep::NormalDispatchStats> {
+public:
+    PYBIND11_TYPE_CASTER(deep_ep::NormalDispatchStats, const_name("NormalDispatchStats"));
+
+    bool load(handle source, bool) {
+        if (source.is_none()) {
+            value = {};
+            return true;
+        }
+
+        auto stats = require_normal_stats_sequence(source, 10, "normal_dispatch_stats");
+        value = {
+            {cast_optional_tensor(stats[0]), cast_optional_tensor(stats[1])},
+            {cast_optional_tensor(stats[2]), cast_optional_tensor(stats[3])},
+            {cast_optional_tensor(stats[4]), cast_optional_tensor(stats[5]), cast_optional_tensor(stats[6])},
+            {cast_optional_tensor(stats[7]), cast_optional_tensor(stats[8]), cast_optional_tensor(stats[9])},
+        };
+        return true;
+    }
+};
+
+template <>
+struct type_caster<deep_ep::NormalCombineStats> {
+public:
+    PYBIND11_TYPE_CASTER(deep_ep::NormalCombineStats, const_name("NormalCombineStats"));
+
+    bool load(handle source, bool) {
+        if (source.is_none()) {
+            value = {};
+            return true;
+        }
+
+        auto stats = require_normal_stats_sequence(source, 5, "normal_combine_stats");
+        value = {
+            {cast_optional_tensor(stats[0]), cast_optional_tensor(stats[1])},
+            {cast_optional_tensor(stats[2]), cast_optional_tensor(stats[3]), cast_optional_tensor(stats[4])},
+        };
+        return true;
+    }
+};
+
+}  // namespace pybind11::detail
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.doc() = "DeepEP: an efficient expert-parallel communication library";
 
@@ -1900,8 +2024,47 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         .def("get_dispatch_layout", &deep_ep::Buffer::get_dispatch_layout)
         .def("intranode_dispatch", &deep_ep::Buffer::intranode_dispatch)
         .def("intranode_combine", &deep_ep::Buffer::intranode_combine)
-        .def("internode_dispatch", &deep_ep::Buffer::internode_dispatch)
-        .def("internode_combine", &deep_ep::Buffer::internode_combine)
+        .def("internode_dispatch",
+             &deep_ep::Buffer::internode_dispatch,
+             py::arg("x"),
+             py::arg("x_scales"),
+             py::arg("topk_idx"),
+             py::arg("topk_weights"),
+             py::arg("num_tokens_per_rank"),
+             py::arg("num_tokens_per_rdma_rank"),
+             py::arg("is_token_in_rank"),
+             py::arg("num_tokens_per_expert"),
+             py::arg("cached_num_recv_tokens"),
+             py::arg("cached_num_rdma_recv_tokens"),
+             py::arg("cached_rdma_channel_prefix_matrix"),
+             py::arg("cached_recv_rdma_rank_prefix_sum"),
+             py::arg("cached_gbl_channel_prefix_matrix"),
+             py::arg("cached_recv_gbl_rank_prefix_sum"),
+             py::arg("expert_alignment"),
+             py::arg("num_worst_tokens"),
+             py::arg("config"),
+             py::arg("previous_event"),
+             py::arg("async"),
+             py::arg("allocate_on_comm_stream"),
+             py::arg("normal_dispatch_stats") = py::none())
+        .def("internode_combine",
+             &deep_ep::Buffer::internode_combine,
+             py::arg("x"),
+             py::arg("topk_weights"),
+             py::arg("bias_0"),
+             py::arg("bias_1"),
+             py::arg("src_meta"),
+             py::arg("is_combined_token_in_rank"),
+             py::arg("rdma_channel_prefix_matrix"),
+             py::arg("rdma_rank_prefix_sum"),
+             py::arg("gbl_channel_prefix_matrix"),
+             py::arg("combined_rdma_head"),
+             py::arg("combined_nvl_head"),
+             py::arg("config"),
+             py::arg("previous_event"),
+             py::arg("async"),
+             py::arg("allocate_on_comm_stream"),
+             py::arg("normal_combine_stats") = py::none())
         .def("clean_low_latency_buffer", &deep_ep::Buffer::clean_low_latency_buffer)
         .def("low_latency_dispatch", &deep_ep::Buffer::low_latency_dispatch)
         .def("low_latency_combine", &deep_ep::Buffer::low_latency_combine)
