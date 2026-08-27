@@ -806,7 +806,15 @@ class ElasticBuffer:
             rdma_traffic += (self.num_ranks - self.num_nvlink_ranks) / self.num_ranks
 
         # Found the bounded one
-        if self.num_scaleout_ranks > 1 and (rdma_traffic / rdma_gbs) > (nvlink_traffic / nvlink_gbs):
+        if nvlink_traffic > 0 and nvlink_gbs == 0:
+            raise ValueError("NVLink connection speed is necessary")
+        nvlink_time = 0.0 if nvlink_traffic == 0 else nvlink_traffic / nvlink_gbs
+
+        if self.num_scaleout_ranks > 1 and rdma_traffic > 0 and rdma_gbs == 0:
+            raise ValueError("RDMA connection speed is necessary")
+        rdma_time = 0.0 if rdma_traffic == 0 else rdma_traffic / rdma_gbs
+
+        if self.num_scaleout_ranks > 1 and rdma_time > nvlink_time:
             bounded_traffic, bounded_gbs = rdma_traffic, rdma_gbs
         else:
             bounded_traffic, bounded_gbs = nvlink_traffic, nvlink_gbs
