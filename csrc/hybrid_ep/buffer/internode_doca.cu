@@ -3,9 +3,86 @@
 // All rights reserved
 #include "buffer/internode_doca.cuh"
 #include <cerrno>
-#include <sstream>
+#include <cstdio>
 #include <cstdlib>
+#include <cstring>
+#include <sstream>
+#include <sys/resource.h>
 #include <unordered_map>
+
+static inline ibv_mr *register_memory_region_or_abort(
+    ibv_pd *pd, void *address, size_t length, int access,
+    const char *buffer_name) {
+  if (pd == nullptr) {
+    fprintf(stderr,
+            "[HybridEP][Error] Cannot register RDMA buffer '%s': the protection "
+            "domain is null (address=%p, length=%zu, access=0x%x)\n",
+            buffer_name, address, length, access);
+    std::abort();
+  }
+
+  errno = 0;
+  ibv_mr *mr = ibv_reg_mr(pd, address, length, access);
+  if (mr != nullptr) {
+    return mr;
+  }
+
+  // Save errno before diagnostics call functions that may overwrite it.
+  const int registration_errno = errno;
+  const char *device_name = "<unknown>";
+  if (pd->context != nullptr && pd->context->device != nullptr) {
+    const char *resolved_device_name =
+        ibv_get_device_name(pd->context->device);
+    if (resolved_device_name != nullptr) {
+      device_name = resolved_device_name;
+    }
+  }
+
+  fprintf(stderr,
+          "[HybridEP][Error] ibv_reg_mr failed for RDMA buffer '%s': "
+          "address=%p, length=%zu, access=0x%x, device=%s, errno=%d (%s)\n",
+          buffer_name, address, length, access, device_name,
+          registration_errno, std::strerror(registration_errno));
+
+  struct rlimit memlock_limit {};
+  if (getrlimit(RLIMIT_MEMLOCK, &memlock_limit) == 0) {
+    if (memlock_limit.rlim_cur == RLIM_INFINITY &&
+        memlock_limit.rlim_max == RLIM_INFINITY) {
+      fprintf(stderr,
+              "[HybridEP][Error] RLIMIT_MEMLOCK: soft=unlimited, "
+              "hard=unlimited\n");
+    } else if (memlock_limit.rlim_cur == RLIM_INFINITY) {
+      fprintf(stderr,
+              "[HybridEP][Error] RLIMIT_MEMLOCK: soft=unlimited, hard=%llu "
+              "bytes\n",
+              static_cast<unsigned long long>(memlock_limit.rlim_max));
+    } else if (memlock_limit.rlim_max == RLIM_INFINITY) {
+      fprintf(stderr,
+              "[HybridEP][Error] RLIMIT_MEMLOCK: soft=%llu bytes, "
+              "hard=unlimited\n",
+              static_cast<unsigned long long>(memlock_limit.rlim_cur));
+    } else {
+      fprintf(stderr,
+              "[HybridEP][Error] RLIMIT_MEMLOCK: soft=%llu bytes, hard=%llu "
+              "bytes\n",
+              static_cast<unsigned long long>(memlock_limit.rlim_cur),
+              static_cast<unsigned long long>(memlock_limit.rlim_max));
+    }
+  } else {
+    const int rlimit_errno = errno;
+    fprintf(stderr,
+            "[HybridEP][Error] Could not read RLIMIT_MEMLOCK: errno=%d (%s)\n",
+            rlimit_errno, std::strerror(rlimit_errno));
+  }
+
+  fprintf(stderr,
+          "[HybridEP][Error] The DOCA backend registers cudaMalloc-backed "
+          "memory through legacy ibv_reg_mr and has no DMA-BUF registration "
+          "fallback. Verify that nvidia_peermem is loaded, the selected HCA "
+          "supports GPUDirect RDMA, and RLIMIT_MEMLOCK is sufficient.\n");
+  fflush(stderr);
+  std::abort();
+}
 
 static int get_env_int_in_range(const char* name, int default_value, int min_value, int max_value) {
   const char* raw_value = std::getenv(name);
@@ -464,22 +541,39 @@ void RDMACoordinator::allocate_dispatch_buffers(){
   CUDA_CHECK(cudaMemset(dispatch_buffers.expected_rdma_flag_value, 0, sizeof(uint64_t)));
 
   // Allocate memory region
-  attn_input_token_mr = ibv_reg_mr(ib_pd, dispatch_buffers.attn_input_token,
-                        attn_input_token_elts * sizeof_token_data_type, mr_access_flag);
-  dispatch_rdma_inter_node_group_token_mr = ibv_reg_mr(ib_pd, dispatch_buffers.rdma_inter_node_group_token,
-                        rdma_inter_node_group_token_elts * sizeof_token_data_type, mr_access_flag);
-  attn_input_flags_mr = ibv_reg_mr(ib_pd, dispatch_buffers.attn_input_flags,
-                        rdma_inter_node_group_flags_elts * sizeof(uint64_t), mr_access_flag);
-  dispatch_rdma_inter_node_group_flags_mr = ibv_reg_mr(ib_pd, dispatch_buffers.rdma_inter_node_group_flags,
-                        rdma_inter_node_group_flags_elts * sizeof(uint64_t), mr_access_flag);
-  attn_input_prob_mr = ibv_reg_mr(ib_pd, dispatch_buffers.attn_input_prob,
-                        attn_input_prob_elts * sizeof(float), mr_access_flag);
-  dispatch_rdma_inter_node_group_prob_mr = ibv_reg_mr(ib_pd, dispatch_buffers.rdma_inter_node_group_prob,
-                        rdma_inter_node_group_prob_elts * sizeof(float), mr_access_flag);
-  attn_input_token_scaling_factor_mr = ibv_reg_mr(ib_pd, dispatch_buffers.attn_input_scaling_factor,
-                        attn_input_token_scaling_factor_elts * sizeof(float), mr_access_flag);
-  dispatch_rdma_inter_node_group_scaling_factor_mr = ibv_reg_mr(ib_pd, dispatch_buffers.rdma_inter_node_group_scaling_factor,
-                        rdma_inter_node_group_scaling_factor_elts * sizeof(float), mr_access_flag);
+  attn_input_token_mr = register_memory_region_or_abort(
+      ib_pd, dispatch_buffers.attn_input_token,
+      attn_input_token_elts * sizeof_token_data_type, mr_access_flag,
+      "dispatch.attn_input_token");
+  dispatch_rdma_inter_node_group_token_mr = register_memory_region_or_abort(
+      ib_pd, dispatch_buffers.rdma_inter_node_group_token,
+      rdma_inter_node_group_token_elts * sizeof_token_data_type, mr_access_flag,
+      "dispatch.rdma_inter_node_group_token");
+  attn_input_flags_mr = register_memory_region_or_abort(
+      ib_pd, dispatch_buffers.attn_input_flags,
+      rdma_inter_node_group_flags_elts * sizeof(uint64_t), mr_access_flag,
+      "dispatch.attn_input_flags");
+  dispatch_rdma_inter_node_group_flags_mr = register_memory_region_or_abort(
+      ib_pd, dispatch_buffers.rdma_inter_node_group_flags,
+      rdma_inter_node_group_flags_elts * sizeof(uint64_t), mr_access_flag,
+      "dispatch.rdma_inter_node_group_flags");
+  attn_input_prob_mr = register_memory_region_or_abort(
+      ib_pd, dispatch_buffers.attn_input_prob,
+      attn_input_prob_elts * sizeof(float), mr_access_flag,
+      "dispatch.attn_input_prob");
+  dispatch_rdma_inter_node_group_prob_mr = register_memory_region_or_abort(
+      ib_pd, dispatch_buffers.rdma_inter_node_group_prob,
+      rdma_inter_node_group_prob_elts * sizeof(float), mr_access_flag,
+      "dispatch.rdma_inter_node_group_prob");
+  attn_input_token_scaling_factor_mr = register_memory_region_or_abort(
+      ib_pd, dispatch_buffers.attn_input_scaling_factor,
+      attn_input_token_scaling_factor_elts * sizeof(float), mr_access_flag,
+      "dispatch.attn_input_scaling_factor");
+  dispatch_rdma_inter_node_group_scaling_factor_mr =
+      register_memory_region_or_abort(
+          ib_pd, dispatch_buffers.rdma_inter_node_group_scaling_factor,
+          rdma_inter_node_group_scaling_factor_elts * sizeof(float),
+          mr_access_flag, "dispatch.rdma_inter_node_group_scaling_factor");
 
   // Set dispatch queue pair attributes.
   int num_of_dispatch_qps = (buffer_config.num_of_nodes - 1) * buffer_config.num_of_blocks_dispatch_api;
@@ -623,18 +717,30 @@ void RDMACoordinator::allocate_combine_buffers(){
   CUDA_CHECK(cudaMalloc((void**)&combine_buffers.expected_rdma_flag_value, sizeof(uint64_t)));
   CUDA_CHECK(cudaMemset(combine_buffers.expected_rdma_flag_value, 0, sizeof(uint64_t)));
 
-  rdma_intra_node_red_token_mr = ibv_reg_mr(ib_pd, combine_buffers.rdma_intra_node_red_token,
-                        rdma_intra_node_red_token_elts * sizeof(uint16_t), mr_access_flag);
-  combine_rdma_inter_node_group_token_mr = ibv_reg_mr(ib_pd, combine_buffers.rdma_inter_node_group_token,
-                        rdma_inter_node_group_token_elts * sizeof(uint16_t), mr_access_flag);
-  attn_output_flags_mr = ibv_reg_mr(ib_pd, combine_buffers.attn_output_flags,
-                        rdma_inter_node_group_flags_elts * sizeof(uint64_t), mr_access_flag);
-  combine_rdma_inter_node_group_flags_mr = ibv_reg_mr(ib_pd, combine_buffers.rdma_inter_node_group_flags,
-                        rdma_inter_node_group_flags_elts * sizeof(uint64_t), mr_access_flag);
-  rdma_intra_node_red_prob_mr = ibv_reg_mr(ib_pd, combine_buffers.rdma_intra_node_red_prob,
-                        rdma_intra_node_red_prob_elts * sizeof(float), mr_access_flag);
-  combine_rdma_inter_node_group_prob_mr = ibv_reg_mr(ib_pd, combine_buffers.rdma_inter_node_group_prob,
-                        rdma_inter_node_group_prob_elts * sizeof(float), mr_access_flag);
+  rdma_intra_node_red_token_mr = register_memory_region_or_abort(
+      ib_pd, combine_buffers.rdma_intra_node_red_token,
+      rdma_intra_node_red_token_elts * sizeof(uint16_t), mr_access_flag,
+      "combine.rdma_intra_node_red_token");
+  combine_rdma_inter_node_group_token_mr = register_memory_region_or_abort(
+      ib_pd, combine_buffers.rdma_inter_node_group_token,
+      rdma_inter_node_group_token_elts * sizeof(uint16_t), mr_access_flag,
+      "combine.rdma_inter_node_group_token");
+  attn_output_flags_mr = register_memory_region_or_abort(
+      ib_pd, combine_buffers.attn_output_flags,
+      rdma_inter_node_group_flags_elts * sizeof(uint64_t), mr_access_flag,
+      "combine.attn_output_flags");
+  combine_rdma_inter_node_group_flags_mr = register_memory_region_or_abort(
+      ib_pd, combine_buffers.rdma_inter_node_group_flags,
+      rdma_inter_node_group_flags_elts * sizeof(uint64_t), mr_access_flag,
+      "combine.rdma_inter_node_group_flags");
+  rdma_intra_node_red_prob_mr = register_memory_region_or_abort(
+      ib_pd, combine_buffers.rdma_intra_node_red_prob,
+      rdma_intra_node_red_prob_elts * sizeof(float), mr_access_flag,
+      "combine.rdma_intra_node_red_prob");
+  combine_rdma_inter_node_group_prob_mr = register_memory_region_or_abort(
+      ib_pd, combine_buffers.rdma_inter_node_group_prob,
+      rdma_inter_node_group_prob_elts * sizeof(float), mr_access_flag,
+      "combine.rdma_inter_node_group_prob");
 
   // Set combine queue pair attributes.
   int num_of_combine_qps = (buffer_config.num_of_nodes - 1) * buffer_config.num_of_blocks_combine_api;
