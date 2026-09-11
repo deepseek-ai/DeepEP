@@ -393,8 +393,13 @@ void Executor::dispatch_postprocess(HybridEpConfigInstance config, DispatchArgs&
     }else if(args.enable_permute && args.fuse_permute_dispatch) {
         // Fused permute: data already written to args output tensors by fused dispatch kernel. No-op.
     }else if(!args.enable_permute) {
-        // No permute: allocate output tensors and D2D copy from NVLink buffer
-        int num_dispatched_tokens = args.num_dispatched_tokens_tensor.value().item<int>();
+        // No permute: allocate output tensors and D2D copy from NVLink buffer.
+        // Reading the tensor back is a host-side read of a value the kernels only
+        // produce at run time, so a caller that needs static shapes (CUDA graph
+        // capture) must pass the count in instead.
+        int num_dispatched_tokens = args.num_dispatched_tokens >= 0
+            ? static_cast<int>(args.num_dispatched_tokens)
+            : args.num_dispatched_tokens_tensor.value().item<int>();
         size_t sizeof_token_data_type = get_token_data_type_size(intra_node_dispatch_buffers->data_type);
         args.local_expert_output_token = torch::empty(
             {num_dispatched_tokens, config.hidden_dim}, 

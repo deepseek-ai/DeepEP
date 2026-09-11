@@ -111,13 +111,18 @@ def get_extension_hybrid_ep_cpp():
             ucx_home = os.getenv("UCX_HOME", "/usr")
             nixl_include = os.path.join(nixl_home, "include")
             nixl_gpu_include = os.path.join(nixl_home, "include/gpu/ucx")
-            import platform
-            machine = platform.machine()
-            if machine == "aarch64":
-                nixl_lib_suffix = "lib/aarch64-linux-gnu"
-            else:
-                nixl_lib_suffix = "lib/x86_64-linux-gnu"
-            nixl_lib = os.path.join(nixl_home, nixl_lib_suffix)
+            # The default assumes a Debian multiarch layout; NIXL_LIB_DIR overrides
+            # it for other distros and architectures. The inter-node JIT reads the
+            # same variable so the two cannot drift apart.
+            nixl_lib = os.getenv("NIXL_LIB_DIR", "")
+            if not nixl_lib:
+                import platform
+                machine = platform.machine()
+                if machine == "aarch64":
+                    nixl_lib_suffix = "lib/aarch64-linux-gnu"
+                else:
+                    nixl_lib_suffix = "lib/x86_64-linux-gnu"
+                nixl_lib = os.path.join(nixl_home, nixl_lib_suffix)
             include_dirs.extend([nixl_include, nixl_gpu_include, os.path.join(ucx_home, "include")])
             library_dirs.append(nixl_lib)
             runtime_library_dirs.append(nixl_lib)

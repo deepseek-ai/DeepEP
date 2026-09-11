@@ -18,7 +18,6 @@ TOPK = int(os.environ.get("TOPK", 8))
 PAD_MULTIPLE = int(os.environ.get("PAD_MULTIPLE", 32))
 ITERATIONS = int(os.environ.get("ITERATIONS", 100))
 SEED = int(os.environ.get("SEED", 42))
-USE_MNNVL = os.environ.get("USE_MNNVL", "0").strip().lower() in {"1", "true", "t", "yes", "y", "on"}
 torch.manual_seed(SEED)
 torch.cuda.manual_seed(SEED)
 torch.cuda.manual_seed_all(SEED)
@@ -187,6 +186,58 @@ def test_hybrid_ep_correctness(buffer: deep_ep.HybridEPBuffer, ref: TorchRef, us
     torch.cuda.profiler.stop()
 
 
+def test_plain_dispatch_capture(buffer: deep_ep.HybridEPBuffer):
+    """Cover capturing dispatch() itself.
+
+    The cases above always hand dispatch_with_permute an explicit
+    num_permuted_tokens, so they never exercise the no-permute path whose
+    output shape has to come from the caller. Without a count that shape is
+    unknowable at capture time, and honouring a supplied count is what keeps
+    the recorded allocation and D2D copies correct.
+    """
+    hidden, probs, scaling_factor, routing_map = init_tensor(
+        hidden_dim=HIDDEN_DIM,
+        seq_len=NUM_TOKENS_PER_RANK,
+        topk=TOPK,
+        num_of_experts=NUM_OF_EXPERTS,
+    )
+
+    # Warm up outside capture. This also leaves the warmup's own count in the
+    # pinned buffer, which is what the explicit count below is checked against.
+    warm_token, _, _, _ = buffer.dispatch(
+        hidden=hidden, scaling_factor=scaling_factor,
+        routing_map=routing_map, probs=probs)
+    warm_count = warm_token.shape[0]
+    torch.cuda.synchronize()
+
+    # Without a count the shape cannot be known, so this has to be refused
+    # rather than capturing whatever the pinned buffer happens to hold.
+    try:
+        with torch.cuda.graph(torch.cuda.CUDAGraph()):
+            buffer.dispatch(hidden=hidden, scaling_factor=scaling_factor,
+                            routing_map=routing_map, probs=probs)
+        raise AssertionError("capturing dispatch() without a count should be refused")
+    except RuntimeError as exc:
+        assert "num_dispatched_tokens" in str(exc), f"unclear error: {exc}"
+
+    torch.cuda.synchronize()
+
+    # Stay below the warmup count so the sized copies are in bounds, while
+    # still differing from the value left in the pinned buffer.
+    target = max(1, warm_count - 128)
+    with torch.cuda.graph(torch.cuda.CUDAGraph()):
+        out_token, _, _, _ = buffer.dispatch(
+            hidden=hidden, scaling_factor=scaling_factor,
+            routing_map=routing_map, probs=probs,
+            num_dispatched_tokens=target)
+    assert out_token.shape[0] == target, (
+        f"output has {out_token.shape[0]} rows, expected {target}; the count was "
+        f"read back instead of honoured (warmup count was {warm_count})")
+
+    torch.cuda.synchronize()
+    print_in_order("test_plain_dispatch_capture passed")
+
+
 def test_main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
     _, _, group = init_dist(local_rank, num_local_ranks)
 
@@ -203,14 +254,21 @@ def test_main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
 
                 # Set missing global vars - use buffer's detected values
                 global NUM_OF_RANKS_PER_NODE, NUM_OF_NODES, NUM_OF_EXPERTS
-                if USE_MNNVL:
-                    NUM_OF_RANKS_PER_NODE = buffer.num_of_hybrid_ep_ranks_per_nvlink_domain
-                    NUM_OF_NODES = buffer.num_of_nodes
-                    NUM_OF_EXPERTS = NUM_LOCAL_EXPERTS * NUM_OF_RANKS_PER_NODE * NUM_OF_NODES
-                else:
-                    NUM_OF_RANKS_PER_NODE = args.num_processes
-                    NUM_OF_NODES = group.size() // NUM_OF_RANKS_PER_NODE
-                    NUM_OF_EXPERTS = NUM_LOCAL_EXPERTS * NUM_OF_RANKS_PER_NODE * NUM_OF_NODES
+                # The NVLink domain the buffer detects may span several nodes
+                # (MNNVL), so it is not derivable from the launcher's per-node
+                # process count. The dispatched prob vector is indexed by
+                # rank-within-domain, and the reference must use the same width
+                # or it slices the wrong experts.
+                NUM_OF_RANKS_PER_NODE = buffer.num_of_hybrid_ep_ranks_per_nvlink_domain
+                NUM_OF_NODES = buffer.num_of_nodes
+                NUM_OF_EXPERTS = NUM_LOCAL_EXPERTS * NUM_OF_RANKS_PER_NODE * NUM_OF_NODES
+                if group.rank() == 0:
+                    # Surface the topology: if it is ever wrong, the symptom is
+                    # an expert-slicing mismatch, a confusing way to find out.
+                    print(f"[topology] ranks_per_nvlink_domain={NUM_OF_RANKS_PER_NODE} "
+                          f"num_of_nodes={NUM_OF_NODES} num_of_experts={NUM_OF_EXPERTS} "
+                          f"(from the buffer; override with "
+                          f"NUM_OF_HYBRID_EP_RANKS_PER_NVLINK_DOMAIN)", flush=True)
 
                 ref = TorchRef(
                     ep_group=group,
@@ -218,6 +276,9 @@ def test_main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
                     num_of_ranks_per_node=NUM_OF_RANKS_PER_NODE,
                 )
                 test_hybrid_ep_correctness(buffer, ref, use_fp8, with_probs, fused_permute_dispatch)
+
+                if not use_fp8 and with_probs and not fused_permute_dispatch:
+                    test_plain_dispatch_capture(buffer)
 
     dist.barrier()
     dist.destroy_process_group()

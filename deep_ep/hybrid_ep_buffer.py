@@ -426,6 +426,17 @@ class HybridEPBuffer:
                 )
 
         if num_dispatched_tokens is None:
+            # The executor reads the count back on the host to size the outputs, so
+            # the pinned buffer has to hold a real value first. While a graph is being
+            # captured the kernel that fills it is only recorded, never run, so there
+            # is nothing to wait for and the caller has to supply the count instead.
+            if torch.cuda.is_current_stream_capturing():
+                raise RuntimeError(
+                    "dispatch() requires an explicit num_dispatched_tokens during CUDA "
+                    "graph capture, because the output shape is data dependent and the "
+                    "count cannot be read back from the device while capturing. Pass an "
+                    "upper bound on the number of tokens this rank will receive."
+                )
             # Synchronize the stream to make sure the data in the pinned_memory_buffer: num_dispatched_tokens_tensor is ready.
             torch.cuda.current_stream().synchronize()
 
@@ -436,6 +447,7 @@ class HybridEPBuffer:
                 scaling_factor=scaling_factor,
                 handle=handle_impl,
                 with_probs=probs is not None,
+                num_dispatched_tokens=num_dispatched_tokens,
             )
         )
 

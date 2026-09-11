@@ -68,7 +68,17 @@ NVCCCompiler::NVCCCompiler(std::string base_path, std::string comm_id):
     include += " -I" + nixl_home + "/include ";
     include += " -I" + nixl_home + "/include/gpu/ucx ";
     include += " -I" + ucx_home + "/include ";
-    std::string nixl_lib = nixl_home + "/lib/x86_64-linux-gnu";
+    // Must match the directory setup.py links against, otherwise the inter-node
+    // JIT cannot find libnixl. The default assumes a Debian multiarch layout;
+    // NIXL_LIB_DIR overrides it for other distros and architectures.
+    std::string nixl_lib = get_env("NIXL_LIB_DIR");
+    if (nixl_lib.empty()) {
+#if defined(__aarch64__)
+        nixl_lib = nixl_home + "/lib/aarch64-linux-gnu";
+#else
+        nixl_lib = nixl_home + "/lib/x86_64-linux-gnu";
+#endif
+    }
     library += " -L" + nixl_lib + " -lnixl -lnixl_build -lnixl_common ";
     library += " -Xlinker -rpath -Xlinker " + nixl_lib + " ";
 #else
