@@ -168,8 +168,8 @@ handle = (
     tokens_per_expert,           # [7] Tensor: Token count per local expert
     num_of_tokens_per_rank,      # [8] int: Group-uniform token-slot count
     config,                      # [9] HybridEpConfigInstance: Runtime configuration
-    overflow_flag,               # [10] Tensor: Buffer overflow indicator
-    num_of_valid_tokens,         # [11] int: Real local token count (== hidden.size(0))
+    num_of_valid_tokens,         # [10] int: Real local token count (== hidden.size(0))
+    overflow_flag,               # [11] Tensor: Buffer overflow indicator; kept last for handle[-1]
 )
 ```
 

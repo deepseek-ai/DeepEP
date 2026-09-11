@@ -518,8 +518,8 @@ class HybridEPBuffer:
         # 8. tokens_per_expert
         # 9. num_of_tokens_per_rank
         # 10. template_config: HybridEpConfigInstance
-        # 11. overflow_flag
-        # 12. num_of_valid_tokens
+        # 11. num_of_valid_tokens
+        # 12. overflow_flag (keep last for callers using handle[-1])
         handle: tuple = None,
         # If non_blocking is True, no stream synchronization will be used, the metadata outputs are on the GPU.
         # Otherwise, tokens_per_expert is copied through pinned memory so Python can derive num_permuted_tokens.
@@ -609,8 +609,8 @@ class HybridEPBuffer:
                     handle_impl.tokens_per_expert,
                     handle_impl.num_of_tokens_per_rank,
                     handle_impl.config,
-                    handle_impl.overflow_flag,
                     handle_impl.num_of_valid_tokens,
+                    handle_impl.overflow_flag,
                 ) = handle
                 self._check_handle_buffer_compat(handle_impl)
                 handle_impl.num_permuted_tokens = num_permuted_tokens
@@ -648,8 +648,8 @@ class HybridEPBuffer:
                 handle_impl.tokens_per_expert,
                 handle_impl.num_of_tokens_per_rank,
                 handle_impl.config,
-                handle_impl.overflow_flag,
                 handle_impl.num_of_valid_tokens,
+                handle_impl.overflow_flag,
             ),
         )
 
@@ -688,8 +688,8 @@ class HybridEPBuffer:
                 handle_impl.tokens_per_expert,
                 handle_impl.num_of_tokens_per_rank,
                 handle_impl.config,
-                handle_impl.overflow_flag,
                 handle_impl.num_of_valid_tokens,
+                handle_impl.overflow_flag,
             ) = handle
             self._check_handle_buffer_compat(handle_impl)
             combined_token, combined_probs = self.runtime.combine_with_unpermute(
