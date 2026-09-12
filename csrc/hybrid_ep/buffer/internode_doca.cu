@@ -5,7 +5,10 @@
 #include <cerrno>
 #include <sstream>
 #include <cstdlib>
+#include <cstring>
+#include <stdexcept>
 #include <unordered_map>
+#include <unistd.h>
 
 static int get_env_int_in_range(const char* name, int default_value, int min_value, int max_value) {
   const char* raw_value = std::getenv(name);
@@ -23,6 +26,90 @@ static int get_env_int_in_range(const char* name, int default_value, int min_val
     return default_value;
   }
   return static_cast<int>(parsed_value);
+}
+
+static ibv_mr* register_gpu_memory(
+    ibv_pd* pd,
+    void* address,
+    size_t length,
+    int access,
+    bool dmabuf_supported,
+    int local_rank,
+    const char* buffer_name) {
+  errno = 0;
+  ibv_mr* mr = ibv_reg_mr(pd, address, length, access);
+  if (mr != nullptr) {
+    return mr;
+  }
+
+  const int legacy_errno = errno;
+  if (!dmabuf_supported) {
+    std::ostringstream error;
+    error << "HybridEP failed to register GPU buffer '" << buffer_name
+          << "' with ibv_reg_mr: " << std::strerror(legacy_errno)
+          << " (errno=" << legacy_errno << "); CUDA reports no DMA-BUF support";
+    throw std::runtime_error(error.str());
+  }
+
+  const long page_size_value = sysconf(_SC_PAGESIZE);
+  if (page_size_value <= 0) {
+    throw std::runtime_error("HybridEP could not determine the host page size for DMA-BUF registration");
+  }
+  const size_t page_size = static_cast<size_t>(page_size_value);
+  const uintptr_t iova = reinterpret_cast<uintptr_t>(address);
+  const uintptr_t dmabuf_base = iova & ~(static_cast<uintptr_t>(page_size) - 1);
+  const size_t dmabuf_offset = iova - dmabuf_base;
+  if (length > SIZE_MAX - dmabuf_offset ||
+      length + dmabuf_offset > SIZE_MAX - (page_size - 1)) {
+    std::ostringstream error;
+    error << "HybridEP DMA-BUF registration range overflows for GPU buffer '"
+          << buffer_name << "': address=" << address << ", length=" << length
+          << ", page_size=" << page_size;
+    throw std::runtime_error(error.str());
+  }
+  const size_t aligned_length =
+      (length + dmabuf_offset + page_size - 1) & ~(page_size - 1);
+
+  int dmabuf_fd = -1;
+  const CUresult export_status = cuMemGetHandleForAddressRange(
+      reinterpret_cast<void*>(&dmabuf_fd),
+      static_cast<CUdeviceptr>(dmabuf_base),
+      aligned_length,
+      CU_MEM_RANGE_HANDLE_TYPE_DMA_BUF_FD,
+      0);
+  if (export_status != CUDA_SUCCESS) {
+    const char* error_name = nullptr;
+    const char* error_description = nullptr;
+    cuGetErrorName(export_status, &error_name);
+    cuGetErrorString(export_status, &error_description);
+    std::ostringstream error;
+    error << "HybridEP failed to export GPU buffer '" << buffer_name
+          << "' as DMA-BUF after ibv_reg_mr failed: "
+          << (error_name != nullptr ? error_name : "unknown CUDA error")
+          << " (" << (error_description != nullptr ? error_description : "no description")
+          << "); legacy errno=" << legacy_errno;
+    throw std::runtime_error(error.str());
+  }
+
+  errno = 0;
+  mr = ibv_reg_dmabuf_mr(pd, 0, aligned_length, dmabuf_base, dmabuf_fd, access);
+  const int dmabuf_errno = errno;
+  close(dmabuf_fd);
+  if (mr == nullptr) {
+    std::ostringstream error;
+    error << "HybridEP failed to DMA-BUF register GPU buffer '" << buffer_name
+          << "': " << std::strerror(dmabuf_errno) << " (errno=" << dmabuf_errno
+          << "); legacy ibv_reg_mr errno=" << legacy_errno;
+    throw std::runtime_error(error.str());
+  }
+
+  static bool logged_dmabuf_fallback = false;
+  if (local_rank == 0 && !logged_dmabuf_fallback) {
+    fprintf(stderr,
+            "[HybridEP] legacy GPU memory registration is unavailable; using DMA-BUF registration\n");
+    logged_dmabuf_fallback = true;
+  }
+  return mr;
 }
 
 // Functions realted to get RDMA context.
@@ -464,22 +551,39 @@ void RDMACoordinator::allocate_dispatch_buffers(){
   CUDA_CHECK(cudaMemset(dispatch_buffers.expected_rdma_flag_value, 0, sizeof(uint64_t)));
 
   // Allocate memory region
-  attn_input_token_mr = ibv_reg_mr(ib_pd, dispatch_buffers.attn_input_token,
-                        attn_input_token_elts * sizeof_token_data_type, mr_access_flag);
-  dispatch_rdma_inter_node_group_token_mr = ibv_reg_mr(ib_pd, dispatch_buffers.rdma_inter_node_group_token,
-                        rdma_inter_node_group_token_elts * sizeof_token_data_type, mr_access_flag);
-  attn_input_flags_mr = ibv_reg_mr(ib_pd, dispatch_buffers.attn_input_flags,
-                        rdma_inter_node_group_flags_elts * sizeof(uint64_t), mr_access_flag);
-  dispatch_rdma_inter_node_group_flags_mr = ibv_reg_mr(ib_pd, dispatch_buffers.rdma_inter_node_group_flags,
-                        rdma_inter_node_group_flags_elts * sizeof(uint64_t), mr_access_flag);
-  attn_input_prob_mr = ibv_reg_mr(ib_pd, dispatch_buffers.attn_input_prob,
-                        attn_input_prob_elts * sizeof(float), mr_access_flag);
-  dispatch_rdma_inter_node_group_prob_mr = ibv_reg_mr(ib_pd, dispatch_buffers.rdma_inter_node_group_prob,
-                        rdma_inter_node_group_prob_elts * sizeof(float), mr_access_flag);
-  attn_input_token_scaling_factor_mr = ibv_reg_mr(ib_pd, dispatch_buffers.attn_input_scaling_factor,
-                        attn_input_token_scaling_factor_elts * sizeof(float), mr_access_flag);
-  dispatch_rdma_inter_node_group_scaling_factor_mr = ibv_reg_mr(ib_pd, dispatch_buffers.rdma_inter_node_group_scaling_factor,
-                        rdma_inter_node_group_scaling_factor_elts * sizeof(float), mr_access_flag);
+  const bool dmabuf_supported = gpu_handler != nullptr && gpu_handler->support_dmabuf;
+  attn_input_token_mr = register_gpu_memory(
+      ib_pd, dispatch_buffers.attn_input_token,
+      attn_input_token_elts * sizeof_token_data_type, mr_access_flag,
+      dmabuf_supported, local_rank, "dispatch.attn_input_token");
+  dispatch_rdma_inter_node_group_token_mr = register_gpu_memory(
+      ib_pd, dispatch_buffers.rdma_inter_node_group_token,
+      rdma_inter_node_group_token_elts * sizeof_token_data_type, mr_access_flag,
+      dmabuf_supported, local_rank, "dispatch.rdma_inter_node_group_token");
+  attn_input_flags_mr = register_gpu_memory(
+      ib_pd, dispatch_buffers.attn_input_flags,
+      rdma_inter_node_group_flags_elts * sizeof(uint64_t), mr_access_flag,
+      dmabuf_supported, local_rank, "dispatch.attn_input_flags");
+  dispatch_rdma_inter_node_group_flags_mr = register_gpu_memory(
+      ib_pd, dispatch_buffers.rdma_inter_node_group_flags,
+      rdma_inter_node_group_flags_elts * sizeof(uint64_t), mr_access_flag,
+      dmabuf_supported, local_rank, "dispatch.rdma_inter_node_group_flags");
+  attn_input_prob_mr = register_gpu_memory(
+      ib_pd, dispatch_buffers.attn_input_prob,
+      attn_input_prob_elts * sizeof(float), mr_access_flag,
+      dmabuf_supported, local_rank, "dispatch.attn_input_prob");
+  dispatch_rdma_inter_node_group_prob_mr = register_gpu_memory(
+      ib_pd, dispatch_buffers.rdma_inter_node_group_prob,
+      rdma_inter_node_group_prob_elts * sizeof(float), mr_access_flag,
+      dmabuf_supported, local_rank, "dispatch.rdma_inter_node_group_prob");
+  attn_input_token_scaling_factor_mr = register_gpu_memory(
+      ib_pd, dispatch_buffers.attn_input_scaling_factor,
+      attn_input_token_scaling_factor_elts * sizeof(float), mr_access_flag,
+      dmabuf_supported, local_rank, "dispatch.attn_input_scaling_factor");
+  dispatch_rdma_inter_node_group_scaling_factor_mr = register_gpu_memory(
+      ib_pd, dispatch_buffers.rdma_inter_node_group_scaling_factor,
+      rdma_inter_node_group_scaling_factor_elts * sizeof(float), mr_access_flag,
+      dmabuf_supported, local_rank, "dispatch.rdma_inter_node_group_scaling_factor");
 
   // Set dispatch queue pair attributes.
   int num_of_dispatch_qps = (buffer_config.num_of_nodes - 1) * buffer_config.num_of_blocks_dispatch_api;
@@ -516,19 +620,19 @@ void RDMACoordinator::allocate_dispatch_buffers(){
       curr_info->token_rkey = dispatch_rdma_inter_node_group_token_mr->rkey;
       switch (dispatch_buffers.data_type) {
         case APP_TOKEN_DATA_TYPE::UINT8:
-          curr_info->token_vaddr = (uintptr_t)((uint8_t *)dispatch_rdma_inter_node_group_token_mr->addr + peer_idx * token_stride);
+          curr_info->token_vaddr = (uintptr_t)((uint8_t *)dispatch_buffers.rdma_inter_node_group_token + peer_idx * token_stride);
           break;
         case APP_TOKEN_DATA_TYPE::UINT16:
-          curr_info->token_vaddr = (uintptr_t)((uint16_t *)dispatch_rdma_inter_node_group_token_mr->addr + peer_idx * token_stride);
+          curr_info->token_vaddr = (uintptr_t)((uint16_t *)dispatch_buffers.rdma_inter_node_group_token + peer_idx * token_stride);
           break;
       }
       curr_info->flag_rkey = dispatch_rdma_inter_node_group_flags_mr->rkey;
-      curr_info->flag_vaddr = (uintptr_t)dispatch_rdma_inter_node_group_flags_mr->addr;
+      curr_info->flag_vaddr = (uintptr_t)dispatch_buffers.rdma_inter_node_group_flags;
       curr_info->prob_rkey = dispatch_rdma_inter_node_group_prob_mr->rkey;
-      curr_info->prob_vaddr = (uintptr_t)((float *)dispatch_rdma_inter_node_group_prob_mr->addr +
+      curr_info->prob_vaddr = (uintptr_t)((float *)dispatch_buffers.rdma_inter_node_group_prob +
                                           peer_idx * prob_stride);
       curr_info->scaling_factor_rkey = dispatch_rdma_inter_node_group_scaling_factor_mr->rkey;
-      curr_info->scaling_factor_vaddr = (uintptr_t)((float *)dispatch_rdma_inter_node_group_scaling_factor_mr->addr +
+      curr_info->scaling_factor_vaddr = (uintptr_t)((float *)dispatch_buffers.rdma_inter_node_group_scaling_factor +
                                                     peer_idx * scaling_factor_stride);
     }
   }
@@ -555,20 +659,20 @@ void RDMACoordinator::allocate_dispatch_buffers(){
       int my_idx = qp_idx * (buffer_config.num_of_nodes - 1) + peer_idx;
       int rem_idx = actual_node_idx * num_of_dispatch_qps + qp_idx * (buffer_config.num_of_nodes - 1) + actual_idx_in_node;
       struct dispatch_memory_region_info_t *data = dispatch_mr_info_h + my_idx;
-      data->token_laddr = (uint64_t)attn_input_token_mr->addr;
+      data->token_laddr = (uint64_t)dispatch_buffers.attn_input_token;
       data->token_lkey = htobe32(attn_input_token_mr->lkey);
       data->token_raddr = dispatch_remote_info_vec[rem_idx].token_vaddr;
       data->token_rkey = htobe32(dispatch_remote_info_vec[rem_idx].token_rkey);
-      data->scaling_factor_laddr = (uint64_t)attn_input_token_scaling_factor_mr->addr;
+      data->scaling_factor_laddr = (uint64_t)dispatch_buffers.attn_input_scaling_factor;
       data->scaling_factor_lkey = htobe32(attn_input_token_scaling_factor_mr->lkey);
       data->scaling_factor_raddr = dispatch_remote_info_vec[rem_idx].scaling_factor_vaddr;
       data->scaling_factor_rkey = htobe32(dispatch_remote_info_vec[rem_idx].scaling_factor_rkey);
-      data->flag_laddr = (uint64_t)attn_input_flags_mr->addr;
+      data->flag_laddr = (uint64_t)dispatch_buffers.attn_input_flags;
       data->flag_lkey = htobe32(attn_input_flags_mr->lkey);
       data->flag_raddr = dispatch_remote_info_vec[rem_idx].flag_vaddr;
       data->flag_rkey = htobe32(dispatch_remote_info_vec[rem_idx].flag_rkey);
       data->back_sync_barrier_idx = rdma_inter_node_group_flags_barrier_idx;
-      data->prob_laddr = (uint64_t)attn_input_prob_mr->addr;
+      data->prob_laddr = (uint64_t)dispatch_buffers.attn_input_prob;
       data->prob_lkey = htobe32(attn_input_prob_mr->lkey);
       data->prob_raddr = dispatch_remote_info_vec[rem_idx].prob_vaddr;
       data->prob_rkey = htobe32(dispatch_remote_info_vec[rem_idx].prob_rkey);
@@ -623,18 +727,31 @@ void RDMACoordinator::allocate_combine_buffers(){
   CUDA_CHECK(cudaMalloc((void**)&combine_buffers.expected_rdma_flag_value, sizeof(uint64_t)));
   CUDA_CHECK(cudaMemset(combine_buffers.expected_rdma_flag_value, 0, sizeof(uint64_t)));
 
-  rdma_intra_node_red_token_mr = ibv_reg_mr(ib_pd, combine_buffers.rdma_intra_node_red_token,
-                        rdma_intra_node_red_token_elts * sizeof(uint16_t), mr_access_flag);
-  combine_rdma_inter_node_group_token_mr = ibv_reg_mr(ib_pd, combine_buffers.rdma_inter_node_group_token,
-                        rdma_inter_node_group_token_elts * sizeof(uint16_t), mr_access_flag);
-  attn_output_flags_mr = ibv_reg_mr(ib_pd, combine_buffers.attn_output_flags,
-                        rdma_inter_node_group_flags_elts * sizeof(uint64_t), mr_access_flag);
-  combine_rdma_inter_node_group_flags_mr = ibv_reg_mr(ib_pd, combine_buffers.rdma_inter_node_group_flags,
-                        rdma_inter_node_group_flags_elts * sizeof(uint64_t), mr_access_flag);
-  rdma_intra_node_red_prob_mr = ibv_reg_mr(ib_pd, combine_buffers.rdma_intra_node_red_prob,
-                        rdma_intra_node_red_prob_elts * sizeof(float), mr_access_flag);
-  combine_rdma_inter_node_group_prob_mr = ibv_reg_mr(ib_pd, combine_buffers.rdma_inter_node_group_prob,
-                        rdma_inter_node_group_prob_elts * sizeof(float), mr_access_flag);
+  const bool dmabuf_supported = gpu_handler != nullptr && gpu_handler->support_dmabuf;
+  rdma_intra_node_red_token_mr = register_gpu_memory(
+      ib_pd, combine_buffers.rdma_intra_node_red_token,
+      rdma_intra_node_red_token_elts * sizeof(uint16_t), mr_access_flag,
+      dmabuf_supported, local_rank, "combine.rdma_intra_node_red_token");
+  combine_rdma_inter_node_group_token_mr = register_gpu_memory(
+      ib_pd, combine_buffers.rdma_inter_node_group_token,
+      rdma_inter_node_group_token_elts * sizeof(uint16_t), mr_access_flag,
+      dmabuf_supported, local_rank, "combine.rdma_inter_node_group_token");
+  attn_output_flags_mr = register_gpu_memory(
+      ib_pd, combine_buffers.attn_output_flags,
+      rdma_inter_node_group_flags_elts * sizeof(uint64_t), mr_access_flag,
+      dmabuf_supported, local_rank, "combine.attn_output_flags");
+  combine_rdma_inter_node_group_flags_mr = register_gpu_memory(
+      ib_pd, combine_buffers.rdma_inter_node_group_flags,
+      rdma_inter_node_group_flags_elts * sizeof(uint64_t), mr_access_flag,
+      dmabuf_supported, local_rank, "combine.rdma_inter_node_group_flags");
+  rdma_intra_node_red_prob_mr = register_gpu_memory(
+      ib_pd, combine_buffers.rdma_intra_node_red_prob,
+      rdma_intra_node_red_prob_elts * sizeof(float), mr_access_flag,
+      dmabuf_supported, local_rank, "combine.rdma_intra_node_red_prob");
+  combine_rdma_inter_node_group_prob_mr = register_gpu_memory(
+      ib_pd, combine_buffers.rdma_inter_node_group_prob,
+      rdma_inter_node_group_prob_elts * sizeof(float), mr_access_flag,
+      dmabuf_supported, local_rank, "combine.rdma_inter_node_group_prob");
 
   // Set combine queue pair attributes.
   int num_of_combine_qps = (buffer_config.num_of_nodes - 1) * buffer_config.num_of_blocks_combine_api;
@@ -668,12 +785,12 @@ void RDMACoordinator::allocate_combine_buffers(){
       memset(&curr_info->gid, 0, sizeof(curr_info->gid));;
       memcpy(curr_info->gid.raw, combine_gverbs_ctx.gid.raw, 16);
       curr_info->token_rkey = combine_rdma_inter_node_group_token_mr->rkey;
-      curr_info->token_vaddr = (uintptr_t)((uint16_t *)combine_rdma_inter_node_group_token_mr->addr +
+      curr_info->token_vaddr = (uintptr_t)((uint16_t *)combine_buffers.rdma_inter_node_group_token +
                                            peer_idx * token_stride);
       curr_info->flag_rkey = combine_rdma_inter_node_group_flags_mr->rkey;
-      curr_info->flag_vaddr = (uintptr_t)combine_rdma_inter_node_group_flags_mr->addr;
+      curr_info->flag_vaddr = (uintptr_t)combine_buffers.rdma_inter_node_group_flags;
       curr_info->prob_rkey = combine_rdma_inter_node_group_prob_mr->rkey;
-      curr_info->prob_vaddr = (uintptr_t)((float *)combine_rdma_inter_node_group_prob_mr->addr +
+      curr_info->prob_vaddr = (uintptr_t)((float *)combine_buffers.rdma_inter_node_group_prob +
                                           peer_idx * prob_stride);
     }
   }
@@ -701,16 +818,16 @@ void RDMACoordinator::allocate_combine_buffers(){
       int my_idx = qp_idx * (buffer_config.num_of_nodes - 1) + peer_idx;
       int rem_idx = actual_node_idx * num_of_combine_qps + qp_idx * (buffer_config.num_of_nodes - 1) + actual_idx_in_node;
       struct combine_memory_region_info_t *data = combine_mr_info_h + my_idx;
-      data->token_laddr = (uint64_t)((uint16_t *)rdma_intra_node_red_token_mr->addr);
+      data->token_laddr = (uint64_t)combine_buffers.rdma_intra_node_red_token;
       data->token_lkey = htobe32(rdma_intra_node_red_token_mr->lkey);
       data->token_raddr = combine_remote_info_vec[rem_idx].token_vaddr;
       data->token_rkey = htobe32(combine_remote_info_vec[rem_idx].token_rkey);
-      data->flag_laddr = (uint64_t)attn_output_flags_mr->addr;
+      data->flag_laddr = (uint64_t)combine_buffers.attn_output_flags;
       data->flag_lkey = htobe32(attn_output_flags_mr->lkey);
       data->flag_raddr = combine_remote_info_vec[rem_idx].flag_vaddr;
       data->flag_rkey = htobe32(combine_remote_info_vec[rem_idx].flag_rkey);
       data->back_sync_barrier_idx = combine_rdma_inter_node_group_flags_barrier_idx;
-      data->prob_laddr = (uint64_t)rdma_intra_node_red_prob_mr->addr;
+      data->prob_laddr = (uint64_t)combine_buffers.rdma_intra_node_red_prob;
       data->prob_lkey = htobe32(rdma_intra_node_red_prob_mr->lkey);
       data->prob_raddr = combine_remote_info_vec[rem_idx].prob_vaddr;
       data->prob_rkey = htobe32(combine_remote_info_vec[rem_idx].prob_rkey);
