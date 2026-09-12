@@ -239,8 +239,23 @@ def check_nvlink_connections(group: object) -> None:
     """
     rank = group.Get_rank() if hasattr(group, 'Get_rank') else group.rank()
 
-    local_device_id = _get_physical_device_id(torch.cuda.current_device())
-    rank_devices = _all_gather_object(group, (_get_physical_node_id(), local_device_id))
+    # Discovery can fail on just one rank (for example, when PyTorch does not
+    # expose its device UUID). Exchange that error before any rank proceeds to
+    # peer queries, so the other ranks do not wait in a mismatched collective.
+    local_rank_device = None
+    local_identity_error = None
+    try:
+        local_device_id = _get_physical_device_id(torch.cuda.current_device())
+        local_rank_device = (_get_physical_node_id(), local_device_id)
+    except Exception as error:
+        local_identity_error = f'rank {rank}: {type(error).__name__}: {error}'
+
+    gathered_devices = _all_gather_object(group, (local_rank_device, local_identity_error))
+    identity_errors = [error for _, error in gathered_devices if error is not None]
+    if identity_errors:
+        raise RuntimeError('DeepEP P2P preflight could not identify the physical topology: ' + '; '.join(identity_errors))
+
+    rank_devices = [rank_device for rank_device, _ in gathered_devices]
     local_access_results = []
     local_query_error = None
     try:
