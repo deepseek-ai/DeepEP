@@ -35,9 +35,24 @@ engram_fetch_impl(const ncclDevComm_t nccl_dev_comm, const ncclWindow_t nccl_win
     const auto gin = handle::NCCLGin(nccl_dev_comm, nccl_window, qp_idx, NCCL_GIN_RESOURCE_SHARING_CTA);
 
     __shared__ int num_requests_per_peer[kNumRDMAPeers];
+    __shared__ int total_requests_per_peer[kNumRDMAPeers];
     EP_STATIC_ASSERT(kNumRDMAPeers <= kNumThreads, "Too many RDMA peers");
-    if (thread_idx < kNumRDMAPeers)
+    if (thread_idx < kNumRDMAPeers) {
         num_requests_per_peer[thread_idx] = 0;
+        total_requests_per_peer[thread_idx] = 0;
+    }
+    __syncthreads();
+
+    // Count the number of gets
+    if (ptx::elect_one_sync()) {
+        #pragma unroll 4
+        for (int i = global_warp_idx; i < num_tokens * kNumEntriesPerToken; i += kNumQPs * kNumWarps) {
+            const auto global_idx = __ldg(indices + i);
+            const auto owner_rank_idx = global_idx / kNumEntriesPerRank;
+            const auto peer_idx = owner_rank_idx / kNumRanksPerRDMAPeer;
+            atomicAdd_block(total_requests_per_peer + peer_idx, 1);
+        }
+    }
     __syncthreads();
 
     // Issue RDMA
@@ -67,10 +82,12 @@ engram_fetch_impl(const ncclDevComm_t nccl_dev_comm, const ncclWindow_t nccl_win
 
             // Issue RDMA get
             const auto request_idx = atomicAdd_block(num_requests_per_peer + peer_idx, 1);
+            const bool is_last_get = (request_idx == total_requests_per_peer[peer_idx] - 1);
             issue_rdma_get(
                 i, peer_idx, src_byte_offset,
-                // NOTES: requests may exceed the queue depth, flush if needed
-                (request_idx % kGinQPFlushDepth == (kGinQPFlushDepth - 1)) ? 0 : ncclGinOptFlagsAggregateRequests
+                // Periodic flush at kGinQPFlushDepth; if last get dont past flag so we ring db
+                (request_idx % kGinQPFlushDepth == (kGinQPFlushDepth - 1) || is_last_get)
+                    ? 0 : ncclGinOptFlagsAggregateRequests
             );
 
             // TODO: once NCCL supports ncclCoopWarp gin.get, drop the elect_one_sync and let the whole warp
