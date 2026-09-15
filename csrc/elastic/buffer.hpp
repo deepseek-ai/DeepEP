@@ -46,6 +46,9 @@ class ElasticBuffer {
     // Whether to prefer overlapping communication with compute (use more SMs and channels if false)
     bool prefer_overlap_with_compute;
 
+    // Whether to use deterministic algorithms
+    bool deterministic;
+
     // Timeout settings
     int num_cpu_timeout_secs;
     int64_t num_gpu_timeout_cycles;
@@ -84,6 +87,7 @@ public:
                   const bool& allow_hybrid_mode,
                   const bool& allow_multiple_reduction,
                   const bool& prefer_overlap_with_compute,
+                  const bool& deterministic,
                   const int& sl_idx, const int& num_allocated_qps,
                   const int& num_cpu_timeout_secs, const int& num_gpu_timeout_secs,
                   const bool& explicitly_destroy):
@@ -93,7 +97,8 @@ public:
         comm_stream(get_global_comm_stream()),
         allow_hybrid_mode(allow_hybrid_mode),
         allow_multiple_reduction(allow_multiple_reduction),
-        prefer_overlap_with_compute(prefer_overlap_with_compute) {
+        prefer_overlap_with_compute(prefer_overlap_with_compute),
+        deterministic(deterministic) {
         // Check buffer bytes alignment (2 MB)
         EP_HOST_ASSERT(num_buffer_bytes > 0 and num_buffer_bytes % symmetric::kNumAlignmentBytes == 0);
         EP_HOST_ASSERT(num_cpu_buffer_bytes >= 0 and num_cpu_buffer_bytes % symmetric::kNumAlignmentBytes == 0);
@@ -717,6 +722,7 @@ public:
              const int& num_max_tokens_per_rank,
              const int& num_experts, const int& expert_alignment,
              const int& num_sms, const int& num_qps,
+             const int& num_prologue_sms,
              const std::optional<EventHandle>& previous_event,
              const std::optional<EventHandle>& previous_event_before_epilogue,
              const bool& async_with_compute_stream,
@@ -726,6 +732,9 @@ public:
              const bool& use_tma_aligned_col_major_sf) const {
         // Check SM count
         EP_HOST_ASSERT(num_sms > 0);
+        // SM count for the deterministic prologue kernel (0 for automatic: at most 64 SMs)
+        const int resolved_prologue_num_sms = num_prologue_sms > 0 ?
+            num_prologue_sms : std::min(64, jit::device_runtime->get_num_sms());
 
         // Zero padding only makes sense with expand mode
         EP_HOST_ASSERT(not do_zero_padding or do_expand);
@@ -830,17 +839,26 @@ public:
         }
         num_unaligned_recv_tokens_per_expert_ptr = num_unaligned_recv_tokens_per_expert.data_ptr<int>();
 
+        const bool hybrid_mode = nccl_context->num_scaleout_ranks > 1;
+        // The expanded layout assigns its output rows with atomics, which the kernel-side
+        // deterministic path cannot make reproducible; those cases keep using the sorting
+        // epilogue on the Python side, so the kernel path stays off here
+        const bool use_deterministic_kernel = deterministic and not do_expand;
+        bool row_form = hybrid_mode and use_deterministic_kernel;
         // The prefix sum tensor of number of received tokens from each rank
         // Will also be used in combine as the dispatch handle
+        // hybrid deterministic mode shape: [ SU  | R  ]  else: [ SU  ]
         auto psum_num_recv_tokens_per_scaleup_rank = cached_psum_num_recv_tokens_per_scaleup_rank.value_or(torch::Tensor());
         if (cached_mode) {
-            const auto [num_scaleup_ranks] = get_shape<1>(psum_num_recv_tokens_per_scaleup_rank);
-            EP_HOST_ASSERT(num_scaleup_ranks == nccl_context->num_scaleup_ranks);
+            const auto [num_psum_elems] = get_shape<1>(psum_num_recv_tokens_per_scaleup_rank);
+            row_form = num_psum_elems == nccl_context->num_scaleup_ranks + nccl_context->num_ranks;
+            EP_HOST_ASSERT(num_psum_elems == nccl_context->num_scaleup_ranks or row_form);
             EP_HOST_ASSERT(psum_num_recv_tokens_per_scaleup_rank.is_cuda() and psum_num_recv_tokens_per_scaleup_rank.is_contiguous());
             EP_HOST_ASSERT(psum_num_recv_tokens_per_scaleup_rank.scalar_type() == torch::kInt);
         } else {
             psum_num_recv_tokens_per_scaleup_rank = torch::empty(
-                {nccl_context->num_scaleup_ranks}, at::TensorOptions(torch::kCUDA).dtype(torch::kInt));
+                {nccl_context->num_scaleup_ranks + (row_form ? nccl_context->num_ranks : 0)},
+                at::TensorOptions(torch::kCUDA).dtype(torch::kInt));
         }
 
         // Decide number of channels by shared memory consumption
@@ -867,6 +885,9 @@ public:
         }
 
         // Non-hybrid mode handles
+        std::optional<torch::Tensor> deterministic_rank_count_buffer = std::nullopt;
+        std::optional<torch::Tensor> deterministic_slot_idx = std::nullopt;
+        int* deterministic_slot_idx_ptr = nullptr;
         auto dst_buffer_slot_idx = cached_dst_buffer_slot_idx.value_or(torch::Tensor());
         if (nccl_context->num_scaleout_ranks == 1) {
             if (cached_mode) {
@@ -874,6 +895,24 @@ public:
                 EP_HOST_ASSERT(num_tokens == num_tokens__ and num_topk == num_topk_);
                 EP_HOST_ASSERT(dst_buffer_slot_idx.is_cuda() and dst_buffer_slot_idx.is_contiguous());
                 EP_HOST_ASSERT(dst_buffer_slot_idx.scalar_type() == torch::kInt);
+            } else if (use_deterministic_kernel) {
+                // Allocate new tensors
+                deterministic_rank_count_buffer = torch::empty(
+                    {resolved_prologue_num_sms, nccl_context->num_scaleup_ranks},
+                    torch::TensorOptions(torch::kCUDA).dtype(torch::kInt));
+                dst_buffer_slot_idx = torch::empty(
+                    {num_tokens, num_topk}, torch::TensorOptions(torch::kCUDA).dtype(torch::kInt));
+
+                // Launch a kernel to preprocess the destination slot indices
+                launch_dispatch_deterministic_prologue(topk_idx.data_ptr<topk_idx_t>(),
+                                                       deterministic_rank_count_buffer->data_ptr<int>(),
+                                                       dst_buffer_slot_idx.data_ptr<int>(),
+                                                       num_tokens, num_max_tokens_per_rank,
+                                                       num_experts, num_topk,
+                                                       nccl_context->scaleup_rank_idx, nccl_context->num_scaleup_ranks,
+                                                       resolved_prologue_num_sms,
+                                                       jit::device_runtime->get_num_smem_bytes(),
+                                                       comm_stream);
             } else {
                 // Allocate a new tensor
                 dst_buffer_slot_idx = torch::empty(
@@ -885,6 +924,28 @@ public:
         std::optional<torch::Tensor> token_metadata_at_forward, channel_linked_list;
         int *token_metadata_at_forward_ptr = nullptr, *channel_linked_list_ptr = nullptr;
         if (nccl_context->num_scaleout_ranks > 1) {
+            // NOTES: the cached mode replays the recorded slots, so it precedes the deterministic one
+            if (use_deterministic_kernel and not cached_mode) {
+                // Pre-compute the destination slot of every `(token, top-k)` entry, encoded as
+                // `scaleout_rank_idx * num_max_tokens_per_rank + row-local slot`
+                deterministic_rank_count_buffer = torch::empty(
+                    {resolved_prologue_num_sms, nccl_context->num_ranks},
+                    torch::TensorOptions(torch::kCUDA).dtype(torch::kInt));
+                deterministic_slot_idx = torch::empty(
+                    {num_tokens, num_topk}, torch::TensorOptions(torch::kCUDA).dtype(torch::kInt));
+                deterministic_slot_idx_ptr = deterministic_slot_idx->data_ptr<int>();
+
+                launch_dispatch_deterministic_prologue(topk_idx.data_ptr<topk_idx_t>(),
+                                                       deterministic_rank_count_buffer->data_ptr<int>(),
+                                                       deterministic_slot_idx_ptr,
+                                                       num_tokens, num_max_tokens_per_rank,
+                                                       num_experts, num_topk,
+                                                       nccl_context->scaleout_rank_idx, nccl_context->num_ranks,
+                                                       resolved_prologue_num_sms,
+                                                       jit::device_runtime->get_num_smem_bytes(),
+                                                       comm_stream);
+            }
+
             // The token destination slot idx during forward
             // `[i, j, k, l]` means: from channel i from scale-out peer k, the j-th token's index in the l-th rank buffer
             // NOTES: Used primarily for cached mode
@@ -985,6 +1046,7 @@ public:
                         psum_num_recv_tokens_per_expert.data_ptr<int>(),
                         num_unaligned_recv_tokens_per_expert_ptr,
                         dst_buffer_slot_idx.data_ptr<int>(),
+                        deterministic_slot_idx_ptr,
                         token_metadata_at_forward_ptr,
                         num_tokens, num_max_tokens_per_rank,
                         hidden, x.element_size(),
@@ -999,7 +1061,7 @@ public:
                         num_sms, num_channels_per_sm,
                         num_smem_bytes,
                         num_qps, num_gpu_timeout_cycles,
-                        cached_mode, do_cpu_sync,
+                        cached_mode, use_deterministic_kernel, do_cpu_sync,
                         comm_stream);
 
         // Received token counters
@@ -1143,6 +1205,7 @@ public:
                                       num_channels,
                                       do_expand, cached_mode,
                                       do_zero_padding,
+                                      row_form,
                                       comm_stream);
 
         // Stream control
@@ -1155,6 +1218,8 @@ public:
              psum_num_recv_tokens_per_expert,
              num_unaligned_recv_tokens_per_expert,
              recv_src_metadata,
+             deterministic_rank_count_buffer,
+             deterministic_slot_idx,
              dst_buffer_slot_idx,
              token_metadata_at_forward,
              channel_linked_list},
@@ -1205,10 +1270,12 @@ public:
 
         // Check tensors at dispatch
         const auto [num_combined_tokens, num_topk] = get_shape<2>(combined_topk_idx);
-        const auto [num_scaleup_ranks] = get_shape<1>(psum_num_recv_tokens_per_scaleup_rank);
+        const auto [num_psum_elems] = get_shape<1>(psum_num_recv_tokens_per_scaleup_rank);
         EP_HOST_ASSERT(combined_topk_idx.is_cuda() and combined_topk_idx.is_contiguous());
         EP_HOST_ASSERT(combined_topk_idx.scalar_type() == c10::CppTypeToScalarType<topk_idx_t>::value);
-        EP_HOST_ASSERT(num_scaleup_ranks == nccl_context->num_scaleup_ranks);
+        // NOTES: the row-form dispatch appends `num_ranks` per-source-rank prefix sums
+        EP_HOST_ASSERT(num_psum_elems == nccl_context->num_scaleup_ranks or
+                       num_psum_elems == nccl_context->num_scaleup_ranks + nccl_context->num_ranks);
         EP_HOST_ASSERT(psum_num_recv_tokens_per_scaleup_rank.is_cuda() and psum_num_recv_tokens_per_scaleup_rank.is_contiguous());
         EP_HOST_ASSERT(psum_num_recv_tokens_per_scaleup_rank.scalar_type() == torch::kInt);
         EP_HOST_ASSERT(num_combined_tokens <= num_max_tokens_per_rank);
@@ -1345,7 +1412,7 @@ public:
 
 static void register_apis(pybind11::module_& m) {
     pybind11::class_<ElasticBuffer>(m, "ElasticBuffer")
-        .def(pybind11::init<int, int, int64_t, symmetric::cpu_comm_t, int64_t, int64_t, bool, bool, bool, int, int, int, int, bool>())
+        .def(pybind11::init<int, int, int64_t, symmetric::cpu_comm_t, int64_t, int64_t, bool, bool, bool, bool, int, int, int, int, bool>())
         .def("destroy", &ElasticBuffer::destroy)
         .def("get_comm_stream", &ElasticBuffer::get_comm_stream)
         .def("get_physical_domain_size", &ElasticBuffer::get_physical_domain_size)
