@@ -35,6 +35,8 @@ engram_fetch_impl(const ncclDevComm_t nccl_dev_comm, const ncclWindow_t nccl_win
     const auto gin = handle::NCCLGin(nccl_dev_comm, nccl_window, qp_idx, NCCL_GIN_RESOURCE_SHARING_CTA);
 
     __shared__ int num_requests_per_peer[kNumRDMAPeers];
+    __shared__ int deferred_token_idx[kNumRDMAPeers];
+    __shared__ int64_t deferred_src_byte_offset[kNumRDMAPeers];
     EP_STATIC_ASSERT(kNumRDMAPeers <= kNumThreads, "Too many RDMA peers");
     if (thread_idx < kNumRDMAPeers)
         num_requests_per_peer[thread_idx] = 0;
@@ -67,11 +69,16 @@ engram_fetch_impl(const ncclDevComm_t nccl_dev_comm, const ncclWindow_t nccl_win
 
             // Issue RDMA get
             const auto request_idx = atomicAdd_block(num_requests_per_peer + peer_idx, 1);
-            issue_rdma_get(
-                i, peer_idx, src_byte_offset,
-                // NOTES: requests may exceed the queue depth, flush if needed
-                (request_idx % kGinQPFlushDepth == (kGinQPFlushDepth - 1)) ? 0 : ncclGinOptFlagsAggregateRequests
-            );
+            if (request_idx == 0) {
+                deferred_token_idx[peer_idx] = i;
+                deferred_src_byte_offset[peer_idx] = src_byte_offset;
+            } else {
+                issue_rdma_get(
+                    i, peer_idx, src_byte_offset,
+                    // NOTES: requests may exceed the queue depth, flush if needed
+                    (request_idx % kGinQPFlushDepth == (kGinQPFlushDepth - 1)) ? 0 : ncclGinOptFlagsAggregateRequests
+                );
+            }
 
             // TODO: once NCCL supports ncclCoopWarp gin.get, drop the elect_one_sync and let the whole warp
             // gather SF packs in parallel.
@@ -90,12 +97,12 @@ engram_fetch_impl(const ncclDevComm_t nccl_dev_comm, const ncclWindow_t nccl_win
     }
     __syncthreads();
 
-    // Issue flush per peer we sent to; its unconditional DB ring flushes all
-    // prior aggregated gets on the same QP.
+    // Issue flush per peer we sent to
     if (ptx::elect_one_sync()) {
         for (int i = warp_idx; i < kNumRDMAPeers; i += kNumWarps) {
             const auto request_ptr = last_gin_requests + qp_idx * kNumRDMAPeers + i;
             if (num_requests_per_peer[i] > 0) {
+                issue_rdma_get(deferred_token_idx[i], i, deferred_src_byte_offset[i]);
                 gin.flush_async<team_t, ncclCoopThread>(i, request_ptr);
             } else {
                 EP_STATIC_ASSERT(sizeof(ncclGinRequest_t) == sizeof(int4), "Invalid request size");
