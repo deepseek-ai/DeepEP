@@ -7,18 +7,18 @@
 //  - nvshmem/src/include/non_abi/device/pt-to-pt/ibgda_device.cuh
 #pragma once
 
-
-#include <nvshmem.h>
 #include <device_host_transport/nvshmem_common_ibgda.h>
-#include <non_abi/device/threadgroup/nvshmemi_common_device_defines.cuh>
+#include <nvshmem.h>
 
 #include <deep_ep/common/exception.cuh>
+#include <non_abi/device/threadgroup/nvshmemi_common_device_defines.cuh>
 
 #include "utils.cuh"
 
 namespace deep_ep::legacy {
 
 EP_STATIC_ASSERT(NVSHMEMI_IBGDA_MIN_QP_DEPTH >= 64, "Invalid QP minimum depth");
+EP_STATIC_ASSERT(NVSHMEMI_IBGDA_MAX_QP_DEPTH <= 32768, "Invalid QP maximum depth");
 
 __device__ static __forceinline__ uint64_t HtoBE64(uint64_t x) {
     uint64_t ret;
@@ -460,14 +460,23 @@ __device__ __forceinline__ uint64_t nvshmemi_get_p2p_ptr(const uint64_t& ptr, co
 }
 
 // This is a simplified version of NVSHMEM's `ibgda_poll_cq`.
-// Note that this implementation does not guarantee thread safety,
-// so we must ensure that no other threads are concurrently using the same QP.
 __device__ static __forceinline__ void ibgda_poll_cq(nvshmemi_ibgda_device_cq_t* cq, uint64_t idx) {
     const auto cqe64 = static_cast<mlx5_cqe64*>(cq->cqe);
     const uint32_t ncqes = cq->ncqes;
     memory_fence_cta();
-    if (*cq->cons_idx >= idx)
+
+    auto cons_idx = ld_na_relaxed(cq->cons_idx);
+    if (cons_idx >= idx) {
+        memory_fence_cta();
         return;
+    }
+
+    // A 16-bit WQE counter is ambiguous if `idx` is more than one epoch ahead.
+    // Wait until the target has been submitted before interpreting the counter.
+    while (ld_na_relaxed(cq->prod_idx) < idx)
+        ;
+    memory_fence_cta();
+
     // NOTES: this while loop is part of do-while below.
     // `wqe_counter` is the HW consumer index. However, we always maintain `index + 1`.
     // To be able to compare with the index, we need to use `wqe_counter + 1`.
@@ -478,8 +487,20 @@ __device__ static __forceinline__ void ibgda_poll_cq(nvshmemi_ibgda_device_cq_t*
     uint16_t wqe_counter;
     do {
         wqe_counter = HtoBE16(ld_na_relaxed(&cqe64->wqe_counter));
+
+        // Another poller may have completed the same or a later target.
+        cons_idx = ld_na_relaxed(cq->cons_idx);
+        if (cons_idx >= idx) {
+            memory_fence_cta();
+            return;
+        }
     } while ((static_cast<uint16_t>(static_cast<uint16_t>(idx) - wqe_counter - static_cast<uint16_t>(2)) < ncqes));
-    *cq->cons_idx = idx;
+
+    // Reconstruct the full software consumer index from the 16-bit hardware
+    // counter and keep the shared consumer monotonic across concurrent pollers.
+    ++wqe_counter;
+    const uint64_t new_cons_idx = ((idx & ~0xffffULL) | wqe_counter) + ((static_cast<uint16_t>(idx) > wqe_counter) ? 0x10000ULL : 0);
+    atomicMax(reinterpret_cast<unsigned long long int*>(cq->cons_idx), static_cast<unsigned long long int>(new_cons_idx));
 
     // Prevent reordering of this function and later instructions
     memory_fence_cta();
