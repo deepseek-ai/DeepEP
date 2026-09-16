@@ -7,12 +7,11 @@
 //  - nvshmem/src/include/non_abi/device/pt-to-pt/ibgda_device.cuh
 #pragma once
 
-
-#include <nvshmem.h>
 #include <device_host_transport/nvshmem_common_ibgda.h>
-#include <non_abi/device/threadgroup/nvshmemi_common_device_defines.cuh>
+#include <nvshmem.h>
 
 #include <deep_ep/common/exception.cuh>
+#include <non_abi/device/threadgroup/nvshmemi_common_device_defines.cuh>
 
 #include "utils.cuh"
 
@@ -158,6 +157,8 @@ __device__ static __forceinline__ void ibgda_submit_requests(nvshmemi_ibgda_devi
     // Wait for prior WQE slots to be filled first
     while (atomicCAS(ready_idx, base_wqe_idx, new_wqe_idx) != base_wqe_idx)
         ;
+    // Keep subsequent post-send work ordered after publishing `ready_idx`.
+    memory_fence_cta();
 
     // Always post, not in batch
     if (!state->use_async_postsend) {
