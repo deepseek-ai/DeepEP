@@ -1,3 +1,14 @@
+# MIT License
+#
+# Copyright (c) 2025 DeepSeek
+# Changes and additions copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+#
+# Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the "Software"), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
+#
+# The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
+#
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
 import functools
 import os
 import math
@@ -53,6 +64,9 @@ class EPHandle:
         dst_buffer_slot_idx: destination buffer slot indices from dispatch.
         token_metadata_at_forward: per-channel forwarded token metadata (hybrid mode only).
         channel_linked_list: per-channel per-scaleup-peer linked list (hybrid mode only).
+        token_map_at_dispatch: per-(token, k) recv slot for combine's return trip, `[num_max_tokens_per_rank, num_topk]`
+            (hybrid mode only). Populated by dispatch; consumed by the combine epilogue to look up
+            each partial's location under the queue-based recv layout.
         num_recv_tokens: the total number of received tokens.
     """
 
@@ -71,7 +85,8 @@ class EPHandle:
                  recv_src_metadata: torch.Tensor,
                  dst_buffer_slot_idx: torch.Tensor,
                  token_metadata_at_forward: Optional[torch.Tensor],
-                 channel_linked_list: Optional[torch.Tensor]):
+                 channel_linked_list: Optional[torch.Tensor],
+                 token_map_at_dispatch: Optional[torch.Tensor]):
         # NOTES: remember to copy the original users' input to prevent uncasual modifications on them
         assert topk_idx is not None
 
@@ -89,6 +104,7 @@ class EPHandle:
         self.dst_buffer_slot_idx = dst_buffer_slot_idx
         self.token_metadata_at_forward = token_metadata_at_forward
         self.channel_linked_list = channel_linked_list
+        self.token_map_at_dispatch = token_map_at_dispatch
 
         # May not be accurate without CPU sync
         self.num_recv_tokens = num_recv_tokens
@@ -261,7 +277,16 @@ class ElasticBuffer:
             allow_multiple_reduction: whether to allow multiple reductions in combine.
             prefer_overlap_with_compute: whether to prefer overlapping communication with compute.
             sl_idx: the RDMA service level index, can be overridden by `EP_OVERRIDE_RDMA_SL` env var.
-            num_allocated_qps: the number of QPs to allocate for RDMA (0 for automatic).
+            num_allocated_qps: the number of QPs to allocate for RDMA. One GIN context supplies
+                one QP, so this is also the GIN context count. Pass 0 for automatic, which
+                resolves per hybrid kernel mode (see `EP_HYBRID_KERNEL`):
+                  - unordered: 11 QPs and 21 signals per QP, for the balance
+                    between token batch size and the number of QPs. An explicit value
+                    is clamped into [2, 17] with a warning. Requesting fewer
+                    QPs gives each context more signals.
+                  - ordered (default): 129 QPs. This mode signals through VA/strong signals rather than
+                    the indexed-signal budget, so any explicit value passes through
+                    without restriction.
             num_cpu_timeout_secs: CPU-side timeout in seconds for CPU sync.
             num_gpu_timeout_secs: GPU-side timeout in seconds for GPU operations.
             explicitly_destroy: If this flag is set to True, you need to explicitly call `destroy()` to release resources;
@@ -323,16 +348,22 @@ class ElasticBuffer:
         if 'EP_OVERRIDE_RDMA_SL' in os.environ:
             sl_idx = int(os.environ['EP_OVERRIDE_RDMA_SL'])
 
-        # Automatic maximum QP count allowed
-        # TODO(tianr22): revise the QP count in consideration of Engram
-        if num_allocated_qps == 0:
-            # Hybrid mode will consume more QPs
-            # The extra QP is for notify warps
+        # Automatic QP count
+        if num_allocated_qps == 0 and (not self.allow_hybrid_mode or os.environ.get('EP_HYBRID_KERNEL', 'ordered') == 'ordered'):
+            # Hybrid mode will consume more QPs; the extra QP is for notify warps.
+            # The unordered hybrid kernels (`EP_HYBRID_KERNEL=unordered`) instead
+            # resolve the QP count in C++ from the GIN signal budget.
             if self.allow_hybrid_mode:
                 num_allocated_qps = 65 if check_fast_rdma_atomic_support() else 129
             else:
                 num_allocated_qps = 17
-        self.num_allocated_qps = num_allocated_qps
+        elif num_allocated_qps > 0 and self.allow_hybrid_mode and os.environ.get('EP_HYBRID_KERNEL', 'ordered') != 'ordered':
+            clamped_qps = max(_C.min_unordered_gin_qps, min(num_allocated_qps, _C.max_unordered_gin_qps))
+            if clamped_qps != num_allocated_qps:
+                print(f'[WARN] DeepEP clamped num_allocated_qps from {num_allocated_qps} to {clamped_qps}: '
+                      f'the unordered GIN layout supports [{_C.min_unordered_gin_qps}, {_C.max_unordered_gin_qps}] '
+                      f'contexts (one GIN context supplies one QP)', flush=True)
+                num_allocated_qps = clamped_qps
 
         # Create CPU communicator (exchange POSIX FD handles for CPU segments)
         cpu_comm = []
@@ -352,6 +383,13 @@ class ElasticBuffer:
                                         sl_idx, num_allocated_qps,
                                         num_cpu_timeout_secs, num_gpu_timeout_secs,
                                         self.explicitly_destroy)
+
+        self.num_allocated_qps = self.runtime.get_num_allocated_qps()
+        # The unordered hybrid path intentionally passes 0 down and relies on C++ to
+        # resolve it (see the automatic QP count above). A 0 read back here means that
+        # delegation did not happen; it would surface far downstream as `kNumQPs == 0`.
+        assert self.num_allocated_qps >= 1, \
+            f'runtime returned num_allocated_qps={self.num_allocated_qps}: the QP count was never resolved'
 
         # Logical rank indices
         self.num_scaleout_ranks, self.num_scaleup_ranks = self.get_logical_domain_size()
@@ -512,9 +550,9 @@ class ElasticBuffer:
         -> Tuple[Optional[int], Optional[int], Optional[list],
                  Optional[torch.Tensor], Optional[torch.Tensor],
                  Optional[torch.Tensor], Optional[torch.Tensor], Optional[torch.Tensor],
-                 Optional[torch.Tensor], Optional[torch.Tensor]]:
+                 Optional[torch.Tensor], Optional[torch.Tensor], Optional[torch.Tensor]]:
         if handle is None:
-            return None, None, None, None, None, None, None, None, None, None
+            return None, None, None, None, None, None, None, None, None, None, None
         return (handle.num_recv_tokens,
                 handle.num_expanded_tokens,
                 handle.num_recv_tokens_per_expert_list,
@@ -524,7 +562,8 @@ class ElasticBuffer:
                 handle.dst_buffer_slot_idx,
                 handle.token_metadata_at_forward,
                 handle.recv_src_metadata,
-                handle.channel_linked_list)
+                handle.channel_linked_list,
+                handle.token_map_at_dispatch)
 
     @staticmethod
     def capture() -> EventHandle:
@@ -953,7 +992,8 @@ class ElasticBuffer:
          cached_dst_buffer_slot_idx,
          cached_token_metadata_at_forward,
          cached_recv_src_metadata,
-         cached_channel_linked_list) = self._unpack_handle(handle)
+         cached_channel_linked_list,
+         cached_token_map_at_dispatch) = self._unpack_handle(handle)
 
         # Some default values
         num_max_tokens_per_rank = value_or(num_max_tokens_per_rank, self.num_max_tokens_per_rank)
@@ -973,6 +1013,7 @@ class ElasticBuffer:
          dst_buffer_slot_idx,
          token_metadata_at_forward,
          channel_linked_list,
+         token_map_at_dispatch,
          event) = self.runtime.dispatch(x, sf, topk_idx, topk_weights,
                                         cumulative_local_expert_recv_stats,
                                         cached_num_recv_tokens,
@@ -985,6 +1026,7 @@ class ElasticBuffer:
                                         cached_token_metadata_at_forward,
                                         cached_recv_src_metadata,
                                         cached_channel_linked_list,
+                                        cached_token_map_at_dispatch,
                                         num_max_tokens_per_rank,
                                         num_experts, expert_alignment,
                                         num_sms, num_qps,
@@ -1011,7 +1053,8 @@ class ElasticBuffer:
                               recv_src_metadata,
                               dst_buffer_slot_idx,
                               token_metadata_at_forward,
-                              channel_linked_list)
+                              channel_linked_list,
+                              token_map_at_dispatch)
 
         # Create event
         event_overlap = EventOverlap(event)
@@ -1096,6 +1139,7 @@ class ElasticBuffer:
                                  handle.psum_num_recv_tokens_per_scaleup_rank,
                                  handle.token_metadata_at_forward,
                                  handle.channel_linked_list,
+                                 handle.token_map_at_dispatch,
                                  handle.num_experts,
                                  handle.num_max_tokens_per_rank,
                                  num_sms, num_qps,

@@ -1,5 +1,16 @@
 #pragma once
 
+// MIT License
+//
+// Copyright (c) 2025 DeepSeek
+// Changes and additions copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+//
+// Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the "Software"), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
+//
+// The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
 #include <deep_ep/common/compiled.cuh>
 #include <deep_ep/common/exception.cuh>
 #include <deep_ep/common/math.cuh>
@@ -20,6 +31,7 @@ struct WorkspaceLayout {
     static constexpr int kNumMaxExperts = 2048;
     static constexpr int kNumMaxExpertsPerRank = 256;
     static constexpr int kNumMaxInflightAGRS = 32;
+    static constexpr int kNumMaxParts = 64;
 
     static constexpr int64_t kNumBarrierSignalBytes = 16;
 
@@ -180,22 +192,31 @@ struct TokenLayout {
     int num_hidden_bytes, num_sf_bytes;
     // NOTES: the top-k index is always 32-bit
     bool with_metadata;
+    // Per-token scale-out header present iff true. See kHdrBytes note below.
+    bool with_scaleout_hdr;
     int num_topk, num_metadata_bytes;
     void* base;
 
+    static constexpr int kHdrBytes = sizeof(int64_t);
+
     __forceinline__ __device__ __host__
     TokenLayout(const int& num_hidden_bytes, const int& num_sf_bytes,
-                const int& num_topk, const bool& with_metadata, void* base = nullptr) :
+                const int& num_topk, const bool& with_metadata,
+                void* base = nullptr, const bool& with_scaleout_hdr = false) :
         num_hidden_bytes(num_hidden_bytes),
         num_sf_bytes(num_sf_bytes),
-        // Metadata includes: top-k indices, weight and source rank/token index
         with_metadata(with_metadata),
+        with_scaleout_hdr(with_scaleout_hdr),
         num_topk(num_topk),
-        num_metadata_bytes(num_topk * (sizeof(int) + sizeof(float)) +
-                           (with_metadata ? (1 + num_topk) * sizeof(int) : 0)),
+        num_metadata_bytes((with_scaleout_hdr ? math::align<int>(hdrless_content_bytes(num_topk, with_metadata), sizeof(int64_t)) + kHdrBytes
+                                              : hdrless_content_bytes(num_topk, with_metadata))),
         base(base) {
         EP_STATIC_ASSERT(sizeof(int) == sizeof(float), "Invalid size assumption");
         EP_UNIFIED_ASSERT(num_hidden_bytes % ptx::kNumTMAAlignBytes == 0);
+    }
+
+    __forceinline__ __device__ __host__ static int hdrless_content_bytes(const int& num_topk, const bool& with_metadata) {
+        return num_topk * (sizeof(int) + sizeof(float)) + (with_metadata ? (1 + num_topk) * sizeof(int) : 0);
     }
 
     template <bool kWithMBarrier, typename dtype_t = int>
@@ -232,7 +253,7 @@ struct TokenLayout {
     }
 
     __forceinline__ __device__ __host__ float* get_topk_weights_ptr() const {
-        return math::advance_ptr<float>(get_metadata_ptr(), num_topk * sizeof(int));
+        return math::advance_ptr<float>(get_topk_idx_ptr(), num_topk * sizeof(int));
     }
 
     __forceinline__ __device__ __host__ int* get_src_token_global_idx_ptr() const {
@@ -241,6 +262,12 @@ struct TokenLayout {
 
     __forceinline__ __device__ __host__ int* get_linked_list_idx_ptr() const {
         return get_src_token_global_idx_ptr() + 1;
+    }
+
+    __forceinline__ __device__ __host__ int64_t* get_hdr_ptr() const {
+        const int hdr_offset = math::align<int>(hdrless_content_bytes(num_topk, with_metadata), sizeof(int64_t));
+        return static_cast<int64_t*>(static_cast<void*>(
+            math::advance_ptr<int8_t>(get_metadata_ptr(), hdr_offset)));
     }
 
     __forceinline__ __device__ ptx::mbarrier* get_mbarrier_ptr() const {
@@ -306,7 +333,8 @@ struct BufferLayout {
     TokenLayout get_token_buffer(const int& token_idx, const bool& global = false) const {
         EP_UNIFIED_ASSERT(num_ranks == 1 or global);
         return TokenLayout(token_layout.num_hidden_bytes, token_layout.num_sf_bytes, token_layout.num_topk, token_layout.with_metadata,
-                           static_cast<int8_t*>(base) + token_layout.get_num_bytes<kWithMBarrier, int64_t>() * token_idx);
+                           static_cast<int8_t*>(base) + token_layout.get_num_bytes<kWithMBarrier, int64_t>() * token_idx,
+                           token_layout.with_scaleout_hdr);
     }
 };
 

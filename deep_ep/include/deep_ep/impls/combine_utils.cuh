@@ -1,9 +1,50 @@
 #pragma once
 
+// MIT License
+//
+// Copyright (c) 2025 DeepSeek
+// Changes and additions copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+//
+// Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the "Software"), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
+//
+// The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
 #include <stdexcept>
 
 
 namespace deep_ep::elastic {
+
+// Packing for `token_map_at_dispatch[token][k]`. Written by dispatch, read by the combine epilogue.
+// Layout (int32):
+//   bits [30:26] — dst_scaleout_rank (5 bits, 0..31)
+//   bits [25:12] — slot within `recv[dst_scaleout_rank][channel × slots_per_channel + slot]` (14 bits, 0..16383)
+//   bits [11:0]  — channel index (12 bits, 0..4095)
+// Field widths add up to 31, leaving bit 31 clear on any valid entry. The epilogue reuses the
+// `-1`/`< 0` sentinel convention that `compute_topk_slots` produces for trailing (unused) `topk_slot_idx`
+// entries — `combine_reduce` predicates loads via `ldg_with_gez_pred`'s sign check. Keeping bit 31
+// clear on valid entries preserves this shared sentinel invariant so no extra masking is needed.
+constexpr int kCombineRecvMapChannelBits = 12;
+constexpr int kCombineRecvMapSlotBits    = 14;
+constexpr int kCombineRecvMapRankBits    = 5;
+constexpr int kCombineRecvMapChannelMask = (1 << kCombineRecvMapChannelBits) - 1;
+constexpr int kCombineRecvMapSlotMask    = (1 << kCombineRecvMapSlotBits) - 1;
+constexpr int kCombineRecvMapRankMask    = (1 << kCombineRecvMapRankBits) - 1;
+constexpr int kCombineRecvMapSlotShift    = kCombineRecvMapChannelBits;
+constexpr int kCombineRecvMapRankShift    = kCombineRecvMapChannelBits + kCombineRecvMapSlotBits;
+
+__device__ __host__ __forceinline__
+int pack_combine_recv_addr(const int& rank, const int& slot, const int& channel) {
+    return (rank << kCombineRecvMapRankShift) | (slot << kCombineRecvMapSlotShift) | channel;
+}
+
+__device__ __host__ __forceinline__
+void unpack_combine_recv_addr(const int& packed, int& rank, int& slot, int& channel) {
+    rank    = (packed >> kCombineRecvMapRankShift) & kCombineRecvMapRankMask;
+    slot    = (packed >> kCombineRecvMapSlotShift) & kCombineRecvMapSlotMask;
+    channel = packed & kCombineRecvMapChannelMask;
+}
 
 template <bool kAllowMultipleReduction, int kNumRanks, int kNumTopk>
 constexpr bool use_rank_layout() {

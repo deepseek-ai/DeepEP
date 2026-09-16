@@ -341,6 +341,7 @@ The library provides some environment variables, which may be useful:
     - `EP_NIC_NAME`: string, the default NIC name used to query NIC properties, `mlx5_0` by default
     - `EP_OVERRIDE_RDMA_SL`: integer, override the RDMA service level index for traffic isolation
     - `EP_DISABLE_GIN`: `0` or `1`, disable the NCCL Gin backend (fall back to non-Gin path), `0` by default
+    - `EP_HYBRID_KERNEL`: `ordered` or `unordered`, select the hybrid (scale-out) dispatch/combine kernel pair. See [Hybrid kernel variants](#hybrid-kernel-variants-ordered-and-unordered)
 - JIT
     - `EP_JIT_DEBUG`: `0` or `1`, print JIT debugging information, `0` by default
     - `EP_JIT_CACHE_DIR`: string, cache directory for compiled kernels, `$HOME/.deep_ep` by default
@@ -398,6 +399,28 @@ If the hardware supports it, we recommend using the following command to set the
 ```bash
 sudo mlxconfig -y -d mlx5_$i set PCI_ATOMIC_MODE=4
 ```
+
+## Hybrid kernel variants (ordered and unordered)
+
+We have two implementations of the hybrid (scale-out) dispatch and combine kernels. The `EP_HYBRID_KERNEL` environment variable selects between them at JIT compile time. The value is read once per process, and the JIT cache distinguishes the two variants automatically. Direct mode is not affected by this setting.
+
+- `EP_HYBRID_KERNEL=unordered`. The sender batches tokens into parts with in-band headers, and the receiver counts signal arrivals to learn how much data has landed. The kernels make no assumption about network delivery order, so they only need weak (counting) signals from the GIN backend.
+- `EP_HYBRID_KERNEL=ordered`. The upstream kernels. The sender publishes a tail pointer through a trailing signal, and the receiver assumes all data preceding the tail has already landed. This requires a GIN backend that supports [strong signals and VA signals](https://docs.nvidia.com/deeplearning/nccl/user-guide/docs/api/device_gin.html#signals-and-counters)
+
+## Running on AWS EFA
+
+On EFA the traffic is carried by an NCCL GIN backend provided by the [aws-ofi-nccl](https://github.com/aws/aws-ofi-nccl) plugin. Two backends are available:
+
+- **EFA-GDA** (GPU-initiated). The NIC work queues are mapped into GPU memory and the kernels post RDMA operations themselves.
+- **CPU proxy**. The GPU hands work descriptors to a CPU proxy thread that posts the RDMA operations.
+
+Enabling NCCL GIN backends on AWS has different requirements, see details in this [document](https://github.com/aws/aws-ofi-nccl/blob/master/doc/gin-getting-started.md).
+
+### Benchmarking on EFA
+
+A ready-to-run setup (install script, reference Dockerfile, and Slurm launchers for intra-node and inter-node `test_ep.py` runs) is maintained in the awsome-distributed-ai repository:
+
+- [DeepEP V2 Benchmark (NCCL GIN / EFA-GDA)](https://github.com/awslabs/awsome-distributed-ai/blob/main/micro-benchmarks/expert-parallelism/deepep-v2-benchmark/README.md)
 
 ## Experimental branches
 

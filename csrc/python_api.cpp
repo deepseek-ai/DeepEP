@@ -2,6 +2,7 @@
 #include <torch/python.h>
 
 #include <deep_ep/common/compiled.cuh>
+#include <deep_ep/common/gin_resource_alloc.cuh>
 
 #include "jit/api.hpp"
 #include "elastic/buffer.hpp"
@@ -27,6 +28,10 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
 
     // The integer type of top-k indices
     m.attr("topk_idx_t") = py::cast(c10::CppTypeToScalarType<deep_ep::topk_idx_t>::value);
+
+    m.attr("min_unordered_gin_qps") = py::int_(deep_ep::elastic::gin_alloc::kMinGinContextCnt);
+    m.attr("max_unordered_gin_qps") = py::int_(deep_ep::elastic::gin_alloc::kMaxGinContextCnt);
+    m.attr("default_unordered_gin_qps") = py::int_(deep_ep::elastic::gin_alloc::kDefaultGinContextCnt);
 
     // JIT API
     deep_ep::jit::register_apis(m);

@@ -1,5 +1,16 @@
 #pragma once
 
+// MIT License
+//
+// Copyright (c) 2025 DeepSeek
+// Changes and additions copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+//
+// Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the "Software"), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
+//
+// The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
 #include <deep_ep/common/compiled.cuh>
 #include <deep_ep/common/ptx.cuh>
 #include <deep_ep/common/layout.cuh>
@@ -16,17 +27,24 @@ template <bool kUseExpandedLayout, bool kAllowMultipleReduction,
           int kHidden,
           int kNumMaxTokensPerRank,
           int kNumExperts, int kNumTopk,
+          int kNumChannels,
+          // Ordered (upstream) recv layout: partials live at `token_idx` per rank buffer
+          // instead of the unordered per-(channel, slot) map.
+          bool kOrderedLayout = false,
           int kNumThreads = kNumWarps * 32,
           int kNumHiddenBytes = kHidden * sizeof(nv_bfloat16),
           int kNumRanks = kNumScaleoutRanks == 1 ? kNumScaleupRanks : kNumScaleoutRanks,
           bool kUseRankLayout = use_rank_layout<kAllowMultipleReduction, kNumRanks, kNumTopk>(),
-          int kNumTokensInLayout = get_num_tokens_in_layout<kAllowMultipleReduction, kNumRanks, kNumTopk>()>
+          int kNumTokensInLayout = get_num_tokens_in_layout<kAllowMultipleReduction, kNumRanks, kNumTopk>(),
+          int kNumMaxTokensPerChannel = math::constexpr_ceil_div(kNumMaxTokensPerRank, kNumChannels),
+          int kNumSlotsPerChannel = kNumMaxTokensPerChannel * (kAllowMultipleReduction ? 1 : kNumTopk)>
 __global__ void __launch_bounds__(kNumThreads, 1)
 combine_reduce_epilogue_impl(nv_bfloat16* combined_x,
                              float* combined_topk_weights,
                              topk_idx_t* combined_topk_idx,
                              void* recv_buffer,
                              void* bias_0, void* bias_1,
+                             const int* token_map_at_dispatch,
                              const int num_combined_tokens,
                              const int scaleout_rank_idx, const int scaleup_rank_idx) {
     constexpr int kNumExpertsPerScaleout = kNumExperts / kNumScaleoutRanks;
@@ -41,8 +59,12 @@ combine_reduce_epilogue_impl(nv_bfloat16* combined_x,
     // Load buffers from scale-out or scale-up ranks
     extern __shared__ __align__(ptx::kNumTMAAlignBytes) int8_t smem[];
     const auto comm_token_layout = layout::TokenLayout(kNumHiddenBytes, 0, kNumTopk, false);
+    constexpr int kHybridMode = (kNumScaleoutRanks > 1) and not kOrderedLayout;
     const auto comm_buffer = layout::BufferLayout<false>(
-        comm_token_layout, kNumTokensInLayout, kNumMaxTokensPerRank, recv_buffer);
+        comm_token_layout,
+        kHybridMode ? kNumScaleoutRanks : kNumTokensInLayout,
+        kHybridMode ? (kNumChannels * kNumSlotsPerChannel) : kNumMaxTokensPerRank,
+        recv_buffer);
 
     // Store buffers
     const auto output_token_layout = layout::TokenLayout(kNumHiddenBytes, 0, 0, false);
@@ -53,6 +75,14 @@ combine_reduce_epilogue_impl(nv_bfloat16* combined_x,
     // Bias layout
     const auto bias_0_buffer = layout::BufferLayout<false>(output_token_layout, 1, num_combined_tokens, bias_0);
     const auto bias_1_buffer = layout::BufferLayout<false>(output_token_layout, 1, num_combined_tokens, bias_1);
+
+    // Guard against packed-layout overflow. See `combine_utils.cuh` for bit widths.
+    EP_STATIC_ASSERT(not kHybridMode or kNumChannels <= (1 << kCombineRecvMapChannelBits),
+                     "kNumChannels exceeds packed channel field capacity");
+    EP_STATIC_ASSERT(not kHybridMode or kNumScaleoutRanks <= (1 << kCombineRecvMapRankBits),
+                     "kNumScaleoutRanks exceeds packed rank field capacity");
+    EP_STATIC_ASSERT(not kHybridMode or kNumSlotsPerChannel <= (1 << kCombineRecvMapSlotBits),
+                     "kNumSlotsPerChannel exceeds packed slot field capacity");
 
     // Will block until the main combine kernel has finished and all data are visible
     // NOTES: PDL is used, please do not use `__ldg`
@@ -87,12 +117,21 @@ combine_reduce_epilogue_impl(nv_bfloat16* combined_x,
             ptx::gather(ptx::deduplicate(deduplicate_key, lane_idx) and stored_dst_rank_idx >= 0) :
             ptx::gather(stored_dst_rank_idx >= 0);
         int topk_slot_idx[kNumTokensInLayout];
-        compute_topk_slots(
-            topk_slot_idx, reduce_valid_mask,
-            [=](const int& idx) {
-                return kUseRankLayout ? ptx::exchange(stored_dst_rank_idx, idx) : idx;
-            }
-        );
+        if constexpr (kHybridMode) {
+            const int my_map_entry = lane_idx < kNumTopk ?
+                token_map_at_dispatch[token_idx * kNumTopk + lane_idx] : -1;
+            compute_topk_slots(
+                topk_slot_idx, reduce_valid_mask,
+                [=](const int& idx) { return ptx::exchange(my_map_entry, idx); }
+            );
+        } else {
+            compute_topk_slots(
+                topk_slot_idx, reduce_valid_mask,
+                [=](const int& idx) {
+                    return kUseRankLayout ? ptx::exchange(stored_dst_rank_idx, idx) : idx;
+                }
+            );
+        }
 
         // Iterate over per-hidden-chunk stage
         using combine_vec_t = typename CombineVecTraits<kHidden * sizeof(nv_bfloat16)>::vec_t;
@@ -101,8 +140,16 @@ combine_reduce_epilogue_impl(nv_bfloat16* combined_x,
         combine_reduce<kHiddenVec, kUnrollFactor, kNumTokensInLayout>(
             lane_idx, topk_slot_idx, static_cast<combine_vec_t*>(tma_buffer.get_base_ptr()),
             /* Get source base */ [=](const int& slot_idx) {
-                return static_cast<combine_vec_t*>(
-                    comm_buffer.get_rank_buffer(slot_idx).get_token_buffer(token_idx).get_base_ptr());
+                if constexpr (kHybridMode) {
+                    int rank, slot, channel;
+                    unpack_combine_recv_addr(slot_idx, rank, slot, channel);
+                    const int recv_token_slot = channel * kNumSlotsPerChannel + slot;
+                    return static_cast<combine_vec_t*>(
+                        comm_buffer.get_rank_buffer(rank).get_token_buffer(recv_token_slot).get_base_ptr());
+                } else {
+                    return static_cast<combine_vec_t*>(
+                        comm_buffer.get_rank_buffer(slot_idx).get_token_buffer(token_idx).get_base_ptr());
+                }
             },
             /* Wait buffer release */ [=]() {
                 ptx::tma_store_wait();
@@ -130,10 +177,22 @@ combine_reduce_epilogue_impl(nv_bfloat16* combined_x,
             if (lane_idx < kNumTopk) {
                 float value = 0;
                 if (stored_dst_rank_idx >= 0) {
-                    const auto dst_ptr = comm_buffer
-                        .get_rank_buffer(kUseRankLayout ? stored_dst_rank_idx : master_lane_idx)
-                        .get_token_buffer(token_idx).get_topk_weights_ptr() + lane_idx;
-                    value = *dst_ptr;
+                    if constexpr (kHybridMode) {
+                        int rank, slot, channel;
+                        unpack_combine_recv_addr(
+                            token_map_at_dispatch[token_idx * kNumTopk + master_lane_idx],
+                            rank, slot, channel);
+                        const int recv_token_slot = channel * kNumSlotsPerChannel + slot;
+                        const auto dst_ptr = comm_buffer
+                            .get_rank_buffer(rank)
+                            .get_token_buffer(recv_token_slot).get_topk_weights_ptr() + lane_idx;
+                        value = *dst_ptr;
+                    } else {
+                        const auto dst_ptr = comm_buffer
+                            .get_rank_buffer(kUseRankLayout ? stored_dst_rank_idx : master_lane_idx)
+                            .get_token_buffer(token_idx).get_topk_weights_ptr() + lane_idx;
+                        value = *dst_ptr;
+                    }
                 }
                 combined_topk_weights[token_idx * kNumTopk + lane_idx] = value;
             }

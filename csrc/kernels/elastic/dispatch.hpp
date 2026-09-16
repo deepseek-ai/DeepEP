@@ -1,13 +1,26 @@
 #pragma once
 
+// MIT License
+//
+// Copyright (c) 2025 DeepSeek
+// Changes and additions copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+//
+// Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the "Software"), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
+//
+// The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
 #include <nccl.h>
 #include <nccl_device.h>
 
 #include <deep_ep/common/compiled.cuh>
 #include <deep_ep/common/exception.cuh>
+#include <deep_ep/common/gin_resource_alloc.cuh>
 
 #include "../../jit/compiler.hpp"
 #include "../../jit/launch_runtime.hpp"
+#include "kernel_select.hpp"
 
 namespace deep_ep::elastic {
 
@@ -18,9 +31,22 @@ public:
         bool is_scaleup_nvlink;
         bool do_cpu_sync;
         bool reuse_slot_indices;
+        // Use the ordered (upstream) hybrid kernel instead of the unordered one.
+        // Resolved once from `EP_HYBRID_KERNEL`; only affects the hybrid path.
+        bool use_ordered_kernel;
+        // Combine-time reduction mode. Only used by the hybrid kernel to decide how to encode
+        // per-(token, k) slot offsets in `token_map_at_dispatch`. Ignored by the direct kernel.
+        bool allow_multiple_reduction;
+        // Expanded dispatch. Selects the `token_map_at_dispatch` slot numbering that matches the
+        // combine this handle feeds: per valid k when expanded, per destination rank otherwise.
+        bool do_expand;
+        // Double-buffer the forward warp's TMA token loads (ping-pong). Enabled only when compute
+        // overlap is off, so overlap runs keep DeepEP's original single-buffer forward path.
+        bool double_buffer_forward;
         int num_notify_warps;
         int num_dispatch_warps; // For hybrid dispatch
         int num_scaleout_warps, num_forward_warps; // For direct dispatch
+        int gin_indexed_signals_cnt;  // provisioned per-context signal budget, hybrid dispatch only
         int num_scaleout_ranks, num_scaleup_ranks;
         int num_hidden_bytes, num_sf_packs;
         int num_max_tokens_per_rank;
@@ -37,6 +63,7 @@ public:
         int* num_unaligned_recv_tokens_per_expert;
         int* dst_buffer_slot_idx;
         int* token_metadata_at_forward;
+        int* token_map_at_dispatch;
         int num_tokens;
         int sf_token_stride, sf_hidden_stride;
         jit::NoRefPtr nccl_dev_comm;
@@ -44,6 +71,7 @@ public:
         void* buffer;
         void* workspace; void* mapped_host_workspace;
         int scaleout_rank_idx, scaleup_rank_idx;
+        int dispatch_iteration;
 
         jit::LaunchArgs launch_args;
     };
@@ -63,7 +91,7 @@ public:
                 args.num_max_tokens_per_rank,
                 args.num_experts, args.num_topk, args.expert_alignment,
                 args.num_qps, args.num_timeout_cycles);
-        } else {
+        } else if (args.use_ordered_kernel) {
             header_name = "hybrid_dispatch";
             func_name = fmt::format("hybrid_dispatch_impl<{}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}>",
                 args.do_cpu_sync,
@@ -75,6 +103,22 @@ public:
                 args.num_max_tokens_per_rank,
                 args.num_experts, args.num_topk, args.expert_alignment,
                 args.num_qps, args.num_timeout_cycles);
+        } else {
+            header_name = "hybrid_dispatch_unordered";
+            func_name = fmt::format("hybrid_unordered_dispatch_impl<{}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}>",
+                args.do_cpu_sync,
+                args.reuse_slot_indices,
+                args.allow_multiple_reduction,
+                args.do_expand,
+                args.double_buffer_forward,
+                args.launch_args.grid_dim.first,
+                args.num_notify_warps, args.num_scaleout_warps, args.num_forward_warps,
+                args.num_scaleout_ranks, args.num_scaleup_ranks,
+                args.num_hidden_bytes, args.num_sf_packs,
+                args.num_max_tokens_per_rank,
+                args.num_experts, args.num_topk, args.expert_alignment,
+                args.num_qps, args.num_timeout_cycles,
+                args.gin_indexed_signals_cnt);
         }
 
         return fmt::format(R"(
@@ -105,7 +149,7 @@ static void __instantiate_kernel() {{
                 args.buffer,
                 args.workspace, args.mapped_host_workspace,
                 args.scaleup_rank_idx));
-        } else {
+        } else if (args.use_ordered_kernel) {
             EP_CUDA_UNIFIED_CHECK(jit::launch_kernel(
                 kernel, config,
                 args.x, args.sf, args.topk_idx, args.topk_weights,
@@ -122,6 +166,26 @@ static void __instantiate_kernel() {{
                 args.buffer,
                 args.workspace, args.mapped_host_workspace,
                 args.scaleout_rank_idx, args.scaleup_rank_idx
+            ));
+        } else {
+            EP_CUDA_UNIFIED_CHECK(jit::launch_kernel(
+                kernel, config,
+                args.x, args.sf, args.topk_idx, args.topk_weights,
+                args.copied_topk_idx,
+                args.cumulative_local_expert_recv_stats,
+                args.psum_num_recv_tokens_per_scaleup_rank,
+                args.psum_num_recv_tokens_per_expert,
+                args.num_unaligned_recv_tokens_per_expert,
+                args.dst_buffer_slot_idx,
+                args.token_metadata_at_forward,
+                args.token_map_at_dispatch,
+                args.num_tokens,
+                args.sf_token_stride, args.sf_hidden_stride,
+                args.nccl_dev_comm, args.nccl_window,
+                args.buffer,
+                args.workspace, args.mapped_host_workspace,
+                args.scaleout_rank_idx, args.scaleup_rank_idx,
+                args.dispatch_iteration
             ));
         }
     }
@@ -147,6 +211,7 @@ static void launch_dispatch(void* x, void* sf,
                             int* num_unaligned_recv_tokens_per_expert,
                             int* dst_buffer_slot_idx,
                             int* token_metadata_at_forward,
+                            int* token_map_at_dispatch,
                             const int& num_tokens, const int& num_max_tokens_per_rank,
                             const int& hidden, const int& elem_size,
                             const int& num_sf_packs, const int& sf_token_stride, const int& sf_hidden_stride,
@@ -158,10 +223,21 @@ static void launch_dispatch(void* x, void* sf,
                             const int& num_scaleout_ranks, const int& num_scaleup_ranks,
                             const bool& is_scaleup_nvlink,
                             const int& num_sms, const int& num_channels_per_sm,
+                            const int& gin_indexed_signals_cnt,
                             const int& num_smem_bytes,
                             const int& num_qps, const int64_t& num_timeout_cycles,
                             const bool& cached_mode,
                             const bool& do_cpu_sync,
+                            // Double-buffer the forward warp's TMA loads. Only enabled when compute
+                            // overlap is off; overlap runs keep the original single-buffer path.
+                            const bool& double_buffer_forward,
+                            // Combine-time reduction mode. Only affects the hybrid kernel's
+                            // `token_map_at_dispatch` slot encoding; direct dispatch ignores it.
+                            const bool& allow_multiple_reduction,
+                            // Expanded dispatch. Selects the matching slot encoding for the combine
+                            // this handle feeds; direct dispatch ignores it.
+                            const bool& do_expand,
+                            const int& dispatch_iteration,
                             const at::cuda::CUDAStream& stream) {
     // Cached mode does not support expert token counting
     if (cached_mode)
@@ -200,9 +276,14 @@ static void launch_dispatch(void* x, void* sf,
         .is_scaleup_nvlink = is_scaleup_nvlink,
         .do_cpu_sync = do_cpu_sync,
         .reuse_slot_indices = reuse_slot_indices,
+        .use_ordered_kernel = use_ordered_hybrid_kernel(),
+        .allow_multiple_reduction = allow_multiple_reduction,
+        .do_expand = do_expand,
+        .double_buffer_forward = double_buffer_forward,
         .num_notify_warps = num_notify_warps,
         .num_dispatch_warps = num_dispatch_warps,
         .num_scaleout_warps = num_scaleout_warps, .num_forward_warps = num_forward_warps,
+        .gin_indexed_signals_cnt = gin_indexed_signals_cnt,
         .num_scaleout_ranks = num_scaleout_ranks, .num_scaleup_ranks = num_scaleup_ranks,
         .num_hidden_bytes = hidden * elem_size, .num_sf_packs = num_sf_packs,
         .num_max_tokens_per_rank = num_max_tokens_per_rank,
@@ -216,12 +297,14 @@ static void launch_dispatch(void* x, void* sf,
         .num_unaligned_recv_tokens_per_expert = num_unaligned_recv_tokens_per_expert,
         .dst_buffer_slot_idx = dst_buffer_slot_idx,
         .token_metadata_at_forward = token_metadata_at_forward,
+        .token_map_at_dispatch = token_map_at_dispatch,
         .num_tokens = num_tokens,
         .sf_token_stride = sf_token_stride, .sf_hidden_stride = sf_hidden_stride,
         .nccl_dev_comm = nccl_dev_comm, .nccl_window = nccl_window,
         .buffer = buffer,
         .workspace = workspace, .mapped_host_workspace = mapped_host_workspace,
         .scaleout_rank_idx = scaleout_rank_idx, .scaleup_rank_idx = scaleup_rank_idx,
+        .dispatch_iteration = dispatch_iteration,
         // NOTES: make cluster dim 2 to overlap with clustered computation kernels
         .launch_args = jit::LaunchArgs(num_sms, num_threads, num_smem_bytes, 2 - (num_sms % 2), true)};
     const auto code = DispatchRuntime::generate(args);

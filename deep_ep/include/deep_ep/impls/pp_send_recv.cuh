@@ -1,5 +1,16 @@
 #pragma once
 
+// MIT License
+//
+// Copyright (c) 2025 DeepSeek
+// Changes and additions copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+//
+// Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the "Software"), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
+//
+// The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
 #include <cooperative_groups.h>
 #include <deep_ep/common/comm.cuh>
 #include <deep_ep/common/layout.cuh>
@@ -21,11 +32,10 @@ __device__ __forceinline__ void check_signal(
     const ncclGinSignal_t& signal_idx,
     const int64_t& target,
     const timeout_print_t& timeout_print) {
-    const auto gdaki = static_cast<struct ncclGinGdakiGPUContext*>(gin.gin._ginHandle) + gin.gin.contextId;
-    const auto signal_ptr = reinterpret_cast<int64_t*>(
-        __ldg(reinterpret_cast<int64_t*>(&gdaki->signals_table.buffer))) + signal_idx;
+    // TODO(NCCL): Using the official NCCL wait signal API, after they added timeout check.
     comm::timeout_while<kNumTimeoutCycles>([=](const bool& is_last_check) {
-        const auto signal = ptx::ld_acquire_sys<int64_t>(signal_ptr);
+        const auto signal = static_cast<int64_t>(
+            gin.gin.readSignal(signal_idx, 64, cuda::memory_order_acquire));
         if (signal >= target)
             return true;
 
