@@ -58,7 +58,16 @@ __forceinline__ __device__ void barrier(int thread_id, int rank, int num_ranks, 
                 ;
             // Mask rank if timeout
             if (wait_recv_cost > LEGACY_NUM_TIMEOUT_CYCLES) {
-                printf("Warning: DeepEP timeout for barrier, rank %d, dst_rank %d\n", rank, dst_rank);
+                // SELF-ATTRIBUTION -- see the dispatch-side twin below.
+                printf("Warning: DeepEP timeout for barrier, rank %d, dst_rank %d"
+                       " [waited=%llu cycles limit=%llu mask_buffer=%p]%s internode_ll.cu:%d\n",
+                       rank,
+                       dst_rank,
+                       (unsigned long long)wait_recv_cost,
+                       (unsigned long long)LEGACY_NUM_TIMEOUT_CYCLES,
+                       (void*)mask_buffer_ptr,
+                       mask_buffer_ptr == nullptr ? " FATAL-WILL-TRAP(origin of CUDA 719)" : " masked-survivable",
+                       __LINE__);
                 if (mask_buffer_ptr == nullptr)
                     trap();
                 atomicExch(mask_buffer_ptr + dst_rank, 1);
@@ -395,10 +404,23 @@ LOW_LATENCY_DISPATCH_RECV:
                 num_recv_tokens = -1;
             // Mask rank if timeout
             if (wait_recv_cost > LEGACY_NUM_TIMEOUT_CYCLES) {
-                printf("Warning: DeepEP timeout for dispatch receive, rank %d, local_expert_idx %d, src_rank %d\n",
+                // SELF-ATTRIBUTION: when mask_buffer_ptr is null this block is the ORIGIN of a
+                // CUDA 719 (CUDA_ERROR_LAUNCH_FAILED) that every later launch on this context
+                // reports as its own. Without the line number and the mask_buffer value printed
+                // here, the only surviving evidence was a bare "Warning:" line, and the 719 got
+                // attributed to whichever library happened to make the next launch-API call --
+                // observed splitting 25/7 between DeepGEMM and this file's own launch site
+                // across 32 ranks in the same second.
+                printf("Warning: DeepEP timeout for dispatch receive, rank %d, local_expert_idx %d, src_rank %d"
+                       " [waited=%llu cycles limit=%llu mask_buffer=%p]%s internode_ll.cu:%d\n",
                        rank,
                        local_expert_idx,
-                       src_rank);
+                       src_rank,
+                       (unsigned long long)wait_recv_cost,
+                       (unsigned long long)LEGACY_NUM_TIMEOUT_CYCLES,
+                       (void*)mask_buffer_ptr,
+                       mask_buffer_ptr == nullptr ? " FATAL-WILL-TRAP(origin of CUDA 719)" : " masked-survivable",
+                       __LINE__);
                 if (mask_buffer_ptr == nullptr)
                     trap();
                 atomicExch(mask_buffer_ptr + src_rank, 1);
@@ -959,10 +981,17 @@ LOW_LATENCY_COMBINE_RECV:
             }
             // Mask rank if timeout
             if (wait_recv_cost > LEGACY_NUM_TIMEOUT_CYCLES) {
-                printf("Warning: DeepEP timeout for combine receive, rank %d, local_expert_idx %d, src_rank %d\n",
+                // SELF-ATTRIBUTION -- see the dispatch-side twin above.
+                printf("Warning: DeepEP timeout for combine receive, rank %d, local_expert_idx %d, src_rank %d"
+                       " [waited=%llu cycles limit=%llu mask_buffer=%p]%s internode_ll.cu:%d\n",
                        rank,
                        responsible_expert_idx % num_local_experts,
-                       src_rank);
+                       src_rank,
+                       (unsigned long long)wait_recv_cost,
+                       (unsigned long long)LEGACY_NUM_TIMEOUT_CYCLES,
+                       (void*)mask_buffer_ptr,
+                       mask_buffer_ptr == nullptr ? " FATAL-WILL-TRAP(origin of CUDA 719)" : " masked-survivable",
+                       __LINE__);
                 if (mask_buffer_ptr == nullptr)
                     trap();
                 atomicExch(mask_buffer_ptr + src_rank, 1);
