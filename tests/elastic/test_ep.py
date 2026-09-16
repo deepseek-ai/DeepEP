@@ -1,3 +1,14 @@
+# MIT License
+#
+# Copyright (c) 2025 DeepSeek
+# Changes and additions copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+#
+# Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the "Software"), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
+#
+# The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
+#
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
 import argparse
 import os
 import torch
@@ -545,7 +556,12 @@ def test_loop(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
     test_dispatch_combine(buffer, args)
 
     # Pressure tests
-    for seed in range(int(1e9) if args.do_pressure_test else 0):
+    if args.do_pressure_test:
+        pressure_iteration_count = args.pressure_iterations if args.pressure_iterations != 0 else int(1e9)
+    else:
+        pressure_iteration_count = 0
+
+    for seed in range(pressure_iteration_count):
         if not args.reuse_elastic_buffer:
             # Recreate elastic buffer
             buffer.destroy()
@@ -558,6 +574,7 @@ def test_loop(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
 
     # Destroy the runtime and communication group
     buffer.destroy()
+    dist.barrier()
     dist.destroy_process_group()
 
 
@@ -591,6 +608,12 @@ if __name__ == '__main__':
     parser.add_argument('--skip-check', action='store_true', help='Whether to skip correctness checks')
     parser.add_argument('--skip-perf-test', action='store_true', help='Whether to skip performance tests')
     parser.add_argument('--do-pressure-test', action='store_true', help='Whether to do pressure test')
+    parser.add_argument(
+        '--pressure-iterations',
+        type=int,
+        default=0,
+        help='Number of pressure-loop seeds; 0 represents the default unbounded value of 1e9 seeds',
+    )
     parser.add_argument('--reuse-elastic-buffer', action='store_true', help='Whether to reuse elastic buffer for each test')
     parser.add_argument('--test-first-only', action='store_true', help='Only test the first case')
     parser.add_argument('--unbalanced-ratio', type=float, default=1.0, help='The MoE unbalanced ratio')
@@ -599,6 +622,10 @@ if __name__ == '__main__':
     parser.add_argument('--dump-profile-traces', type=str, default='', help='Dump profiling trace JSONs')
     parser.add_argument('--ignore-local-traffic', action='store_true', help='Whether to ignore local traffic during bandwidth calculation')
     args = parser.parse_args()
+    if args.pressure_iterations < 0:
+        parser.error("--pressure-iterations must be non-negative")
+    if args.pressure_iterations and not args.do_pressure_test:
+        parser.error("--pressure-iterations requires --do-pressure-test")
 
     # Create dump trace directories
     if args.dump_profile_traces:
