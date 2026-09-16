@@ -1,3 +1,14 @@
+# MIT License
+#
+# Copyright (c) 2025 DeepSeek
+# Changes and additions copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+#
+# Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the "Software"), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
+#
+# The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
+#
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
 import functools
 import inspect
 import os
@@ -6,7 +17,7 @@ import re
 import subprocess
 import torch
 import torch.distributed as dist
-from typing import Tuple
+from typing import Optional, Tuple
 
 # noinspection PyUnresolvedReferences
 import deep_ep._C as _C
@@ -242,17 +253,71 @@ def check_fast_rdma_atomic_support(nic_name: str = _DEFAULT_NIC_NAME) -> bool:
         return False
 
 
-@functools.lru_cache()
-def get_rdma_gbs(nic_name: str = _DEFAULT_NIC_NAME) -> float:
+def _get_sysfs_rdma_gbs(nic_name: str) -> float:
     """
-    Get the RDMA bandwidth in GB/s, cached.
+    Read one RDMA device's link rate from sysfs (`/sys/class/infiniband/<nic>/ports/*/rate`).
+    Works for any verbs provider (mlx5, EFA's `rdmap*`, ...) without external tools.
 
     Arguments:
         nic_name: the NIC device name.
 
     Returns:
-        gbs: the RDMA bandwidth in GB/s (0 if detection fails).
+        gbs: the device's link rate in GB/s (0 if the device or its rate is unavailable).
     """
+    rate = 0
+    ports_dir = os.path.join('/sys/class/infiniband', nic_name, 'ports')
+    try:
+        for port in os.listdir(ports_dir):
+            with open(os.path.join(ports_dir, port, 'rate')) as f:
+                match = re.match(r'\s*(\d+)\s*Gb/sec', f.read())
+            if match:
+                rate = max(rate, int(match.group(1)))
+    except OSError:
+        pass
+    return rate / 8
+
+
+@functools.lru_cache()
+def get_rdma_gbs(nic_name: Optional[str] = None) -> float:
+    """
+    Get the RDMA bandwidth in GB/s, cached.
+
+    Probes sysfs first, which covers any verbs provider; `ibstat` is kept as a fallback but
+    cannot see providers without a umad interface (e.g. EFA). Automatic device discovery
+    (the fastest device under `/sys/class/infiniband`) applies only when no NIC was named
+    at all -- neither via the `nic_name` argument nor via `EP_NIC_NAME`; an explicitly
+    named NIC never falls back to another device.
+
+    Arguments:
+        nic_name: the NIC device name; None (the default) resolves to `EP_NIC_NAME`,
+            falling back to `mlx5_0`.
+
+    Returns:
+        gbs: the RDMA bandwidth in GB/s.
+
+    Raises:
+        RuntimeError: when no probe can determine a link rate. Set `EP_NIC_NAME` to a
+            device listed under `/sys/class/infiniband`, or bypass detection by passing
+            the SM count explicitly (e.g. `--num-sms`).
+    """
+    explicit = nic_name is not None or 'EP_NIC_NAME' in os.environ
+    if nic_name is None:
+        nic_name = _DEFAULT_NIC_NAME
+    gbs = _get_sysfs_rdma_gbs(nic_name)
+    if gbs > 0:
+        return gbs
+
+    # The un-named default may simply not exist on this fabric; an explicitly named NIC
+    # (argument or environment) must not fall back silently
+    if not explicit:
+        try:
+            devices = sorted(os.listdir('/sys/class/infiniband'))
+        except OSError:
+            devices = []
+        gbs = max((_get_sysfs_rdma_gbs(device) for device in devices), default=0)
+        if gbs > 0:
+            return gbs
+
     # noinspection PyBroadException
     try:
         result = subprocess.run(['ibstat'], capture_output=True, text=True, check=True)
@@ -264,5 +329,9 @@ def get_rdma_gbs(nic_name: str = _DEFAULT_NIC_NAME) -> float:
         rate = int(match.group(1))
         return rate / 8
     except Exception as e:
-        print(f'Failed to get RDMA connection speed: {e}')
-        return 0
+        raise RuntimeError(
+            f"Could not determine the RDMA link rate for '{nic_name}': no readable rate under "
+            f"/sys/class/infiniband and `ibstat` failed ({e}). Set EP_NIC_NAME to a device "
+            f"listed under /sys/class/infiniband, or bypass detection by passing the SM count "
+            f"explicitly (e.g. `--num-sms`)."
+        ) from e
