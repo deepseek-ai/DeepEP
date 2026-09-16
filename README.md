@@ -292,13 +292,14 @@ def decode_dispatch(x: Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]],
 
     if cached_handle is not None:
         # Reuse cached handle: skip layout recomputation and CPU sync
-        recv_x, _, _, handle, event = _buffer.dispatch(
+        recv_x, recv_topk_idx, recv_topk_weights, handle, event = _buffer.dispatch(
             x,
             handle=cached_handle,
+            topk_weights=topk_weights,
             num_sms=_num_comm_sms,
             async_with_compute_stream=True,
         )
-        return recv_x, cached_handle.topk_idx, None, handle, event
+        return recv_x, recv_topk_idx, recv_topk_weights, handle, event
 
     recv_x, recv_topk_idx, recv_topk_weights, handle, event = _buffer.dispatch(
         x,
