@@ -169,10 +169,12 @@ __forceinline__ __device__ void gin_barrier_wo_local_sync(
             const auto shadow_ptr = gin.getSignalShadowPtr(signal_idx);
             const auto target = ++(*shadow_ptr);
 
-            const auto gdaki = static_cast<struct ncclGinGdakiGPUContext*>(gin._ginHandle) + gin.contextId;
-            const auto signal_ptr = reinterpret_cast<uint64_t*>(__ldg(reinterpret_cast<uint64_t*>(&gdaki->signals_table.buffer))) + signal_idx;
             timeout_while<kNumTimeoutCycles>([=](const bool& is_last_check) {
-                const auto signal = ptx::ld_acquire_sys<uint64_t>(signal_ptr);
+                // Read the signal through the backend-dispatched accessor instead of
+                // casting the opaque GIN handle to one backend's context struct: the
+                // handle layout differs per backend, so a direct cast is only correct
+                // for GDAKI and only at context 0.
+                const auto signal = gin.readSignal(signal_idx, 64, cuda::memory_order_acquire);
                 if (signal >= target)
                     return true;
 

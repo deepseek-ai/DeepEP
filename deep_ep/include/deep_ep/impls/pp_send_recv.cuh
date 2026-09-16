@@ -21,11 +21,12 @@ __device__ __forceinline__ void check_signal(
     const ncclGinSignal_t& signal_idx,
     const int64_t& target,
     const timeout_print_t& timeout_print) {
-    const auto gdaki = static_cast<struct ncclGinGdakiGPUContext*>(gin.gin._ginHandle) + gin.gin.contextId;
-    const auto signal_ptr = reinterpret_cast<int64_t*>(
-        __ldg(reinterpret_cast<int64_t*>(&gdaki->signals_table.buffer))) + signal_idx;
     comm::timeout_while<kNumTimeoutCycles>([=](const bool& is_last_check) {
-        const auto signal = ptx::ld_acquire_sys<int64_t>(signal_ptr);
+        // Read the signal through the backend-dispatched accessor instead of casting
+        // the opaque GIN handle to one backend's context struct. The result is cast
+        // back to int64_t so the comparison below stays signed: `target` is allowed
+        // to be negative here (send_count - num_max_inflight_tensors + 1).
+        const auto signal = static_cast<int64_t>(gin.gin.readSignal(signal_idx, 64, cuda::memory_order_acquire));
         if (signal >= target)
             return true;
 
