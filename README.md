@@ -439,10 +439,10 @@ This code repository is released under [the MIT License](LICENSE).
 ## Citation
 
 ```bibtex
-@misc{deepep2025,
+@misc{deepep2026,
       title={DeepEP: an efficient expert-parallel communication library},
       author={Chenggang Zhao and Shangyan Zhou and Liyue Zhang and Chengqi Deng and Zhean Xu and Yuxuan Liu and Kuai Yu and Jiashi Li and Liang Zhao},
-      year={2025},
+      year={2026},
       publisher = {GitHub},
       howpublished = {\url{https://github.com/deepseek-ai/DeepEP}},
 }
