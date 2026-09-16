@@ -86,10 +86,8 @@ DeepEP also depends on NVSHMEM to provide support for legacy methods. Please ref
 ### Development
 
 ```bash
-# Build and make symbolic links for SO files
-python setup.py build
-# You may modify the specific SO names according to your own platform
-ln -s build/lib.linux-x86_64-cpython-38/deep_ep_cpp.cpython-38-x86_64-linux-gnu.so
+# Build the extension and create the symbolic links for the SO files
+bash ./develop.sh
 
 # Run test cases
 # NOTES: you may modify the `init_dist` function in `tests/utils/envs.py`
