@@ -26,8 +26,9 @@ static dtype_t get_env(const std::string& name, const dtype_t& default_value = d
     if constexpr (std::is_same_v<dtype_t, std::string>) {
         return std::string(c_str);
     } else if constexpr (std::is_same_v<dtype_t, int>) {
-        int value;
-        std::sscanf(c_str, "%d", &value);
+        int value = default_value;
+        if (std::sscanf(c_str, "%d", &value) != 1)
+            return default_value;
         return value;
     } else {
         EP_HOST_ASSERT(false and "Unexpected type");
