@@ -17,6 +17,10 @@ find_pkgs_spec = importlib.util.spec_from_file_location('find_pkgs', os.path.joi
 find_pkgs = importlib.util.module_from_spec(find_pkgs_spec)
 find_pkgs_spec.loader.exec_module(find_pkgs)
 
+nccl_utils_spec = importlib.util.spec_from_file_location('nccl_utils', os.path.join(current_dir, 'deep_ep', 'utils', 'nccl.py'))
+nccl_utils = importlib.util.module_from_spec(nccl_utils_spec)
+nccl_utils_spec.loader.exec_module(nccl_utils)
+
 
 # Wheel specific: NVIDIA pip wheels (nvidia-nvshmem-cu12, nvidia-nccl-cu12)
 # only ship the SO name of the host library, e.g. `libnvshmem_host.so.3`,
@@ -81,6 +85,9 @@ class CustomBuildPy(build_py):
         # noinspection PyShadowingNames
         for name in persistent_env_names:
             code += f"persistent_envs['{name}'] = '{os.environ[name]}'\n" if name in os.environ else ''
+        nccl_header = os.path.join(find_pkgs.find_nccl_root(), 'include', 'nccl.h')
+        built_nccl_version = nccl_utils.read_nccl_header_version(nccl_header)
+        code += f'built_nccl_version = {built_nccl_version}\n'
 
         # Create temporary build directory
         build_include_dir = os.path.join(self.build_lib, 'deep_ep')

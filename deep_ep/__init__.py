@@ -6,14 +6,21 @@ import torch
 import os
 
 from .utils.find_pkgs import find_nccl_root
+from .utils.nccl import format_nccl_version, get_nccl_runtime_version
 
 # Set some default environment provided at setup
+built_nccl_version = None
 try:
     # noinspection PyUnresolvedReferences
     from .envs import persistent_envs
-    for key, value in persistent_envs.items():
-        if key not in os.environ:
-            os.environ[key] = value
+except ImportError:
+    persistent_envs = {}
+for key, value in persistent_envs.items():
+    if key not in os.environ:
+        os.environ[key] = value
+try:
+    # noinspection PyUnresolvedReferences
+    from .envs import built_nccl_version
 except ImportError:
     pass
 
@@ -57,9 +64,17 @@ def check_nccl_so():
         for so in [line.strip().split(' ')[-1] for line in f if 'libnccl' in line]:
             loaded_nccl_so = so if loaded_nccl_so is None else loaded_nccl_so
             assert so == loaded_nccl_so, f'Duplicate NCCL runtime found in the current system: {so} and {loaded_nccl_so}'
+    assert loaded_nccl_so is not None, 'No NCCL runtime is loaded in the current process'
     linked_nccl_so_candidates = sorted(glob.glob(f'{find_nccl_root()}/lib/libnccl.so*'))
     assert linked_nccl_so_candidates, f'No libnccl.so found in {find_nccl_root()}/lib/'
     linked_nccl_so = linked_nccl_so_candidates[0]
+
+    if built_nccl_version is not None:
+        runtime_nccl_version = get_nccl_runtime_version(loaded_nccl_so)
+        assert runtime_nccl_version >= built_nccl_version, \
+            (f'NCCL runtime {format_nccl_version(runtime_nccl_version)} is older than the '
+             f'{format_nccl_version(built_nccl_version)} version used to build DeepEP; '
+             f'upgrade NCCL before importing deep_ep')
 
     # So checking binary-level equalness is necessary
     # noinspection PyTypeChecker
