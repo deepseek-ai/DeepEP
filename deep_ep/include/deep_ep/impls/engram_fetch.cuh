@@ -97,8 +97,7 @@ engram_fetch_impl(const ncclDevComm_t nccl_dev_comm, const ncclWindow_t nccl_win
     }
     __syncthreads();
 
-    // Issue flush per peer we sent to; its unconditional DB ring flushes all
-    // prior aggregated gets on the same QP.
+    // Issue flush per peer we sent to
     if (ptx::elect_one_sync()) {
         for (int i = warp_idx; i < kNumRDMAPeers; i += kNumWarps) {
             const auto request_ptr = last_gin_requests + qp_idx * kNumRDMAPeers + i;
