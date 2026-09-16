@@ -15,6 +15,7 @@
 namespace deep_ep::elastic {
 
 template <bool kIsScaleupNVLink,
+          int kNumTmaBuffers,
           bool kDoCPUSync,
           bool kReuseSlotIndices,
           int kNumSMs,
@@ -44,8 +45,11 @@ dispatch_impl(
     const int rank_idx
 ) {
     constexpr int kNumExpertsPerRank = kNumExperts / kNumRanks;
+    constexpr int kNumNVLinkStoreGroupsToKeep = 1;
     EP_STATIC_ASSERT(kNumExperts % kNumRanks == 0, "Invalid number of experts or ranks");
     EP_STATIC_ASSERT(kNumNotifyWarps % 4 == 0, "Invalid warpgroup size");
+    EP_STATIC_ASSERT(kIsScaleupNVLink ? kNumTmaBuffers > kNumNVLinkStoreGroupsToKeep + 1 : kNumTmaBuffers == 1,
+                     "Invalid number of dispatch TMA buffers");
 
     // Utils
     const auto sm_idx = static_cast<int>(blockIdx.x), thread_idx = static_cast<int>(threadIdx.x);
@@ -261,28 +265,31 @@ dispatch_impl(
 
         // Buffer layouts
         const auto token_layout = layout::TokenLayout(kNumHiddenBytes, kNumSFPacks * sizeof(sf_pack_t), kNumTopk, true);
-        const auto tma_buffer = layout::BufferLayout<true>(token_layout, kNumDispatchWarps, 1,
-            math::advance_ptr<int>(smem, kNumSmemBytesForNotify)).get_rank_buffer(dispatch_warp_idx).get_token_buffer(0);
+        const auto warp_tma_buffers = layout::BufferLayout<true>(token_layout, kNumDispatchWarps, kNumTmaBuffers,
+            math::advance_ptr<int>(smem, kNumSmemBytesForNotify)).get_rank_buffer(dispatch_warp_idx);
         auto recv_buffer = layout::BufferLayout<false>(token_layout, kNumRanks, kNumMaxTokensPerRank, buffer);
         auto send_buffer = layout::BufferLayout<false>(token_layout, 1, kNumMaxTokensPerRank, recv_buffer.get_buffer_end_ptr());
         recv_buffer = recv_buffer.get_rank_buffer(rank_idx);
 
         // Init TMA
-        ptx::arrival_phase phase = 0;
-        const auto mbarrier_ptr = tma_buffer.get_mbarrier_ptr();
-        if (ptx::elect_one_sync())
-            ptx::mbarrier_init_with_fence(mbarrier_ptr, 1);
+        ptx::arrival_phase phases[kNumTmaBuffers] = {};
+        #pragma unroll
+        for (int i = 0; i < kNumTmaBuffers; ++ i) {
+            const auto tma_buffer = warp_tma_buffers.get_token_buffer(i);
+            if (ptx::elect_one_sync())
+                ptx::mbarrier_init_with_fence(tma_buffer.get_mbarrier_ptr(), 1);
+        }
         __syncwarp();
 
-        // Iterate all tokens
-        const auto token_start = dispatch_warp_idx * kNumSMs + sm_idx;
-        const auto token_stride = kNumDispatchWarps * kNumSMs;
-        for (int token_idx = token_start; token_idx < num_tokens; token_idx += token_stride) {
+        // Prepare a token without waiting for the G2S transfer. With three
+        // buffers the next token can be prepared before the current token's
+        // S2G stores are issued, so its hidden/SF load overlaps the stores.
+        auto prepare_token = [&](const int token_idx, const int token_iter,
+                                 int& stored_dst_rank_idx, int& stored_dst_slot_idx) {
             const auto token_i64_idx = static_cast<int64_t>(token_idx);
-
-            // Wait TMA store arrivals
-            ptx::tma_store_wait();
-            __syncwarp();
+            const int tma_buffer_idx = token_iter % kNumTmaBuffers;
+            const auto tma_buffer = warp_tma_buffers.get_token_buffer(tma_buffer_idx);
+            const auto mbarrier_ptr = tma_buffer.get_mbarrier_ptr();
 
             // Issue data TMA
             if (ptx::elect_one_sync()) {
@@ -313,7 +320,7 @@ dispatch_impl(
 
             // Load top-k indices and weights
             EP_STATIC_ASSERT(kNumTopk <= 32, "Insufficient lanes for loading top-k indices");
-            int stored_dst_rank_idx = -1;
+            stored_dst_rank_idx = -1;
             if (lane_idx < kNumTopk) {
                 const auto uncasted_dst_expert_idx = __ldg(topk_idx + token_idx * kNumTopk + lane_idx);
                 const auto dst_expert_idx = static_cast<int>(uncasted_dst_expert_idx);
@@ -334,7 +341,7 @@ dispatch_impl(
             __syncwarp();
 
             // Deduplicate ranks and assign slots
-            int stored_dst_slot_idx = -1;
+            stored_dst_slot_idx = -1;
             if constexpr (kReuseSlotIndices) {
                 if (lane_idx < kNumTopk)
                     stored_dst_slot_idx = __ldg(dst_buffer_slot_idx + token_idx * kNumTopk + lane_idx);
@@ -351,6 +358,38 @@ dispatch_impl(
             }
             __syncwarp();
 
+        };
+
+        // Iterate all tokens. The current route remains in registers while
+        // the following token is prefetched into another shared buffer.
+        const auto token_start = dispatch_warp_idx * kNumSMs + sm_idx;
+        const auto token_stride = kNumDispatchWarps * kNumSMs;
+        int token_idx = token_start, token_iter = 0;
+        int stored_dst_rank_idx = -1, stored_dst_slot_idx = -1;
+        if (token_idx < num_tokens)
+            prepare_token(token_idx, token_iter, stored_dst_rank_idx, stored_dst_slot_idx);
+
+        while (token_idx < num_tokens) {
+            const int next_token_idx = token_idx + token_stride;
+            const int next_token_iter = token_iter + 1;
+            int next_dst_rank_idx = -1, next_dst_slot_idx = -1;
+
+            if constexpr (kIsScaleupNVLink) {
+                if (next_token_idx < num_tokens) {
+                    // Keep only the youngest store groups before recycling a
+                    // staging buffer. Safety requires at least two other
+                    // buffers: one for the current token and one for every
+                    // store group that can remain in flight after this wait.
+                    ptx::tma_store_wait<kNumNVLinkStoreGroupsToKeep>();
+                    __syncwarp();
+                    prepare_token(next_token_idx, next_token_iter, next_dst_rank_idx, next_dst_slot_idx);
+                }
+            }
+
+            const int tma_buffer_idx = token_iter % kNumTmaBuffers;
+            const auto tma_buffer = warp_tma_buffers.get_token_buffer(tma_buffer_idx);
+            const auto mbarrier_ptr = tma_buffer.get_mbarrier_ptr();
+            auto& phase = phases[tma_buffer_idx];
             // Wait TMA load arrival
             // NOTES: this arrive must be after the `ptx::cp_async_mbarrier_arrive`
             if (ptx::elect_one_sync()) {
@@ -391,6 +430,19 @@ dispatch_impl(
                 }
                 __syncwarp();
             }
+
+            if constexpr (not kIsScaleupNVLink) {
+                if (next_token_idx < num_tokens) {
+                    ptx::tma_store_wait();
+                    __syncwarp();
+                    prepare_token(next_token_idx, next_token_iter, next_dst_rank_idx, next_dst_slot_idx);
+                }
+            }
+
+            token_idx = next_token_idx;
+            token_iter = next_token_iter;
+            stored_dst_rank_idx = next_dst_rank_idx;
+            stored_dst_slot_idx = next_dst_slot_idx;
         }
     }
 
