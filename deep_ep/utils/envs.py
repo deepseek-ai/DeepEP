@@ -242,10 +242,39 @@ def check_fast_rdma_atomic_support(nic_name: str = _DEFAULT_NIC_NAME) -> bool:
         return False
 
 
+def get_net_device_speed_gbs(nic_name: str) -> float:
+    """
+    Get the link speed of an RDMA device via sysfs.
+
+    Arguments:
+        nic_name: the NIC device name.
+
+    Returns:
+        gbs: the link speed in GB/s (0 if detection fails).
+    """
+    try:
+        ports_dir = f'/sys/class/infiniband/{nic_name}/ports'
+        port = sorted(os.listdir(ports_dir))[0]
+        ndev_path = f'{ports_dir}/{port}/gid_attrs/ndevs/0'
+        with open(ndev_path) as f:
+            net_iface = f.read().strip()
+
+        speed_path = f'/sys/class/net/{net_iface}/speed'
+        with open(speed_path) as f:
+            speed_mbps = int(f.read().strip())
+
+        return speed_mbps / 8000 if speed_mbps > 0 else 0
+    except Exception:
+        return 0
+
+
 @functools.lru_cache()
 def get_rdma_gbs(nic_name: str = _DEFAULT_NIC_NAME) -> float:
     """
     Get the RDMA bandwidth in GB/s, cached.
+    Can be overridden via the EP_OVERRIDE_RDMA_GBS environment variable.
+
+    For bonded devices (name containing 'bond'), reads the aggregated link speed from sysfs. Falls back to ibstat parsing if sysfs is unavailable.
 
     Arguments:
         nic_name: the NIC device name.
@@ -253,6 +282,16 @@ def get_rdma_gbs(nic_name: str = _DEFAULT_NIC_NAME) -> float:
     Returns:
         gbs: the RDMA bandwidth in GB/s (0 if detection fails).
     """
+    # Environment variable override (highest priority)
+    if 'EP_OVERRIDE_RDMA_GBS' in os.environ:
+        return float(os.environ['EP_OVERRIDE_RDMA_GBS'])
+
+    # For bond devices, prefer sysfs which reports the correct aggregated speed
+    if 'bond' in nic_name:
+        gbs = get_net_device_speed_gbs(nic_name)
+        if gbs > 0:
+            return gbs
+
     # noinspection PyBroadException
     try:
         result = subprocess.run(['ibstat'], capture_output=True, text=True, check=True)
