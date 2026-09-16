@@ -805,8 +805,19 @@ class ElasticBuffer:
             nvlink_traffic += self.num_nvlink_ranks / self.num_ranks * (1 - 1 / self.num_nvlink_ranks)  # Except local bypass
             rdma_traffic += (self.num_ranks - self.num_nvlink_ranks) / self.num_ranks
 
-        # Found the bounded one
-        if self.num_scaleout_ranks > 1 and (rdma_traffic / rdma_gbs) > (nvlink_traffic / nvlink_gbs):
+        # Find the bounded link. Detection helpers return 0 on failure, so treat
+        # a link with traffic but unknown bandwidth as unbounded transfer time
+        # instead of dividing by zero.
+        def get_transfer_time(traffic: float, bandwidth: float) -> float:
+            if traffic == 0:
+                return 0.0
+            return traffic / bandwidth if bandwidth > 0 else math.inf
+
+        rdma_time = get_transfer_time(rdma_traffic, rdma_gbs)
+        nvlink_time = get_transfer_time(nvlink_traffic, nvlink_gbs)
+        # If both are unknown, either branch selects zero bandwidth and the
+        # calculation below conservatively retains the full device SM count.
+        if self.num_scaleout_ranks > 1 and rdma_time > nvlink_time:
             bounded_traffic, bounded_gbs = rdma_traffic, rdma_gbs
         else:
             bounded_traffic, bounded_gbs = nvlink_traffic, nvlink_gbs
@@ -815,7 +826,7 @@ class ElasticBuffer:
         # NOTES: will try to use more SMs if not overlap with compute
         num_device_sms = torch.cuda.get_device_properties('cuda').multi_processor_count
         num_sms = num_device_sms  # No traffic, e.g., EP=1
-        if bounded_traffic > 0:
+        if bounded_traffic > 0 and bounded_gbs > 0:
             num_sms = max(
                 bounded_gbs / bounded_traffic * sm_read / sm_read_gbs,
                 bounded_gbs / bounded_traffic * sm_write / sm_write_gbs,
