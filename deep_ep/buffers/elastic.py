@@ -251,6 +251,8 @@ class ElasticBuffer:
             group: the communication group.
             num_bytes: the total buffer size in bytes (GPU + CPU, excludes workspace), if set, overrides MoE-based calculation.
                 Must be aligned to 2 MB (``get_elastic_buffer_alignment()``).
+                The V2 direct-recv-x experiment reserves an additional receive tensor window after
+                the communication buffer when ``EP_V2_EXPERIMENTAL_DIRECT_RECV_X=1`` is enabled before construction.
             num_cpu_bytes: the number of CPU buffer bytes (e.g. for Engram storage). Must be aligned to 2 MB.
             num_max_tokens_per_rank: the maximum number of tokens per rank, used for buffer size calculation.
             hidden: the hidden dimension of each token.
@@ -920,8 +922,20 @@ class ElasticBuffer:
             recv_topk_weights: received expert weights (`None` if `topk_weights` was not provided).
             handle: the returned communication handle.
             event: the event after executing the kernel (valid only if `async_with_compute_stream` is set).
+
+        Experimental:
+            If ``EP_V2_EXPERIMENTAL_DIRECT_RECV_X=1`` is set, non-expanded dispatch returns ``recv_x`` from
+            the tail of DeepEP's NCCL symmetric window and writes hidden states directly into that output window.
+            The epilogue only materializes metadata/top-k/SF tensors. The compact path supports BF16 and FP8 for
+            both single-node and hybrid dispatch in the experimental kernel path. Cached and deterministic dispatch
+            are not supported in direct recv_x mode.
         """
         check_torch_deterministic()
+        use_direct_recv_x = os.environ.get('EP_V2_EXPERIMENTAL_DIRECT_RECV_X', '0') == '1'
+        if use_direct_recv_x and handle is not None:
+            raise RuntimeError('EP_V2_EXPERIMENTAL_DIRECT_RECV_X does not support cached dispatch')
+        if use_direct_recv_x and self.deterministic:
+            raise RuntimeError('EP_V2_EXPERIMENTAL_DIRECT_RECV_X does not support deterministic dispatch')
 
         # Automatic decide SM and QP count
         num_topk = (handle.topk_idx if topk_idx is None else topk_idx).shape[1]
@@ -1088,6 +1102,17 @@ class ElasticBuffer:
         assert num_qps <= self.num_allocated_qps, f'Allocated QPs are not enough'
 
         bias_0, bias_1 = ElasticBuffer._unpack_bias(bias)
+
+        extra_tensors = None
+        if x.shape[0] == 0:
+            x_backing = torch.empty((1, x.shape[1]), device=x.device, dtype=x.dtype)
+            x = x_backing[:0]
+            extra_tensors = (x_backing, x)
+            if topk_weights is not None and topk_weights.shape[0] == 0:
+                topk_weights_backing = torch.empty((1, topk_weights.shape[1]), device=topk_weights.device, dtype=topk_weights.dtype)
+                topk_weights = topk_weights_backing[:0]
+                extra_tensors = (x_backing, x, topk_weights_backing, topk_weights)
+
         combined_x, combined_topk_weights, event = \
             self.runtime.combine(x, topk_weights,
                                  bias_0, bias_1,
@@ -1104,4 +1129,4 @@ class ElasticBuffer:
                                  async_with_compute_stream,
                                  allocate_on_comm_stream,
                                  handle.do_expand)
-        return combined_x, combined_topk_weights, EventOverlap(event)
+        return combined_x, combined_topk_weights, EventOverlap(event, extra_tensors)

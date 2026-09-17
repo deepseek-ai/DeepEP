@@ -19,15 +19,21 @@ from deep_ep.utils.testing import bench_kineto
 
 
 # noinspection PyUnusedLocal,PyShadowingNames
-def enumerate_ep_modes():
+def enumerate_ep_modes(expert_alignment=None, use_fp8_dispatch=None, num_bias=None):
     for do_handle_copy in (1, 0):
-        for expert_alignment in (128, 1):
-            for use_fp8_dispatch in (1, 0):
-                for num_bias in (0, 1, 2):
+        for ea in (128, 1):
+            if expert_alignment is not None and ea != expert_alignment:
+                continue
+            for fp8 in (1, 0):
+                if use_fp8_dispatch is not None and fp8 != use_fp8_dispatch:
+                    continue
+                for nb in (0, 1, 2):
+                    if num_bias is not None and nb != num_bias:
+                        continue
                     for with_previous_event in (0, 1):
                         for async_with_compute_stream in (0, 1):
                             for allocate_on_comm_stream in ((1, ) if with_previous_event else (0, 1)):
-                                yield (do_handle_copy, expert_alignment, use_fp8_dispatch, num_bias,
+                                yield (do_handle_copy, ea, fp8, nb,
                                        with_previous_event, async_with_compute_stream, allocate_on_comm_stream)
 
 
@@ -55,6 +61,12 @@ def fold_expanded(expanded: Union[Tuple[torch.Tensor], torch.Tensor],
     return folded
 
 
+def clone_recv_x(recv_x: Union[Tuple[torch.Tensor, torch.Tensor], torch.Tensor]):
+    if isinstance(recv_x, tuple):
+        return tuple(t.clone() for t in recv_x)
+    return recv_x.clone()
+
+
 # noinspection PyUnboundLocalVariable,PyShadowingNames
 def test_dispatch_combine(buffer: deep_ep.ElasticBuffer, args: argparse.Namespace):
     # Settings
@@ -68,7 +80,8 @@ def test_dispatch_combine(buffer: deep_ep.ElasticBuffer, args: argparse.Namespac
                f' > Ranks: {num_scaleout_ranks} x {num_scaleup_ranks}\n'
                f' > Experts: {num_topk}/{num_experts}\n'
                f' > Tokens: {num_tokens} (max: {num_max_tokens_per_rank}), hidden: {hidden}\n'
-               f' > #SM: {num_sms}, #QPs: {num_qps}/{buffer.num_allocated_qps}\n',
+               f' > #SM: {num_sms}, #QPs: {num_qps}/{buffer.num_allocated_qps}\n'
+               f' > Mode: {"DRV_X" if os.environ.get("EP_V2_EXPERIMENTAL_DIRECT_RECV_X", "0") == "1" else "baseline"}',
                once_in_node=True)
 
     # Construct expert selections first (may have an unbalanced ratio here)
@@ -83,7 +96,14 @@ def test_dispatch_combine(buffer: deep_ep.ElasticBuffer, args: argparse.Namespac
     # Run all tests
     dist_print('Running all test cases:', once_in_node=True)
     for (do_handle_copy, expert_alignment, use_fp8_dispatch, num_bias,
-         with_previous_event, async_with_compute_stream, allocate_on_comm_stream) in enumerate_ep_modes():
+         with_previous_event, async_with_compute_stream, allocate_on_comm_stream) in enumerate_ep_modes(
+             expert_alignment=args.expert_alignment, use_fp8_dispatch=args.use_fp8_dispatch, num_bias=args.num_bias):
+        use_direct_recv_x = os.environ.get('EP_V2_EXPERIMENTAL_DIRECT_RECV_X', '0') == '1'
+        run_expanded_dispatch = not use_direct_recv_x
+        # DRV_X restrictions: no cached handle, no previous event, no deterministic dispatch
+        if use_direct_recv_x and (do_handle_copy or with_previous_event or args.deterministic):
+            continue
+
         dist_print(f' > Testing with '
                    f'{do_handle_copy=}, {expert_alignment=}, {use_fp8_dispatch=}, {num_bias=}, '
                    f'{with_previous_event=}, {async_with_compute_stream=}, {allocate_on_comm_stream=} ...',
@@ -151,36 +171,49 @@ def test_dispatch_combine(buffer: deep_ep.ElasticBuffer, args: argparse.Namespac
             do_handle_copy=do_handle_copy, do_cpu_sync=args.do_cpu_sync)
         recv_x, recv_topk_idx, recv_topk_weights, handle, dispatch_event = \
             launch(buffer, 'dispatch', with_previous_event, async_with_compute_stream, dispatch_args)
+        # Direct recv modes return a view into the symmetric window tail. Later dispatches and
+        # perf benches reuse that window, so preserve the compact result for correctness checks.
+        if use_direct_recv_x:
+            recv_x = clone_recv_x(recv_x)
         recv_x_bf16 = get_recv_x_bf16(recv_x)
 
         # Expanding mode
-        expanded_dispatch_args = dispatch_args | dict(do_expand=True, use_tma_aligned_col_major_sf=True)
-        expanded_recv_x, expanded_recv_topk_idx, expanded_recv_topk_weights, expanded_handle, expanded_dispatch_event = \
-            launch(buffer, 'dispatch', with_previous_event, async_with_compute_stream, expanded_dispatch_args)
-        expanded_recv_x_bf16 = get_recv_x_bf16(expanded_recv_x)
+        if run_expanded_dispatch:
+            expanded_dispatch_args = dispatch_args | dict(do_expand=True, use_tma_aligned_col_major_sf=True)
+            expanded_recv_x, expanded_recv_topk_idx, expanded_recv_topk_weights, expanded_handle, expanded_dispatch_event = \
+                launch(buffer, 'dispatch', with_previous_event, async_with_compute_stream, expanded_dispatch_args)
+            if use_direct_recv_x:
+                expanded_recv_x = clone_recv_x(expanded_recv_x)
+            expanded_recv_x_bf16 = get_recv_x_bf16(expanded_recv_x)
 
         # Cached mode
-        cached_dispatch_args = dict(
-            x=x,
-            num_sms=num_sms, num_qps=num_qps,
-            async_with_compute_stream=async_with_compute_stream,
-            allocate_on_comm_stream=allocate_on_comm_stream,
-            handle=handle)
-        cached_recv_x, cached_recv_topk_idx, cached_recv_topk_weights, cached_handle, cached_dispatch_event = \
-            launch(buffer, 'dispatch', with_previous_event, async_with_compute_stream, cached_dispatch_args)
+        if not use_direct_recv_x:
+            cached_dispatch_args = dict(
+                x=x,
+                num_sms=num_sms, num_qps=num_qps,
+                async_with_compute_stream=async_with_compute_stream,
+                allocate_on_comm_stream=allocate_on_comm_stream,
+                handle=handle)
+            cached_recv_x, cached_recv_topk_idx, cached_recv_topk_weights, cached_handle, cached_dispatch_event = \
+                launch(buffer, 'dispatch', with_previous_event, async_with_compute_stream, cached_dispatch_args)
+            if use_direct_recv_x:
+                cached_recv_x = clone_recv_x(cached_recv_x)
 
         # Cached expanding mode with zero padding
-        cached_expanded_dispatch_args = cached_dispatch_args | dict(
-            topk_weights=topk_weights, do_expand=True, use_tma_aligned_col_major_sf=True,
-            do_zero_padding=True, handle=expanded_handle)
-        cached_expanded_recv_x, _, cached_expanded_recv_topk_weights, _, _ = \
-            launch(buffer, 'dispatch', with_previous_event, async_with_compute_stream, cached_expanded_dispatch_args)
-
+        if run_expanded_dispatch:
+            cached_expanded_dispatch_args = cached_dispatch_args | dict(
+                topk_weights=topk_weights, do_expand=True, use_tma_aligned_col_major_sf=True,
+                do_zero_padding=True, handle=expanded_handle)
+            cached_expanded_recv_x, _, cached_expanded_recv_topk_weights, _, _ = \
+                launch(buffer, 'dispatch', with_previous_event, async_with_compute_stream, cached_expanded_dispatch_args)
+            if use_direct_recv_x:
+                cached_expanded_recv_x = clone_recv_x(cached_expanded_recv_x)
         # Count the number of received tokens
         num_recv_tokens = handle.psum_num_recv_tokens_per_scaleup_rank[-1].item()
-        assert num_recv_tokens == expanded_handle.psum_num_recv_tokens_per_scaleup_rank[-1].item(), \
-               'Expand should not affect the number of received tokens.'
-        num_expanded_tokens = expanded_handle.psum_num_recv_tokens_per_expert[-1].item()
+        if run_expanded_dispatch:
+            assert num_recv_tokens == expanded_handle.psum_num_recv_tokens_per_scaleup_rank[-1].item(), \
+                   'Expand should not affect the number of received tokens.'
+            num_expanded_tokens = expanded_handle.psum_num_recv_tokens_per_expert[-1].item()
 
         # Construction the input data for DeepEP combine
         src_token_global_idx = handle.recv_src_metadata[:num_recv_tokens, 0]
@@ -194,16 +227,18 @@ def test_dispatch_combine(buffer: deep_ep.ElasticBuffer, args: argparse.Namespac
         input_for_combine = torch.empty_like(recv_x_bf16, dtype=torch.bfloat16, device='cuda')
         input_for_combine[:num_recv_tokens] = local_reduced_y
 
-        expanded_src_token_global_idx = expanded_handle.recv_src_metadata[:num_recv_tokens, 0]
-        if not args.skip_check:
-            sorted_expanded_src_token_global_idx = torch.sort(expanded_src_token_global_idx).values
-            assert torch.equal(ref_recv_src_token_idx, sorted_expanded_src_token_global_idx), \
-                f'{ref_recv_src_token_idx=}, {sorted_expanded_src_token_global_idx=}'
-        local_y_expand = generate_pre_combine_data(expanded_src_token_global_idx, num_max_tokens_per_rank, num_topk, hidden)  # [num_recv_tokens, topk, hidden]
-        # We put an extra row to conveniently handle the -1 index
-        input_for_expand_combine = torch.empty((expanded_recv_x_bf16.shape[0] + 1, hidden), dtype=torch.bfloat16, device='cuda')
-        input_for_expand_combine[expanded_handle.recv_src_metadata[:num_recv_tokens, 2:].flatten()] = local_y_expand.view(-1, hidden)
-        input_for_expand_combine = input_for_expand_combine[:-1, ...]
+        # Expanded combine data
+        if run_expanded_dispatch:
+            expanded_src_token_global_idx = expanded_handle.recv_src_metadata[:num_recv_tokens, 0]
+            if not args.skip_check:
+                sorted_expanded_src_token_global_idx = torch.sort(expanded_src_token_global_idx).values
+                assert torch.equal(ref_recv_src_token_idx, sorted_expanded_src_token_global_idx), \
+                    f'{ref_recv_src_token_idx=}, {sorted_expanded_src_token_global_idx=}'
+            local_y_expand = generate_pre_combine_data(expanded_src_token_global_idx, num_max_tokens_per_rank, num_topk, hidden)  # [num_recv_tokens, topk, hidden]
+            # We put an extra row to conveniently handle the -1 index
+            input_for_expand_combine = torch.empty((expanded_recv_x_bf16.shape[0] + 1, hidden), dtype=torch.bfloat16, device='cuda')
+            input_for_expand_combine[expanded_handle.recv_src_metadata[:num_recv_tokens, 2:].flatten()] = local_y_expand.view(-1, hidden)
+            input_for_expand_combine = input_for_expand_combine[:-1, ...]
 
         # Do combine
         combine_args = dict(
@@ -217,18 +252,19 @@ def test_dispatch_combine(buffer: deep_ep.ElasticBuffer, args: argparse.Namespac
             launch(buffer, 'combine', with_previous_event, async_with_compute_stream, combine_args)
 
         # Reduced combine
-        reduced_combine_args = dict(
-            x=input_for_expand_combine, bias=bias,
-            handle=expanded_handle,
-            num_sms=num_sms, num_qps=num_qps,
-            async_with_compute_stream=async_with_compute_stream,
-            allocate_on_comm_stream=allocate_on_comm_stream,
-        )
-        # NOTES: expand mode requires `allow_multiple_reduction = True` to support topk_weights
-        if args.allow_multiple_reduction:
-            reduced_combine_args['topk_weights'] = expanded_recv_topk_weights
-        reduced_combined_x, reduced_combined_topk_weights, reduced_combine_event = \
-            launch(buffer, 'combine', with_previous_event, async_with_compute_stream, reduced_combine_args)
+        if run_expanded_dispatch:
+            reduced_combine_args = dict(
+                x=input_for_expand_combine, bias=bias,
+                handle=expanded_handle,
+                num_sms=num_sms, num_qps=num_qps,
+                async_with_compute_stream=async_with_compute_stream,
+                allocate_on_comm_stream=allocate_on_comm_stream,
+            )
+            # NOTES: expand mode requires `allow_multiple_reduction = True` to support topk_weights
+            if args.allow_multiple_reduction:
+                reduced_combine_args['topk_weights'] = expanded_recv_topk_weights
+            reduced_combined_x, reduced_combined_topk_weights, reduced_combine_event = \
+                launch(buffer, 'combine', with_previous_event, async_with_compute_stream, reduced_combine_args)
 
         assert not (args.dump_profile_traces and args.skip_perf_test), '`--skip-perf-test` should not be specified when `--dump-profile-traces` is provided'
         if not args.skip_perf_test:
@@ -263,25 +299,27 @@ def test_dispatch_combine(buffer: deep_ep.ElasticBuffer, args: argparse.Namespac
                     f'copy: {2 * num_recv_tokens * num_bytes_per_dispatch_token / copy_t / 1e9:.0f} GB/s, {copy_t * 1e6:.3f} us')
 
             # Test expanded dispatch performance
-            num_bytes_per_dispatch_token_meta = safe_div(count_bytes(expanded_handle.recv_src_metadata), expanded_handle.recv_src_metadata.size(0))
-            t, copy_t = bench_kineto(lambda: buffer.dispatch(**expanded_dispatch_args),
-                                    kernel_names=('dispatch_impl', 'dispatch_copy_epilogue_impl'),
-                                    barrier_comm_profiling=True, barrier=buffer.barrier, trace_path=get_trace_path('expanded_dispatch'))
-            dist_print(f'   - EP: {buffer.rank_idx:3}/{buffer.num_ranks} | '
-                    f'expanded dispatch: '
-                    f'{num_scaleout_bytes / t / 1e9:.0f} GB/s (SO), '
-                    f'{num_scaleup_bytes / t / 1e9:.0f} GB/s (SU), {t * 1e6:.3f} us, {num_scaleup_bytes:.0f} bytes | '
-                    f'copy: {(num_recv_tokens * (num_bytes_per_dispatch_token_meta + num_bytes_per_dispatch_token) + num_expanded_tokens * num_bytes_per_dispatch_token) / copy_t / 1e9:.0f} GB/s, {copy_t * 1e6:.3f} us')
+            if run_expanded_dispatch:
+                num_bytes_per_dispatch_token_meta = safe_div(count_bytes(expanded_handle.recv_src_metadata), expanded_handle.recv_src_metadata.size(0))
+                t, copy_t = bench_kineto(lambda: buffer.dispatch(**expanded_dispatch_args),
+                                        kernel_names=('dispatch_impl', 'dispatch_copy_epilogue_impl'),
+                                        barrier_comm_profiling=True, barrier=buffer.barrier, trace_path=get_trace_path('expanded_dispatch'))
+                dist_print(f'   - EP: {buffer.rank_idx:3}/{buffer.num_ranks} | '
+                        f'expanded dispatch: '
+                        f'{num_scaleout_bytes / t / 1e9:.0f} GB/s (SO), '
+                        f'{num_scaleup_bytes / t / 1e9:.0f} GB/s (SU), {t * 1e6:.3f} us, {num_scaleup_bytes:.0f} bytes | '
+                        f'copy: {(num_recv_tokens * (num_bytes_per_dispatch_token_meta + num_bytes_per_dispatch_token) + num_expanded_tokens * num_bytes_per_dispatch_token) / copy_t / 1e9:.0f} GB/s, {copy_t * 1e6:.3f} us')
 
             # Test cached dispatch performance
-            t, copy_t = bench_kineto(lambda: buffer.dispatch(**cached_dispatch_args),
-                                    kernel_names=('dispatch_impl', 'dispatch_copy_epilogue_impl'),
-                                    barrier_comm_profiling=True, barrier=buffer.barrier, trace_path=get_trace_path('cached_dispatch'))
-            dist_print(f'   # EP: {buffer.rank_idx:3}/{buffer.num_ranks} | '
-                    f'cached dispatch: '
-                    f'{num_scaleout_bytes / t / 1e9:.0f} GB/s (SO), '
-                    f'{num_scaleup_bytes / t / 1e9:.0f} GB/s (SU), {t * 1e6:.3f} us, {num_scaleup_bytes:.0f} bytes | '
-                    f'copy: {2 * num_scaleup_bytes / copy_t / 1e9:.0f} GB/s, {copy_t * 1e6:.3f} us')
+            if not use_direct_recv_x:
+                t, copy_t = bench_kineto(lambda: buffer.dispatch(**cached_dispatch_args),
+                                        kernel_names=('dispatch_impl', 'dispatch_copy_epilogue_impl'),
+                                        barrier_comm_profiling=True, barrier=buffer.barrier, trace_path=get_trace_path('cached_dispatch'))
+                dist_print(f'   # EP: {buffer.rank_idx:3}/{buffer.num_ranks} | '
+                        f'cached dispatch: '
+                        f'{num_scaleout_bytes / t / 1e9:.0f} GB/s (SO), '
+                        f'{num_scaleup_bytes / t / 1e9:.0f} GB/s (SU), {t * 1e6:.3f} us, {num_scaleup_bytes:.0f} bytes | '
+                        f'copy: {2 * num_scaleup_bytes / copy_t / 1e9:.0f} GB/s, {copy_t * 1e6:.3f} us')
 
             # Test combine performance
             num_bytes_per_combine_token = safe_div(count_bytes(recv_x_bf16, recv_topk_weights), recv_x_bf16.size(0))
@@ -346,15 +384,16 @@ def test_dispatch_combine(buffer: deep_ep.ElasticBuffer, args: argparse.Namespac
                     f'reduce: {(num_bias_bytes + num_reduction_read_bytes + num_reduction_write_bytes) / copy_t / 1e9:.0f} GB/s, {copy_t * 1e6:.3f} us')
 
             # Test reduced combine performance
-            num_scaleout_bytes, num_scaleup_bytes, num_reduction_read_bytes = get_combine_bytes(True)
-            t, copy_t = bench_kineto(lambda: buffer.combine(**reduced_combine_args),
-                                    kernel_names=('combine_impl', 'combine_reduce_epilogue_impl'),
-                                    barrier_comm_profiling=True, barrier=buffer.barrier, trace_path=get_trace_path('reduced_combine'))
-            dist_print(f'   + EP: {buffer.rank_idx:3}/{buffer.num_ranks} | '
-                    f'reduced combine: '
-                    f'{num_scaleout_bytes / t / 1e9:.0f} GB/s (SO), '
-                    f'{num_scaleup_bytes / t / 1e9:.0f} GB/s (SU), {t * 1e6:.3f} us, {num_scaleup_bytes:.0f} bytes | '
-                    f'reduce: {(num_bias_bytes + num_reduction_read_bytes + num_reduction_write_bytes) / copy_t / 1e9:.0f} GB/s, {copy_t * 1e6:.3f} us')
+            if run_expanded_dispatch:
+                num_scaleout_bytes, num_scaleup_bytes, num_reduction_read_bytes = get_combine_bytes(True)
+                t, copy_t = bench_kineto(lambda: buffer.combine(**reduced_combine_args),
+                                        kernel_names=('combine_impl', 'combine_reduce_epilogue_impl'),
+                                        barrier_comm_profiling=True, barrier=buffer.barrier, trace_path=get_trace_path('reduced_combine'))
+                dist_print(f'   + EP: {buffer.rank_idx:3}/{buffer.num_ranks} | '
+                        f'reduced combine: '
+                        f'{num_scaleout_bytes / t / 1e9:.0f} GB/s (SO), '
+                        f'{num_scaleup_bytes / t / 1e9:.0f} GB/s (SU), {t * 1e6:.3f} us, {num_scaleup_bytes:.0f} bytes | '
+                        f'reduce: {(num_bias_bytes + num_reduction_read_bytes + num_reduction_write_bytes) / copy_t / 1e9:.0f} GB/s, {copy_t * 1e6:.3f} us')
             dist_print(once_in_node=True)
 
         # Checks
@@ -362,27 +401,33 @@ def test_dispatch_combine(buffer: deep_ep.ElasticBuffer, args: argparse.Namespac
         if not args.skip_check:
             # Handle copy checks
             assert (topk_idx.data_ptr() != handle.topk_idx.data_ptr()) == do_handle_copy
-            assert (topk_idx.data_ptr() != cached_handle.topk_idx.data_ptr()) == do_handle_copy
-            assert handle.topk_idx.data_ptr() == cached_handle.topk_idx.data_ptr()
+            if not use_direct_recv_x:
+                assert (topk_idx.data_ptr() != cached_handle.topk_idx.data_ptr()) == do_handle_copy
+                assert handle.topk_idx.data_ptr() == cached_handle.topk_idx.data_ptr()
 
             # Make the valid part of the whole tensor for no CPU sync mode
             if not args.do_cpu_sync:
                 if use_fp8_dispatch:
                     recv_x = (recv_x[0][:num_recv_tokens], recv_x[1][:num_recv_tokens])
-                    cached_recv_x = (cached_recv_x[0][:num_recv_tokens], cached_recv_x[1][:num_recv_tokens])
+                    if not use_direct_recv_x:
+                        cached_recv_x = (cached_recv_x[0][:num_recv_tokens], cached_recv_x[1][:num_recv_tokens])
                 else:
                     recv_x = recv_x[:num_recv_tokens]
-                    cached_recv_x = cached_recv_x[:num_recv_tokens]
+                    if not use_direct_recv_x:
+                        cached_recv_x = cached_recv_x[:num_recv_tokens]
                 recv_x_bf16 = recv_x_bf16[:num_recv_tokens]
                 recv_topk_idx = recv_topk_idx[:num_recv_tokens]
                 recv_topk_weights = recv_topk_weights[:num_recv_tokens]
-                cached_recv_topk_idx = cached_recv_topk_idx[:num_recv_tokens]
+                if not use_direct_recv_x:
+                    cached_recv_topk_idx = cached_recv_topk_idx[:num_recv_tokens]
                 handle.recv_src_metadata = handle.recv_src_metadata[:num_recv_tokens]
-                expanded_handle.recv_src_metadata = expanded_handle.recv_src_metadata[:num_recv_tokens]
+                if run_expanded_dispatch:
+                    expanded_handle.recv_src_metadata = expanded_handle.recv_src_metadata[:num_recv_tokens]
 
-            expanded_indices = expanded_handle.recv_src_metadata[:, 2:]
-            expanded_mask = expanded_indices >= 0
-            valid_expanded_indices = expanded_indices[expanded_mask]
+            if run_expanded_dispatch:
+                expanded_indices = expanded_handle.recv_src_metadata[:, 2:]
+                expanded_mask = expanded_indices >= 0
+                valid_expanded_indices = expanded_indices[expanded_mask]
 
             # Make sure deterministic mode works by doing the dispatch twice
             if args.deterministic:
@@ -390,18 +435,20 @@ def test_dispatch_combine(buffer: deep_ep.ElasticBuffer, args: argparse.Namespac
                     launch(buffer, 'dispatch', with_previous_event, async_with_compute_stream, dispatch_args)
                 if not args.do_cpu_sync:
                     assert num_recv_tokens == handle_twice.psum_num_recv_tokens_per_scaleup_rank[-1].item()
+                    handle_twice.recv_src_metadata = handle_twice.recv_src_metadata[:num_recv_tokens]
                 recv_x_twice_bf16 = get_recv_x_bf16(recv_x_twice)
-                assert torch.equal(recv_x_bf16, recv_x_twice_bf16)
+                assert torch.equal(recv_x_bf16, recv_x_twice_bf16[:num_recv_tokens])
                 assert torch.equal(recv_topk_idx, recv_topk_idx_twice[:num_recv_tokens])
                 assert torch.equal(recv_topk_weights, recv_topk_weights_twice[:num_recv_tokens])
-                assert torch.equal(handle.recv_src_metadata[:, :1], handle_twice.recv_src_metadata[:num_recv_tokens, :1])
+                assert torch.equal(handle.recv_src_metadata[:, :2], handle_twice.recv_src_metadata[:, :2])
 
-                expanded_recv_x_twice, expanded_recv_topk_idx_twice, expanded_recv_topk_weights_twice, expanded_handle_twice, expanded_dispatch_event_twice = \
-                    launch(buffer, 'dispatch', with_previous_event, async_with_compute_stream, expanded_dispatch_args)
-                expanded_recv_x_twice_bf16 = get_recv_x_bf16(expanded_recv_x_twice)
-                assert torch.equal(expanded_recv_x_bf16[valid_expanded_indices], expanded_recv_x_twice_bf16[valid_expanded_indices])
-                if expert_alignment == 1:
-                    assert torch.equal(expanded_recv_topk_weights, expanded_recv_topk_weights_twice)  # Only check for `topk_weight` if `expert_alignment == 1`, since its padding isn't initialized
+                if run_expanded_dispatch:
+                    expanded_recv_x_twice, expanded_recv_topk_idx_twice, expanded_recv_topk_weights_twice, expanded_handle_twice, expanded_dispatch_event_twice = \
+                        launch(buffer, 'dispatch', with_previous_event, async_with_compute_stream, expanded_dispatch_args)
+                    expanded_recv_x_twice_bf16 = get_recv_x_bf16(expanded_recv_x_twice)
+                    assert torch.equal(expanded_recv_x_bf16[valid_expanded_indices], expanded_recv_x_twice_bf16[valid_expanded_indices])
+                    if expert_alignment == 1:
+                        assert torch.equal(expanded_recv_topk_weights, expanded_recv_topk_weights_twice)  # Only check for `topk_weight` if `expert_alignment == 1`, since its padding isn't initialized
 
             # Test cumulative stats counter
             cumulative_local_expert_recv_stats = torch.zeros((num_local_experts, ), dtype=torch.int, device='cuda')
@@ -409,38 +456,43 @@ def test_dispatch_combine(buffer: deep_ep.ElasticBuffer, args: argparse.Namespac
             launch(buffer, 'dispatch', with_previous_event, async_with_compute_stream, dispatch_args)
 
             # Expanded checks
-            assert expanded_recv_topk_idx is None
-            assert expanded_handle.recv_src_metadata.size(0) == num_recv_tokens
-            expanded_safe_indices = expanded_indices.clone()
-            expanded_safe_indices[~expanded_mask] = 0
+            if run_expanded_dispatch:
+                assert expanded_recv_topk_idx is None
+                assert expanded_handle.recv_src_metadata.size(0) == num_recv_tokens
+                expanded_indices = expanded_handle.recv_src_metadata[:, 2:]
+                expanded_mask = expanded_indices >= 0
+                valid_expanded_indices = expanded_indices[expanded_mask]
+                expanded_safe_indices = expanded_indices.clone()
+                expanded_safe_indices[~expanded_mask] = 0
 
-            # Cached expand checks: compare valid token slots and verify padding is zeroed
-            cached_expanded_recv_x_bf16 = get_recv_x_bf16(cached_expanded_recv_x)
+                if not use_direct_recv_x:
+                    # Cached expand checks: compare valid token slots and verify padding is zeroed
+                    cached_expanded_recv_x_bf16 = get_recv_x_bf16(cached_expanded_recv_x)
+                    assert torch.equal(expanded_recv_x_bf16[valid_expanded_indices], cached_expanded_recv_x_bf16[valid_expanded_indices])
+                    assert torch.equal(expanded_recv_topk_weights[valid_expanded_indices], cached_expanded_recv_topk_weights[valid_expanded_indices])
 
-            assert torch.equal(expanded_recv_x_bf16[valid_expanded_indices], cached_expanded_recv_x_bf16[valid_expanded_indices])
-            assert torch.equal(expanded_recv_topk_weights[valid_expanded_indices], cached_expanded_recv_topk_weights[valid_expanded_indices])
+                    # Zero padding checks
+                    for expert_idx in range(num_local_experts):
+                        start = expanded_handle.psum_num_recv_tokens_per_expert[expert_idx].item()
+                        end = align(start, expert_alignment)
+                        assert (cached_expanded_recv_x_bf16[start:end] == 0).all()
+                        assert (cached_expanded_recv_topk_weights[start:end] == 0).all()
 
-            # Zero padding checks
-            for expert_idx in range(num_local_experts):
-                start = expanded_handle.psum_num_recv_tokens_per_expert[expert_idx].item()
-                end = align(start, expert_alignment)
-                assert (cached_expanded_recv_x_bf16[start:end] == 0).all()
-                assert (cached_expanded_recv_topk_weights[start:end] == 0).all()
-
-            # Fold expanded
-            expanded_recv_x = fold_expanded(expanded_recv_x, expanded_safe_indices, expanded_mask)
-            expanded_recv_topk_weights = expanded_recv_topk_weights[expanded_safe_indices]
+                # Fold expanded
+                expanded_recv_x = fold_expanded(expanded_recv_x, expanded_safe_indices, expanded_mask)
+                expanded_recv_topk_weights = expanded_recv_topk_weights[expanded_safe_indices]
 
             # Cached checks
-            if use_fp8_dispatch:
-                assert torch.equal(recv_x[0], cached_recv_x[0])
-                assert torch.equal(recv_x[1], cached_recv_x[1])
-            else:
-                assert torch.equal(recv_x, cached_recv_x)
-            assert torch.equal(recv_topk_idx, cached_recv_topk_idx)
-            assert torch.equal(handle.dst_buffer_slot_idx, cached_handle.dst_buffer_slot_idx)
-            assert torch.equal(handle.psum_num_recv_tokens_per_scaleup_rank, cached_handle.psum_num_recv_tokens_per_scaleup_rank)
-            assert handle.num_recv_tokens_per_expert_list == cached_handle.num_recv_tokens_per_expert_list
+            if not use_direct_recv_x:
+                if use_fp8_dispatch:
+                    assert torch.equal(recv_x[0], cached_recv_x[0])
+                    assert torch.equal(recv_x[1], cached_recv_x[1])
+                else:
+                    assert torch.equal(recv_x, cached_recv_x)
+                assert torch.equal(recv_topk_idx, cached_recv_topk_idx)
+                assert torch.equal(handle.dst_buffer_slot_idx, cached_handle.dst_buffer_slot_idx)
+                assert torch.equal(handle.psum_num_recv_tokens_per_scaleup_rank, cached_handle.psum_num_recv_tokens_per_scaleup_rank)
+                assert handle.num_recv_tokens_per_expert_list == cached_handle.num_recv_tokens_per_expert_list
 
             # Check dispatch expert count
             assert recv_x_bf16.size() == ref_recv_x_bf16.size(), f'{recv_x_bf16.size()=}, {ref_recv_x_bf16.size()=}'
@@ -452,14 +504,16 @@ def test_dispatch_combine(buffer: deep_ep.ElasticBuffer, args: argparse.Namespac
                     f'{i}, {ref_count}, {cumulative_local_expert_recv_stats[i].item()}'
                 assert aligned_ref_count == handle.num_recv_tokens_per_expert_list[i]
             psum_num_recv_tokens_per_expert_list = [0] + handle.psum_num_recv_tokens_per_expert.tolist()
-            expanded_psum_num_recv_tokens_per_expert_list = [0] + expanded_handle.psum_num_recv_tokens_per_expert.tolist()
+            if run_expanded_dispatch:
+                expanded_psum_num_recv_tokens_per_expert_list = [0] + expanded_handle.psum_num_recv_tokens_per_expert.tolist()
             for i in range(num_local_experts):
                 ref_count = (ref_recv_topk_idx == i).sum().item()
                 count = psum_num_recv_tokens_per_expert_list[i + 1] - psum_num_recv_tokens_per_expert_list[i]
-                expanded_count = (expanded_psum_num_recv_tokens_per_expert_list[i + 1] -
-                                  align(expanded_psum_num_recv_tokens_per_expert_list[i], expert_alignment))
                 assert align(ref_count, expert_alignment) == count, f'{buffer.rank_idx=}, {i=}, {ref_count=}, {count=}'
-                assert ref_count == expanded_count, f'{ref_count=}, {expanded_count=}'
+                if run_expanded_dispatch:
+                    expanded_count = (expanded_psum_num_recv_tokens_per_expert_list[i + 1] -
+                                      align(expanded_psum_num_recv_tokens_per_expert_list[i], expert_alignment))
+                    assert ref_count == expanded_count, f'{ref_count=}, {expanded_count=}'
 
             # Check dispatch scale-up received token psum
             psum_num_recv_tokens_per_scaleup_rank_list = [0] + handle.psum_num_recv_tokens_per_scaleup_rank.tolist()
@@ -469,10 +523,10 @@ def test_dispatch_combine(buffer: deep_ep.ElasticBuffer, args: argparse.Namespac
                 assert count == ref_count, f'{ref_count=}, {count=}'
 
             # Check dispatch data
-            for check_recv_x, check_recv_topk_idx, check_recv_topk_weights, check_handle in (
-                (expanded_recv_x, None, expanded_recv_topk_weights, expanded_handle),  # Expanded
-                (recv_x, recv_topk_idx, recv_topk_weights, handle),  # Unexpanded
-            ):
+            check_tuples = [(recv_x, recv_topk_idx, recv_topk_weights, handle)]
+            if run_expanded_dispatch:
+                check_tuples.append((expanded_recv_x, None, expanded_recv_topk_weights, expanded_handle))
+            for check_recv_x, check_recv_topk_idx, check_recv_topk_weights, check_handle in check_tuples:
                 for i in range(buffer.num_ranks):
                     rank_start_idx = sum(ref_num_recv_tokens_per_rank[:i])
                     rank_end_idx = rank_start_idx + ref_num_recv_tokens_per_rank[i]
@@ -502,11 +556,12 @@ def test_dispatch_combine(buffer: deep_ep.ElasticBuffer, args: argparse.Namespac
             # Combined data should also be bitwise-identical
             assert torch.equal(combined_x, ref_combined_y), \
                 f'Diff: {calc_diff(combined_x, ref_combined_y)}'
-            assert torch.equal(reduced_combined_x, ref_reduced_combined_y), \
-                f'Diff: {calc_diff(reduced_combined_x, ref_reduced_combined_y)}'
+            if run_expanded_dispatch:
+                assert torch.equal(reduced_combined_x, ref_reduced_combined_y), \
+                    f'Diff: {calc_diff(reduced_combined_x, ref_reduced_combined_y)}'
             assert torch.equal(combined_topk_weights, topk_weights), \
                 f'{calc_diff(combined_topk_weights, topk_weights)}'
-            if args.allow_multiple_reduction:
+            if run_expanded_dispatch and args.allow_multiple_reduction:
                 assert torch.equal(reduced_combined_topk_weights, topk_weights), \
                     f'{calc_diff(reduced_combined_topk_weights, topk_weights)}'
 
@@ -519,10 +574,15 @@ def test_dispatch_combine(buffer: deep_ep.ElasticBuffer, args: argparse.Namespac
 # noinspection PyUnboundLocalVariable,PyShadowingNames
 @torch.inference_mode()
 def test_loop(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
+    # Set experimental direct-recv env vars before any DeepEP imports/construction
+    if args.direct_recv_x:
+        os.environ['EP_V2_EXPERIMENTAL_DIRECT_RECV_X'] = '1'
+
     rank_idx, num_ranks, group = init_dist(local_rank, num_local_ranks, seed=args.seed)
     def construct_elastic_buffer():
         return deep_ep.ElasticBuffer(group,
                                      num_max_tokens_per_rank=args.num_tokens, hidden=args.hidden,
+                                     num_topk=args.num_topk,
                                      deterministic=args.deterministic,
                                      allow_hybrid_mode=args.allow_hybrid_mode,
                                      allow_multiple_reduction=args.allow_multiple_reduction,
@@ -584,7 +644,13 @@ if __name__ == '__main__':
     parser.add_argument('--allow-hybrid-mode', type=int, default=1, help='Whether to allow hybrid mode')
     parser.add_argument('--allow-multiple-reduction', type=int, default=1, help='Whether to allow multiple reductions')
     parser.add_argument('--prefer-overlap-with-compute', type=int, default=0, help='Whether to prefer overlap with compute')
+    parser.add_argument('--direct-recv-x', action='store_true', help='Enable EP_V2_EXPERIMENTAL_DIRECT_RECV_X (non-cached, non-expanded)')
     parser.add_argument('--deterministic', action='store_true', help='Use deterministic algorithm')
+
+    # Mode filter settings (None = test all values for that dimension)
+    parser.add_argument('--expert-alignment', type=int, default=None, choices=[1, 128], help='Filter: only test this expert alignment')
+    parser.add_argument('--use-fp8-dispatch', type=int, default=None, choices=[0, 1], help='Filter: only test FP8 (1) or BF16 (0) dispatch')
+    parser.add_argument('--num-bias', type=int, default=None, choices=[0, 1, 2], help='Filter: only test this number of bias tensors')
 
     # Test settings
     parser.add_argument('--seed', type=int, default=0, help='Default seed for pressure tests')

@@ -17,6 +17,7 @@ namespace deep_ep::elastic {
 template <bool kIsScaleupNVLink,
           bool kDoCPUSync,
           bool kReuseSlotIndices,
+          bool kDirectRecvX,
           int kNumSMs,
           int kNumNotifyWarps, int kNumDispatchWarps,
           int kNumRanks,
@@ -37,6 +38,7 @@ dispatch_impl(
     int* psum_num_recv_tokens_per_expert,
     int* num_unaligned_recv_tokens_per_expert,
     int* dst_buffer_slot_idx,
+    void* direct_recv_x,
     const int num_tokens,
     const int sf_token_stride, const int sf_hidden_stride,
     const ncclDevComm_t nccl_dev_comm, const ncclWindow_t nccl_window, void* buffer,
@@ -58,7 +60,8 @@ dispatch_impl(
     // The kernel uses a fixed space of dynamic shared memory (no static shared memory)
     extern __shared__ __align__(ptx::kNumTMAAlignBytes) int8_t smem[];
     constexpr int kNumSmemBytesForNotify = kNumNotifyThreads > 0 ?
-        math::constexpr_align(kNumRanks + kNumExperts, kNumNotifyThreads) * sizeof(int) : 0;
+        math::constexpr_align(kNumRanks + kNumExperts, kNumNotifyThreads) *
+        sizeof(int) : 0;
     EP_STATIC_ASSERT(kNumSmemBytesForNotify % ptx::kNumTMAAlignBytes == 0, "Invalid TMA alignment");
 
     // Named barrier indices
@@ -74,6 +77,8 @@ dispatch_impl(
     comm::gpu_barrier<kIsScaleupNVLink, 1, kNumRanks,
                       kNumSMs, kNumThreads, kNumQPs, kNumTimeoutCycles, comm::kDispatchTag0, false, false, true>(
         gin, workspace_layout, 0, rank_idx, sm_idx, thread_idx);
+
+    bool pending_direct_recv_x_hidden_tma_store = false;
 
     // Different warp roles
     if (warp_idx < kNumNotifyWarps) {
@@ -212,7 +217,8 @@ dispatch_impl(
                 if (num_unaligned_recv_tokens_per_expert != nullptr)
                     num_unaligned_recv_tokens_per_expert[i] = sum;
 
-                expert_count[i] = math::align(sum, kExpertAlignment);
+                const auto aligned_sum = math::align(sum, kExpertAlignment);
+                expert_count[i] = aligned_sum;
 
                 // Update statistics counters
                 if (cumulative_local_expert_recv_stats != nullptr)
@@ -241,8 +247,9 @@ dispatch_impl(
                     const auto sum = psum + ptx::warp_inclusive_sum(value, lane_idx);
 
                     // Store into global memory
-                    if (idx < n + is_exclusive)
+                    if (idx < n + is_exclusive) {
                         out[idx] = sum;
+                    }
 
                     // Update `psum` by using the last lane's value
                     psum = ptx::exchange(sum, 31);
@@ -255,17 +262,40 @@ dispatch_impl(
                 // Exclusive prefix sum for later expanding
                 do_psum(expert_count, psum_num_recv_tokens_per_expert, kNumExpertsPerRank, 1);
             }
+
+            if constexpr (kDirectRecvX) {
+                // Send this receiver's compact output base for each source rank back to the source.
+                // Source dispatch warps use it to write hidden states directly into compact recv_x.
+                for (int i = thread_idx; i < kNumRanks; i += kNumNotifyThreads) {
+                    const auto compact_rank_base = i == 0 ? 0 : psum_num_recv_tokens_per_scaleup_rank[i - 1];
+                    gin.put_value<team_t>(
+                        workspace_layout.get_scaleout_channel_signaled_tail_ptr(rank_idx, 0),
+                        math::encode_decode_positive(static_cast<int64_t>(compact_rank_base)),
+                        i,
+                        ncclGinOptFlagsAggregateRequests);
+                }
+                gin.flush();
+            }
+
         }
+
     } else {
         const int dispatch_warp_idx = warp_idx - kNumNotifyWarps;
 
         // Buffer layouts
         const auto token_layout = layout::TokenLayout(kNumHiddenBytes, kNumSFPacks * sizeof(sf_pack_t), kNumTopk, true);
         const auto tma_buffer = layout::BufferLayout<true>(token_layout, kNumDispatchWarps, 1,
-            math::advance_ptr<int>(smem, kNumSmemBytesForNotify)).get_rank_buffer(dispatch_warp_idx).get_token_buffer(0);
+            math::advance_ptr<int>(smem, kNumSmemBytesForNotify))
+            .get_rank_buffer(dispatch_warp_idx).get_token_buffer(0);
         auto recv_buffer = layout::BufferLayout<false>(token_layout, kNumRanks, kNumMaxTokensPerRank, buffer);
         auto send_buffer = layout::BufferLayout<false>(token_layout, 1, kNumMaxTokensPerRank, recv_buffer.get_buffer_end_ptr());
         recv_buffer = recv_buffer.get_rank_buffer(rank_idx);
+        constexpr int kNumMetadataBytes = math::constexpr_align(
+            kNumTopk * (int(sizeof(int)) + int(sizeof(float))) + (1 + kNumTopk) * int(sizeof(int)),
+            ptx::kNumTMAAlignBytes);
+        constexpr int kNumSidecarBytes =
+            math::constexpr_align(kNumSFPacks * int(sizeof(sf_pack_t)), ptx::kNumTMAAlignBytes) +
+            kNumMetadataBytes;
 
         // Init TMA
         ptx::arrival_phase phase = 0;
@@ -274,14 +304,18 @@ dispatch_impl(
             ptx::mbarrier_init_with_fence(mbarrier_ptr, 1);
         __syncwarp();
 
-        // Iterate all tokens
         const auto token_start = dispatch_warp_idx * kNumSMs + sm_idx;
         const auto token_stride = kNumDispatchWarps * kNumSMs;
+        // Iterate all tokens
         for (int token_idx = token_start; token_idx < num_tokens; token_idx += token_stride) {
             const auto token_i64_idx = static_cast<int64_t>(token_idx);
 
-            // Wait TMA store arrivals
+            // Wait TMA store arrivals before reusing the per-warp staging buffer.
+            // In direct-recv-x NVLink mode, the previous iteration may leave hidden recv_x
+            // stores outstanding after sidecar has been flushed for PDL, so this wait is
+            // the hidden-store completion point instead of the final epilogue barrier.
             ptx::tma_store_wait();
+            pending_direct_recv_x_hidden_tma_store = false;
             __syncwarp();
 
             // Issue data TMA
@@ -313,18 +347,21 @@ dispatch_impl(
 
             // Load top-k indices and weights
             EP_STATIC_ASSERT(kNumTopk <= 32, "Insufficient lanes for loading top-k indices");
+            int stored_dst_expert_idx = -1;
             int stored_dst_rank_idx = -1;
             if (lane_idx < kNumTopk) {
                 const auto uncasted_dst_expert_idx = __ldg(topk_idx + token_idx * kNumTopk + lane_idx);
-                const auto dst_expert_idx = static_cast<int>(uncasted_dst_expert_idx);
-                stored_dst_rank_idx = dst_expert_idx >= 0 ? dst_expert_idx / kNumExpertsPerRank : -1;
-                tma_buffer.get_topk_idx_ptr()[lane_idx] = dst_expert_idx;
+                stored_dst_expert_idx = static_cast<int>(uncasted_dst_expert_idx);
+                stored_dst_rank_idx = stored_dst_expert_idx >= 0 ? stored_dst_expert_idx / kNumExpertsPerRank : -1;
+                tma_buffer.get_topk_idx_ptr()[lane_idx] = stored_dst_expert_idx;
                 if (topk_weights != nullptr)
                     tma_buffer.get_topk_weights_ptr()[lane_idx] = __ldg(topk_weights + token_idx * kNumTopk + lane_idx);
                 if (copied_topk_idx != nullptr)
                     copied_topk_idx[token_idx * kNumTopk + lane_idx] = uncasted_dst_expert_idx;
             }
             __syncwarp();
+
+            int direct_recv_x_idx = -1;
 
             // Add source metadata (rank index and token index)
             // Please ensure no TMA buffer shared memory writes after this part
@@ -351,6 +388,34 @@ dispatch_impl(
             }
             __syncwarp();
 
+            // In the direct-recv-x experiment, the receiver publishes the source-rank base
+            // for its compact recv_x layout. The sender combines that base with the
+            // rank-major slot index it already owns.
+            if constexpr (kDirectRecvX) {
+                if (stored_dst_slot_idx >= 0) {
+                    const auto direct_recv_x_base_ptr =
+                        workspace_layout.get_scaleout_channel_signaled_tail_ptr(stored_dst_rank_idx, 0);
+                    int decoded_base = -1;
+                    comm::timeout_while<kNumTimeoutCycles>([&](const bool& is_last_check) {
+                        const auto decoded_base_i64 = math::encode_decode_positive(
+                            ptx::ld_acquire_sys<int64_t>(direct_recv_x_base_ptr));
+                        decoded_base = static_cast<int>(decoded_base_i64);
+                        if (math::is_decoded_positive_ready(decoded_base_i64))
+                            return true;
+
+                        if (is_last_check) {
+                            printf("DeepEP direct recv_x prefix timeout, rank: %d, dst rank: %d, "
+                                   "slot: %d, decoded base: %d\n",
+                                   rank_idx, stored_dst_rank_idx, stored_dst_slot_idx, decoded_base);
+                        }
+                        return false;
+                    });
+                    EP_DEVICE_ASSERT(decoded_base >= 0);
+                    direct_recv_x_idx = decoded_base + stored_dst_slot_idx;
+                }
+            }
+            __syncwarp();
+
             // Wait TMA load arrival
             // NOTES: this arrive must be after the `ptx::cp_async_mbarrier_arrive`
             if (ptx::elect_one_sync()) {
@@ -360,7 +425,8 @@ dispatch_impl(
             __syncwarp();
 
             // TMA store to send buffer
-            auto send_buffer_ptr = send_buffer.get_token_buffer(token_idx).get_base_ptr();
+            auto send_buffer_token = send_buffer.get_token_buffer(token_idx);
+            auto send_buffer_ptr = send_buffer_token.get_base_ptr();
             if constexpr (not kIsScaleupNVLink) {
                 if (ptx::elect_one_sync())
                     ptx::tma_store_1d(send_buffer_ptr, tma_buffer.get_base_ptr(), tma_buffer.get_num_bytes<false>());
@@ -370,11 +436,44 @@ dispatch_impl(
 
             // Issue TMA NVLink stores
             EP_STATIC_ASSERT(kNumTopk <= 32, "Invalid top-k selection");
-            const auto dst_ptr = stored_dst_slot_idx >= 0 ?
-                gin.get_sym_ptr<team_t>(recv_buffer.get_token_buffer(stored_dst_slot_idx).get_base_ptr(), stored_dst_rank_idx) :
-                nullptr;
-            if (dst_ptr != nullptr)
-                ptx::tma_store_1d(dst_ptr, tma_buffer.get_base_ptr(), tma_buffer.get_num_bytes<false>());
+            if constexpr (kDirectRecvX) {
+                void* dst_sidecar_ptr = nullptr;
+                if (stored_dst_slot_idx >= 0) {
+                    const auto dst_token = recv_buffer.get_token_buffer(stored_dst_slot_idx);
+                    dst_sidecar_ptr = gin.get_sym_ptr<team_t>(dst_token.get_sf_ptr(), stored_dst_rank_idx);
+                }
+                // Direct-recv-x still lets the copy epilogue read SF and metadata/top-k from staging.
+                // Keep this in a separate TMA group from the hidden direct store so the PDL
+                // copy epilogue can wait only for sidecar visibility.
+                if (dst_sidecar_ptr != nullptr)
+                    ptx::tma_store_1d(dst_sidecar_ptr, tma_buffer.get_sf_ptr(), kNumSidecarBytes);
+                if constexpr (kIsScaleupNVLink)
+                    ptx::tma_store_commit();
+
+                // Write hidden states to direct_recv_x only when prefix sum is valid
+                const auto dst_x_ptr = direct_recv_x_idx >= 0 ?
+                    gin.get_sym_ptr<team_t>(
+                        math::advance_ptr(direct_recv_x, static_cast<int64_t>(direct_recv_x_idx) * kNumHiddenBytes),
+                        stored_dst_rank_idx) :
+                        nullptr;
+                if (dst_x_ptr != nullptr) {
+                    ptx::tma_store_1d(dst_x_ptr, tma_buffer.get_hidden_ptr(), kNumHiddenBytes);
+                    if constexpr (kIsScaleupNVLink)
+                        pending_direct_recv_x_hidden_tma_store = true;
+                }
+                if constexpr (kIsScaleupNVLink) {
+                    pending_direct_recv_x_hidden_tma_store =
+                        ptx::gather(pending_direct_recv_x_hidden_tma_store) != 0;
+                    __syncwarp();
+                }
+            } else {
+                const auto dst_ptr = stored_dst_slot_idx >= 0 ?
+                    gin.get_sym_ptr<team_t>(recv_buffer.get_token_buffer(stored_dst_slot_idx).get_base_ptr(), stored_dst_rank_idx) :
+                    nullptr;
+                if (dst_ptr != nullptr) {
+                    ptx::tma_store_1d(dst_ptr, tma_buffer.get_base_ptr(), tma_buffer.get_num_bytes<false>());
+                }
+            }
             ptx::tma_store_commit();
             __syncwarp();
 
@@ -385,27 +484,84 @@ dispatch_impl(
                 __syncwarp();
 
                 // NOTES: we should skip the NVLink accessible ranks
-                if (stored_dst_slot_idx >= 0 and dst_ptr == nullptr) {
-                    gin.put<team_t>(recv_buffer.get_token_buffer(stored_dst_slot_idx).get_base_ptr(),
-                                    send_buffer_ptr, tma_buffer.get_num_bytes<false>(), stored_dst_rank_idx);
+                if constexpr (kDirectRecvX) {
+                    const auto dst_x_ptr = direct_recv_x_idx >= 0 ?
+                        gin.get_sym_ptr<team_t>(
+                            math::advance_ptr(direct_recv_x, static_cast<int64_t>(direct_recv_x_idx) * kNumHiddenBytes),
+                            stored_dst_rank_idx) :
+                        nullptr;
+                    if (stored_dst_slot_idx >= 0 and dst_x_ptr == nullptr and direct_recv_x_idx >= 0) {
+                        gin.put<team_t>(
+                            math::advance_ptr(direct_recv_x, static_cast<int64_t>(direct_recv_x_idx) * kNumHiddenBytes),
+                            send_buffer_token.get_hidden_ptr(),
+                            kNumHiddenBytes, stored_dst_rank_idx,
+                            ncclGinOptFlagsAggregateRequests);
+                        gin.put<team_t>(
+                            recv_buffer.get_token_buffer(stored_dst_slot_idx).get_sf_ptr(),
+                            send_buffer_token.get_sf_ptr(),
+                            kNumSidecarBytes, stored_dst_rank_idx,
+                            ncclGinOptFlagsAggregateRequests);
+                    } else if (stored_dst_slot_idx >= 0 and direct_recv_x_idx < 0) {
+                        // Fallback: timeout on prefix sum, write SF/metadata only via RDMA
+                        gin.put<team_t>(
+                            recv_buffer.get_token_buffer(stored_dst_slot_idx).get_sf_ptr(),
+                            send_buffer_token.get_sf_ptr(),
+                            kNumSidecarBytes, stored_dst_rank_idx,
+                            ncclGinOptFlagsAggregateRequests);
+                    }
+                } else {
+                    const auto dst_ptr = stored_dst_slot_idx >= 0 ?
+                        gin.get_sym_ptr<team_t>(recv_buffer.get_token_buffer(stored_dst_slot_idx).get_base_ptr(), stored_dst_rank_idx) :
+                        nullptr;
+                    if (stored_dst_slot_idx >= 0 and dst_ptr == nullptr) {
+                        gin.put<team_t>(recv_buffer.get_token_buffer(stored_dst_slot_idx).get_base_ptr(),
+                                        send_buffer_ptr, tma_buffer.get_num_bytes<false>(), stored_dst_rank_idx);
+                    }
                 }
                 __syncwarp();
             }
         }
     }
 
-    // Barrier to ensure data arrival
-    comm::gpu_barrier<kIsScaleupNVLink, 1, kNumRanks,
-                      kNumSMs, kNumThreads, kNumQPs, kNumTimeoutCycles, comm::kDispatchTag1, true, true, false>(
-        gin, workspace_layout, 0, rank_idx, sm_idx, thread_idx);
 
-    // Trigger the copy epilogue kernel
+    // Barrier to ensure sidecar data arrival for the copy epilogue.
+    // Direct-recv-x hidden stores target recv_x directly, and the copy epilogue skips
+    // hidden copy, so only the sidecar TMA group must be flushed before PDL. If this
+    // warp did not issue a final hidden store, there is no later group to keep pending.
+    if constexpr (kDirectRecvX and kIsScaleupNVLink) {
+        if (pending_direct_recv_x_hidden_tma_store)
+            ptx::tma_store_wait<1>();
+        else
+            ptx::tma_store_wait();
+        __syncwarp();
+        comm::gpu_barrier<kIsScaleupNVLink, 1, kNumRanks,
+                          kNumSMs, kNumThreads, kNumQPs, kNumTimeoutCycles, comm::kDispatchTag1, false, true, false>(
+            gin, workspace_layout, 0, rank_idx, sm_idx, thread_idx);
+    } else {
+        comm::gpu_barrier<kIsScaleupNVLink, 1, kNumRanks,
+                          kNumSMs, kNumThreads, kNumQPs, kNumTimeoutCycles, comm::kDispatchTag1, true, true, false>(
+            gin, workspace_layout, 0, rank_idx, sm_idx, thread_idx);
+    }
+
+
+    // Trigger the copy epilogue kernel after sidecar is visible. Hidden direct stores
+    // may still be outstanding and can overlap with the epilogue, which does not copy hidden.
     cudaTriggerProgrammaticLaunchCompletion();
+
+    if constexpr (kDirectRecvX and kIsScaleupNVLink) {
+        if (pending_direct_recv_x_hidden_tma_store)
+            ptx::tma_store_wait();
+        __syncwarp();
+    }
 
     // Clean atomic counters
     EP_STATIC_ASSERT(kNumRanks <= kNumThreads, "Insufficient threads");
     if (not kReuseSlotIndices and sm_idx == 0 and thread_idx < kNumRanks)
         workspace_layout.get_scaleup_atomic_sender_counter()[thread_idx] = 0;
+    if constexpr (kDirectRecvX) {
+        if (sm_idx == 0 and thread_idx < kNumRanks)
+            workspace_layout.get_scaleout_channel_signaled_tail_ptr(thread_idx, 0)[0] = 0;
+    }
 }
 
 }  // namespace deep_ep::elastic
