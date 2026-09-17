@@ -76,6 +76,9 @@ struct WorkspaceLayout {
         // AGRS signals
         num_bytes += (kNumMaxInflightAGRS + 1) * kNumMaxRanks * sizeof(int);
 
+        // Per-source-rank received token counts (hybrid deterministic mode only)
+        num_bytes += kNumMaxRanks * sizeof(int);
+
         return num_bytes;
     }
 
@@ -173,6 +176,13 @@ struct WorkspaceLayout {
         const auto base_ptr = math::advance_ptr<int>(
             get_agrs_recv_signal_ptr(0, 0), kNumMaxInflightAGRS * kNumMaxRanks * sizeof(int));
         return base_ptr + rank_idx;
+    }
+
+    // Per-source-rank received token counts, used by the hybrid deterministic mode only.
+    __forceinline__ __device__ __host__ int* get_deterministic_src_rank_count_ptr(const int& row_idx = 0) const {
+        const auto base_ptr = math::advance_ptr<int>(
+            get_agrs_session_signal_ptr(0), kNumMaxRanks * sizeof(int));
+        return base_ptr + row_idx;
     }
 };
 

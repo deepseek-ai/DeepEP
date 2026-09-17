@@ -8,7 +8,11 @@
 
 namespace deep_ep::elastic {
 
-template <bool kDoExpand, bool kCachedMode, bool kDoZeroPadding,
+// `kRowForm` selects the deterministic interpretation of the hybrid scale-up receive buffer:
+// every global source rank owns a private (partially filled) row of `kNumMaxTokensPerRank` slots,
+// so a token sits at `segment = src_scaleup_rank_idx` and
+// `in-segment offset = src_scaleout_rank_idx * kNumMaxTokensPerRank + row-local slot`
+template <bool kDoExpand, bool kCachedMode, bool kDoZeroPadding, bool kRowForm,
           // NOTES: this channel concept only applies for scale-out ranks
           int kNumSMs, int kNumChannels, int kNumWarps,
           int kNumScaleoutRanks, int kNumScaleupRanks,
@@ -63,6 +67,13 @@ dispatch_copy_epilogue_impl(void* buffer, void* workspace,
     if (num_recv_tokens == kNumMaxTokensPerRank * kNumRanks)
         num_recv_tokens = psum_num_recv_tokens_per_scaleup_rank[kNumScaleupRanks - 1];
 
+    // Traversal source: the per-scale-up-rank prefix sums, or the per-source-rank ones (stored
+    // right after them) for the row-form layout
+    constexpr int kNumTraversalRows = kRowForm ? kNumRanks : kNumScaleupRanks;
+    const auto traversal_psum = kRowForm ?
+        psum_num_recv_tokens_per_scaleup_rank + kNumScaleupRanks :
+        psum_num_recv_tokens_per_scaleup_rank;
+
     // Current rank indices should be maintained
     int current_rank_idx = -1, stored_psum_num_recv_tokens;
     int current_rank_start = 0, current_rank_end = 0;
@@ -71,14 +82,22 @@ dispatch_copy_epilogue_impl(void* buffer, void* workspace,
         // Calculate token index in the buffer
         while (i >= current_rank_end) {
             current_rank_idx += 1;
-            EP_DEVICE_ASSERT(current_rank_idx < kNumScaleupRanks);
+            EP_DEVICE_ASSERT(current_rank_idx < kNumTraversalRows);
             const auto stored_lane_idx = current_rank_idx % 32;
-            if (stored_lane_idx == 0 and current_rank_idx + lane_idx < kNumScaleupRanks)
-                stored_psum_num_recv_tokens = psum_num_recv_tokens_per_scaleup_rank[current_rank_idx + lane_idx];
+            if (stored_lane_idx == 0 and current_rank_idx + lane_idx < kNumTraversalRows)
+                stored_psum_num_recv_tokens = traversal_psum[current_rank_idx + lane_idx];
             current_rank_start = current_rank_end;
             current_rank_end = ptx::exchange(stored_psum_num_recv_tokens, stored_lane_idx);
         }
-        const auto buffer_token = scaleup_buffer.get_rank_buffer(current_rank_idx).get_token_buffer(i - current_rank_start);
+
+        // Locate the token: the row-form traversal index is a global source rank
+        int buffer_segment_idx = current_rank_idx;
+        int buffer_token_idx = i - current_rank_start;
+        if constexpr (kRowForm) {
+            buffer_segment_idx = current_rank_idx / kNumScaleoutRanks;
+            buffer_token_idx = (current_rank_idx % kNumScaleoutRanks) * kNumMaxTokensPerRank + buffer_token_idx;
+        }
+        const auto buffer_token = scaleup_buffer.get_rank_buffer(buffer_segment_idx).get_token_buffer(buffer_token_idx);
 
         // Wait buffer releases
         ptx::tma_store_wait();
@@ -195,7 +214,9 @@ dispatch_copy_epilogue_impl(void* buffer, void* workspace,
                 if constexpr (kNumScaleoutRanks == 1) {
                     recv_src_metadata[i * kMetadataStride + 1] = current_rank_idx * kNumTopk + master_src_topk_idx;
                 } else {
-                    recv_src_metadata[i * kMetadataStride + 1] = (i - current_rank_start) * kNumTopk + master_src_topk_idx;
+                    // NOTES: the in-segment offset, which combine divides by `kNumTopk` to address
+                    // the very same slot (`buffer_token_idx` already carries the row base)
+                    recv_src_metadata[i * kMetadataStride + 1] = buffer_token_idx * kNumTopk + master_src_topk_idx;
                 }
             }
             __syncwarp();

@@ -3,7 +3,7 @@ import os
 import math
 import torch
 import torch.distributed as dist
-from typing import Callable, Optional, Tuple, Union, List, Sequence
+from typing import Callable, Optional, Tuple, Union, Sequence
 from contextlib import contextmanager
 
 # noinspection PyUnresolvedReferences
@@ -125,6 +125,8 @@ class EPHandle:
         sort_keys = self.cached_recv_src_metadata_before_sort[:, 0]
 
         # Ignore trailing tokens by setting their `sort_keys` to max
+        # NOTES: this sorting epilogue is only used by the expand layout, which never enables the
+        # row-form dispatch, so the last element is still the per-scale-up-rank total here
         num_recv_tokens = self.psum_num_recv_tokens_per_scaleup_rank[-1] if not do_cpu_sync else self.recv_src_metadata.shape[0]
         if not do_cpu_sync:
             oob_tokens_mask = torch.arange(0, self.recv_src_metadata.shape[0], device=self.recv_src_metadata.device) >= num_recv_tokens
@@ -349,6 +351,7 @@ class ElasticBuffer:
                                         allow_hybrid_mode,
                                         allow_multiple_reduction,
                                         prefer_overlap_with_compute,
+                                        deterministic,
                                         sl_idx, num_allocated_qps,
                                         num_cpu_timeout_secs, num_gpu_timeout_secs,
                                         self.explicitly_destroy)
@@ -861,6 +864,7 @@ class ElasticBuffer:
                  num_max_tokens_per_rank: Optional[int] = None,
                  expert_alignment: Optional[int] = None,
                  num_sms: int = 0, num_qps: int = 0,
+                 num_prologue_sms: int = 0,
                  previous_event: Optional[EventHandle] = None,
                  previous_event_before_epilogue: Optional[EventHandle] = None,
                  async_with_compute_stream: bool = False,
@@ -896,6 +900,8 @@ class ElasticBuffer:
             expert_alignment: align the number of tokens received by each local expert to this variable.
             num_sms: the number of SMs to use (0 for automatic via `get_theoretical_num_sms`).
             num_qps: the number of RDMA QPs to use (0 for automatic via `get_theoretical_num_qps`).
+            num_prologue_sms: the number of SMs for the deterministic prologue kernel
+                (0 for automatic: at most 64 SMs). Only used when `deterministic` is enabled.
             previous_event: the event to wait before actually executing the kernel.
                 If set, `allocate_on_comm_stream` must also be `True`.
             previous_event_before_epilogue: the event to wait before actually executing the copy epilogue.
@@ -927,7 +933,7 @@ class ElasticBuffer:
         num_topk = (handle.topk_idx if topk_idx is None else topk_idx).shape[1]
         num_sms = self.get_theoretical_num_sms(num_experts, num_topk) if num_sms == 0 else num_sms
         num_qps = self.get_theoretical_num_qps(num_sms) if num_qps == 0 else num_qps
-        assert num_qps <= self.num_allocated_qps, f'Allocated QPs are not enough'
+        assert num_qps <= self.num_allocated_qps, 'Allocated QPs are not enough'
 
         # Unpack SF
         x, sf = x if isinstance(x, tuple) else (x, None)
@@ -988,6 +994,7 @@ class ElasticBuffer:
                                         num_max_tokens_per_rank,
                                         num_experts, expert_alignment,
                                         num_sms, num_qps,
+                                        num_prologue_sms,
                                         previous_event,
                                         previous_event_before_epilogue,
                                         async_with_compute_stream, allocate_on_comm_stream,
@@ -1018,7 +1025,10 @@ class ElasticBuffer:
 
         # Deterministic epilogue
         # NOTES: when we change the metadata layout, the epilogue should also be changed
-        if self.deterministic:
+        # The non-expand layout is already reproducible through the kernel-side path (the prologue
+        # pre-computes every destination slot), so the sort is only needed for the expand layout,
+        # whose output rows are still assigned with atomics
+        if self.deterministic and do_expand:
             epilogue = functools.partial(
                 handle.deterministic_sort,
                 do_cpu_sync, is_cached_dispatch,
@@ -1085,7 +1095,7 @@ class ElasticBuffer:
         # Automatic decide SM and QP count
         num_sms = handle.num_sms if num_sms == 0 else num_sms
         num_qps = self.get_theoretical_num_qps(num_sms) if num_qps == 0 else num_qps
-        assert num_qps <= self.num_allocated_qps, f'Allocated QPs are not enough'
+        assert num_qps <= self.num_allocated_qps, 'Allocated QPs are not enough'
 
         bias_0, bias_1 = ElasticBuffer._unpack_bias(bias)
         combined_x, combined_topk_weights, event = \
