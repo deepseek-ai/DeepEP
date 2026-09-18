@@ -38,6 +38,15 @@ Despite its lightweight design, DeepEP's performance matches or exceeds hardware
 
 For the legacy V1 documentation (NVSHMEM-based), see [docs/legacy.md](docs/legacy.md).
 
+
+## Documentation
+
+For a source-driven learning path that breaks the system down from architecture to tuning, see:
+
+- [Documentation index](docs/README.md)
+- [English docs](docs/en/README.md)
+- [中文文档](docs/zh/README.md)
+
 ## Performance
 
 Following V3's configuration, we tested with 8K tokens per batch, 7168 hidden dimensions, top 8 experts, FP8 dispatching, and BF16 combining, and obtained the following results:
