@@ -490,6 +490,8 @@ __global__ void __launch_bounds__(((kNumDispatchRDMASenderWarps + 1 + LEGACY_NUM
     const auto sm_id = static_cast<int>(blockIdx.x);
     const auto num_threads = static_cast<int>(blockDim.x), num_warps = num_threads / 32;
     const auto thread_id = static_cast<int>(threadIdx.x), warp_id = thread_id / 32, lane_id = get_lane_id();
+    const auto num_devs = ibgda_get_state()->num_devices_initialized;
+    const auto rc_per_pe = ibgda_get_state()->num_rc_per_pe;
     const auto num_channels = num_sms / 2, channel_id = sm_id / 2;
     const bool is_forwarder = sm_id % 2 == 0;
     const auto rdma_rank = rank / LEGACY_NUM_MAX_NVL_PEERS, nvl_rank = rank % LEGACY_NUM_MAX_NVL_PEERS;
@@ -811,6 +813,7 @@ __global__ void __launch_bounds__(((kNumDispatchRDMASenderWarps + 1 + LEGACY_NUM
 
                 // Issue RDMA send
                 auto num_tokens_to_issue = min(num_tokens_processed, num_max_rdma_chunked_send_tokens);
+                const auto qp_id = channel_id + (channel_id % num_devs) * rc_per_pe;
                 EP_DEVICE_ASSERT(num_tokens_to_issue >= 0 and num_tokens_to_issue <= synced_num_tokens_to_send);
                 if (dst_rdma_rank != rdma_rank) {
                     auto dst_slot_idx = synced_last_issued_tail % num_max_rdma_chunked_recv_tokens;
@@ -824,7 +827,7 @@ __global__ void __launch_bounds__(((kNumDispatchRDMASenderWarps + 1 + LEGACY_NUM
                                                       src_ptr,
                                                       num_bytes_per_msg,
                                                       translate_dst_rdma_rank<kLowLatencyMode>(dst_rdma_rank, nvl_rank),
-                                                      channel_id,
+                                                      qp_id,
                                                       lane_id,
                                                       0);
                 } else {
@@ -840,7 +843,7 @@ __global__ void __launch_bounds__(((kNumDispatchRDMASenderWarps + 1 + LEGACY_NUM
                     nvshmemi_ibgda_amo_nonfetch_add(rdma_channel_tail.buffer(rdma_rank),
                                                     num_tokens_to_issue,
                                                     translate_dst_rdma_rank<kLowLatencyMode>(dst_rdma_rank, nvl_rank),
-                                                    channel_id,
+                                                    qp_id,
                                                     dst_rdma_rank == rdma_rank);
                 }
                 __syncwarp();
@@ -1045,12 +1048,13 @@ __global__ void __launch_bounds__(((kNumDispatchRDMASenderWarps + 1 + LEGACY_NUM
                 break;
 
             // Update remote head
+            const auto qp_id = channel_id + (channel_id % num_devs) * rc_per_pe + num_channels;
             if (min_head != std::numeric_limits<int>::max() and min_head >= last_head + num_max_rdma_chunked_send_tokens and
                 lane_id < kNumRDMARanks) {
                 nvshmemi_ibgda_amo_nonfetch_add(rdma_channel_head.buffer(rdma_rank),
                                                 min_head - last_head,
                                                 translate_dst_rdma_rank<kLowLatencyMode>(lane_id, nvl_rank),
-                                                channel_id + num_channels,
+                                                qp_id,
                                                 lane_id == rdma_rank);
                 last_head = min_head;
             }
@@ -1749,6 +1753,8 @@ __global__ void __launch_bounds__((kNumForwarders + 1) * 32, 1) combine(int4* co
     const auto num_threads = static_cast<int>(blockDim.x), num_warps = num_threads / 32;
     const auto thread_id = static_cast<int>(threadIdx.x), lane_id = get_lane_id();
     const auto num_channels = static_cast<int>(gridDim.x) / 2, channel_id = sm_id / 2;
+    const auto num_devs = ibgda_get_state()->num_devices_initialized;
+    const auto rc_per_pe = ibgda_get_state()->num_rc_per_pe;
     const bool is_forwarder_sm = sm_id % 2 == 1;
 
     EP_DEVICE_ASSERT(num_topk <= 32);
@@ -2113,6 +2119,7 @@ __global__ void __launch_bounds__((kNumForwarders + 1) * 32, 1) combine(int4* co
 
                 // Issue RDMA send
                 if (sub_warp_id == kNumWarpsPerForwarder - 1) {
+                    const auto qp_id = channel_id + (channel_id % num_devs) * rc_per_pe;
                     if (dst_rdma_rank != rdma_rank) {
                         auto rdma_slot_idx = token_start_idx % num_max_rdma_chunked_recv_tokens;
                         const size_t num_bytes_per_msg = num_chunked_tokens * num_bytes_per_token;
@@ -2124,7 +2131,7 @@ __global__ void __launch_bounds__((kNumForwarders + 1) * 32, 1) combine(int4* co
                                                           src_ptr,
                                                           num_bytes_per_msg,
                                                           translate_dst_rdma_rank<kLowLatencyMode>(dst_rdma_rank, nvl_rank),
-                                                          channel_id,
+                                                          qp_id,
                                                           lane_id,
                                                           0);
                     } else {
@@ -2137,7 +2144,7 @@ __global__ void __launch_bounds__((kNumForwarders + 1) * 32, 1) combine(int4* co
                         nvshmemi_ibgda_amo_nonfetch_add(rdma_channel_tail.buffer(rdma_rank),
                                                         num_chunked_tokens,
                                                         translate_dst_rdma_rank<kLowLatencyMode>(dst_rdma_rank, nvl_rank),
-                                                        channel_id,
+                                                        qp_id,
                                                         dst_rdma_rank == rdma_rank);
                     }
                 }
@@ -2250,12 +2257,13 @@ __global__ void __launch_bounds__((kNumForwarders + 1) * 32, 1) combine(int4* co
                     for (int i = 0; i < kNumRDMAReceivers; ++i)
                         if (not rdma_receiver_retired[i])
                             min_head = min(min_head, rdma_receiver_rdma_head[i][dst_rdma_rank]);
+                    const auto qp_id = channel_id + (channel_id % num_devs) * rc_per_pe + num_channels;
                     if (min_head != std::numeric_limits<int>::max() and min_head >= last_rdma_head + num_max_rdma_chunked_send_tokens and
                         lane_id < kNumRDMARanks) {
                         nvshmemi_ibgda_amo_nonfetch_add(rdma_channel_head.buffer(rdma_rank),
                                                         min_head - last_rdma_head,
                                                         translate_dst_rdma_rank<kLowLatencyMode>(dst_rdma_rank, nvl_rank),
-                                                        channel_id + num_channels,
+                                                        qp_id,
                                                         dst_rdma_rank == rdma_rank);
                         last_rdma_head = min_head;
                     }

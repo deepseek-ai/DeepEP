@@ -159,6 +159,7 @@ __global__ __launch_bounds__(1024, 1) void dispatch(void* packed_recv_x,
     const auto num_sms = static_cast<int>(gridDim.x);
     const auto num_warps = num_warp_groups * num_warps_per_group;
     const auto num_local_experts = num_experts / num_ranks;
+    const auto num_devs = ibgda_get_state()->num_devices_initialized;
     const auto warp_group_id = warp_id / num_warps_per_group;
     const auto sub_warp_id = warp_id % num_warps_per_group;
     const auto responsible_expert_idx = sm_id * num_warp_groups + warp_group_id;
@@ -261,9 +262,10 @@ __global__ __launch_bounds__(1024, 1) void dispatch(void* packed_recv_x,
                     dst_expert_local_idx * num_ranks * num_max_dispatch_tokens_per_rank * num_bytes_per_msg +
                     rank * num_max_dispatch_tokens_per_rank * num_bytes_per_msg + slot_idx * num_bytes_per_msg;
                 const auto dst_p2p_ptr = nvshmemi_get_p2p_ptr(dst_ptr, rank, dst_rank);
+                const auto qp_id = dst_expert_local_idx + (dst_expert_local_idx % num_devs) * num_local_experts;
                 if (not is_rank_masked<true>(mask_buffer_ptr, dst_rank)) {
                     if (dst_p2p_ptr == 0) {
-                        nvshmemi_ibgda_put_nbi_warp(dst_ptr, src_ptr, num_bytes_per_msg, dst_rank, dst_expert_local_idx, lane_id, slot_idx);
+                        nvshmemi_ibgda_put_nbi_warp(dst_ptr, src_ptr, num_bytes_per_msg, dst_rank, qp_id, lane_id, slot_idx);
                     } else {
                         // NOTES: only 2 load iterations for 7K hidden with 8 unrolls
                         const auto* src_int4_ptr = reinterpret_cast<const int4*>(src_ptr);
@@ -331,9 +333,10 @@ __global__ __launch_bounds__(1024, 1) void dispatch(void* packed_recv_x,
             ;
         auto dst_ptr = reinterpret_cast<uint64_t>(rdma_recv_count + dst_expert_local_idx * num_ranks + rank);
         auto dst_p2p_ptr = nvshmemi_get_p2p_ptr(dst_ptr, rank, dst_rank);
+        const auto qp_id = dst_expert_local_idx + (dst_expert_local_idx % num_devs) * num_local_experts;
         if (not is_rank_masked(mask_buffer_ptr, dst_rank)) {
             if (dst_p2p_ptr == 0) {
-                nvshmemi_ibgda_amo_nonfetch_add(reinterpret_cast<int*>(dst_ptr), -num_tokens_sent - 1, dst_rank, dst_expert_local_idx);
+                nvshmemi_ibgda_amo_nonfetch_add(reinterpret_cast<int*>(dst_ptr), -num_tokens_sent - 1, dst_rank, qp_id);
             } else {
                 st_release_sys_global(reinterpret_cast<int*>(dst_p2p_ptr), -num_tokens_sent - 1);
             }
@@ -743,6 +746,7 @@ __global__ __launch_bounds__(1024, 1) void combine(void* combined_x,
     const auto num_threads = __shfl_sync(0xffffffff, static_cast<int>(blockDim.x), 0);
     const auto warp_id = __shfl_sync(0xffffffff, thread_id / 32, 0), lane_id = get_lane_id();
     const auto num_local_experts = num_experts / num_ranks;
+    const auto num_devs = ibgda_get_state()->num_devices_initialized;
     const auto warp_group_id = warp_id / num_warps_per_group;
     const auto sub_warp_id = warp_id % num_warps_per_group;
     const auto responsible_expert_idx = sm_id * num_warp_groups + warp_group_id;
@@ -907,8 +911,10 @@ __global__ __launch_bounds__(1024, 1) void combine(void* combined_x,
 
                 // Issue RDMA
                 // NOTES: for zero-copy mode, we assume the data is already in the send buffer
-                if (dst_p2p_ptr == 0)
-                    nvshmemi_ibgda_put_nbi_warp(dst_ptr, buf_ptr, num_send_bytes, dst_rank, local_expert_idx, lane_id, token_idx - offset);
+                if (dst_p2p_ptr == 0) {
+                    const auto qp_id = local_expert_idx + (local_expert_idx % num_devs) * num_local_experts;
+                    nvshmemi_ibgda_put_nbi_warp(dst_ptr, buf_ptr, num_send_bytes, dst_rank, qp_id, lane_id, token_idx - offset);
+                }
             }
         }
 
@@ -920,9 +926,10 @@ __global__ __launch_bounds__(1024, 1) void combine(void* combined_x,
                 ;
             auto dst_ptr = reinterpret_cast<uint64_t>(rdma_recv_flag + global_expert_idx);
             auto dst_p2p_ptr = nvshmemi_get_p2p_ptr(dst_ptr, rank, dst_rank);
+            const auto qp_id = local_expert_idx + (local_expert_idx % num_devs) * num_local_experts;
             if (not is_rank_masked(mask_buffer_ptr, dst_rank)) {
                 if (dst_p2p_ptr == 0) {
-                    nvshmemi_ibgda_amo_nonfetch_add(reinterpret_cast<int*>(dst_ptr), 1, dst_rank, local_expert_idx);
+                    nvshmemi_ibgda_amo_nonfetch_add(reinterpret_cast<int*>(dst_ptr), 1, dst_rank, qp_id);
                 } else {
                     st_release_sys_global(reinterpret_cast<int*>(dst_p2p_ptr), 1);
                 }
