@@ -448,6 +448,7 @@ template <bool kLowLatencyMode,
           bool kCachedMode,
           int kNumTMABytesPerWarp,
           int kNumDispatchRDMASenderWarps,
+          bool kScaleAligned,
           int kNumTopkRDMARanks = get_num_topk_rdma_ranks(kNumRDMARanks)>
 __global__ void __launch_bounds__(((kNumDispatchRDMASenderWarps + 1 + LEGACY_NUM_MAX_NVL_PEERS) * 32), 1)
     dispatch(int4* recv_x,
@@ -1134,8 +1135,7 @@ __global__ void __launch_bounds__(((kNumDispatchRDMASenderWarps + 1 + LEGACY_NUM
                 int64_t recv_token_idx = __shfl_sync(0xffffffff, total_offset, meta.src_rdma_rank);
                 (lane_id == meta.src_rdma_rank) ? (total_offset += 1) : 0;
 
-                bool scale_aligned = (scale_bytes % 16 == 0);
-                auto tma_load_bytes = hidden_bytes + (scale_aligned ? scale_bytes : 0);
+                auto tma_load_bytes = hidden_bytes + (kScaleAligned ? scale_bytes : 0);
 
                 // Copy data
                 if (elect_one_sync()) {
@@ -1146,15 +1146,14 @@ __global__ void __launch_bounds__(((kNumDispatchRDMASenderWarps + 1 + LEGACY_NUM
                 mbarrier_wait(tma_mbarrier, tma_phase);
                 if (elect_one_sync()) {
                     tma_store_1d(tma_buffer, recv_x + recv_token_idx * hidden_int4, hidden_bytes, false);
-                    if (scale_aligned)
+                    if constexpr (kScaleAligned)
                         tma_store_1d(tma_buffer + hidden_bytes, recv_x_scales + recv_token_idx * num_scales, scale_bytes, false);
                 }
                 __syncwarp();
                 shifted += hidden_bytes;
 
                 // Copy scales
-                // TODO: make it as templated
-                if (not scale_aligned) {
+                if constexpr (not kScaleAligned) {
                     UNROLLED_WARP_COPY(1,
                                        lane_id,
                                        num_scales,
@@ -1257,14 +1256,22 @@ void dispatch(void* recv_x,
     // Make sure never OOB
     EP_HOST_ASSERT(static_cast<int64_t>(num_scales) * scale_hidden_stride < std::numeric_limits<int>::max());
 
-#define DISPATCH_LAUNCH_CASE(num_rdma_ranks)                                                                                   \
-    {                                                                                                                          \
-        auto dispatch_func = low_latency_mode                                                                                  \
-            ? (is_cached_dispatch ? dispatch<true, num_rdma_ranks, true, kNumTMABytesPerWarp, kNumDispatchRDMASenderWarps>     \
-                                  : dispatch<true, num_rdma_ranks, false, kNumTMABytesPerWarp, kNumDispatchRDMASenderWarps>)   \
-            : (is_cached_dispatch ? dispatch<false, num_rdma_ranks, true, kNumTMABytesPerWarp, kNumDispatchRDMASenderWarps>    \
-                                  : dispatch<false, num_rdma_ranks, false, kNumTMABytesPerWarp, kNumDispatchRDMASenderWarps>); \
-        SET_SHARED_MEMORY_FOR_TMA(dispatch_func);                                                                              \
+    const bool scale_aligned = (num_scales * static_cast<int>(sizeof(float))) % 16 == 0;
+
+#define DISPATCH_LAUNCH_CASE(num_rdma_ranks)                                                                                                        \
+    {                                                                                                                                               \
+        auto dispatch_func = low_latency_mode                                                                                                       \
+            ? (is_cached_dispatch                                                                                                                   \
+                ? (scale_aligned ? dispatch<true, num_rdma_ranks, true, kNumTMABytesPerWarp, kNumDispatchRDMASenderWarps, true>                     \
+                                 : dispatch<true, num_rdma_ranks, true, kNumTMABytesPerWarp, kNumDispatchRDMASenderWarps, false>)                    \
+                : (scale_aligned ? dispatch<true, num_rdma_ranks, false, kNumTMABytesPerWarp, kNumDispatchRDMASenderWarps, true>                    \
+                                 : dispatch<true, num_rdma_ranks, false, kNumTMABytesPerWarp, kNumDispatchRDMASenderWarps, false>))                  \
+            : (is_cached_dispatch                                                                                                                   \
+                ? (scale_aligned ? dispatch<false, num_rdma_ranks, true, kNumTMABytesPerWarp, kNumDispatchRDMASenderWarps, true>                    \
+                                 : dispatch<false, num_rdma_ranks, true, kNumTMABytesPerWarp, kNumDispatchRDMASenderWarps, false>)                   \
+                : (scale_aligned ? dispatch<false, num_rdma_ranks, false, kNumTMABytesPerWarp, kNumDispatchRDMASenderWarps, true>                   \
+                                 : dispatch<false, num_rdma_ranks, false, kNumTMABytesPerWarp, kNumDispatchRDMASenderWarps, false>));                \
+        SET_SHARED_MEMORY_FOR_TMA(dispatch_func);                                                                                                   \
         LAUNCH_KERNEL(&cfg,                                                                                                    \
                       dispatch_func,                                                                                           \
                       reinterpret_cast<int4*>(recv_x),                                                                         \
