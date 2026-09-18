@@ -96,7 +96,7 @@ __forceinline__ __device__ void st_bulk(void* smem_ptr) {
     if (elect_one_sync()) {
         asm volatile("st.bulk.weak.shared::cta [%0], %1, 0;\n" ::
                      "r"(static_cast<uint32_t>(__cvta_generic_to_shared(smem_ptr))),
-                     "r"(kNumBytes)
+                     "l"(static_cast<uint64_t>(kNumBytes))
                      : "memory");
     }
 #else
