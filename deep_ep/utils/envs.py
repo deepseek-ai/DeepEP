@@ -17,8 +17,22 @@ _local_rank = None
 _local_seed = 0
 _global_seed = 0
 
+def _get_default_nic_name():
+    env = os.getenv('EP_NIC_NAME')
+    if env:
+        return env
+    
+    hca = os.getenv('NCCL_IB_HCA')
+    if hca and not hca.startswith('^'):
+        m = re.search(r'^=?(\w+)', hca)
+        if m:
+            return m[1]
+
+    return 'mlx5_0'
+
 # Default NIC name for RDMA operations, configurable via environment variable
-_DEFAULT_NIC_NAME = os.getenv('EP_NIC_NAME', 'mlx5_0')
+_DEFAULT_NIC_NAME = _get_default_nic_name()
+
 
 
 def init_seed(global_seed: int) -> None:
