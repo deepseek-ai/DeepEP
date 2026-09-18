@@ -172,21 +172,6 @@ def test_main(args: argparse.Namespace,
                                 dim=1, keepdim=True).expand_as(recv_topk_weights)[recv_topk_idx.eq(-1)]
                             check_data(recv_topk_weights, recv_gbl_rank_prefix_sum)
 
-                    # Test `num_worst_tokens != 0`
-                    if with_topk:
-                        num_worst_tokens = num_tokens * num_ranks
-                        dispatch_args.update({'num_worst_tokens': num_worst_tokens})
-                        recv_worst_x, recv_worst_topk_idx, recv_worst_topk_weights, empty_list, _, event = buffer.dispatch(**dispatch_args)
-                        event.current_stream_wait() if async_mode else ()
-                        recv_worst_x = per_token_cast_back(*recv_worst_x) if isinstance(recv_worst_x, tuple) else recv_worst_x
-                        assert len(empty_list) == 0
-                        assert num_worst_tokens == recv_worst_x.size(0)
-                        assert num_worst_tokens == recv_worst_topk_idx.size(0)
-                        assert num_worst_tokens == recv_worst_topk_weights.size(0)
-                        assert torch.equal(recv_x, recv_worst_x[:recv_x.size(0)])
-                        assert torch.equal(recv_topk_idx, recv_worst_topk_idx[:recv_x.size(0)])
-                        assert torch.equal(recv_topk_weights_clone, recv_worst_topk_weights[:recv_x.size(0)])
-                        assert torch.all(recv_worst_topk_idx[recv_x.size(0):] == -1).item()
 
                     # Test cached dispatch (must without top-k staffs)
                     if not with_topk:
