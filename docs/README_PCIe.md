@@ -47,14 +47,12 @@ csrc/
 deep_ep/
 └── buffer.py          # Buffer management
 
-tests/
-└── test_normal_without_nvl.py       # Normal mode w/o NVLink testing 
 ```
 
 ## 🚀 Usage Guide
 
 ### Quick Start
-Refer to `tests/test_normal_without_nvl.py`, the only change for user to use pcie kernel is to select transport path by setting 'allow_nvlink_for_normal_mode'.
+Refer to `deep_ep/buffer.py`: the only change for user to use the PCIe kernel is to select the transport path by setting `allow_nvlink_for_normal_mode=False` when constructing `deep_ep.Buffer`.
 
 ## 📋 Future Plan
 - Add TMA support
