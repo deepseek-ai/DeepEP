@@ -64,11 +64,11 @@ NVSHMEM_DIR=/path/to/installed/nvshmem python setup.py build
 ln -s build/lib.linux-x86_64-cpython-38/deep_ep_cpp.cpython-38-x86_64-linux-gnu.so
 
 # Run test cases
-# NOTES: you may modify the `init_dist` function in `tests/utils.py`
+# NOTES: you may modify the `init_dist` function in `deep_ep/utils/envs.py`
 # according to your own cluster settings, and launch into multiple nodes
-python tests/test_intranode.py
-python tests/test_internode.py
-python tests/test_low_latency.py
+python tests/legacy/test_intranode.py
+python tests/legacy/test_internode.py
+python tests/legacy/test_low_latency.py
 ```
 
 ### Installation
