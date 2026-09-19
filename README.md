@@ -92,7 +92,7 @@ python setup.py build
 ln -s build/lib.linux-x86_64-cpython-38/deep_ep_cpp.cpython-38-x86_64-linux-gnu.so
 
 # Run test cases
-# NOTES: you may modify the `init_dist` function in `tests/utils/envs.py`
+# NOTES: you may modify the `init_dist` function in `deep_ep/utils/envs.py`
 # according to your own cluster settings, and launch into multiple nodes
 python tests/elastic/test_ep.py
 python tests/elastic/test_agrs.py
