@@ -92,6 +92,7 @@ public:
         torch::Tensor sparse_to_dense_map;
         torch::Tensor rdma_to_attn_map;
         torch::Tensor attn_to_rdma_map;
+        int num_dispatched_tokens_value = -1;
         // Dense-layout metadata used by standalone and fused unpermute.
         torch::Tensor dense_chunk_layout;  
         torch::Tensor dense_to_expert_map;          
