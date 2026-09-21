@@ -435,6 +435,7 @@ void Executor::combine_preprocess(HybridEpConfigInstance config, CombineArgs& ar
         assert(args.dense_to_expert_map.defined());
     
         UnpermuteArgs unpermute_args;
+        unpermute_args.num_dispatched_tokens_value = args.num_dispatched_tokens_value;
         unpermute_args.permuted_tokens = args.hidden;
         unpermute_args.permuted_probs = args.probs;
         unpermute_args.tokens_ptr = reinterpret_cast<uint16_t*>(intra_node_combine_buffers->expert_input_token);
