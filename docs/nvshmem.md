@@ -17,6 +17,23 @@ Hardware requirements:
 Software requirements:
    - NVSHMEM v3.3.9 or later
 
+### RDMA adapter compatibility
+
+DeepEP V1's internode and low-latency paths enable NVSHMEM's IBGDA transport. A generic
+RDMA-capable or RoCE NIC is not sufficient: NVSHMEM's supported InfiniBand/RoCE
+configuration requires a Mellanox adapter (CX-4 or later), and IBGDA requires the
+corresponding Mellanox OFED/software support.
+
+In particular, the current NVSHMEM IBGDA path used by DeepEP V1 does not support non-`mlx5`
+providers such as Alibaba Cloud eRDMA (`erdma_*`). On such hosts, NVSHMEM may only emit a
+`libmlx5dv`/`directNIC` warning during initialization, but DeepEP V1 internode and
+low-latency operations cannot run.
+
+If your RDMA device is not backed by an `mlx5` driver, do not proceed with the V1 internode
+or low-latency examples. DeepEP V2 uses the NCCL Gin backend instead of NVSHMEM for its
+primary path; see the [main README](../README.md) and verify that your NCCL/network stack
+supports the target device.
+
 ## Installation procedure
 
 ### 1. Install NVSHMEM binaries
