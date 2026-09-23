@@ -109,9 +109,7 @@ engram_fetch_impl(
             const auto issue_batch = [&](const int batch_size, const bool is_last_batch = false) {
                 const auto rings_doorbell = is_last_batch or num_issued_requests % doorbell_threshold + batch_size >= doorbell_threshold;
                 num_issued_requests += batch_size;
-                const auto options =
-                    (rings_doorbell ? ncclGinOptFlagsDefault : ncclGinOptFlagsAggregateRequests) |
-                    (batch_size == kWarpSize ? ncclGinOptFlagsWarpGet : ncclGinOptFlagsDefault);
+                const auto options = rings_doorbell ? ncclGinOptFlagsDefault : ncclGinOptFlagsAggregateRequests;
 
                 if (lane_idx < batch_size) {
                     const auto request = warp_pending_requests[pending_head + lane_idx];
