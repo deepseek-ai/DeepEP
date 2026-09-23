@@ -95,12 +95,12 @@ __global__ void __launch_bounds__(kNumThreads, 1) combine_reduce_epilogue_impl(n
         });
 
         // Iterate over per-hidden-chunk stage
-    using combine_vec_t = typename CombineVecTraits<kHidden * sizeof(nv_bfloat16)>::vec_t;
-       constexpr int kHiddenVec = kHidden * sizeof(nv_bfloat16) / sizeof(combine_vec_t);
-     constexpr int kUnrollFactor = get_max_unroll_factor<kHiddenVec, 4>();
-      combine_reduce<kHiddenVec, kUnrollFactor, kNumTokensInLayout>(
-           lane_idx,
-         topk_slot_idx,
+        using combine_vec_t = typename CombineVecTraits<kHidden * sizeof(nv_bfloat16)>::vec_t;
+        constexpr int kHiddenVec = kHidden * sizeof(nv_bfloat16) / sizeof(combine_vec_t);
+        constexpr int kUnrollFactor = get_max_unroll_factor<kHiddenVec, 4>();
+        combine_reduce<kHiddenVec, kUnrollFactor, kNumTokensInLayout>(
+            lane_idx,
+            topk_slot_idx,
             static_cast<combine_vec_t*>(tma_buffer.get_base_ptr()),
             /* Get source base */
             [=](const int& slot_idx) {
