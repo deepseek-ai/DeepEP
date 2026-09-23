@@ -1,12 +1,14 @@
 import json
 import os
+import re
 import sys
-import torch
-import numpy as np
 import tempfile
-import torch.distributed as dist
 from pathlib import Path
 from typing import Callable, Optional, Union
+
+import numpy as np
+import torch
+import torch.distributed as dist
 
 
 def flush_l2_cache(enabled: bool = True):
@@ -21,7 +23,7 @@ def flush_l2_cache(enabled: bool = True):
         torch.empty(int(l2_flush_cache_size // 4), dtype=torch.int, device='cuda').zero_()
 
 
-def bench(fn, num_warmups: int = 50, num_tests: int = 50,
+def bench(fn, num_warmups: int = 30, num_tests: int = 30,
           post_fn: Optional[Callable] = None, flush_l2: bool = True):
     """
     Benchmark a function using CUDA events.
@@ -217,3 +219,21 @@ def bench_kineto(fn,
 
     # Return execution durations
     return kernel_durations if is_tuple else kernel_durations[0]
+
+
+def parse_num_bytes(text: str) -> int:
+    """Parse a byte count, optionally with a binary suffix: `1G`, `64M`, `512k`.
+    """
+    match = re.fullmatch(r'\s*([0-9.]+)\s*([kmgt])?(?:i?b)?\s*', text, re.IGNORECASE)
+    if match is None:
+        raise ValueError(
+            f'{text!r} is not a byte count; expected e.g. 1G, 64M, 512K, 1048576')
+    scale = {None: 1, 'k': 1 << 10, 'm': 1 << 20, 'g': 1 << 30, 't': 1 << 40}
+    suffix = match.group(2)
+    try:
+        value = int(float(match.group(1)) * scale[suffix.lower() if suffix else None])
+    except ValueError:
+        raise ValueError(f'{text!r} has an unparseable number')
+    if value <= 0:
+        raise ValueError(f'byte count must be positive, got {value}')
+    return value
