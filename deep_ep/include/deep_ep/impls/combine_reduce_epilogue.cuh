@@ -1,34 +1,37 @@
 #pragma once
 
 #include <deep_ep/common/compiled.cuh>
-#include <deep_ep/common/ptx.cuh>
 #include <deep_ep/common/layout.cuh>
-
+#include <deep_ep/common/ptx.cuh>
 #include <deep_ep/impls/combine_utils.cuh>
-
 
 namespace deep_ep::elastic {
 
-template <bool kUseExpandedLayout, bool kAllowMultipleReduction,
-          int kNumSMs, int kNumWarps,
+template <bool kUseExpandedLayout,
+          bool kAllowMultipleReduction,
+          int kNumSMs,
+          int kNumWarps,
           // TODO: merge these two variables into one (ensure the whole file does not contain "scaleup")
-          int kNumScaleoutRanks, int kNumScaleupRanks,
+          int kNumScaleoutRanks,
+          int kNumScaleupRanks,
           int kHidden,
           int kNumMaxTokensPerRank,
-          int kNumExperts, int kNumTopk,
+          int kNumExperts,
+          int kNumTopk,
           int kNumThreads = kNumWarps * 32,
           int kNumHiddenBytes = kHidden * sizeof(nv_bfloat16),
           int kNumRanks = kNumScaleoutRanks == 1 ? kNumScaleupRanks : kNumScaleoutRanks,
           bool kUseRankLayout = use_rank_layout<kAllowMultipleReduction, kNumRanks, kNumTopk>(),
           int kNumTokensInLayout = get_num_tokens_in_layout<kAllowMultipleReduction, kNumRanks, kNumTopk>()>
-__global__ void __launch_bounds__(kNumThreads, 1)
-combine_reduce_epilogue_impl(nv_bfloat16* combined_x,
-                             float* combined_topk_weights,
-                             topk_idx_t* combined_topk_idx,
-                             void* recv_buffer,
-                             void* bias_0, void* bias_1,
-                             const int num_combined_tokens,
-                             const int scaleout_rank_idx, const int scaleup_rank_idx) {
+__global__ void __launch_bounds__(kNumThreads, 1) combine_reduce_epilogue_impl(nv_bfloat16* combined_x,
+                                                                               float* combined_topk_weights,
+                                                                               topk_idx_t* combined_topk_idx,
+                                                                               void* recv_buffer,
+                                                                               void* bias_0,
+                                                                               void* bias_1,
+                                                                               const int num_combined_tokens,
+                                                                               const int scaleout_rank_idx,
+                                                                               const int scaleup_rank_idx) {
     constexpr int kNumExpertsPerScaleout = kNumExperts / kNumScaleoutRanks;
     constexpr int kNumExpertsPerRank = kNumExperts / (kNumScaleupRanks * kNumScaleoutRanks);
     EP_STATIC_ASSERT(kNumExperts % (kNumScaleupRanks * kNumScaleoutRanks) == 0, "Invalid number of experts or ranks");
@@ -36,19 +39,19 @@ combine_reduce_epilogue_impl(nv_bfloat16* combined_x,
     // Utils
     const auto sm_idx = static_cast<int>(blockIdx.x);
     const auto warp_idx = ptx::get_warp_idx(), lane_idx = ptx::get_lane_idx();
-    const auto global_warp_idx = warp_idx * kNumSMs + sm_idx;   // NOTES: Here we prioritize distributing tasks to different SMs to ensure that the last wave is evenly concentrated on each SM.
+    const auto global_warp_idx = warp_idx * kNumSMs + sm_idx;  // NOTES: Here we prioritize distributing tasks to different SMs to ensure
+                                                               // that the last wave is evenly concentrated on each SM.
 
     // Load buffers from scale-out or scale-up ranks
     extern __shared__ __align__(ptx::kNumTMAAlignBytes) int8_t smem[];
     const auto comm_token_layout = layout::TokenLayout(kNumHiddenBytes, 0, kNumTopk, false);
-    const auto comm_buffer = layout::BufferLayout<false>(
-        comm_token_layout, kNumTokensInLayout, kNumMaxTokensPerRank, recv_buffer);
+    const auto comm_buffer = layout::BufferLayout<false>(comm_token_layout, kNumTokensInLayout, kNumMaxTokensPerRank, recv_buffer);
 
     // Store buffers
     const auto output_token_layout = layout::TokenLayout(kNumHiddenBytes, 0, 0, false);
     const auto output_buffer = layout::BufferLayout<false>(output_token_layout, 1, num_combined_tokens, combined_x);
-    const auto tma_buffer = layout::BufferLayout<false>(output_token_layout, kNumWarps, 1, smem)
-        .get_rank_buffer(warp_idx).get_token_buffer(0);
+    const auto tma_buffer =
+        layout::BufferLayout<false>(output_token_layout, kNumWarps, 1, smem).get_rank_buffer(warp_idx).get_token_buffer(0);
 
     // Bias layout
     const auto bias_0_buffer = layout::BufferLayout<false>(output_token_layout, 1, num_combined_tokens, bias_0);
@@ -65,8 +68,9 @@ combine_reduce_epilogue_impl(nv_bfloat16* combined_x,
         EP_STATIC_ASSERT(kNumTopk <= 32, "Too many top-k selections");
         if (lane_idx < kNumTopk) {
             stored_dst_expert_idx = static_cast<int>(combined_topk_idx[token_idx * kNumTopk + lane_idx]);
-            stored_dst_rank_idx = stored_dst_expert_idx >= 0 ?
-                stored_dst_expert_idx / (kNumScaleoutRanks == 1 ? kNumExpertsPerRank : kNumExpertsPerScaleout) : -1;
+            stored_dst_rank_idx = stored_dst_expert_idx >= 0
+                ? stored_dst_expert_idx / (kNumScaleoutRanks == 1 ? kNumExpertsPerRank : kNumExpertsPerScaleout)
+                : -1;
         }
         __syncwarp();
 
@@ -83,56 +87,63 @@ combine_reduce_epilogue_impl(nv_bfloat16* combined_x,
                 return {true, stored_dst_rank_idx};
             }
         }();
-        auto reduce_valid_mask = should_deduplicate ?
-            ptx::gather(ptx::deduplicate(deduplicate_key, lane_idx) and stored_dst_rank_idx >= 0) :
-            ptx::gather(stored_dst_rank_idx >= 0);
+        auto reduce_valid_mask = should_deduplicate ? ptx::gather(ptx::deduplicate(deduplicate_key, lane_idx) and stored_dst_rank_idx >= 0)
+                                                    : ptx::gather(stored_dst_rank_idx >= 0);
         int topk_slot_idx[kNumTokensInLayout];
-        compute_topk_slots(
-            topk_slot_idx, reduce_valid_mask,
-            [=](const int& idx) {
-                return kUseRankLayout ? ptx::exchange(stored_dst_rank_idx, idx) : idx;
-            }
-        );
+        compute_topk_slots(topk_slot_idx, reduce_valid_mask, [=](const int& idx) {
+            return kUseRankLayout ? ptx::exchange(stored_dst_rank_idx, idx) : idx;
+        });
 
         // Iterate over per-hidden-chunk stage
-        using combine_vec_t = typename CombineVecTraits<kHidden * sizeof(nv_bfloat16)>::vec_t;
-        constexpr int kHiddenVec = kHidden * sizeof(nv_bfloat16) / sizeof(combine_vec_t);
-        constexpr int kUnrollFactor = get_max_unroll_factor<kHiddenVec, 4>();
-        combine_reduce<kHiddenVec, kUnrollFactor, kNumTokensInLayout>(
-            lane_idx, topk_slot_idx, static_cast<combine_vec_t*>(tma_buffer.get_base_ptr()),
-            /* Get source base */ [=](const int& slot_idx) {
-                return static_cast<combine_vec_t*>(
-                    comm_buffer.get_rank_buffer(slot_idx).get_token_buffer(token_idx).get_base_ptr());
+    using combine_vec_t = typename CombineVecTraits<kHidden * sizeof(nv_bfloat16)>::vec_t;
+       constexpr int kHiddenVec = kHidden * sizeof(nv_bfloat16) / sizeof(combine_vec_t);
+     constexpr int kUnrollFactor = get_max_unroll_factor<kHiddenVec, 4>();
+      combine_reduce<kHiddenVec, kUnrollFactor, kNumTokensInLayout>(
+           lane_idx,
+         topk_slot_idx,
+            static_cast<combine_vec_t*>(tma_buffer.get_base_ptr()),
+            /* Get source base */
+            [=](const int& slot_idx) {
+                return static_cast<combine_vec_t*>(comm_buffer.get_rank_buffer(slot_idx).get_token_buffer(token_idx).get_base_ptr());
             },
-            /* Wait buffer release */ [=]() {
+            /* Wait buffer release */
+            [=]() {
                 ptx::tma_store_wait();
                 __syncwarp();
             },
-            /* Bias 0 */ bias_0 == nullptr ?
-                nullptr : static_cast<combine_vec_t*>(bias_0_buffer.get_token_buffer(token_idx).get_base_ptr()),
-            /* Bias 1 */ bias_1 == nullptr ?
-                nullptr : static_cast<combine_vec_t*>(bias_1_buffer.get_token_buffer(token_idx).get_base_ptr())
-        );
+            /* Bias 0 */ bias_0 == nullptr ? nullptr
+                                           : static_cast<combine_vec_t*>(bias_0_buffer.get_token_buffer(token_idx).get_base_ptr()),
+            /* Bias 1 */ bias_1 == nullptr ? nullptr
+                                           : static_cast<combine_vec_t*>(bias_1_buffer.get_token_buffer(token_idx).get_base_ptr()));
         ptx::tma_store_fence();
         __syncwarp();
 
         // Issue TMA copy
         if (ptx::elect_one_sync()) {
-            ptx::tma_store_1d(output_buffer.get_token_buffer(token_idx).get_base_ptr(),
-                              tma_buffer.get_base_ptr(), kNumHiddenBytes);
+            ptx::tma_store_1d(output_buffer.get_token_buffer(token_idx).get_base_ptr(), tma_buffer.get_base_ptr(), kNumHiddenBytes);
             ptx::tma_store_commit();
         }
         __syncwarp();
 
         // Write top-k weights
         if (combined_topk_weights != nullptr) {
-            const auto master_lane_idx = ptx::get_master_lane_idx(ptx::match(stored_dst_rank_idx));
+            // Hybrid non-expanded/no-multiple-reduction forwards one separate
+            // top-k weight row per destination GPU. It does not merge those
+            // rows per scale-out rank, so select the master slot for this GPU.
+            // In this mode kUseRankLayout is false (see use_rank_layout).
+            auto weight_source_rank_idx = stored_dst_rank_idx;
+            if constexpr (kNumScaleoutRanks != 1 and not kUseExpandedLayout and not kAllowMultipleReduction) {
+                EP_STATIC_ASSERT(not kUseRankLayout, "Per-GPU score rows require slot layout");
+                weight_source_rank_idx = stored_dst_expert_idx >= 0 ? stored_dst_expert_idx / kNumExpertsPerRank : -1;
+            }
+            const auto master_lane_idx = ptx::get_master_lane_idx(ptx::match(weight_source_rank_idx));
             if (lane_idx < kNumTopk) {
                 float value = 0;
                 if (stored_dst_rank_idx >= 0) {
-                    const auto dst_ptr = comm_buffer
-                        .get_rank_buffer(kUseRankLayout ? stored_dst_rank_idx : master_lane_idx)
-                        .get_token_buffer(token_idx).get_topk_weights_ptr() + lane_idx;
+                    const auto dst_ptr = comm_buffer.get_rank_buffer(kUseRankLayout ? stored_dst_rank_idx : master_lane_idx)
+                                             .get_token_buffer(token_idx)
+                                             .get_topk_weights_ptr() +
+                        lane_idx;
                     value = *dst_ptr;
                 }
                 combined_topk_weights[token_idx * kNumTopk + lane_idx] = value;
@@ -142,4 +153,4 @@ combine_reduce_epilogue_impl(nv_bfloat16* combined_x,
     }
 }
 
-}  // deep_ep::elastic
+}  // namespace deep_ep::elastic
