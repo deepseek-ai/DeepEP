@@ -126,7 +126,15 @@ combine_reduce_epilogue_impl(nv_bfloat16* combined_x,
 
         // Write top-k weights
         if (combined_topk_weights != nullptr) {
-            const auto master_lane_idx = ptx::get_master_lane_idx(ptx::match(stored_dst_rank_idx));
+            // Without multiple reduction, hybrid non-expanded mode forwards
+            // a separate top-k weight row per GPU, not per scale-out rank.
+            auto weight_source_rank_idx = stored_dst_rank_idx;
+            if constexpr (kNumScaleoutRanks != 1 and not kUseExpandedLayout and not kAllowMultipleReduction) {
+                EP_STATIC_ASSERT(not kUseRankLayout, "Per-GPU score rows require slot layout");
+                weight_source_rank_idx = stored_dst_expert_idx >= 0 ?
+                    stored_dst_expert_idx / kNumExpertsPerRank : -1;
+            }
+            const auto master_lane_idx = ptx::get_master_lane_idx(ptx::match(weight_source_rank_idx));
             if (lane_idx < kNumTopk) {
                 float value = 0;
                 if (stored_dst_rank_idx >= 0) {
