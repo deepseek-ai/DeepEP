@@ -17,6 +17,8 @@ select = [
     "SIM",
     # isort
     # "I",
+    # flake8-quotes
+    "Q000",
 ]
 ignore = [
     # Module level import not at top of file
@@ -37,3 +39,6 @@ ignore = [
 exclude = [
     "deep_ep/__init__.py"
 ]
+
+[tool.ruff.lint.flake8-quotes]
+inline-quotes = "single"   # options: single, double, or backtick
