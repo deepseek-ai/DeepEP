@@ -81,7 +81,13 @@ def main(args):
             event.current_stream_wait()
 
             expected = expected_row.expand(num_tokens, -1)
-            passed = torch.equal(returned_score_grad, expected) and torch.count_nonzero(grad_x).item() == 0
+            nonzero_grad_x = torch.count_nonzero(grad_x).item()
+            passed = torch.equal(returned_score_grad, expected) and nonzero_grad_x == 0
+            if not passed:
+                print(
+                    f'{name}: rank={dist.get_rank()}, returned={returned_score_grad.tolist()}, '
+                    f'expected={expected.tolist()}, nonzero_grad_x={nonzero_grad_x}',
+                    flush=True)
             all_passed = torch.tensor(int(passed), device=device)
             dist.all_reduce(all_passed, op=dist.ReduceOp.MIN)
             assert all_passed.item() == 1, f'{name}: incorrect score gradients on one or more ranks'
