@@ -3,15 +3,19 @@ import inspect
 import os
 import random
 import re
+import socket
 import subprocess
 import torch
 import torch.distributed as dist
-from typing import Tuple
+from contextlib import contextmanager
+from typing import Callable, Iterator, List, Tuple
 
 # noinspection PyUnresolvedReferences
 import deep_ep._C as _C
 
 from .comm import get_nccl_comm_handle
+from .p2p import (build_local_peer_access_results, build_physical_peer_access_checker, find_unsupported_peer_pairs,
+                  format_p2p_preflight_error)
 
 _local_rank = None
 _local_seed = 0
@@ -142,42 +146,133 @@ def get_logical_domain_size(group: dist.ProcessGroup, allow_hybrid_mode: bool = 
     return _C.get_logical_domain_size(get_nccl_comm_handle(group).get(), allow_hybrid_mode)
 
 
-def check_nvlink_connections(group: dist.ProcessGroup) -> None:
+def _all_gather_object(group: object, obj: object) -> List[object]:
+    if hasattr(group, 'Get_rank'):
+        return group.allgather(obj)
+
+    object_list = [None] * group.size()
+    dist.all_gather_object(object_list, obj, group=group)
+    return object_list
+
+
+def _get_physical_node_id() -> str:
+    # Containers on one machine can have different hostnames but share the
+    # kernel boot ID; different physical nodes have independent boot IDs.
+    try:
+        with open('/proc/sys/kernel/random/boot_id', encoding='utf-8') as file:
+            boot_id = file.read().strip()
+        if boot_id:
+            return f'boot:{boot_id}'
+    except OSError:
+        pass
+    return f'hostname:{socket.gethostname()}'
+
+
+def _get_physical_device_id(device: int) -> str:
+    device_uuid = getattr(torch.cuda.get_device_properties(device), 'uuid', None)
+    if device_uuid is None:
+        raise RuntimeError('PyTorch did not expose a UUID for the current CUDA device')
+    return str(device_uuid)
+
+
+def _normalize_nvml_enum(value: object) -> int:
+    # Some pynvml releases expose the READ enum as a one-element tuple.
+    if isinstance(value, tuple):
+        value = value[0]
+    return int(value)
+
+
+@contextmanager
+def _physical_peer_access_checker() -> Iterator[Callable[[str, str], bool]]:
+    visible_device_ids = [_get_physical_device_id(device) for device in range(torch.cuda.device_count())]
+    pynvml = None
+    nvml_initialized = False
+    nvml_handles = {}
+
+    def can_access_hidden_peer(device_id: str, peer_device_id: str) -> bool:
+        nonlocal pynvml, nvml_initialized
+        if pynvml is None:
+            try:
+                import pynvml as imported_pynvml
+            except ImportError as error:
+                raise RuntimeError('pynvml is required to validate a peer GPU hidden by CUDA_VISIBLE_DEVICES') from error
+            pynvml = imported_pynvml
+        if not nvml_initialized:
+            pynvml.nvmlInit()
+            nvml_initialized = True
+
+        def get_handle(physical_device_id: str):
+            if physical_device_id not in nvml_handles:
+                try:
+                    nvml_handles[physical_device_id] = pynvml.nvmlDeviceGetHandleByUUID(physical_device_id)
+                except pynvml.NVMLError as error:
+                    raise RuntimeError(f'NVML cannot resolve physical GPU {physical_device_id}') from error
+            return nvml_handles[physical_device_id]
+
+        device_handle = get_handle(device_id)
+        peer_device_handle = get_handle(peer_device_id)
+        p2p_status_ok = _normalize_nvml_enum(pynvml.NVML_P2P_STATUS_OK)
+        for capability_name, default_index in (('NVML_P2P_CAPS_INDEX_READ', 0), ('NVML_P2P_CAPS_INDEX_WRITE', 1)):
+            capability_index = _normalize_nvml_enum(getattr(pynvml, capability_name, default_index))
+            status = pynvml.nvmlDeviceGetP2PStatus(device_handle, peer_device_handle, capability_index)
+            if _normalize_nvml_enum(status) != p2p_status_ok:
+                return False
+        return True
+
+    checker = build_physical_peer_access_checker(visible_device_ids, torch.cuda.can_device_access_peer, can_access_hidden_peer)
+    try:
+        yield checker
+    finally:
+        if nvml_initialized:
+            pynvml.nvmlShutdown()
+
+
+def check_nvlink_connections(group: object) -> None:
     """
-    Check NVLink connection between every pair of GPUs.
+    Check directed CUDA peer access between every pair of intranode GPUs.
+
+    Physical GPU UUIDs avoid cross-process CUDA ordinal ambiguity, and the
+    NVML fallback covers peers hidden by per-rank CUDA_VISIBLE_DEVICES masks.
 
     Arguments:
         group: the communication group.
     """
-    # Check NVLink connection
-    # NOTES: some A100 PCIE GPUs only have pairwise NVLink connection, so that we can only use EP2
-    # TODO: check all cases, all local-node GPUs in the group should be connected via NVLink
-    if 'PCIE' in torch.cuda.get_device_name():
-        assert group.size() <= 2, 'PCIe GPUs only have pairwise NVLink connections'
+    rank = group.Get_rank() if hasattr(group, 'Get_rank') else group.rank()
 
-        # noinspection PyUnresolvedReferences
-        import pynvml
-        pynvml.nvmlInit()
+    # Discovery can fail on just one rank (for example, when PyTorch does not
+    # expose its device UUID). Exchange that error before any rank proceeds to
+    # peer queries, so the other ranks do not wait in a mismatched collective.
+    local_rank_device = None
+    local_identity_error = None
+    try:
+        local_device_id = _get_physical_device_id(torch.cuda.current_device())
+        local_rank_device = (_get_physical_node_id(), local_device_id)
+    except Exception as error:
+        local_identity_error = f'rank {rank}: {type(error).__name__}: {error}'
 
-        # noinspection PyTypeChecker
-        devices = os.environ.get('CUDA_VISIBLE_DEVICES', '0,1,2,3,4,5,6,7').strip(',').split(',')
-        physical_device_idx = int(devices[torch.cuda.current_device()])
-        physical_device_indices = [0, ] * group.size()
-        dist.all_gather_object(physical_device_indices, physical_device_idx, group)
+    gathered_devices = _all_gather_object(group, (local_rank_device, local_identity_error))
+    identity_errors = [error for _, error in gathered_devices if error is not None]
+    if identity_errors:
+        raise RuntimeError('DeepEP P2P preflight could not identify the physical topology: ' + '; '.join(identity_errors))
 
-        # Check whether they are all connected via NVLink
-        # Reference: https://github.com/vllm-project/vllm/blob/b8e809a057765c574726a6077fd124db5077ce1f/vllm/platforms/cuda.py#L438
-        handles = [pynvml.nvmlDeviceGetHandleByIndex(i) for i in physical_device_indices]
-        for i, handle in enumerate(handles):
-            for j, peer_handle in enumerate(handles):
-                if i >= j:
-                    continue
-                status = pynvml.nvmlDeviceGetP2PStatus(handle, peer_handle, pynvml.NVML_P2P_CAPS_INDEX_NVLINK)
-                assert status == pynvml.NVML_P2P_STATUS_OK, \
-                    f'GPU {physical_device_indices[i]} and GPU {physical_device_indices[j]} are not connected via NVLink'
+    rank_devices = [rank_device for rank_device, _ in gathered_devices]
+    local_access_results = []
+    local_query_error = None
+    try:
+        with _physical_peer_access_checker() as can_access_peer:
+            local_access_results = build_local_peer_access_results(rank, rank_devices, can_access_peer)
+    except Exception as error:
+        local_query_error = f'rank {rank}: {type(error).__name__}: {error}'
 
-        # Close NVML
-        pynvml.nvmlShutdown()
+    gathered_queries = _all_gather_object(group, (local_access_results, local_query_error))
+    query_errors = [error for _, error in gathered_queries if error is not None]
+    if query_errors:
+        raise RuntimeError('DeepEP P2P preflight could not query the physical topology: ' + '; '.join(query_errors))
+
+    peer_access_results = [access_results for access_results, _ in gathered_queries]
+    unsupported_pairs, num_required_pairs = find_unsupported_peer_pairs(rank_devices, peer_access_results)
+    if unsupported_pairs:
+        raise RuntimeError(format_p2p_preflight_error(unsupported_pairs, num_required_pairs))
 
 
 def check_torch_deterministic() -> None:
@@ -202,8 +297,7 @@ def get_nvlink_gbs(factor: float = 0.9) -> float:
     """
     # noinspection PyBroadException
     try:
-        result = subprocess.run(['nvidia-smi', 'nvlink', '-s'],
-                                capture_output=True, text=True, check=True)
+        result = subprocess.run(['nvidia-smi', 'nvlink', '-s'], capture_output=True, text=True, check=True)
         output = result.stdout
         pattern = r'GPU \d+:.*?(?=^GPU \d+:|^$)'
         match = re.search(pattern, output, re.MULTILINE | re.DOTALL)
