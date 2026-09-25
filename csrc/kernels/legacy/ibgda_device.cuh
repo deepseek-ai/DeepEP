@@ -8,6 +8,8 @@
 #pragma once
 
 
+#include <type_traits>
+
 #include <nvshmem.h>
 #include <device_host_transport/nvshmem_common_ibgda.h>
 #include <non_abi/device/threadgroup/nvshmemi_common_device_defines.cuh>
@@ -78,11 +80,21 @@ __device__ static __forceinline__ nvshmemi_ibgda_device_state_t* ibgda_get_state
     return &nvshmemi_ibgda_device_state_d;
 }
 
+template <typename StateType>
+__device__ static __forceinline__ nvshmemi_ibgda_device_qp_t* ibgda_get_rc_impl(StateType* state, int pe, int id) {
+    const auto num_rc_per_pe = state->num_rc_per_pe;
+
+    if constexpr (std::is_same_v<StateType, nvshmemi_ibgda_device_state_v1>) {
+        return &state->globalmem
+                    .rcs[pe * num_rc_per_pe * state->num_devices_initialized + id % (num_rc_per_pe * state->num_devices_initialized)];
+    } else {
+        return &state->globalmem.rcs[pe + nvshmemi_device_state_d.npes * id];
+    }
+}
+
 __device__ static __forceinline__ nvshmemi_ibgda_device_qp_t* ibgda_get_rc(int pe, int id) {
     auto state = ibgda_get_state();
-    const auto num_rc_per_pe = ibgda_get_state()->num_rc_per_pe;
-    return &state->globalmem
-                .rcs[pe * num_rc_per_pe * state->num_devices_initialized + id % (num_rc_per_pe * state->num_devices_initialized)];
+    return ibgda_get_rc_impl(state, pe, id);
 }
 
 __device__ static __forceinline__ void ibgda_lock_acquire(int* lock) {

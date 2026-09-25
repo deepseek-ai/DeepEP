@@ -7,6 +7,13 @@
 #define __CUDACC__
 #endif
 
+// Define __CUDACC_RDC__ so NVSHMEM device symbols use the correct extern declarations.
+#ifndef DISABLE_NVSHMEM
+#ifndef __CUDACC_RDC__
+#define __CUDACC_RDC__  // NOLINT(*-reserved-identifier)
+#endif
+#endif
+
 // Remove Torch restrictions
 #ifdef __CUDA_NO_HALF_CONVERSIONS__
 #undef __CUDA_NO_HALF_CONVERSIONS__
