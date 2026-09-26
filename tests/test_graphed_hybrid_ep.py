@@ -115,6 +115,7 @@ def test_hybrid_ep_correctness(buffer: deep_ep.HybridEPBuffer, ref: TorchRef, us
         handle=handle,
         pad_multiple=PAD_MULTIPLE,
         fuse_unpermute_combine=fused_permute_dispatch,
+        non_blocking=True,
     )
 
     # Get the reference (no token_per_expert needed)
@@ -154,6 +155,7 @@ def test_hybrid_ep_correctness(buffer: deep_ep.HybridEPBuffer, ref: TorchRef, us
             handle=graph_handle,
             pad_multiple=PAD_MULTIPLE,
             fuse_unpermute_combine=fused_permute_dispatch,
+            non_blocking=True,
         )
     graph.replay()
     torch.cuda.synchronize()

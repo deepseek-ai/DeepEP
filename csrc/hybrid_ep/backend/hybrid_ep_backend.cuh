@@ -3772,14 +3772,29 @@ inline __device__ void unpermute_G2S_warp_group_device_function(const int node_r
           }
         }
 #ifdef HYBRID_EP_BUILD_TOKEN_DROP_ENABLE
-        // This dst token has no src token. This will only happen when token drop is triggered and all src tokens of this dst token have been dropped.
-        // To make unpermute_red_warp_group_device_function work, we need to produce a single dummy src token entry with garbage value for this dst token.
-        // The dummy src token entry has all its data(token, prob, expert_id) left unset as garbage value and the end group flag set as true.
-        if(last_src_token_id == -1){
+		// This dst token has no src token. This will only happen when token drop is triggered and all src tokens of this dst token have been dropped.
+		// To make unpermute_red_warp_group_device_function work, we need to produce a single dummy src token entry for this dst token.
+		// The payload of that one entry has to be written, not left unset: the unpermute reduction warp group cannot tell a dummy
+		// entry from a real one and reduces whatever the shared memory stage holds, so a stale payload from a previous dst token
+		// -- or, on the first pass through the FIFO, uninitialized shared memory whose bit pattern can decode to NaN -- would
+		// land in this dst token instead of the zero a fully dropped dst token must contribute.
+		if(last_src_token_id == -1){
           // Wait until current token entry within the shared memory has been consumed.
           while(!cuda::ptx::mbarrier_try_wait_parity(&smem_buffer_ptr->unpermute_mbarrier_G2S_buffer[token_stage][1], token_consumer_parity)){}
 
+          static_assert((HIDDEN_DIM * sizeof(uint16_t)) % sizeof(uint4) == 0, "The hidden dim must be a multiple of 8 to zero a dummy token entry with 16B stores.");
+          constexpr int NUM_OF_INIT_ITER_PER_DUMMY_TOKEN = (HIDDEN_DIM * sizeof(uint16_t)) / sizeof(uint4);
+          uint4* dummy_token_base_addr = reinterpret_cast<uint4*>(&smem_buffer_ptr->unpermute_token_G2S_buffer[token_stage][0]);
+          #pragma unroll 4
+          for(int k = 0; k < NUM_OF_INIT_ITER_PER_DUMMY_TOKEN; k++){
+            dummy_token_base_addr[k] = make_uint4(0, 0, 0, 0);
+          }
+          if constexpr(BACKWARD_COMBINE){
+            smem_buffer_ptr->unpermute_prob_G2S_buffer[token_stage] = 0.0f;
+            smem_buffer_ptr->unpermute_local_expert_id_G2S_buffer[token_stage] = 0;
+          }
           smem_buffer_ptr->unpermute_flag_G2S_buffer[token_stage] = true;
+          __threadfence_block();
           // Directly mark the producer to consumer mbarrier clear for this src token entry to let unpermute_red_warp_group_device_function consume this dummy src token entry.
           if constexpr(BACKWARD_COMBINE){
             // When BACKWARD_COMBINE is true, arrive twice as the mbarrier will be init to 2. Otherwise, arrive once.
