@@ -222,6 +222,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
              py::arg("handle"),
              py::arg("pad_multiple") = std::nullopt,
              py::arg("fuse_unpermute_combine") = false,
+             py::arg("non_blocking") = false,
              py::arg("with_probs") = false);    
     
   }

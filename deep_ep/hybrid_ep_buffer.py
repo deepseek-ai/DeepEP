@@ -662,6 +662,7 @@ class HybridEPBuffer:
         handle: tuple = None,
         pad_multiple: int = None,
         fuse_unpermute_combine: bool = False,
+        non_blocking: bool = False,
         # Deprecated parameters
         num_dispatched_tokens: int = None,
     ):
@@ -698,6 +699,7 @@ class HybridEPBuffer:
                 handle=handle_impl,
                 pad_multiple=pad_multiple,
                 fuse_unpermute_combine=fuse_unpermute_combine,
+                non_blocking=non_blocking,
                 with_probs=probs is not None,
             )
         return combined_token, combined_probs

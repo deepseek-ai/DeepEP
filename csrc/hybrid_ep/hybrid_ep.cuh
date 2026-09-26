@@ -72,6 +72,7 @@ public:
           HandleImpl handle,
           c10::optional<int64_t> pad_multiple,
           bool fuse_unpermute_combine,
+          bool non_blocking,
           bool with_probs);       
 
 private:
