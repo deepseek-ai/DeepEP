@@ -36,6 +36,7 @@ class NCCLCommHandle:
         """
         return self.nccl_comm
 
+
 _storage = dict()
 
 
@@ -82,21 +83,20 @@ def get_nccl_comm_handle(group: dist.ProcessGroup, force_new_comm: bool = False)
         # collective is reached unconditionally), and all ranks then take the
         # same branch: reuse only if ALL ranks hold a real communicator.
         comm_ptr = backend._comm_ptr()
-        have_comm = [None, ] * group.size()
+        have_comm = [None] * group.size()
         dist.all_gather_object(have_comm, comm_ptr != 0, group)
         if all(have_comm):
             _storage[group] = NCCLCommHandle(comm_ptr, False)
             return _storage[group]
 
     # For old PyTorch, we have to recreate a NCCL comm
-    nccl_unique_ids = [None, ] * group.size()
+    nccl_unique_ids = [None] * group.size()
     dist.all_gather_object(nccl_unique_ids, _C.get_local_nccl_unique_id(), group)
     root_unique_id = nccl_unique_ids[0]
 
     # Create a new communicator
     key = time.time_ns() if force_new_comm else group
-    _storage[key] = NCCLCommHandle(
-        _C.create_nccl_comm(root_unique_id, group.size(), group.rank()), True)
+    _storage[key] = NCCLCommHandle(_C.create_nccl_comm(root_unique_id, group.size(), group.rank()), True)
     return _storage[key]
 
 
