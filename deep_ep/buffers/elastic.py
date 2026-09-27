@@ -360,9 +360,11 @@ class ElasticBuffer:
             # requests at 128; clamp auto-sized QP count to avoid ring overflow.
             if _is_efa_fabric() and num_allocated_qps > _EFA_MAX_QPS:
                 import sys
-                print(f'[DeepEP] EFA detected: capping num_allocated_qps '
-                      f'{num_allocated_qps} -> {_EFA_MAX_QPS} to avoid GIN '
-                      f'128-slot ring overflow', file=sys.stderr)
+                print(
+                    f'[DeepEP] EFA detected: capping num_allocated_qps '
+                    f'{num_allocated_qps} -> {_EFA_MAX_QPS} to avoid GIN '
+                    f'128-slot ring overflow',
+                    file=sys.stderr)
                 num_allocated_qps = _EFA_MAX_QPS
         self.num_allocated_qps = num_allocated_qps
 
