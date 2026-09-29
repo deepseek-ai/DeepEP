@@ -6,19 +6,35 @@ import re
 import subprocess
 import torch
 import torch.distributed as dist
-from typing import Tuple
+from typing import List, Tuple
 
 # noinspection PyUnresolvedReferences
 import deep_ep._C as _C
 
-from .comm import get_nccl_comm_handle
+from .. import comm
+
 
 _local_rank = None
 _local_seed = 0
 _global_seed = 0
 
-# Default NIC name for RDMA operations, configurable via environment variable
-_DEFAULT_NIC_NAME = os.getenv('EP_NIC_NAME', 'mlx5_0')
+
+class EnvOverride:
+
+    def __init__(self, envs: List[Tuple[str, str, bool]]):
+        self.envs = {name: value for name, value, enable in envs if enable}
+
+    def __enter__(self):
+        self.original_values = {name: os.environ.get(name) for name in self.envs}
+        os.environ.update(self.envs)
+        return self
+
+    def __exit__(self, *_):
+        for name, value in self.original_values.items():
+            if value is None:
+                os.environ.pop(name)
+            else:
+                os.environ[name] = value
 
 
 def init_seed(global_seed: int) -> None:
@@ -85,6 +101,10 @@ def init_dist(local_rank: int, num_local_ranks: int, seed: int = 0) -> Tuple[int
         group: the communication group.
     """
     # NOTES: you may rewrite this function with your own cluster settings
+    # `init_dist` is only used by tests. Default tests to SL 1 to avoid affecting production traffic, which uses SL 3.
+    os.environ.setdefault('NCCL_IB_SL', '1')
+    os.environ.setdefault('EP_OVERRIDE_RDMA_SL', '1')
+
     ip = os.getenv('MASTER_ADDR', '127.0.0.1')
     port = int(os.getenv('MASTER_PORT', '8361'))
     num_nodes = int(os.getenv('WORLD_SIZE', 1))
@@ -114,32 +134,13 @@ def init_dist(local_rank: int, num_local_ranks: int, seed: int = 0) -> Tuple[int
 
 
 def get_physical_domain_size(group: dist.ProcessGroup) -> Tuple[int, int]:
-    """
-    Get the physical domain sizes (RDMA ranks and NVLink ranks).
-
-    Arguments:
-        group: the communication group.
-
-    Returns:
-        num_rdma_ranks: the number of physical RDMA ranks.
-        num_nvlink_ranks: the number of physical NVLink ranks.
-    """
-    return _C.get_physical_domain_size(get_nccl_comm_handle(group).get())
+    """Return the physical RDMA and NVLink domain sizes."""
+    return comm.get_physical_domain_size(group)
 
 
 def get_logical_domain_size(group: dist.ProcessGroup, allow_hybrid_mode: bool = True) -> Tuple[int, int]:
-    """
-    Get the logical domain sizes (scaleout ranks and scaleup ranks).
-
-    Arguments:
-        group: the communication group.
-        allow_hybrid_mode: whether to enable hybrid mode.
-
-    Returns:
-        num_scaleout_ranks: the number of logical scaleout ranks.
-        num_scaleup_ranks: the number of logical scaleup ranks.
-    """
-    return _C.get_logical_domain_size(get_nccl_comm_handle(group).get(), allow_hybrid_mode)
+    """Return the logical scaleout and scaleup domain sizes."""
+    return comm.get_logical_domain_size(group, allow_hybrid_mode)
 
 
 def check_nvlink_connections(group: dist.ProcessGroup) -> None:
@@ -190,6 +191,20 @@ def check_torch_deterministic() -> None:
 
 
 @functools.lru_cache()
+def get_sm_read_gbs() -> float:
+    """Return the default per-SM HBM read bandwidth in GB/s."""
+    # TODO: use architecture-specific values.
+    return 180
+
+
+@functools.lru_cache()
+def get_sm_write_gbs() -> float:
+    """Return the default per-SM HBM write bandwidth in GB/s."""
+    # TODO: use architecture-specific values.
+    return 45
+
+
+@functools.lru_cache()
 def get_nvlink_gbs(factor: float = 0.9) -> float:
     """
     Get the total NVLink bandwidth in GB/s, cached.
@@ -220,7 +235,7 @@ def get_nvlink_gbs(factor: float = 0.9) -> float:
 
 
 @functools.lru_cache()
-def check_fast_rdma_atomic_support(nic_name: str = _DEFAULT_NIC_NAME) -> bool:
+def check_fast_rdma_atomic_support(nic_name: str = 'mlx5_0') -> bool:
     """
     Check whether the NIC supports fast RDMA atomic operations (MT4131 or newer).
 
@@ -243,7 +258,7 @@ def check_fast_rdma_atomic_support(nic_name: str = _DEFAULT_NIC_NAME) -> bool:
 
 
 @functools.lru_cache()
-def get_rdma_gbs(nic_name: str = _DEFAULT_NIC_NAME) -> float:
+def get_rdma_gbs(nic_name: str = 'mlx5_0') -> float:
     """
     Get the RDMA bandwidth in GB/s, cached.
 

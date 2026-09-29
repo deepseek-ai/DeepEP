@@ -28,16 +28,7 @@
 #include <cuda_bf16.h>
 #include <cuda_runtime.h>
 
-#ifndef DISABLE_SM90_FEATURES
 #include <cuda_fp8.h>
-#else
-// Ampere does not support FP8 features
-#define __NV_E4M3 0
-#define __NV_E5M2 1
-typedef int __nv_fp8_interpretation_t;
-typedef int __nv_fp8x4_e4m3;
-typedef uint8_t __nv_fp8_storage_t;
-#endif
 
 // Compatibility: 256 bits LD/ST instructions
 #if defined(CUDART_VERSION) and CUDART_VERSION >= 13000
@@ -57,12 +48,6 @@ __device__ __forceinline__ longlong4_t make_longlong4_t(
 
 namespace deep_ep {
 
-#ifndef DISABLE_SM90_FEATURES
-constexpr bool kEnableSM90Features = true;
-#else
-constexpr bool kEnableSM90Features = false;
-#endif
-
 template <int kNumBits> struct int_with_bits;
 template <> struct int_with_bits<8>  { using type = int8_t;  };
 template <> struct int_with_bits<16> { using type = int16_t; };
@@ -76,12 +61,24 @@ union sf_pack_t {
     int ue8m0x4;
 };
 
-constexpr int kNumTMAAlignedBytes = 16;
 constexpr int kNumAlignedSFPacks = 16 / sizeof(sf_pack_t);
 
-// Some communication channel settings
-constexpr int kNumMaxChannels = 1024;
-constexpr int kGinQPDepth = 1024;
-constexpr int kGinQPFlushDepth = 768;
+// Alignment requirements
+constexpr int kNumTMAAlignmentBytes = 32;
+constexpr int kNumRDMAAlignmentBytes = 64;
+constexpr int kNumAllocationAlignmentBytes = 2 * 1024 * 1024;
+static_assert(kNumRDMAAlignmentBytes % kNumTMAAlignmentBytes == 0);
+static_assert(kNumAllocationAlignmentBytes % kNumRDMAAlignmentBytes == 0);
+
+// Communication limits
+constexpr int kNumMaxRanks = 1024;
+constexpr int kNumMaxRDMARanks = kNumMaxRanks;
+constexpr int kNumMaxNVLRanks = kNumMaxRanks;
+constexpr int kNumMaxScaleoutRanks = kNumMaxRanks;
+constexpr int kNumMaxScaleupRanks = kNumMaxRanks;
+constexpr int kNumMaxContexts = 8;
+constexpr int kNumMaxQPs = 1024;
+constexpr int kDefaultQPDepth = 1024;
+constexpr int kNumMaxSignalBytes = 16 * 1024 * 1024;
 
 } // namespace deep_ep
