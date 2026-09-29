@@ -80,7 +80,13 @@ def create_grouped_scores(scores: torch.Tensor, group_idx: torch.Tensor, num_gro
 
 
 def hash_tensor(t: torch.Tensor) -> int:
-    return t.view(torch.int).sum().item()
+    # `view(torch.int)` needs a contiguous tensor whose elements are 4 bytes wide,
+    # so it raises for non-contiguous tensors and for dtypes such as `bool`,
+    # `int64` or `float16`. Normalize with a byte view to stay dtype-agnostic.
+    t = t.contiguous()
+    if t.element_size() == 4:
+        return t.view(torch.int).sum().item()
+    return t.view(torch.uint8).sum().item()
 
 
 def hash_tensors(*tensors) -> int:
