@@ -44,7 +44,7 @@ class DispatchRecvView:
     def release(self, *consumer_streams):
         self.wait()
         if not consumer_streams:
-            consumer_streams = (torch.cuda.current_stream(self._slab.device),)
+            consumer_streams = (torch.cuda.current_stream(self._slab.device), )
         comm_stream = comm.get_comm_stream(self._owner)
         for stream in consumer_streams:
             if stream.device != self._slab.device:

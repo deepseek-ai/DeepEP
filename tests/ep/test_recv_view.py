@@ -34,11 +34,17 @@ def test_case(deep_ep, deterministic, asynchronous, with_weights, skew):
     gathered = [torch.empty_like(full_x) for _ in range(world)]
     dist.all_gather(gathered, full_x)
     all_x = torch.stack(gathered)
-    buffer = deep_ep.EPBuffer(dist.group.WORLD, num_max_tokens_per_rank=capacity,
-                              hidden=hidden, num_topk=topk, deterministic=deterministic,
+    buffer = deep_ep.EPBuffer(dist.group.WORLD,
+                              num_max_tokens_per_rank=capacity,
+                              hidden=hidden,
+                              num_topk=topk,
+                              deterministic=deterministic,
                               explicitly_destroy=True)
-    kwargs = dict(topk_idx=indices, topk_weights=weights, num_experts=local_experts * world,
-                  num_sms=8, async_with_compute_stream=asynchronous,
+    kwargs = dict(topk_idx=indices,
+                  topk_weights=weights,
+                  num_experts=local_experts * world,
+                  num_sms=8,
+                  async_with_compute_stream=asynchronous,
                   allocate_on_comm_stream=asynchronous)
 
     def dispatch(borrow, value=x):
@@ -68,18 +74,14 @@ def test_case(deep_ep, deterministic, asynchronous, with_weights, skew):
     rejected(lambda: view.slab, RuntimeError)
     rejected(view.release, RuntimeError)
 
-    replay, _, _, _, event = buffer.dispatch(x, handle=handle, num_sms=8,
-                                            async_with_compute_stream=True)
+    replay, _, _, _, event = buffer.dispatch(x, handle=handle, num_sms=8, async_with_compute_stream=True)
     event.current_stream_wait()
     exact(replay, payload)
     # Integer sums are exact even with an unspecified receive order.
-    combined, _, event = buffer.combine(torch.ones_like(replay), handle,
-                                        async_with_compute_stream=True)
+    combined, _, event = buffer.combine(torch.ones_like(replay), handle, async_with_compute_stream=True)
     event.current_stream_wait()
-    expected_count = torch.stack([
-        ((indices >= 0) & (indices // local_experts == peer)).any(dim=1)
-        for peer in range(world)
-    ]).sum(dim=0).to(x.dtype)
+    expected_count = torch.stack([((indices >= 0) & (indices // local_experts == peer)).any(dim=1)
+                                  for peer in range(world)]).sum(dim=0).to(x.dtype)
     exact(combined, expected_count[:, None].expand_as(x))
 
     # Consumers can move to another stream after the dispatch event is waited.

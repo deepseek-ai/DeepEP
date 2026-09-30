@@ -16,12 +16,8 @@ from .. import comm
 from ..utils.event import EventOverlap
 from ..utils.math import align
 from ..utils.semantic import value_or, weak_lru
-from ..utils.envs import (
-    check_fast_rdma_atomic_support,
-    check_nvlink_connections, check_torch_deterministic,
-    get_nvlink_gbs, get_rdma_gbs,
-    get_sm_read_gbs, get_sm_write_gbs
-)
+from ..utils.envs import (check_fast_rdma_atomic_support, check_nvlink_connections, check_torch_deterministic, get_nvlink_gbs, get_rdma_gbs,
+                          get_sm_read_gbs, get_sm_write_gbs)
 
 
 class EPHandle:
@@ -61,22 +57,11 @@ class EPHandle:
         num_recv_tokens: the total number of received tokens.
     """
 
-    def __init__(self,
-                 do_expand: bool,
-                 num_experts: int, expert_alignment: int,
-                 num_max_tokens_per_rank: int,
-                 num_sms: int,
-                 topk_idx: torch.Tensor,
-                 num_recv_tokens: int,
-                 num_expanded_tokens: int,
-                 num_recv_tokens_per_expert_list: list,
-                 psum_num_recv_tokens_per_scaleup_rank: torch.Tensor,
-                 psum_num_recv_tokens_per_expert: torch.Tensor,
-                 num_unaligned_recv_tokens_per_expert: torch.Tensor,
-                 recv_src_metadata: torch.Tensor,
-                 dst_buffer_slot_idx: torch.Tensor,
-                 token_metadata_at_forward: Optional[torch.Tensor],
-                 channel_linked_list: Optional[torch.Tensor]):
+    def __init__(self, do_expand: bool, num_experts: int, expert_alignment: int, num_max_tokens_per_rank: int, num_sms: int,
+                 topk_idx: torch.Tensor, num_recv_tokens: int, num_expanded_tokens: int, num_recv_tokens_per_expert_list: list,
+                 psum_num_recv_tokens_per_scaleup_rank: torch.Tensor, psum_num_recv_tokens_per_expert: torch.Tensor,
+                 num_unaligned_recv_tokens_per_expert: torch.Tensor, recv_src_metadata: torch.Tensor, dst_buffer_slot_idx: torch.Tensor,
+                 token_metadata_at_forward: Optional[torch.Tensor], channel_linked_list: Optional[torch.Tensor]):
         assert topk_idx is not None
 
         self.do_expand = do_expand
@@ -183,20 +168,24 @@ class EPHandle:
             #  - `expert_idx * src_token_global_index_max_x2`, for padding slots
             # This guarantees a two-key sort: first by expert, then by order within each expert.
             # Valid tokens precede padding tokens, and valid tokens are sorted by `src_token_global_idx`.
-            src_token_global_index_max_x2 = 10000000000    # 1e10
+            src_token_global_index_max_x2 = 10000000000  # 1e10
             tensor_dim0_after_expand = recv_x.shape[0]
 
             expert_token_idx_start = self.psum_num_recv_tokens_per_expert - self.num_unaligned_recv_tokens_per_expert
             token_idx2expert_idx = torch.bucketize(torch.arange(tensor_dim0_after_expand, device='cuda'),
-                                                   expert_token_idx_start[1:], right=True, out_int32=False)
+                                                   expert_token_idx_start[1:],
+                                                   right=True,
+                                                   out_int32=False)
             sort_keys_for_expanded_tensors = token_idx2expert_idx * src_token_global_index_max_x2
 
-            slots = self.cached_recv_src_metadata_before_sort[:, 2:]    # [num_recv_tokens, topk]
+            slots = self.cached_recv_src_metadata_before_sort[:, 2:]  # [num_recv_tokens, topk]
             src_global_idx = self.cached_recv_src_metadata_before_sort[:, 0]
             valid_mask = slots >= 0
             if not do_cpu_sync:
                 valid_mask[oob_tokens_mask] = False
-            sort_keys_for_expanded_tensors.scatter_add_(0, slots[valid_mask], -src_token_global_index_max_x2//2 + src_global_idx.unsqueeze(1).expand_as(slots)[valid_mask].to(torch.int64))
+            sort_keys_for_expanded_tensors.scatter_add_(
+                0, slots[valid_mask],
+                -src_token_global_index_max_x2 // 2 + src_global_idx.unsqueeze(1).expand_as(slots)[valid_mask].to(torch.int64))
 
             orig_indices_for_expanded_tensors = torch.sort(sort_keys_for_expanded_tensors, stable=True).indices.to(torch.int32)
             permute(recv_x, orig_indices_for_expanded_tensors)
@@ -241,26 +230,28 @@ class EPBuffer(BufferBase):
     get_physical_domain_size = comm.get_physical_domain_size
     get_logical_domain_size = comm.get_logical_domain_size
 
-    def __init__(self,
-                 group: dist.ProcessGroup,
-                 # Provide `num_bytes` (excludes workspace)
-                 num_bytes: Optional[int] = None,
-                 # Or provide MoE settings (BF16 by default)
-                 num_max_tokens_per_rank: int = 0,
-                 hidden: int = 0,
-                 num_topk: int = 0,
-                 use_fp8_dispatch: bool = False,
-                 # Load balance configs
-                 lb_allocation_plan_or_num_bytes: Union[BufferAllocator, int] = 0,
-                 # Configs
-                 deterministic: bool = False,
-                 allow_hybrid_mode: bool = True,
-                 allow_multiple_reduction: bool = True,
-                 prefer_overlap_with_compute: bool = True,
-                 sl_idx: Optional[int] = None,
-                 num_allocated_qps: int = 0,
-                 num_cpu_timeout_secs: int = 300, num_gpu_timeout_secs: int = 100,
-                 explicitly_destroy: bool = False):
+    def __init__(
+            self,
+            group: dist.ProcessGroup,
+            # Provide `num_bytes` (excludes workspace)
+            num_bytes: Optional[int] = None,
+            # Or provide MoE settings (BF16 by default)
+            num_max_tokens_per_rank: int = 0,
+            hidden: int = 0,
+            num_topk: int = 0,
+            use_fp8_dispatch: bool = False,
+            # Load balance configs
+            lb_allocation_plan_or_num_bytes: Union[BufferAllocator, int] = 0,
+            # Configs
+            deterministic: bool = False,
+            allow_hybrid_mode: bool = True,
+            allow_multiple_reduction: bool = True,
+            prefer_overlap_with_compute: bool = True,
+            sl_idx: Optional[int] = None,
+            num_allocated_qps: int = 0,
+            num_cpu_timeout_secs: int = 300,
+            num_gpu_timeout_secs: int = 100,
+            explicitly_destroy: bool = False):
         """
         Initialize the EP communication buffer.
 
@@ -303,10 +294,8 @@ class EPBuffer(BufferBase):
         # Calculate buffer size (already 2 MB-aligned from hint functions / calculate_ep_buffer_size)
         if num_bytes is None:
             # NOTES: we allow `num_topk == 0`, as the buffer size can also be calculated by number of ranks (maybe bigger though)
-            num_bytes = _C.calculate_ep_buffer_size(
-                self.nccl_comm_handle.get(),
-                num_max_tokens_per_rank, hidden, num_topk, use_fp8_dispatch,
-                allow_hybrid_mode, allow_multiple_reduction)
+            num_bytes = _C.calculate_ep_buffer_size(self.nccl_comm_handle.get(), num_max_tokens_per_rank, hidden, num_topk,
+                                                    use_fp8_dispatch, allow_hybrid_mode, allow_multiple_reduction)
 
         if os.environ.get('EP_BUFFER_DEBUG', 0):
             print(f'Initializing EP buffer with {num_bytes} bytes at rank EP {group.rank()}/{group.size()}')
@@ -338,13 +327,9 @@ class EPBuffer(BufferBase):
 
         # Create CPP handle
         super().__init__(explicitly_destroy)
-        self.runtime = _C.EPBuffer(
-            self.rank_idx, self.num_ranks,
-            self.nccl_comm_handle.get(), num_bytes, num_lb_bytes,
-            allow_hybrid_mode, allow_multiple_reduction, prefer_overlap_with_compute,
-            sl_idx, num_allocated_qps,
-            num_cpu_timeout_secs, num_gpu_timeout_secs,
-            self.explicitly_destroy)
+        self.runtime = _C.EPBuffer(self.rank_idx, self.num_ranks, self.nccl_comm_handle.get(), num_bytes, num_lb_bytes, allow_hybrid_mode,
+                                   allow_multiple_reduction, prefer_overlap_with_compute, sl_idx, num_allocated_qps, num_cpu_timeout_secs,
+                                   num_gpu_timeout_secs, self.explicitly_destroy)
         self.context = self.runtime.context
 
         # Materialize LB allocation plan
@@ -379,8 +364,10 @@ class EPBuffer(BufferBase):
 
     @staticmethod
     def get_buffer_size_hint(group: dist.ProcessGroup,
-                             num_max_tokens_per_rank: int, hidden: int,
-                             num_topk: int = 0, use_fp8_dispatch: bool = False,
+                             num_max_tokens_per_rank: int,
+                             hidden: int,
+                             num_topk: int = 0,
+                             use_fp8_dispatch: bool = False,
                              allow_hybrid_mode: bool = True,
                              allow_multiple_reduction: bool = True) -> int:
         """
@@ -401,9 +388,8 @@ class EPBuffer(BufferBase):
         """
         # NOTES: calculate_ep_buffer_size already returns 2 MB-aligned values
         return _C.calculate_ep_buffer_size(
-            comm.get_nccl_comm_handle(group).get(),
-            num_max_tokens_per_rank, hidden, num_topk, use_fp8_dispatch,
-            allow_hybrid_mode, allow_multiple_reduction)
+            comm.get_nccl_comm_handle(group).get(), num_max_tokens_per_rank, hidden, num_topk, use_fp8_dispatch, allow_hybrid_mode,
+            allow_multiple_reduction)
 
     @staticmethod
     def _unpack_handle(handle: Optional[EPHandle] = None) \
@@ -413,16 +399,10 @@ class EPBuffer(BufferBase):
                  Optional[torch.Tensor], Optional[torch.Tensor]]:
         if handle is None:
             return None, None, None, None, None, None, None, None, None, None
-        return (handle.num_recv_tokens,
-                handle.num_expanded_tokens,
-                handle.num_recv_tokens_per_expert_list,
-                handle.psum_num_recv_tokens_per_scaleup_rank,
-                handle.psum_num_recv_tokens_per_expert,
-                handle.num_unaligned_recv_tokens_per_expert,
-                handle.dst_buffer_slot_idx,
-                handle.token_metadata_at_forward,
-                handle.recv_src_metadata,
-                handle.channel_linked_list)
+        return (handle.num_recv_tokens, handle.num_expanded_tokens, handle.num_recv_tokens_per_expert_list,
+                handle.psum_num_recv_tokens_per_scaleup_rank, handle.psum_num_recv_tokens_per_expert,
+                handle.num_unaligned_recv_tokens_per_expert, handle.dst_buffer_slot_idx, handle.token_metadata_at_forward,
+                handle.recv_src_metadata, handle.channel_linked_list)
 
     @staticmethod
     def capture() -> EventHandle:
@@ -435,10 +415,14 @@ class EPBuffer(BufferBase):
         return EventHandle()
 
     @weak_lru(maxsize=None)
-    def get_theoretical_num_sms(self, num_experts: int, num_topk: int,
+    def get_theoretical_num_sms(self,
+                                num_experts: int,
+                                num_topk: int,
                                 num_scaleout_topk: int = 0,
-                                rdma_gbs: float = 0, nvlink_gbs: float = 0,
-                                sm_read_gbs: float = 0, sm_write_gbs: float = 0) -> int:
+                                rdma_gbs: float = 0,
+                                nvlink_gbs: float = 0,
+                                sm_read_gbs: float = 0,
+                                sm_write_gbs: float = 0) -> int:
         """
         Estimate the optimal number of SMs for dispatch/combine kernels based on bandwidth modeling.
         The result is cached. This assumes a balanced gate distribution.
@@ -650,9 +634,8 @@ class EPBuffer(BufferBase):
                 `(recv_x, recv_topk_idx, recv_topk_weights, handle)`.
         """
         self._check_recv_view_released()
-        if borrow_recv and (handle is not None or do_expand or defer_epilogue or do_cpu_sync is False or
-                            not isinstance(x, torch.Tensor) or x.dtype != torch.bfloat16 or
-                            self.num_scaleout_ranks != 1 or self.num_rdma_ranks != 1):
+        if borrow_recv and (handle is not None or do_expand or defer_epilogue or do_cpu_sync is False or not isinstance(x, torch.Tensor)
+                            or x.dtype != torch.bfloat16 or self.num_scaleout_ranks != 1 or self.num_rdma_ranks != 1):
             raise ValueError('borrow_recv requires fresh compact BF16 dispatch, CPU counts, one NVLink domain, and no deferred epilogue')
         assert not do_handle_copy, '`do_handle_copy` must be False; handle copying is no longer supported'
         check_torch_deterministic()
@@ -680,13 +663,9 @@ class EPBuffer(BufferBase):
             # Should be aligned with the handle context
             assert (num_experts, expert_alignment, num_max_tokens_per_rank) == \
                    (handle.num_experts, handle.expert_alignment, handle.num_max_tokens_per_rank)
-        (cached_num_recv_tokens, cached_num_expanded_tokens,
-         cached_num_recv_tokens_per_expert_list,
-         cached_psum_num_recv_tokens_per_scaleup_rank, cached_psum_num_recv_tokens_per_expert,
-         cached_num_unaligned_recv_tokens_per_expert,
-         cached_dst_buffer_slot_idx,
-         cached_token_metadata_at_forward,
-         cached_recv_src_metadata,
+        (cached_num_recv_tokens, cached_num_expanded_tokens, cached_num_recv_tokens_per_expert_list,
+         cached_psum_num_recv_tokens_per_scaleup_rank, cached_psum_num_recv_tokens_per_expert, cached_num_unaligned_recv_tokens_per_expert,
+         cached_dst_buffer_slot_idx, cached_token_metadata_at_forward, cached_recv_src_metadata,
          cached_channel_linked_list) = self._unpack_handle(handle)
 
         # Some default values
@@ -695,59 +674,27 @@ class EPBuffer(BufferBase):
         do_cpu_sync = value_or(do_cpu_sync, True)
 
         # Do dispatch
-        result, event, deferred_epilogue = self.runtime.dispatch(x, sf, topk_idx, topk_weights,
-                                                                 cumulative_local_expert_recv_stats,
-                                                                 cached_num_recv_tokens,
-                                                                 cached_num_expanded_tokens,
-                                                                 cached_num_recv_tokens_per_expert_list,
-                                                                 cached_psum_num_recv_tokens_per_scaleup_rank,
-                                                                 cached_psum_num_recv_tokens_per_expert,
-                                                                 cached_num_unaligned_recv_tokens_per_expert,
-                                                                 cached_dst_buffer_slot_idx,
-                                                                 cached_token_metadata_at_forward,
-                                                                 cached_recv_src_metadata,
-                                                                 cached_channel_linked_list,
-                                                                 num_max_tokens_per_rank,
-                                                                 num_experts, expert_alignment,
-                                                                 num_sms, num_qps,
-                                                                 previous_event,
-                                                                 async_with_compute_stream, allocate_on_comm_stream,
-                                                                 do_cpu_sync, do_expand,
-                                                                 do_zero_padding,
-                                                                 use_tma_aligned_col_major_sf,
-                                                                 defer_epilogue, not borrow_recv)
+        result, event, deferred_epilogue = self.runtime.dispatch(
+            x, sf, topk_idx, topk_weights, cumulative_local_expert_recv_stats, cached_num_recv_tokens, cached_num_expanded_tokens,
+            cached_num_recv_tokens_per_expert_list, cached_psum_num_recv_tokens_per_scaleup_rank, cached_psum_num_recv_tokens_per_expert,
+            cached_num_unaligned_recv_tokens_per_expert, cached_dst_buffer_slot_idx, cached_token_metadata_at_forward,
+            cached_recv_src_metadata, cached_channel_linked_list, num_max_tokens_per_rank, num_experts, expert_alignment, num_sms, num_qps,
+            previous_event, async_with_compute_stream, allocate_on_comm_stream, do_cpu_sync, do_expand, do_zero_padding,
+            use_tma_aligned_col_major_sf, defer_epilogue, not borrow_recv)
         event_overlap = EventOverlap(event)
 
         def finalize_dispatch(dispatch_result: tuple, deterministic_by_hook: bool):
-            (recv_x, recv_sf,
-             recv_topk_idx, recv_topk_weights,
-             num_recv_tokens, num_expanded_tokens,
-             num_recv_tokens_per_expert_list,
-             psum_num_recv_tokens_per_scaleup_rank,
-             psum_num_recv_tokens_per_expert,
-             num_unaligned_recv_tokens_per_expert,
-             recv_src_metadata,
-             dst_buffer_slot_idx,
-             token_metadata_at_forward,
-             channel_linked_list, recv_row_indices) = dispatch_result
+            (recv_x, recv_sf, recv_topk_idx, recv_topk_weights, num_recv_tokens, num_expanded_tokens, num_recv_tokens_per_expert_list,
+             psum_num_recv_tokens_per_scaleup_rank, psum_num_recv_tokens_per_expert, num_unaligned_recv_tokens_per_expert,
+             recv_src_metadata, dst_buffer_slot_idx, token_metadata_at_forward, channel_linked_list, recv_row_indices) = dispatch_result
 
             # Create handle if not cached
             nonlocal handle
             is_cached_dispatch = handle is not None
-            handle = EPHandle(do_expand,
-                              num_experts, expert_alignment,
-                              num_max_tokens_per_rank,
-                              num_sms,
-                              topk_idx,
-                              num_recv_tokens, num_expanded_tokens,
-                              num_recv_tokens_per_expert_list,
-                              psum_num_recv_tokens_per_scaleup_rank,
-                              psum_num_recv_tokens_per_expert,
-                              num_unaligned_recv_tokens_per_expert,
-                              recv_src_metadata,
-                              dst_buffer_slot_idx,
-                              token_metadata_at_forward,
-                              channel_linked_list) if handle is None else handle
+            handle = EPHandle(do_expand, num_experts, expert_alignment, num_max_tokens_per_rank, num_sms, topk_idx, num_recv_tokens,
+                              num_expanded_tokens, num_recv_tokens_per_expert_list, psum_num_recv_tokens_per_scaleup_rank,
+                              psum_num_recv_tokens_per_expert, num_unaligned_recv_tokens_per_expert, recv_src_metadata, dst_buffer_slot_idx,
+                              token_metadata_at_forward, channel_linked_list) if handle is None else handle
 
             recv_view = None
             if borrow_recv:
@@ -757,9 +704,8 @@ class EPBuffer(BufferBase):
 
             def complete_dispatch():
                 if self.deterministic:
-                    handle.deterministic_sort(
-                        do_cpu_sync, is_cached_dispatch, recv_x, recv_sf,
-                        recv_topk_idx, recv_topk_weights, channel_linked_list, recv_row_indices)
+                    handle.deterministic_sort(do_cpu_sync, is_cached_dispatch, recv_x, recv_sf, recv_topk_idx, recv_topk_weights,
+                                              channel_linked_list, recv_row_indices)
                 if recv_view is not None:
                     recv_view._mark_ready()
 
@@ -774,8 +720,7 @@ class EPBuffer(BufferBase):
 
         # Just launch the dispatch
         if deferred_epilogue is not None:
-            event_overlap.register_hook_after_wait(
-                lambda: finalize_dispatch(deferred_epilogue(), False))
+            event_overlap.register_hook_after_wait(lambda: finalize_dispatch(deferred_epilogue(), False))
             return event_overlap
 
         # Do epilogue ASAP
@@ -845,21 +790,12 @@ class EPBuffer(BufferBase):
         assert num_qps <= self.num_allocated_qps, 'Allocated QPs are not enough'
 
         bias_0, bias_1 = EPBuffer._unpack_bias(bias)
-        result, event, deferred_epilogue = self.runtime.combine(x, topk_weights,
-                                                                bias_0, bias_1,
-                                                                handle.recv_src_metadata,
-                                                                handle.topk_idx,
+        result, event, deferred_epilogue = self.runtime.combine(x, topk_weights, bias_0, bias_1, handle.recv_src_metadata, handle.topk_idx,
                                                                 handle.psum_num_recv_tokens_per_scaleup_rank,
-                                                                handle.token_metadata_at_forward,
-                                                                handle.channel_linked_list,
-                                                                handle.num_experts,
-                                                                handle.num_max_tokens_per_rank,
-                                                                num_sms, num_qps,
-                                                                previous_event,
-                                                                async_with_compute_stream,
-                                                                allocate_on_comm_stream,
-                                                                handle.do_expand,
-                                                                defer_epilogue)
+                                                                handle.token_metadata_at_forward, handle.channel_linked_list,
+                                                                handle.num_experts, handle.num_max_tokens_per_rank, num_sms, num_qps,
+                                                                previous_event, async_with_compute_stream, allocate_on_comm_stream,
+                                                                handle.do_expand, defer_epilogue)
         event_overlap = EventOverlap(event)
         if deferred_epilogue is not None:
             event_overlap.register_hook_after_wait(deferred_epilogue)
@@ -903,13 +839,13 @@ class EPBuffer(BufferBase):
             previous_event: the event to wait for before communication; defaults to waiting for the current stream
         """
         self._check_recv_view_released()
-        redundant_expert_weights = ([redundant_expert_weights] if isinstance(redundant_expert_weights, torch.Tensor)
-                                    else list(redundant_expert_weights))
+        redundant_expert_weights = ([redundant_expert_weights]
+                                    if isinstance(redundant_expert_weights, torch.Tensor) else list(redundant_expert_weights))
         expert_weights = [expert_weights] if isinstance(expert_weights, torch.Tensor) else list(expert_weights)
 
         num_sms = self.lb_get_theoretical_num_sms() if num_sms == 0 else align(num_sms, 2)
-        return EventOverlap(self.runtime.lb_prefetch_weights(
-            redundant_expert_weights, expert_weights, redundancy_mapping, num_sms, previous_event))
+        return EventOverlap(
+            self.runtime.lb_prefetch_weights(redundant_expert_weights, expert_weights, redundancy_mapping, num_sms, previous_event))
 
     def lb_reduce_grads(self,
                         redundant_expert_grads: torch.Tensor,
@@ -931,5 +867,4 @@ class EPBuffer(BufferBase):
         """
         self._check_recv_view_released()
         num_sms = self.lb_get_theoretical_num_sms() if num_sms == 0 else align(num_sms, 2)
-        return EventOverlap(self.runtime.lb_reduce_grads(
-            redundant_expert_grads, expert_grads, redundancy_mapping, num_sms, previous_event))
+        return EventOverlap(self.runtime.lb_reduce_grads(redundant_expert_grads, expert_grads, redundancy_mapping, num_sms, previous_event))
