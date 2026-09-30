@@ -614,7 +614,8 @@ class EPBuffer(BufferBase):
             use_tma_aligned_col_major_sf: whether to use TMA-aligned column-major layout for scale factors.
             borrow_recv: return a DispatchRecvView instead of a materialized receive tensor.
                 Requires fresh compact BF16 dispatch in one NVLink domain, exact CPU counts, and
-                defer_epilogue=False. Wait the dispatch event, enqueue indexed consumers, then
+                defer_epilogue=False. Wait the dispatch event only for asynchronous dispatch,
+                enqueue indexed consumers, then
                 release the view with every consuming stream before reusing or destroying this buffer.
                 The view cannot be retained for backward; a cached materialized replay is supported.
             defer_epilogue: whether to defer the CPU receive-count wait and copy epilogue until
