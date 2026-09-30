@@ -280,6 +280,16 @@ The expanded `recv_topk_weights` is one-dimensional, with one value per expert r
 
 Training saves the forward `handle` for `combine_backward` and `dispatch_backward`. The backward helpers above return tensors and an event; wait on that event before using the tensors. Cached dispatch replays the saved expanded layout without another receive-count CPU synchronization. Keep the original `topk_idx` unchanged until all uses of the handle finish.
 
+### Borrowed receive storage
+
+For a fresh compact BF16 dispatch within one physical NVLink domain, `borrow_recv=True` returns a `DispatchRecvView` in place of `recv_x`. Logical receive row `r` is stored at `view.slab[view.row_indices[r]]`. Pass the slab and row map directly to an indexed consumer to avoid the activation copy in the dispatch epilogue. This mode requires exact CPU receive counts and `defer_epilogue=False`.
+
+With `async_with_compute_stream=True`, call `event.current_stream_wait()` before accessing the view. The default synchronous dispatch establishes the stream dependency before returning and needs no event wait. After enqueueing all consumers, call `view.release()` on the consuming stream, or pass every consuming CUDA stream to `view.release(*streams)`. Release orders subsequent communication after those consumers. Dispatch, combine, load-balancing calls, and explicit buffer destruction reject an active view. Keep host API calls serialized and stop using raw slab references after release.
+
+Borrowed storage is intended for forward consumers; retaining it for backward is unsupported. After release, the returned handle can be used for ordinary materialized cached replay. Expanded layouts, FP8, cached borrowed dispatch, deferred epilogues, and multiple NVLink domains are outside this initial API. The option defaults to `False`; whether it reduces latency depends on the consumer and token count.
+
+The exclusive lease makes the next dispatch on the same buffer wait for its consumers; performance gains with pipelined communication and computation have not been measured.
+
 ### Deferred epilogues
 
 Dispatch and combine accept `defer_epilogue=True` together with `async_with_compute_stream=True`. In this mode, the call returns an `EventOverlap` directly. Calling `.wait()` runs the deferred epilogue on the current stream and returns `(recv_x, recv_topk_idx, recv_topk_weights, handle)` for dispatch, or `(combined_x, combined_topk_weights)` for combine.

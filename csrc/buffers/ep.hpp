@@ -2,25 +2,25 @@
 
 #include <c10/util/accumulate.h>
 #include <cuda_runtime.h>
-#include <memory>
-#include <vector>
 #include <pybind11/functional.h>
 
 #include <deep_ep/common/compiled.cuh>
+#include <deep_ep/layout/ep/eplb.cuh>
 #include <deep_ep/layout/ep/token.cuh>
 #include <deep_ep/layout/ep/workspace.cuh>
-#include <deep_ep/layout/ep/eplb.cuh>
+#include <memory>
+#include <vector>
 
-#include "base.hpp"
 #include "../comm/api.hpp"
 #include "../kernels/ep/api.hpp"
 #include "../runtime/jit.hpp"
 #include "../utils/event.hpp"
 #include "../utils/tensor.hpp"
+#include "base.hpp"
 
 namespace deep_ep::ep {
 
-class EPBuffer: public BufferBase {
+class EPBuffer : public BufferBase {
     // Buffer bytes exclude workspace
     // Memory layout: [Workspace, buffer]
     int64_t num_buffer_bytes;
@@ -48,42 +48,55 @@ public:
     // For load balance
     torch::Tensor lb_storage;
 
-    EPBuffer(const int& rank_idx, const int& num_ranks,
+    EPBuffer(const int& rank_idx,
+             const int& num_ranks,
              const int64_t& nccl_comm,
              const int64_t& num_buffer_bytes,
              const int64_t& num_lb_buffer_bytes,
              const bool& allow_hybrid_mode,
              const bool& allow_multiple_reduction,
              const bool& prefer_overlap_with_compute,
-             const std::optional<int>& sl_idx, const int& num_allocated_qps,
-             const int& num_cpu_timeout_secs, const int& num_gpu_timeout_secs,
-             const bool& explicitly_destroy):
-        BufferBase(explicitly_destroy),
-        num_buffer_bytes(num_buffer_bytes),
-        allow_hybrid_mode(allow_hybrid_mode),
-        allow_multiple_reduction(allow_multiple_reduction),
-        prefer_overlap_with_compute(prefer_overlap_with_compute) {
+             const std::optional<int>& sl_idx,
+             const int& num_allocated_qps,
+             const int& num_cpu_timeout_secs,
+             const int& num_gpu_timeout_secs,
+             const bool& explicitly_destroy)
+        : BufferBase(explicitly_destroy),
+          num_buffer_bytes(num_buffer_bytes),
+          allow_hybrid_mode(allow_hybrid_mode),
+          allow_multiple_reduction(allow_multiple_reduction),
+          prefer_overlap_with_compute(prefer_overlap_with_compute) {
         EP_HOST_ASSERT(num_buffer_bytes > 0 and num_buffer_bytes % kNumAllocationAlignmentBytes == 0);
         EP_HOST_ASSERT(num_lb_buffer_bytes >= 0 and num_lb_buffer_bytes % kNumAllocationAlignmentBytes == 0);
 
         // Workspace is aligned to 2 MB so that it sits cleanly at the front of the GPU segment
-        const auto num_workspace_bytes = math::align<int64_t>(
-            layout::EPWorkspaceLayout::get_num_bytes(), kNumAllocationAlignmentBytes);
+        const auto num_workspace_bytes = math::align<int64_t>(layout::EPWorkspaceLayout::get_num_bytes(), kNumAllocationAlignmentBytes);
 
-        context = std::make_shared<comm::Context>(
-            nccl_comm, symmetric::shared_comm_t{}, num_ranks, rank_idx,
-            num_workspace_bytes, num_buffer_bytes + num_lb_buffer_bytes, 0, true,
-            allow_hybrid_mode, sl_idx, num_allocated_qps,
-            0, num_cpu_timeout_secs, num_gpu_timeout_secs);
+        context = std::make_shared<comm::Context>(nccl_comm,
+                                                  symmetric::shared_comm_t{},
+                                                  num_ranks,
+                                                  rank_idx,
+                                                  num_workspace_bytes,
+                                                  num_buffer_bytes + num_lb_buffer_bytes,
+                                                  0,
+                                                  true,
+                                                  allow_hybrid_mode,
+                                                  sl_idx,
+                                                  num_allocated_qps,
+                                                  0,
+                                                  num_cpu_timeout_secs,
+                                                  num_gpu_timeout_secs);
         main_context = context;
         auto& workspace = *static_cast<layout::EPSignals*>(context->workspace);
         context->set_barrier_signals(&workspace.barrier_signals);
 
         // Expose only the LB region; the preceding bytes remain reserved for EP communication.
         lb_storage = torch::from_blob(
-            context->buffer, {num_buffer_bytes + num_lb_buffer_bytes}, [context = context](void*) {},
-            torch::TensorOptions().dtype(torch::kByte).device(torch::kCUDA)
-        ).narrow(0, num_buffer_bytes, num_lb_buffer_bytes);
+                         context->buffer,
+                         {num_buffer_bytes + num_lb_buffer_bytes},
+                         [context = context](void*) {},
+                         torch::TensorOptions().dtype(torch::kByte).device(torch::kCUDA))
+                         .narrow(0, num_buffer_bytes, num_lb_buffer_bytes);
 
         // Allocate host workspaces
         CUDA_RUNTIME_CHECK(cudaMallocHost(&host_workspace, layout::EPWorkspaceLayout::get_num_bytes(), cudaHostAllocMapped));
@@ -95,16 +108,13 @@ public:
         // NOTES: do not call our barrier, as the workspace is not ready yet
     }
 
-    ~EPBuffer() noexcept(false) override {
-        destroy_on_destruction("EP");
-    }
+    ~EPBuffer() noexcept(false) override { destroy_on_destruction("EP"); }
 
     void destroy() override {
         EP_HOST_ASSERT(not destroyed);
 
         // Finish all works on all GPUs
-        comm::barrier(*context, context->barrier_signals, at::cuda::getCurrentCUDAStream(),
-                      context->num_gpu_timeout_cycles, true, true);
+        comm::barrier(*context, context->barrier_signals, at::cuda::getCurrentCUDAStream(), context->num_gpu_timeout_cycles, true, true);
 
         // Deallocate host workspaces
         CUDA_RUNTIME_CHECK(cudaFreeHost(host_workspace));
@@ -163,10 +173,11 @@ public:
             if (get_env<int>("EP_AVOID_RECORD_STREAM", 0)) {
                 event->tensors_to_record = tensors;
             } else {
-                for (auto& t: tensors) if (t.has_value()) {
-                    t->record_stream(compute_stream);
-                    t->record_stream(comm_stream);
-                }
+                for (auto& t : tensors)
+                    if (t.has_value()) {
+                        t->record_stream(compute_stream);
+                        t->record_stream(comm_stream);
+                    }
             }
         } else {
             comm::stream_wait(compute_stream, comm_stream);
@@ -181,37 +192,39 @@ public:
     }
 
     static int64_t get_dispatch_buffer_size(const int& num_max_tokens_per_rank,
-                                            const int& hidden, const int& num_sf_packs, const int& num_topk,
+                                            const int& hidden,
+                                            const int& num_sf_packs,
+                                            const int& num_topk,
                                             const int& elem_size,
-                                            const int& num_scaleout_ranks, const int& num_scaleup_ranks,
+                                            const int& num_scaleout_ranks,
+                                            const int& num_scaleup_ranks,
                                             const bool& is_scaleup_nvlink) {
         const auto num_ranks = num_scaleup_ranks * num_scaleout_ranks;
         const auto token_layout = get_dispatch_token_layout(hidden, elem_size, num_sf_packs, num_topk);
 
         if (num_scaleout_ranks == 1) {
             // Direct dispatch
-            const auto send_buffer_layout = layout::BufferLayout<false>(
-                token_layout, is_scaleup_nvlink ? 0 : 1, num_max_tokens_per_rank);
-            const auto recv_buffer_layout = layout::BufferLayout<false>(
-                token_layout, num_ranks, num_max_tokens_per_rank);
+            const auto send_buffer_layout = layout::BufferLayout<false>(token_layout, is_scaleup_nvlink ? 0 : 1, num_max_tokens_per_rank);
+            const auto recv_buffer_layout = layout::BufferLayout<false>(token_layout, num_ranks, num_max_tokens_per_rank);
             return send_buffer_layout.get_num_bytes() + recv_buffer_layout.get_num_bytes();
         } else {
             // Hybrid dispatch
-            const auto scaleup_recv_buffer = layout::BufferLayout<false>(
-                token_layout, num_scaleup_ranks, num_scaleout_ranks * num_max_tokens_per_rank);
-            const auto scaleout_send_buffer = layout::BufferLayout<false>(
-                token_layout, 1, num_max_tokens_per_rank);
-            const auto scaleout_recv_buffer = layout::BufferLayout<false>(
-                token_layout, num_scaleout_ranks,
-                /* kNumChannels * kNumMaxTokensPerChannel */ num_max_tokens_per_rank + kNumMaxChannels);
-            return scaleup_recv_buffer.get_num_bytes() +
-                   scaleout_send_buffer.get_num_bytes() +
-                   scaleout_recv_buffer.get_num_bytes();
+            const auto scaleup_recv_buffer =
+                layout::BufferLayout<false>(token_layout, num_scaleup_ranks, num_scaleout_ranks * num_max_tokens_per_rank);
+            const auto scaleout_send_buffer = layout::BufferLayout<false>(token_layout, 1, num_max_tokens_per_rank);
+            const auto scaleout_recv_buffer =
+                layout::BufferLayout<false>(token_layout,
+                                            num_scaleout_ranks,
+                                            /* kNumChannels * kNumMaxTokensPerChannel */ num_max_tokens_per_rank + kNumMaxChannels);
+            return scaleup_recv_buffer.get_num_bytes() + scaleout_send_buffer.get_num_bytes() + scaleout_recv_buffer.get_num_bytes();
         }
     }
 
-    static int64_t get_combine_buffer_size(const int& num_max_tokens_per_rank, const int& hidden, const int& num_topk,
-                                           const int& num_scaleout_ranks, const int& num_scaleup_ranks,
+    static int64_t get_combine_buffer_size(const int& num_max_tokens_per_rank,
+                                           const int& hidden,
+                                           const int& num_topk,
+                                           const int& num_scaleout_ranks,
+                                           const int& num_scaleup_ranks,
                                            const bool& is_scaleup_nvlink,
                                            const bool& allow_multiple_reduction) {
         const auto num_ranks = num_scaleup_ranks * num_scaleout_ranks;
@@ -220,35 +233,35 @@ public:
         if (num_scaleout_ranks == 1) {
             // Direct combine
             const auto num_tokens_in_layout = allow_multiple_reduction ? std::min(num_ranks, num_topk) : num_topk;
-            const auto send_buffer_layout = layout::BufferLayout<false>(
-                token_layout, is_scaleup_nvlink ? 0 : num_ranks,
-                // For single reduction cases, the maximum number of received tokens is
-                // `num_ranks * num_topk * num_max_tokens_per_rank` (we assume the bad case of `do_expand=True`)
-                num_max_tokens_per_rank * (allow_multiple_reduction ? 1 : num_topk));
-            const auto recv_buffer_layout = layout::BufferLayout<false>(
-                token_layout, num_tokens_in_layout, num_max_tokens_per_rank);
+            const auto send_buffer_layout =
+                layout::BufferLayout<false>(token_layout,
+                                            is_scaleup_nvlink ? 0 : num_ranks,
+                                            // For single reduction cases, the maximum number of received tokens is
+                                            // `num_ranks * num_topk * num_max_tokens_per_rank` (we assume the bad case of `do_expand=True`)
+                                            num_max_tokens_per_rank * (allow_multiple_reduction ? 1 : num_topk));
+            const auto recv_buffer_layout = layout::BufferLayout<false>(token_layout, num_tokens_in_layout, num_max_tokens_per_rank);
             return send_buffer_layout.get_num_bytes() + recv_buffer_layout.get_num_bytes();
         } else {
             // Hybrid combine
             const int num_tokens_in_scaleup_layout = allow_multiple_reduction ? std::min(num_scaleup_ranks, num_topk) : num_topk;
             const int num_tokens_in_scaleout_layout = allow_multiple_reduction ? std::min(num_scaleout_ranks, num_topk) : num_topk;
-            const auto scaleup_recv_buffer = layout::BufferLayout<false>(
-                token_layout, num_tokens_in_scaleup_layout, num_scaleout_ranks * num_max_tokens_per_rank);
-            const auto scaleout_recv_buffer = layout::BufferLayout<false>(
-                token_layout, num_tokens_in_scaleout_layout, num_max_tokens_per_rank);
-            const auto scaleout_send_buffer = layout::BufferLayout<false>(
-                token_layout, allow_multiple_reduction ? 1 : num_topk,
-                /* kNumChannels * num_scaleout_ranks * kNumMaxTokensPerChannel */
-                num_scaleout_ranks * (num_max_tokens_per_rank + kNumMaxChannels));
-            return scaleup_recv_buffer.get_num_bytes() +
-                   scaleout_send_buffer.get_num_bytes() +
-                   scaleout_recv_buffer.get_num_bytes();
+            const auto scaleup_recv_buffer =
+                layout::BufferLayout<false>(token_layout, num_tokens_in_scaleup_layout, num_scaleout_ranks * num_max_tokens_per_rank);
+            const auto scaleout_recv_buffer =
+                layout::BufferLayout<false>(token_layout, num_tokens_in_scaleout_layout, num_max_tokens_per_rank);
+            const auto scaleout_send_buffer = layout::BufferLayout<false>(token_layout,
+                                                                          allow_multiple_reduction ? 1 : num_topk,
+                                                                          /* kNumChannels * num_scaleout_ranks * kNumMaxTokensPerChannel */
+                                                                          num_scaleout_ranks * (num_max_tokens_per_rank + kNumMaxChannels));
+            return scaleup_recv_buffer.get_num_bytes() + scaleout_send_buffer.get_num_bytes() + scaleout_recv_buffer.get_num_bytes();
         }
     }
 
     static int64_t calculate_buffer_size(const int64_t& nccl_comm,
-                                         const int& num_max_tokens_per_rank, const int& hidden,
-                                         int num_topk, const bool& use_fp8_dispatch,
+                                         const int& num_max_tokens_per_rank,
+                                         const int& hidden,
+                                         int num_topk,
+                                         const bool& use_fp8_dispatch,
                                          const bool& allow_hybrid_mode,
                                          const bool& allow_multiple_reduction) {
         EP_HOST_ASSERT(num_max_tokens_per_rank > 0 and hidden > 0);
@@ -266,48 +279,51 @@ public:
 
         // Dispatch size
         const auto elem_size = use_fp8_dispatch ? sizeof(__nv_fp8_e4m3) : sizeof(nv_bfloat16);
-        const auto num_sf_packs = use_fp8_dispatch ? math::ceil_div(hidden, 32) : 0; // An approximation for number of SF packs
+        const auto num_sf_packs = use_fp8_dispatch ? math::ceil_div(hidden, 32) : 0;  // An approximation for number of SF packs
         const auto num_dispatch_bytes = get_dispatch_buffer_size(
-            num_max_tokens_per_rank, hidden, num_sf_packs, num_topk, elem_size,
-            num_scaleout_ranks, num_scaleup_ranks,
-            is_scaleup_nvlink);
+            num_max_tokens_per_rank, hidden, num_sf_packs, num_topk, elem_size, num_scaleout_ranks, num_scaleup_ranks, is_scaleup_nvlink);
 
         // Combine layout
         const auto num_combine_bytes = get_combine_buffer_size(
-            num_max_tokens_per_rank, hidden, num_topk,
-            num_scaleout_ranks, num_scaleup_ranks,
-            is_scaleup_nvlink, allow_multiple_reduction);
+            num_max_tokens_per_rank, hidden, num_topk, num_scaleout_ranks, num_scaleup_ranks, is_scaleup_nvlink, allow_multiple_reduction);
 
         // Return the maximum of those layouts, aligned to 2 MB
         return math::align<int64_t>(std::max(num_dispatch_bytes, num_combine_bytes), kNumAllocationAlignmentBytes);
     }
 
-    pybind11::tuple
-    dispatch(const torch::Tensor& x,
-             const std::optional<torch::Tensor>& sf,
-             const torch::Tensor& topk_idx,
-             const std::optional<torch::Tensor>& topk_weights,
-             const std::optional<torch::Tensor>& cumulative_local_expert_recv_stats,
-             const std::optional<int>& cached_num_recv_tokens,
-             const std::optional<int>& cached_num_expanded_tokens,
-             const std::optional<std::vector<int>>& cached_num_recv_tokens_per_expert_list,
-             const std::optional<torch::Tensor>& cached_psum_num_recv_tokens_per_scaleup_rank,
-             const std::optional<torch::Tensor>& cached_psum_num_recv_tokens_per_expert,
-             const std::optional<torch::Tensor>& cached_num_unaligned_recv_tokens_per_expert,
-             const std::optional<torch::Tensor>& cached_dst_buffer_slot_idx,
-             const std::optional<torch::Tensor>& cached_token_metadata_at_forward,
-             const std::optional<torch::Tensor>& cached_recv_src_metadata,
-             const std::optional<torch::Tensor>& cached_channel_linked_list,
-             const int& num_max_tokens_per_rank,
-             const int& num_experts, const int& expert_alignment,
-             const int& num_sms, const int& num_qps,
-             const std::optional<EventHandle>& previous_event,
-             const bool& async_with_compute_stream,
-             const bool& allocate_on_comm_stream,
-             const bool& do_cpu_sync,
-             const bool& do_expand, const bool& do_zero_padding,
-             const bool& use_tma_aligned_col_major_sf,
-             const bool& defer_epilogue) const {
+    pybind11::tuple dispatch(const torch::Tensor& x,
+                             const std::optional<torch::Tensor>& sf,
+                             const torch::Tensor& topk_idx,
+                             const std::optional<torch::Tensor>& topk_weights,
+                             const std::optional<torch::Tensor>& cumulative_local_expert_recv_stats,
+                             const std::optional<int>& cached_num_recv_tokens,
+                             const std::optional<int>& cached_num_expanded_tokens,
+                             const std::optional<std::vector<int>>& cached_num_recv_tokens_per_expert_list,
+                             const std::optional<torch::Tensor>& cached_psum_num_recv_tokens_per_scaleup_rank,
+                             const std::optional<torch::Tensor>& cached_psum_num_recv_tokens_per_expert,
+                             const std::optional<torch::Tensor>& cached_num_unaligned_recv_tokens_per_expert,
+                             const std::optional<torch::Tensor>& cached_dst_buffer_slot_idx,
+                             const std::optional<torch::Tensor>& cached_token_metadata_at_forward,
+                             const std::optional<torch::Tensor>& cached_recv_src_metadata,
+                             const std::optional<torch::Tensor>& cached_channel_linked_list,
+                             const int& num_max_tokens_per_rank,
+                             const int& num_experts,
+                             const int& expert_alignment,
+                             const int& num_sms,
+                             const int& num_qps,
+                             const std::optional<EventHandle>& previous_event,
+                             const bool& async_with_compute_stream,
+                             const bool& allocate_on_comm_stream,
+                             const bool& do_cpu_sync,
+                             const bool& do_expand,
+                             const bool& do_zero_padding,
+                             const bool& use_tma_aligned_col_major_sf,
+                             const bool& defer_epilogue,
+                             const bool& materialize_recv_x) const {
+        EP_HOST_ASSERT(materialize_recv_x or
+                       (context->num_scaleout_ranks == 1 and context->num_rdma_ranks == 1 and not do_expand and not sf.has_value() and
+                        x.scalar_type() == torch::kBFloat16 and do_cpu_sync and not cached_num_recv_tokens.has_value() and
+                        not defer_epilogue));
         // Check SM count
         EP_HOST_ASSERT(num_sms > 0 and num_sms <= jit->device.get_num_sms());
         EP_HOST_ASSERT((num_sms > 1 or context->num_scaleout_ranks == 1 or context->num_scaleup_ranks == 1) and
@@ -378,8 +394,7 @@ public:
         int* cumulative_local_expert_recv_stats_ptr = nullptr;
         if (cumulative_local_expert_recv_stats.has_value()) {
             const auto [num_local_experts_] = get_shape<1>(cumulative_local_expert_recv_stats.value());
-            EP_HOST_ASSERT(cumulative_local_expert_recv_stats->is_cuda() and
-                           cumulative_local_expert_recv_stats->is_contiguous());
+            EP_HOST_ASSERT(cumulative_local_expert_recv_stats->is_cuda() and cumulative_local_expert_recv_stats->is_contiguous());
             EP_HOST_ASSERT(num_local_experts == num_local_experts_);
             cumulative_local_expert_recv_stats_ptr = cumulative_local_expert_recv_stats->data_ptr<int>();
         }
@@ -400,8 +415,7 @@ public:
             EP_HOST_ASSERT(psum_num_recv_tokens_per_expert.scalar_type() == torch::kInt);
         } else {
             // NOTES: for expand mode, the input is exclusive prefix sum, while for non-expand, it is inclusive
-            psum_num_recv_tokens_per_expert = torch::empty(
-                {num_local_experts + 1}, at::TensorOptions(torch::kCUDA).dtype(torch::kInt));
+            psum_num_recv_tokens_per_expert = torch::empty({num_local_experts + 1}, at::TensorOptions(torch::kCUDA).dtype(torch::kInt));
         }
 
         // The unaligned (actual) number of received tokens per expert
@@ -414,8 +428,7 @@ public:
             EP_HOST_ASSERT(num_unaligned_recv_tokens_per_expert.is_cuda() and num_unaligned_recv_tokens_per_expert.is_contiguous());
             EP_HOST_ASSERT(num_unaligned_recv_tokens_per_expert.scalar_type() == torch::kInt);
         } else {
-            num_unaligned_recv_tokens_per_expert = torch::empty(
-                {num_local_experts}, at::TensorOptions(torch::kCUDA).dtype(torch::kInt));
+            num_unaligned_recv_tokens_per_expert = torch::empty({num_local_experts}, at::TensorOptions(torch::kCUDA).dtype(torch::kInt));
         }
         num_unaligned_recv_tokens_per_expert_ptr = num_unaligned_recv_tokens_per_expert.data_ptr<int>();
 
@@ -428,8 +441,8 @@ public:
             EP_HOST_ASSERT(psum_num_recv_tokens_per_scaleup_rank.is_cuda() and psum_num_recv_tokens_per_scaleup_rank.is_contiguous());
             EP_HOST_ASSERT(psum_num_recv_tokens_per_scaleup_rank.scalar_type() == torch::kInt);
         } else {
-            psum_num_recv_tokens_per_scaleup_rank = torch::empty(
-                {context->num_scaleup_ranks}, at::TensorOptions(torch::kCUDA).dtype(torch::kInt));
+            psum_num_recv_tokens_per_scaleup_rank =
+                torch::empty({context->num_scaleup_ranks}, at::TensorOptions(torch::kCUDA).dtype(torch::kInt));
         }
 
         // Decide number of channels by shared memory consumption
@@ -443,9 +456,7 @@ public:
             num_channels_per_sm = std::min<int>(
                 (num_smem_bytes - get_num_notify_smem_bytes(context->num_ranks, num_experts)) / dispatch_token_layout.get_num_bytes<true>(),
                 32 - kNumNotifyWarps);
-            num_channels_per_sm = std::min<int>(
-                num_smem_bytes / combine_token_layout.get_num_bytes<true>(),
-                num_channels_per_sm);
+            num_channels_per_sm = std::min<int>(num_smem_bytes / combine_token_layout.get_num_bytes<true>(), num_channels_per_sm);
             num_channels_per_sm = std::min<int>(
                 /* 2 kinds of warps */ num_channels_per_sm / 2, kNumMaxChannelsPerSM);
             if (not prefer_overlap_with_compute)
@@ -465,8 +476,7 @@ public:
                 EP_HOST_ASSERT(dst_buffer_slot_idx.scalar_type() == torch::kInt);
             } else {
                 // Allocate a new tensor
-                dst_buffer_slot_idx = torch::empty(
-                    {num_tokens, num_topk}, torch::TensorOptions(torch::kCUDA).dtype(torch::kInt));
+                dst_buffer_slot_idx = torch::empty({num_tokens, num_topk}, torch::TensorOptions(torch::kCUDA).dtype(torch::kInt));
             }
         }
 
@@ -480,17 +490,14 @@ public:
             // TODO: May make it a linked list to remove the redundant info in `token_metadata_at_forward`
             const auto num_max_tokens_per_channel = math::ceil_div(num_max_tokens_per_rank, num_channels);
             if (cached_mode) {
-                const auto [num_channels_, num_scaleout_ranks_, num_max_tokens_per_channel_, num_topk_] =
-                    get_shape<4>(dst_buffer_slot_idx);
+                const auto [num_channels_, num_scaleout_ranks_, num_max_tokens_per_channel_, num_topk_] = get_shape<4>(dst_buffer_slot_idx);
                 EP_HOST_ASSERT(num_channels == num_channels_ and context->num_scaleout_ranks == num_scaleout_ranks_ and
                                num_max_tokens_per_channel == num_max_tokens_per_channel_ and num_topk == num_topk_);
                 EP_HOST_ASSERT(dst_buffer_slot_idx.is_cuda() and dst_buffer_slot_idx.is_contiguous());
                 EP_HOST_ASSERT(dst_buffer_slot_idx.scalar_type() == torch::kInt);
             } else {
-                dst_buffer_slot_idx = torch::empty(
-                    {num_channels, context->num_scaleout_ranks, num_max_tokens_per_channel, num_topk},
-                    torch::TensorOptions().device(torch::kCUDA).dtype(torch::kInt)
-                );
+                dst_buffer_slot_idx = torch::empty({num_channels, context->num_scaleout_ranks, num_max_tokens_per_channel, num_topk},
+                                                   torch::TensorOptions().device(torch::kCUDA).dtype(torch::kInt));
             }
 
             // The token metadata during forward
@@ -504,16 +511,15 @@ public:
             const auto num_forward_metadata_dims = 2 + num_topk * 2;
             if (cached_mode) {
                 token_metadata_at_forward = cached_token_metadata_at_forward;
-                const auto [num_channels_, num_max_forwarded_tokens_, num_forward_metadata_dims_] = get_shape<3>(token_metadata_at_forward.value());
-                EP_HOST_ASSERT(num_channels == num_channels_ and num_max_forwarded_tokens == num_max_forwarded_tokens_
-                               and num_forward_metadata_dims == num_forward_metadata_dims_);
+                const auto [num_channels_, num_max_forwarded_tokens_, num_forward_metadata_dims_] =
+                    get_shape<3>(token_metadata_at_forward.value());
+                EP_HOST_ASSERT(num_channels == num_channels_ and num_max_forwarded_tokens == num_max_forwarded_tokens_ and
+                               num_forward_metadata_dims == num_forward_metadata_dims_);
                 EP_HOST_ASSERT(token_metadata_at_forward->is_cuda() and token_metadata_at_forward->is_contiguous());
                 EP_HOST_ASSERT(token_metadata_at_forward->scalar_type() == torch::kInt);
             } else {
-                token_metadata_at_forward = torch::empty(
-                    {num_channels, num_max_forwarded_tokens, num_forward_metadata_dims},
-                    torch::TensorOptions().device(torch::kCUDA).dtype(torch::kInt)
-                );
+                token_metadata_at_forward = torch::empty({num_channels, num_max_forwarded_tokens, num_forward_metadata_dims},
+                                                         torch::TensorOptions().device(torch::kCUDA).dtype(torch::kInt));
             }
             token_metadata_at_forward_ptr = token_metadata_at_forward->data_ptr<int>();
 
@@ -531,66 +537,81 @@ public:
             } else {
                 channel_linked_list = torch::empty(
                     // Index 0 of the list means the starting item
-                    {num_channels,
-                    context->num_scaleout_ranks * num_max_tokens_per_channel + 1,
-                    context->num_scaleup_ranks},
-                    torch::TensorOptions().device(torch::kCUDA).dtype(torch::kInt)
-                );
+                    {num_channels, context->num_scaleout_ranks * num_max_tokens_per_channel + 1, context->num_scaleup_ranks},
+                    torch::TensorOptions().device(torch::kCUDA).dtype(torch::kInt));
             }
             channel_linked_list_ptr = channel_linked_list->data_ptr<int>();
         }
 
         // Check buffer size
-        EP_HOST_ASSERT(get_dispatch_buffer_size(
-                       num_max_tokens_per_rank, hidden, num_sf_packs, num_topk, x.element_size(),
-                       context->num_scaleout_ranks, context->num_scaleup_ranks,
-                       context->is_scaleup_nvlink) <= num_buffer_bytes);
+        EP_HOST_ASSERT(get_dispatch_buffer_size(num_max_tokens_per_rank,
+                                                hidden,
+                                                num_sf_packs,
+                                                num_topk,
+                                                x.element_size(),
+                                                context->num_scaleout_ranks,
+                                                context->num_scaleup_ranks,
+                                                context->is_scaleup_nvlink) <= num_buffer_bytes);
 
         // Ready and clean host workspace for this round
-        const auto host_workspace_layout = layout::EPWorkspaceLayout(
-            host_workspace,
-            context->num_scaleout_ranks,
-            context->num_scaleup_ranks,
-            num_experts);
+        const auto host_workspace_layout =
+            layout::EPWorkspaceLayout(host_workspace, context->num_scaleout_ranks, context->num_scaleup_ranks, num_experts);
         std::fill_n(host_workspace_layout.get_scaleup_rank_count_ptr<false>(), context->num_scaleup_ranks, 0);
         std::fill_n(host_workspace_layout.get_scaleup_expert_count_ptr<false>(), num_local_experts, 0);
         std::atomic_thread_fence(std::memory_order_seq_cst);
 
         // Do dispatch into the buffers (with SM limitation)
-        launch_dispatch(x.data_ptr(), sf_ptr,
-                        topk_idx.data_ptr<topk_idx_t>(), topk_weights_ptr,
+        launch_dispatch(x.data_ptr(),
+                        sf_ptr,
+                        topk_idx.data_ptr<topk_idx_t>(),
+                        topk_weights_ptr,
                         cumulative_local_expert_recv_stats_ptr,
                         psum_num_recv_tokens_per_scaleup_rank.data_ptr<int>(),
                         psum_num_recv_tokens_per_expert.data_ptr<int>(),
                         num_unaligned_recv_tokens_per_expert_ptr,
                         dst_buffer_slot_idx.data_ptr<int>(),
                         token_metadata_at_forward_ptr,
-                        num_tokens, num_max_tokens_per_rank,
-                        hidden, x.element_size(),
-                        num_sf_packs, sf_token_stride, sf_hidden_stride,
-                        num_experts, num_topk, expert_alignment,
-                        context->dev_comm, context->window,
+                        num_tokens,
+                        num_max_tokens_per_rank,
+                        hidden,
+                        x.element_size(),
+                        num_sf_packs,
+                        sf_token_stride,
+                        sf_hidden_stride,
+                        num_experts,
+                        num_topk,
+                        expert_alignment,
+                        context->dev_comm,
+                        context->window,
                         context->buffer,
-                        context->workspace, mapped_host_workspace,
-                        context->scaleout_rank_idx, context->scaleup_rank_idx,
-                        context->num_scaleout_ranks, context->num_scaleup_ranks,
+                        context->workspace,
+                        mapped_host_workspace,
+                        context->scaleout_rank_idx,
+                        context->scaleup_rank_idx,
+                        context->num_scaleout_ranks,
+                        context->num_scaleup_ranks,
                         context->is_scaleup_nvlink,
-                        num_sms, num_channels_per_sm,
+                        num_sms,
+                        num_channels_per_sm,
                         num_smem_bytes,
-                        num_qps, context->num_gpu_timeout_cycles,
-                        cached_mode, do_cpu_sync,
+                        num_qps,
+                        context->num_gpu_timeout_cycles,
+                        cached_mode,
+                        do_cpu_sync,
                         comm_stream);
 
         // For tensor recording
-        tensor_list_t tensors_to_record = {
-            x, sf, topk_idx, topk_weights,
-            cumulative_local_expert_recv_stats,
-            psum_num_recv_tokens_per_scaleup_rank,
-            psum_num_recv_tokens_per_expert,
-            num_unaligned_recv_tokens_per_expert,
-            dst_buffer_slot_idx,
-            token_metadata_at_forward,
-            channel_linked_list};
+        tensor_list_t tensors_to_record = {x,
+                                           sf,
+                                           topk_idx,
+                                           topk_weights,
+                                           cumulative_local_expert_recv_stats,
+                                           psum_num_recv_tokens_per_scaleup_rank,
+                                           psum_num_recv_tokens_per_expert,
+                                           num_unaligned_recv_tokens_per_expert,
+                                           dst_buffer_slot_idx,
+                                           token_metadata_at_forward,
+                                           channel_linked_list};
 
         // Epilogue can be deferred, so it is a lambda
         auto epilogue = [=, this](const at::cuda::CUDAStream& stream,
@@ -609,8 +630,8 @@ public:
                 num_expanded_tokens = cached_num_expanded_tokens.value();
             } else if (do_cpu_sync) {
                 // In dispatch, CPU will busy-wait until GPU receive tensor size metadata from other ranks, which can be quite long.
-                // If users of DeepEP need to execute other Python code on other threads, such as KV transfer, their code will get stuck due to GIL
-                // unless we release GIL here.
+                // If users of DeepEP need to execute other Python code on other threads, such as KV transfer, their code will get stuck due
+                // to GIL unless we release GIL here.
                 pybind11::gil_scoped_release release;
 
                 // Non-cached mode with sync
@@ -624,7 +645,7 @@ public:
                             host_workspace_layout.get_scaleup_rank_count_ptr<false>()[counter_scaleup_rank_idx]);
                         if ((ready = math::is_decoded_positive_ready(count))) {
                             num_recv_tokens += count;
-                            ++ counter_scaleup_rank_idx;
+                            ++counter_scaleup_rank_idx;
                         }
                     }
 
@@ -635,7 +656,7 @@ public:
                         if ((ready = math::is_decoded_positive_ready(count))) {
                             num_recv_tokens_per_expert_list.push_back(count);
                             num_expanded_tokens += count;
-                            ++ counter_local_expert_idx;
+                            ++counter_local_expert_idx;
                         }
                     }
 
@@ -643,9 +664,9 @@ public:
                     const auto get_buffer_info = [&]() {
                         std::stringstream ss;
                         ss << "CPU side received count (scaleup: " << context->scaleup_rank_idx << "): ";
-                        for (int i = 0; i < context->num_scaleup_ranks + num_local_experts; ++ i) {
+                        for (int i = 0; i < context->num_scaleup_ranks + num_local_experts; ++i) {
                             ss << host_workspace_layout.get_scaleup_rank_expert_count_ptr<false>()[i];
-                            ss << (i == context->num_scaleup_ranks - 1 ? " # ": " ");
+                            ss << (i == context->num_scaleup_ranks - 1 ? " # " : " ");
                         }
                         return ss.str();
                     };
@@ -671,14 +692,17 @@ public:
             // Allocate received tensors
             // `recv_src_metadata` includes source token indices and buffer slot indices
             const auto num_allocated_tokens = do_expand ? num_expanded_tokens : num_recv_tokens;
-            auto recv_x = torch::empty({num_allocated_tokens, hidden}, x.options());
+            std::optional<torch::Tensor> recv_x, recv_row_indices;
+            if (materialize_recv_x)
+                recv_x = torch::empty({num_allocated_tokens, hidden}, x.options());
+            else
+                recv_row_indices = torch::empty({num_recv_tokens}, x.options().dtype(torch::kInt64));
             auto recv_sf = std::optional<torch::Tensor>();
             auto recv_topk_idx = std::optional<torch::Tensor>();
             auto recv_topk_weights = std::optional<torch::Tensor>();
-            auto recv_src_metadata = cached_mode ?
-                cached_recv_src_metadata.value() :
-                torch::empty({num_recv_tokens, num_topk + 2},
-                             torch::TensorOptions(torch::kCUDA).dtype(torch::kInt));
+            auto recv_src_metadata = cached_mode
+                ? cached_recv_src_metadata.value()
+                : torch::empty({num_recv_tokens, num_topk + 2}, torch::TensorOptions(torch::kCUDA).dtype(torch::kInt));
 
             // Optional tensors
             void* recv_sf_ptr = nullptr;
@@ -692,9 +716,8 @@ public:
                     // TMA-aligned layout for the next GEMM input
                     recv_sf_token_stride = 1, recv_sf_hidden_stride = math::align(num_allocated_tokens, kNumAlignedSFPacks);
                 }
-                recv_sf = torch::empty_strided({num_allocated_tokens, num_sf_packs},
-                                               {recv_sf_token_stride, recv_sf_hidden_stride},
-                                               sf->options());
+                recv_sf = torch::empty_strided(
+                    {num_allocated_tokens, num_sf_packs}, {recv_sf_token_stride, recv_sf_hidden_stride}, sf->options());
                 recv_sf_ptr = recv_sf->data_ptr();
             }
             if (not do_expand) {
@@ -702,9 +725,8 @@ public:
                 recv_topk_idx_ptr = recv_topk_idx->data_ptr<topk_idx_t>();
             }
             if (topk_weights.has_value()) {
-                recv_topk_weights = do_expand ?
-                    torch::empty({num_allocated_tokens}, topk_weights->options()) :
-                    torch::empty({num_allocated_tokens, num_topk}, topk_weights->options());
+                recv_topk_weights = do_expand ? torch::empty({num_allocated_tokens}, topk_weights->options())
+                                              : torch::empty({num_allocated_tokens, num_topk}, topk_weights->options());
                 recv_topk_weights_ptr = recv_topk_weights->data_ptr<float>();
             }
 
@@ -721,44 +743,61 @@ public:
             EP_HOST_ASSERT(psum_num_recv_tokens_per_expert.size(0) == num_local_experts);
 
             // Launch copy kernels with full SMs
-            launch_dispatch_copy_epilogue(context->buffer, context->workspace,
+            launch_dispatch_copy_epilogue(context->buffer,
+                                          context->workspace,
                                           psum_num_recv_tokens_per_scaleup_rank.data_ptr<int>(),
                                           psum_num_recv_tokens_per_expert.data_ptr<int>(),
-                                          recv_x.data_ptr(), recv_sf_ptr,
-                                          recv_topk_idx_ptr, recv_topk_weights_ptr,
+                                          recv_x.has_value() ? recv_x->data_ptr() : nullptr,
+                                          recv_sf_ptr,
+                                          recv_topk_idx_ptr,
+                                          recv_topk_weights_ptr,
                                           recv_src_metadata.data_ptr<int>(),
+                                          recv_row_indices.has_value() ? recv_row_indices->data_ptr<int64_t>() : nullptr,
                                           channel_linked_list_ptr,
                                           num_unaligned_recv_tokens_per_expert_ptr,
-                                          num_recv_tokens, num_max_tokens_per_rank,
+                                          num_recv_tokens,
+                                          num_max_tokens_per_rank,
                                           num_hidden_bytes,
-                                          num_sf_packs, recv_sf_token_stride, recv_sf_hidden_stride,
-                                          num_experts, num_topk, expert_alignment,
-                                          context->scaleout_rank_idx, context->scaleup_rank_idx,
-                                          context->num_scaleout_ranks, context->num_scaleup_ranks,
+                                          num_sf_packs,
+                                          recv_sf_token_stride,
+                                          recv_sf_hidden_stride,
+                                          num_experts,
+                                          num_topk,
+                                          expert_alignment,
+                                          context->scaleout_rank_idx,
+                                          context->scaleup_rank_idx,
+                                          context->num_scaleout_ranks,
+                                          context->num_scaleup_ranks,
                                           jit->device.get_num_sms(),
                                           jit->device.get_num_smem_bytes(),
                                           num_channels,
-                                          do_expand, cached_mode,
+                                          do_expand,
+                                          cached_mode,
                                           do_zero_padding,
+                                          materialize_recv_x,
                                           stream);
 
-            auto result = pybind11::make_tuple(
-                recv_x, recv_sf,
-                recv_topk_idx, recv_topk_weights,
-                num_recv_tokens, num_expanded_tokens,
-                num_recv_tokens_per_expert_list,
-                psum_num_recv_tokens_per_scaleup_rank,
-                psum_num_recv_tokens_per_expert,
-                num_unaligned_recv_tokens_per_expert,
-                recv_src_metadata,
-                dst_buffer_slot_idx,
-                token_metadata_at_forward,
-                channel_linked_list);
+            auto result = pybind11::make_tuple(recv_x,
+                                               recv_sf,
+                                               recv_topk_idx,
+                                               recv_topk_weights,
+                                               num_recv_tokens,
+                                               num_expanded_tokens,
+                                               num_recv_tokens_per_expert_list,
+                                               psum_num_recv_tokens_per_scaleup_rank,
+                                               psum_num_recv_tokens_per_expert,
+                                               num_unaligned_recv_tokens_per_expert,
+                                               recv_src_metadata,
+                                               dst_buffer_slot_idx,
+                                               token_metadata_at_forward,
+                                               channel_linked_list,
+                                               recv_row_indices);
 
             // For non-deferring tensor recording
             if (tensors_to_record_opt.has_value()) {
                 auto& tensors = tensors_to_record_opt->get();
                 tensors.push_back(recv_x);
+                tensors.push_back(recv_row_indices);
                 tensors.push_back(recv_sf);
                 tensors.push_back(recv_topk_idx);
                 tensors.push_back(recv_topk_weights);
@@ -771,8 +810,7 @@ public:
         // NOTES: CPU sync will be deferred, too
         if (defer_epilogue) {
             EP_HOST_ASSERT(async_with_compute_stream);
-            const auto event = stream_control_epilogue(
-                tensors_to_record, compute_stream, allocate_on_comm_stream, true);
+            const auto event = stream_control_epilogue(tensors_to_record, compute_stream, allocate_on_comm_stream, true);
             std::function<pybind11::object()> epilogue_hook = [epilogue = std::move(epilogue)]() mutable {
                 return epilogue(at::cuda::getCurrentCUDAStream(), std::nullopt);
             };
@@ -781,29 +819,39 @@ public:
 
         // Do epilogue intermediately and record all tensors
         auto result = epilogue(comm_stream, std::ref(tensors_to_record));
-        const auto event = stream_control_epilogue(
-            tensors_to_record, compute_stream, allocate_on_comm_stream, async_with_compute_stream);
+        const auto event = stream_control_epilogue(tensors_to_record, compute_stream, allocate_on_comm_stream, async_with_compute_stream);
         return pybind11::make_tuple(result, event, pybind11::none());
     }
 
-    pybind11::tuple
-    combine(const torch::Tensor& x,
-            const std::optional<torch::Tensor>& topk_weights,
-            const std::optional<torch::Tensor>& bias_0,
-            const std::optional<torch::Tensor>& bias_1,
-            const torch::Tensor& src_metadata,
-            const torch::Tensor& combined_topk_idx,
-            const torch::Tensor& psum_num_recv_tokens_per_scaleup_rank,
-            const std::optional<torch::Tensor>& token_metadata_at_forward,
-            const std::optional<torch::Tensor>& channel_linked_list,
-            const int& num_experts,
-            const int& num_max_tokens_per_rank,
-            const int& num_sms, const int& num_qps,
-            const std::optional<EventHandle>& previous_event,
-            const bool& async_with_compute_stream,
-            const bool& allocate_on_comm_stream,
-            const bool& use_expanded_layout,
-            const bool& defer_epilogue) const {
+    torch::Tensor get_dispatch_recv_slab(const torch::Tensor& x, const int& num_topk, const int& num_max_tokens_per_rank) const {
+        EP_HOST_ASSERT(not destroyed and context->num_scaleout_ranks == 1 and context->num_rdma_ranks == 1);
+        EP_HOST_ASSERT(x.is_cuda() and x.scalar_type() == torch::kBFloat16 and x.dim() == 2);
+        const auto token_layout = layout::TokenLayout(x.size(1) * x.element_size(), 0, num_topk, true);
+        const auto slots = static_cast<int64_t>(context->num_scaleup_ranks) * num_max_tokens_per_rank;
+        const auto stride_bytes = token_layout.get_num_bytes<false, int64_t>();
+        EP_HOST_ASSERT(slots * stride_bytes <= context->num_gpu_buffer_bytes);
+        return torch::from_blob(
+            context->buffer, {slots, x.size(1)}, {stride_bytes / static_cast<int64_t>(x.element_size()), 1}, x.options());
+    }
+
+    pybind11::tuple combine(const torch::Tensor& x,
+                            const std::optional<torch::Tensor>& topk_weights,
+                            const std::optional<torch::Tensor>& bias_0,
+                            const std::optional<torch::Tensor>& bias_1,
+                            const torch::Tensor& src_metadata,
+                            const torch::Tensor& combined_topk_idx,
+                            const torch::Tensor& psum_num_recv_tokens_per_scaleup_rank,
+                            const std::optional<torch::Tensor>& token_metadata_at_forward,
+                            const std::optional<torch::Tensor>& channel_linked_list,
+                            const int& num_experts,
+                            const int& num_max_tokens_per_rank,
+                            const int& num_sms,
+                            const int& num_qps,
+                            const std::optional<EventHandle>& previous_event,
+                            const bool& async_with_compute_stream,
+                            const bool& allocate_on_comm_stream,
+                            const bool& use_expanded_layout,
+                            const bool& defer_epilogue) const {
         // Check SM count
         EP_HOST_ASSERT(num_sms > 0 and num_sms <= jit->device.get_num_sms());
         EP_HOST_ASSERT((num_sms > 1 or context->num_scaleout_ranks == 1 or context->num_scaleup_ranks == 1) and
@@ -848,7 +896,7 @@ public:
         }
 
         const auto bias_opts = std::vector({bias_0, bias_1});
-        for (int i = 0; i < 2; ++ i) {
+        for (int i = 0; i < 2; ++i) {
             if (bias_opts[i].has_value()) {
                 auto bias = bias_opts[i].value();
                 EP_HOST_ASSERT(bias.dim() == 2 and bias.is_cuda() and bias.is_contiguous());
@@ -863,9 +911,13 @@ public:
         const auto comm_stream = comm::get_comm_stream();
 
         // Check buffer size
-        EP_HOST_ASSERT(get_combine_buffer_size(num_max_tokens_per_rank, hidden, num_topk,
-                                               context->num_scaleout_ranks, context->num_scaleup_ranks,
-                                               context->is_scaleup_nvlink, allow_multiple_reduction) <= num_buffer_bytes);
+        EP_HOST_ASSERT(get_combine_buffer_size(num_max_tokens_per_rank,
+                                               hidden,
+                                               num_topk,
+                                               context->num_scaleout_ranks,
+                                               context->num_scaleup_ranks,
+                                               context->is_scaleup_nvlink,
+                                               allow_multiple_reduction) <= num_buffer_bytes);
 
         // Optional configs and metadata for hybrid combine
         int num_channels = 1;
@@ -894,32 +946,45 @@ public:
 
         // Push data into remote buffers
         // NOTES: we don't use `num_hidden_bytes` due to enable later quantization possibility
-        const auto reduce_buffer = launch_combine(
-            x.data_ptr(),
-            topk_weights.has_value() ? topk_weights->data_ptr() : nullptr,
-            src_metadata.data_ptr<int>(),
-            psum_num_recv_tokens_per_scaleup_rank.data_ptr<int>(),
-            token_metadata_at_forward_ptr,
-            channel_linked_list_ptr,
-            context->dev_comm, context->window,
-            context->buffer, context->workspace,
-            num_reduced_tokens, num_max_tokens_per_rank,
-            hidden, num_experts, num_topk,
-            num_qps, context->num_gpu_timeout_cycles,
-            context->num_scaleout_ranks, context->num_scaleup_ranks,
-            context->scaleout_rank_idx, context->scaleup_rank_idx,
-            context->is_scaleup_nvlink,
-            num_sms, jit->device.get_num_smem_bytes(),
-            num_channels,
-            use_expanded_layout, allow_multiple_reduction,
-            comm_stream);
+        const auto reduce_buffer = launch_combine(x.data_ptr(),
+                                                  topk_weights.has_value() ? topk_weights->data_ptr() : nullptr,
+                                                  src_metadata.data_ptr<int>(),
+                                                  psum_num_recv_tokens_per_scaleup_rank.data_ptr<int>(),
+                                                  token_metadata_at_forward_ptr,
+                                                  channel_linked_list_ptr,
+                                                  context->dev_comm,
+                                                  context->window,
+                                                  context->buffer,
+                                                  context->workspace,
+                                                  num_reduced_tokens,
+                                                  num_max_tokens_per_rank,
+                                                  hidden,
+                                                  num_experts,
+                                                  num_topk,
+                                                  num_qps,
+                                                  context->num_gpu_timeout_cycles,
+                                                  context->num_scaleout_ranks,
+                                                  context->num_scaleup_ranks,
+                                                  context->scaleout_rank_idx,
+                                                  context->scaleup_rank_idx,
+                                                  context->is_scaleup_nvlink,
+                                                  num_sms,
+                                                  jit->device.get_num_smem_bytes(),
+                                                  num_channels,
+                                                  use_expanded_layout,
+                                                  allow_multiple_reduction,
+                                                  comm_stream);
 
         // For tensor recording
-        tensor_list_t tensors_to_record = {
-            x, topk_weights, bias_0, bias_1,
-            src_metadata, combined_topk_idx,
-            psum_num_recv_tokens_per_scaleup_rank,
-            token_metadata_at_forward, channel_linked_list};
+        tensor_list_t tensors_to_record = {x,
+                                           topk_weights,
+                                           bias_0,
+                                           bias_1,
+                                           src_metadata,
+                                           combined_topk_idx,
+                                           psum_num_recv_tokens_per_scaleup_rank,
+                                           token_metadata_at_forward,
+                                           channel_linked_list};
 
         // Epilogue can be deferred, so it is a lambda
         auto epilogue = [=, this](const at::cuda::CUDAStream& stream,
@@ -934,25 +999,29 @@ public:
             }
 
             // Resolve pointers here to retain bias tensors in a deferred epilogue
-            void* bias_ptrs[2] = {
-                bias_opts[0].has_value() ? bias_opts[0]->data_ptr() : nullptr,
-                bias_opts[1].has_value() ? bias_opts[1]->data_ptr() : nullptr
-            };
+            void* bias_ptrs[2] = {bias_opts[0].has_value() ? bias_opts[0]->data_ptr() : nullptr,
+                                  bias_opts[1].has_value() ? bias_opts[1]->data_ptr() : nullptr};
 
             // Combine pushed data
             launch_combine_reduce_epilogue(combined_x.data_ptr(),
                                            combined_topk_weights_ptr,
                                            combined_topk_idx.data_ptr<topk_idx_t>(),
-                                           num_combined_tokens, num_max_tokens_per_rank,
+                                           num_combined_tokens,
+                                           num_max_tokens_per_rank,
                                            hidden,
-                                           num_experts, num_topk,
+                                           num_experts,
+                                           num_topk,
                                            reduce_buffer,
-                                           bias_ptrs[0], bias_ptrs[1],
-                                           context->num_scaleout_ranks, context->num_scaleup_ranks,
-                                           context->scaleout_rank_idx, context->scaleup_rank_idx,
+                                           bias_ptrs[0],
+                                           bias_ptrs[1],
+                                           context->num_scaleout_ranks,
+                                           context->num_scaleup_ranks,
+                                           context->scaleout_rank_idx,
+                                           context->scaleup_rank_idx,
                                            jit->device.get_num_sms(),
                                            jit->device.get_num_smem_bytes(),
-                                           use_expanded_layout, allow_multiple_reduction,
+                                           use_expanded_layout,
+                                           allow_multiple_reduction,
                                            stream);
 
             if (tensors_to_record_opt.has_value()) {
@@ -965,8 +1034,7 @@ public:
 
         // Defer epilogue
         if (defer_epilogue) {
-            const auto event = stream_control_epilogue(
-                tensors_to_record, compute_stream, allocate_on_comm_stream, true);
+            const auto event = stream_control_epilogue(tensors_to_record, compute_stream, allocate_on_comm_stream, true);
             std::function<pybind11::object()> epilogue_hook = [epilogue = std::move(epilogue)]() {
                 return epilogue(at::cuda::getCurrentCUDAStream(), std::nullopt);
             };
@@ -975,17 +1043,15 @@ public:
 
         // Do epilogue
         auto result = epilogue(comm_stream, std::ref(tensors_to_record));
-        const auto event = stream_control_epilogue(
-            tensors_to_record, compute_stream, allocate_on_comm_stream, async_with_compute_stream);
+        const auto event = stream_control_epilogue(tensors_to_record, compute_stream, allocate_on_comm_stream, async_with_compute_stream);
         return pybind11::make_tuple(result, event, pybind11::none());
     }
 
-    std::optional<EventHandle>
-    lb_prefetch_weights(const std::vector<torch::Tensor>& redundant_expert_weights,
-                        const std::vector<torch::Tensor>& expert_weights,
-                        const torch::Tensor& redundancy_mapping,
-                        const int& num_sms,
-                        const std::optional<EventHandle>& previous_event) const {
+    std::optional<EventHandle> lb_prefetch_weights(const std::vector<torch::Tensor>& redundant_expert_weights,
+                                                   const std::vector<torch::Tensor>& expert_weights,
+                                                   const torch::Tensor& redundancy_mapping,
+                                                   const int& num_sms,
+                                                   const std::optional<EventHandle>& previous_event) const {
         // Checks
         EP_HOST_ASSERT(num_sms > 0 and num_sms <= jit->device.get_num_sms());
         EP_HOST_ASSERT(redundant_expert_weights.size() == expert_weights.size());
@@ -1002,7 +1068,7 @@ public:
         EP_HOST_ASSERT(num_local_experts > 0);
 
         layout::EPWeightList weights;
-        for (int i = 0; i < num_weights; ++ i) {
+        for (int i = 0; i < num_weights; ++i) {
             const auto& redundant_expert_weight = redundant_expert_weights[i];
             const auto& expert_weight = expert_weights[i];
             EP_HOST_ASSERT(redundant_expert_weight.is_cuda() and redundant_expert_weight.is_contiguous());
@@ -1011,27 +1077,28 @@ public:
             EP_HOST_ASSERT(expert_weight.dim() >= 1);
             EP_HOST_ASSERT(redundant_expert_weight.size(0) == num_redundant_experts);
             EP_HOST_ASSERT(expert_weight.size(0) == num_local_experts);
-            const int64_t num_bytes_per_expert = c10::multiply_integers(redundant_expert_weight.sizes().slice(1)) *
-                                                  redundant_expert_weight.element_size();
-            EP_HOST_ASSERT(num_bytes_per_expert == c10::multiply_integers(expert_weight.sizes().slice(1)) *
-                                                   expert_weight.element_size());
+            const int64_t num_bytes_per_expert =
+                c10::multiply_integers(redundant_expert_weight.sizes().slice(1)) * redundant_expert_weight.element_size();
+            EP_HOST_ASSERT(num_bytes_per_expert == c10::multiply_integers(expert_weight.sizes().slice(1)) * expert_weight.element_size());
             EP_HOST_ASSERT(num_bytes_per_expert % 16 == 0);
 
-            weights[i] = {
-                .redundant_expert_weights = redundant_expert_weight.data_ptr(),
-                .expert_weights = expert_weight.data_ptr(),
-                .num_bytes_per_expert = num_bytes_per_expert
-            };
+            weights[i] = {.redundant_expert_weights = redundant_expert_weight.data_ptr(),
+                          .expert_weights = expert_weight.data_ptr(),
+                          .num_bytes_per_expert = num_bytes_per_expert};
         }
 
         // Stream control
         const auto compute_stream = stream_control_prologue(previous_event);
 
         // Launch
-        launch_lb_prefetch_weights(
-            *context, num_weights, weights, redundancy_mapping.data_ptr<int>(),
-            num_redundant_experts, num_local_experts,
-            num_sms, comm::get_comm_stream());
+        launch_lb_prefetch_weights(*context,
+                                   num_weights,
+                                   weights,
+                                   redundancy_mapping.data_ptr<int>(),
+                                   num_redundant_experts,
+                                   num_local_experts,
+                                   num_sms,
+                                   comm::get_comm_stream());
 
         // Stream epilogue
         tensor_list_t tensors_to_record = {redundancy_mapping};
@@ -1040,12 +1107,11 @@ public:
         return stream_control_epilogue(tensors_to_record, compute_stream, false, true);
     }
 
-    std::optional<EventHandle>
-    lb_reduce_grads(const torch::Tensor& redundant_expert_grads,
-                    const torch::Tensor& expert_grads,
-                    const torch::Tensor& redundancy_mapping,
-                    const int& num_sms,
-                    const std::optional<EventHandle>& previous_event) const {
+    std::optional<EventHandle> lb_reduce_grads(const torch::Tensor& redundant_expert_grads,
+                                               const torch::Tensor& expert_grads,
+                                               const torch::Tensor& redundancy_mapping,
+                                               const int& num_sms,
+                                               const std::optional<EventHandle>& previous_event) const {
         // Checks
         EP_HOST_ASSERT(num_sms > 0 and num_sms <= jit->device.get_num_sms());
         EP_HOST_ASSERT(redundant_expert_grads.is_cuda() and redundant_expert_grads.is_contiguous());
@@ -1069,15 +1135,18 @@ public:
         const auto compute_stream = stream_control_prologue(previous_event);
 
         // Launch: accumulate peers' redundant gradients into the local expert gradients
-        launch_lb_reduce_grads(
-            *context, redundant_expert_grads.data_ptr<float>(), expert_grads.data_ptr<float>(),
-            redundancy_mapping.data_ptr<int>(), num_redundant_experts, num_local_experts, hidden,
-            num_sms, comm::get_comm_stream());
+        launch_lb_reduce_grads(*context,
+                               redundant_expert_grads.data_ptr<float>(),
+                               expert_grads.data_ptr<float>(),
+                               redundancy_mapping.data_ptr<int>(),
+                               num_redundant_experts,
+                               num_local_experts,
+                               hidden,
+                               num_sms,
+                               comm::get_comm_stream());
 
         // Stream epilogue
-        return stream_control_epilogue(
-            {redundant_expert_grads, expert_grads, redundancy_mapping},
-            compute_stream, false, true);
+        return stream_control_epilogue({redundant_expert_grads, expert_grads, redundancy_mapping}, compute_stream, false, true);
     }
 };
 
@@ -1087,14 +1156,12 @@ static void register_apis(pybind11::module_& m) {
         .def_readonly("context", &EPBuffer::context)
         .def_readonly("lb_storage", &EPBuffer::lb_storage)
         .def("dispatch", &EPBuffer::dispatch)
+        .def("get_dispatch_recv_slab", &EPBuffer::get_dispatch_recv_slab)
         .def("combine", &EPBuffer::combine)
         .def("lb_prefetch_weights", &EPBuffer::lb_prefetch_weights)
         .def("lb_reduce_grads", &EPBuffer::lb_reduce_grads);
     m.def("calculate_ep_buffer_size", &EPBuffer::calculate_buffer_size);
-    m.def("get_ep_buffer_alignment", [=]() {
-        return kNumAllocationAlignmentBytes;
-    });
-
+    m.def("get_ep_buffer_alignment", [=]() { return kNumAllocationAlignmentBytes; });
 }
 
 }  // namespace deep_ep::ep

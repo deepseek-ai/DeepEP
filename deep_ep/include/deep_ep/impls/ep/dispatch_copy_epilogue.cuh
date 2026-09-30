@@ -6,32 +6,47 @@
 #include <deep_ep/layout/ep/token.cuh>
 #include <deep_ep/layout/ep/workspace.cuh>
 
-
 namespace deep_ep::ep {
 
-template <bool kDoExpand, bool kCachedMode, bool kDoZeroPadding,
+template <bool kDoExpand,
+          bool kCachedMode,
+          bool kDoZeroPadding,
+          bool kMaterializeRecvX,
           // NOTES: this channel concept only applies for scale-out ranks
-          int kNumSMs, int kNumChannels, int kNumWarps,
-          int kNumScaleoutRanks, int kNumScaleupRanks,
-          int kNumHiddenBytes, int kNumSFPacks,
+          int kNumSMs,
+          int kNumChannels,
+          int kNumWarps,
+          int kNumScaleoutRanks,
+          int kNumScaleupRanks,
+          int kNumHiddenBytes,
+          int kNumSFPacks,
           int kNumMaxTokensPerRank,
-          int kNumExperts, int kNumTopk, int kExpertAlignment,
-          int kNumRanks = kNumScaleoutRanks * kNumScaleupRanks,
+          int kNumExperts,
+          int kNumTopk,
+          int kExpertAlignment,
+          int kNumRanks = kNumScaleoutRanks* kNumScaleupRanks,
           int kNumThreads = kNumWarps * 32,
           int kNumMaxTokensPerChannel = math::constexpr_ceil_div(kNumMaxTokensPerRank, kNumChannels),
           bool kDoCreateLinkedList = (kNumScaleoutRanks > 1 and not kCachedMode)>
-__global__ void __launch_bounds__(kNumThreads, 1)
-dispatch_copy_epilogue_impl(void* buffer, void* workspace,
-                            int* psum_num_recv_tokens_per_scaleup_rank,
-                            int* psum_num_recv_tokens_per_expert,
-                            void* recv_x, sf_pack_t* recv_sf,
-                            topk_idx_t* recv_topk_idx, float* recv_topk_weights,
-                            int* recv_src_metadata,
-                            int* channel_linked_list,
-                            int* num_unaligned_recv_tokens_per_expert,
-                            int num_recv_tokens,
-                            const int recv_sf_token_stride, const int recv_sf_hidden_stride,
-                            const int scaleout_rank_idx, const int scaleup_rank_idx) {
+__global__ void __launch_bounds__(kNumThreads, 1) dispatch_copy_epilogue_impl(void* buffer,
+                                                                              void* workspace,
+                                                                              int* psum_num_recv_tokens_per_scaleup_rank,
+                                                                              int* psum_num_recv_tokens_per_expert,
+                                                                              void* recv_x,
+                                                                              sf_pack_t* recv_sf,
+                                                                              topk_idx_t* recv_topk_idx,
+                                                                              float* recv_topk_weights,
+                                                                              int* recv_src_metadata,
+                                                                              int64_t* recv_row_indices,
+                                                                              int* channel_linked_list,
+                                                                              int* num_unaligned_recv_tokens_per_expert,
+                                                                              int num_recv_tokens,
+                                                                              const int recv_sf_token_stride,
+                                                                              const int recv_sf_hidden_stride,
+                                                                              const int scaleout_rank_idx,
+                                                                              const int scaleup_rank_idx) {
+    EP_STATIC_ASSERT(kMaterializeRecvX or (not kDoExpand and kNumSFPacks == 0 and kNumScaleoutRanks == 1),
+                     "Borrowed receive only supports compact, intra-node BF16 dispatch");
     // Utils
     const auto sm_idx = static_cast<int>(blockIdx.x), thread_idx = static_cast<int>(threadIdx.x);
     const auto warp_idx = ptx::get_warp_idx(), lane_idx = ptx::get_lane_idx();
@@ -45,15 +60,17 @@ dispatch_copy_epilogue_impl(void* buffer, void* workspace,
     // Buffer layouts
     extern __shared__ __align__(kNumTMAAlignmentBytes) int8_t smem[];
     const auto token_layout = layout::TokenLayout(kNumHiddenBytes, kNumSFPacks * sizeof(sf_pack_t), kNumTopk, true);
-    const auto tma_buffer = layout::BufferLayout<true>(token_layout, kNumWarps, 1, smem)
-        .get_rank_buffer(warp_idx).get_token_buffer(0);
-    const auto scaleup_buffer = layout::BufferLayout<false>(token_layout, kNumScaleupRanks, kNumScaleoutRanks * kNumMaxTokensPerRank, buffer);
+    const auto tma_buffer = layout::BufferLayout<true>(token_layout, kNumWarps, 1, smem).get_rank_buffer(warp_idx).get_token_buffer(0);
+    const auto scaleup_buffer =
+        layout::BufferLayout<false>(token_layout, kNumScaleupRanks, kNumScaleoutRanks * kNumMaxTokensPerRank, buffer);
 
     // Init TMA
     ptx::arrival_phase phase = 0;
     const auto mbarrier_ptr = tma_buffer.get_mbarrier_ptr();
-    if (ptx::elect_one_sync())
-        ptx::mbarrier_init_with_fence(mbarrier_ptr, 1);
+    if constexpr (kMaterializeRecvX) {
+        if (ptx::elect_one_sync())
+            ptx::mbarrier_init_with_fence(mbarrier_ptr, 1);
+    }
     __syncwarp();
 
     // Will block until the main dispatch kernel has finished and all data are visible
@@ -80,17 +97,23 @@ dispatch_copy_epilogue_impl(void* buffer, void* workspace,
             current_rank_end = ptx::exchange(stored_psum_num_recv_tokens, stored_lane_idx);
         }
         const auto buffer_token = scaleup_buffer.get_rank_buffer(current_rank_idx).get_token_buffer(i - current_rank_start);
+        if constexpr (not kMaterializeRecvX) {
+            if (ptx::elect_one_sync())
+                recv_row_indices[i] = static_cast<int64_t>(current_rank_idx) * kNumMaxTokensPerRank + i - current_rank_start;
+        }
 
         // Wait buffer releases
-        ptx::tma_store_wait();
+        if constexpr (kMaterializeRecvX)
+            ptx::tma_store_wait();
         __syncwarp();
 
         // Issue TMA loads
         // Including all stuffs: data, SF, top-k metadata
-        if (ptx::elect_one_sync()) {
-            ptx::tma_load_1d(tma_buffer.get_base_ptr(), buffer_token.get_base_ptr(),
-                             mbarrier_ptr, tma_buffer.get_num_bytes<false>());
-            ptx::mbarrier_arrive_and_set_tx(mbarrier_ptr, tma_buffer.get_num_bytes<false>());
+        if constexpr (kMaterializeRecvX) {
+            if (ptx::elect_one_sync()) {
+                ptx::tma_load_1d(tma_buffer.get_base_ptr(), buffer_token.get_base_ptr(), mbarrier_ptr, tma_buffer.get_num_bytes<false>());
+                ptx::mbarrier_arrive_and_set_tx(mbarrier_ptr, tma_buffer.get_num_bytes<false>());
+            }
         }
         __syncwarp();
 
@@ -124,9 +147,14 @@ dispatch_copy_epilogue_impl(void* buffer, void* workspace,
         __syncwarp();
 
         // Wait for TMA arrival
-        if (ptx::elect_one_sync())
-            ptx::mbarrier_wait_and_flip_phase(mbarrier_ptr, phase);
+        if constexpr (kMaterializeRecvX) {
+            if (ptx::elect_one_sync())
+                ptx::mbarrier_wait_and_flip_phase(mbarrier_ptr, phase);
+        }
         __syncwarp();
+
+        // Borrowed mode reads metadata directly from the buffer after the PDL fence.
+        const auto metadata_token = kMaterializeRecvX ? tma_buffer : buffer_token;
 
         // Maintain linked list
         if constexpr (kDoCreateLinkedList) {
@@ -136,10 +164,13 @@ dispatch_copy_epilogue_impl(void* buffer, void* workspace,
         }
 
         // Issue TMA stores for data
-        if (kDoExpand ? (dst_tensor_idx >= 0) : ptx::elect_one_sync()) {
-            ptx::tma_store_1d(math::advance_ptr(recv_x, static_cast<int64_t>(dst_tensor_idx) * kNumHiddenBytes),
-                              tma_buffer.get_hidden_ptr(), kNumHiddenBytes);
-            ptx::tma_store_commit();
+        if constexpr (kMaterializeRecvX) {
+            if (kDoExpand ? (dst_tensor_idx >= 0) : ptx::elect_one_sync()) {
+                ptx::tma_store_1d(math::advance_ptr(recv_x, static_cast<int64_t>(dst_tensor_idx) * kNumHiddenBytes),
+                                  tma_buffer.get_hidden_ptr(),
+                                  kNumHiddenBytes);
+                ptx::tma_store_commit();
+            }
         }
         __syncwarp();
 
@@ -153,7 +184,7 @@ dispatch_copy_epilogue_impl(void* buffer, void* workspace,
             const auto smem_src_ptr = tma_buffer.get_sf_ptr();
             sf_pack_t reg_src[kNumFullIters + 1];
             #pragma unroll
-            for (int k = 0; k < kNumFullIters; ++ k)
+            for (int k = 0; k < kNumFullIters; ++k)
                 reg_src[k] = smem_src_ptr[k * 32 + lane_idx];
             if (do_last_iter)
                 reg_src[kNumFullIters] = smem_src_ptr[kNumFullIters * 32 + lane_idx];
@@ -166,10 +197,10 @@ dispatch_copy_epilogue_impl(void* buffer, void* workspace,
             auto mask = kDoExpand ? ptx::gather(dst_tensor_idx >= 0) : 1;
             while (mask) {
                 const int valid_lane_idx = __ffs(mask) - 1;
-                const auto gmem_dst = math::advance_ptr<sf_pack_t>(recv_sf,
-                    ptx::exchange(dst_tensor_idx, valid_lane_idx) * (recv_sf_token_stride_i64 * sizeof(sf_pack_t)));
+                const auto gmem_dst = math::advance_ptr<sf_pack_t>(
+                    recv_sf, ptx::exchange(dst_tensor_idx, valid_lane_idx) * (recv_sf_token_stride_i64 * sizeof(sf_pack_t)));
                 #pragma unroll
-                for (int k = 0; k < kNumFullIters; ++ k)
+                for (int k = 0; k < kNumFullIters; ++k)
                     gmem_dst[(k * 32 + lane_idx) * recv_sf_hidden_stride_i64] = reg_src[k];
                 if (do_last_iter)
                     gmem_dst[(kNumFullIters * 32 + lane_idx) * recv_sf_hidden_stride_i64] = reg_src[kNumFullIters];
@@ -179,10 +210,10 @@ dispatch_copy_epilogue_impl(void* buffer, void* workspace,
 
         // Store the top-k weights
         if (kDoExpand and recv_topk_weights != nullptr and dst_tensor_idx >= 0) {
-            recv_topk_weights[dst_tensor_idx] = tma_buffer.get_topk_weights_ptr()[lane_idx];
+            recv_topk_weights[dst_tensor_idx] = metadata_token.get_topk_weights_ptr()[lane_idx];
         } else if (not kDoExpand and recv_topk_weights != nullptr and lane_idx < kNumTopk) {
             // For backward, weights are optional
-            recv_topk_weights[i * kNumTopk + lane_idx] = tma_buffer.get_topk_weights_ptr()[lane_idx];
+            recv_topk_weights[i * kNumTopk + lane_idx] = metadata_token.get_topk_weights_ptr()[lane_idx];
         }
         __syncwarp();
 
@@ -192,7 +223,7 @@ dispatch_copy_epilogue_impl(void* buffer, void* workspace,
         //   - Hybrid mode: the slot index and master top-k lane index
         if constexpr (not kCachedMode) {
             if (ptx::elect_one_sync()) {
-                recv_src_metadata[i * kMetadataStride + 0] = *tma_buffer.get_src_token_global_idx_ptr();
+                recv_src_metadata[i * kMetadataStride + 0] = *metadata_token.get_src_token_global_idx_ptr();
                 if constexpr (kNumScaleoutRanks == 1) {
                     recv_src_metadata[i * kMetadataStride + 1] = current_rank_idx * kNumTopk + master_src_topk_idx;
                 } else {
@@ -215,11 +246,9 @@ dispatch_copy_epilogue_impl(void* buffer, void* workspace,
         const auto workspace_layout = layout::EPWorkspaceLayout(workspace, kNumScaleoutRanks, kNumScaleupRanks, kNumExperts);
         for (int i = global_warp_idx; i < kNumChannels; i += kNumSMs * kNumWarps) {
             #pragma unroll
-            for (int j = 0; j < kNumScaleupRanksPerLane; ++ j) {
+            for (int j = 0; j < kNumScaleupRanksPerLane; ++j) {
                 if (const auto k = j * 32 + lane_idx; j < (kNumScaleupRanksPerLane - 1) or k < kNumScaleupRanks) {
-                    channel_linked_list[
-                        *workspace_layout.get_channel_scaleup_tail_ptr(i, k)
-                    ] = -1;
+                    channel_linked_list[*workspace_layout.get_channel_scaleup_tail_ptr(i, k)] = -1;
 
                     // Clean for combine usages
                     *workspace_layout.get_channel_scaleup_tail_ptr(i, k) = 0;
@@ -244,10 +273,9 @@ dispatch_copy_epilogue_impl(void* buffer, void* workspace,
         constexpr int kNumExpertsPerLane = math::constexpr_ceil_div(kNumExpertsPerRank, 32);
         int num_experts_per_lane[kNumExpertsPerLane];
         #pragma unroll
-        for (int i = 0; i < kNumExpertsPerLane; ++ i) {
+        for (int i = 0; i < kNumExpertsPerLane; ++i) {
             const int expert_idx = i * 32 + lane_idx;
-            num_experts_per_lane[i] = expert_idx < kNumExpertsPerRank ?
-                num_unaligned_recv_tokens_per_expert[expert_idx] : 0;
+            num_experts_per_lane[i] = expert_idx < kNumExpertsPerRank ? num_unaligned_recv_tokens_per_expert[expert_idx] : 0;
         }
 
         // Single while loop over all padding tokens
@@ -259,7 +287,7 @@ dispatch_copy_epilogue_impl(void* buffer, void* workspace,
                 // Assign current wave expert token count
                 int wave_num_experts_per_lane;
                 #pragma unroll
-                for (int i = 0; i < kNumExpertsPerLane; ++ i)
+                for (int i = 0; i < kNumExpertsPerLane; ++i)
                     wave_num_experts_per_lane = i == wave_idx ? num_experts_per_lane[i] : wave_num_experts_per_lane;
                 int wave_num_pads_per_lane = 0;
                 if (wave_idx * 32 + lane_idx < kNumExpertsPerRank) {
@@ -273,15 +301,15 @@ dispatch_copy_epilogue_impl(void* buffer, void* workspace,
                     const int local_pad_idx = pad_idx - wave_pad_psum;
                     const int pad_psum = ptx::warp_inclusive_sum(wave_num_pads_per_lane, lane_idx);
                     const int owner_lane_idx = __ffs(__ballot_sync(0xffffffff, pad_psum > local_pad_idx)) - 1;
-                    dst_tensor_idx = wave_tensor_psum + ptx::exchange(
-                        ptx::warp_exclusive_sum(wave_num_experts_per_lane + wave_num_pads_per_lane, lane_idx) +
-                        wave_num_experts_per_lane + local_pad_idx - (pad_psum - wave_num_pads_per_lane),
-                        owner_lane_idx);
+                    dst_tensor_idx = wave_tensor_psum +
+                        ptx::exchange(ptx::warp_exclusive_sum(wave_num_experts_per_lane + wave_num_pads_per_lane, lane_idx) +
+                                          wave_num_experts_per_lane + local_pad_idx - (pad_psum - wave_num_pads_per_lane),
+                                      owner_lane_idx);
                     break;
                 }
 
                 // Move to the next wave
-                wave_idx ++;
+                wave_idx++;
                 wave_pad_psum += wave_num_pads;
                 wave_tensor_psum += ptx::reduce_add(wave_num_experts_per_lane + wave_num_pads_per_lane);
             }
@@ -291,7 +319,8 @@ dispatch_copy_epilogue_impl(void* buffer, void* workspace,
             // Zero data via TMA store
             if (ptx::elect_one_sync()) {
                 ptx::tma_store_1d(math::advance_ptr(recv_x, static_cast<int64_t>(dst_tensor_idx) * kNumHiddenBytes),
-                                  tma_buffer.get_hidden_ptr(), kNumHiddenBytes);
+                                  tma_buffer.get_hidden_ptr(),
+                                  kNumHiddenBytes);
                 ptx::tma_store_commit();
             }
             __syncwarp();
@@ -306,11 +335,11 @@ dispatch_copy_epilogue_impl(void* buffer, void* workspace,
                 const auto recv_sf_token_stride_i64 = static_cast<int64_t>(recv_sf_token_stride);
                 const auto recv_sf_hidden_stride_i64 = static_cast<int64_t>(recv_sf_hidden_stride);
                 constexpr sf_pack_t zero_sf_pack = {0};
-                const auto gmem_dst = math::advance_ptr<sf_pack_t>(recv_sf,
-                    dst_tensor_idx * (recv_sf_token_stride_i64 * sizeof(sf_pack_t)));
+                const auto gmem_dst =
+                    math::advance_ptr<sf_pack_t>(recv_sf, dst_tensor_idx * (recv_sf_token_stride_i64 * sizeof(sf_pack_t)));
                 constexpr auto kNumFullIters = kNumSFPacks / 32;
                 #pragma unroll
-                for (int k = 0; k < kNumFullIters; ++ k)
+                for (int k = 0; k < kNumFullIters; ++k)
                     gmem_dst[(k * 32 + lane_idx) * recv_sf_hidden_stride_i64] = zero_sf_pack;
                 if constexpr (kNumSFPacks % 32 != 0) {
                     if (kNumFullIters * 32 + lane_idx < kNumSFPacks)

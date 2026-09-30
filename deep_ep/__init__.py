@@ -1,7 +1,7 @@
 import filecmp
 import glob
 import os
-import torch
+import torch  # noqa: F401 -- Load PyTorch libraries before checking NCCL.
 
 from .utils.find_pkgs import find_nccl_root
 
@@ -55,25 +55,20 @@ def init_jit():
 check_nccl_so()
 init_jit()
 
-
 # Import APIs after initialization
-from . import comm
-from .comm import destroy_all_managed_nccl_comm, get_physical_domain_size, get_logical_domain_size
-from .buffers.allocator import BufferAllocator
-from .buffers.base import BufferBase
-from .buffers.ep import EPBuffer, EPHandle
-from .buffers.engram import EngramBuffer
-from .buffers.bucket import BucketBuffer, BucketSession
-from .buffers.pp import PPBuffer
+from . import comm as comm
+from .comm import destroy_all_managed_nccl_comm as destroy_all_managed_nccl_comm, get_physical_domain_size as get_physical_domain_size, get_logical_domain_size as get_logical_domain_size
+from .buffers.allocator import BufferAllocator as BufferAllocator
+from .buffers.base import BufferBase as BufferBase
+from .buffers.ep import EPBuffer as EPBuffer, EPHandle as EPHandle
+from .buffers.recv_view import DispatchRecvView as DispatchRecvView
+from .buffers.engram import EngramBuffer as EngramBuffer
+from .buffers.bucket import BucketBuffer as BucketBuffer, BucketSession as BucketSession
+from .buffers.pp import PPBuffer as PPBuffer
 # noinspection PyUnresolvedReferences
-from .utils.event import EventOverlap, EventHandle
+from .utils.event import EventOverlap as EventOverlap, EventHandle as EventHandle
 
 # noinspection PyUnresolvedReferences
-from deep_ep._C import (
-    get_num_allocation_alignment,
-    get_num_rdma_alignment,
-    get_num_tma_alignment,
-    topk_idx_t,
-)
+from deep_ep._C import get_num_allocation_alignment as get_num_allocation_alignment, get_num_rdma_alignment as get_num_rdma_alignment, get_num_tma_alignment as get_num_tma_alignment, topk_idx_t as topk_idx_t
 
 __version__ = '2.5.0'
