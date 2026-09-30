@@ -7,7 +7,8 @@ import torch.distributed as dist
 
 def exact(actual, expected):
     assert actual.shape == expected.shape and actual.dtype == expected.dtype
-    assert torch.equal(actual.contiguous().view(torch.uint8), expected.contiguous().view(torch.uint8))
+    if actual.numel():
+        assert torch.equal(actual.contiguous().view(torch.uint8), expected.contiguous().view(torch.uint8))
 
 
 def rejected(fn, error):
@@ -25,15 +26,41 @@ def test_case(deep_ep, deterministic, asynchronous, with_weights, skew):
     tokens = 65 - rank
     full_x = torch.randn((capacity, hidden), device='cuda', dtype=torch.bfloat16)
     x = full_x[:tokens]
-    indices = torch.rand((tokens, local_experts * world), device='cuda').argsort(dim=1)[:, :topk]
-    indices = indices.to(deep_ep.topk_idx_t).contiguous()
+    full_indices = torch.full((capacity, topk), -1, device='cuda', dtype=deep_ep.topk_idx_t)
+    indices = full_indices[:tokens]
+    indices.copy_(torch.rand((tokens, local_experts * world), device='cuda').argsort(dim=1)[:, :topk])
     if skew:
-        indices = torch.arange(topk, device='cuda', dtype=deep_ep.topk_idx_t).repeat(tokens, 1)
+        indices[:] = torch.arange(topk, device='cuda', dtype=deep_ep.topk_idx_t)
     indices[::7] = -1
-    weights = torch.randn((tokens, topk), device='cuda', dtype=torch.float32) if with_weights else None
-    gathered = [torch.empty_like(full_x) for _ in range(world)]
-    dist.all_gather(gathered, full_x)
-    all_x = torch.stack(gathered)
+    full_weights = torch.randn((capacity, topk), device='cuda', dtype=torch.float32) if with_weights else None
+    weights = full_weights[:tokens] if with_weights else None
+
+    def gather(tensor):
+        gathered = [torch.empty_like(tensor) for _ in range(world)]
+        dist.all_gather(gathered, tensor)
+        return torch.cat(gathered)
+
+    all_x, all_indices = gather(full_x), gather(full_indices)
+    local_routes = (all_indices >= rank * local_experts) & (all_indices < (rank + 1) * local_experts)
+    expected_source = torch.arange(world * capacity, device='cuda')[local_routes.any(dim=1)]
+    expected_lane = torch.where(local_routes[expected_source], torch.arange(topk, device='cuda'), -1).amax(dim=1)
+    expected_peer_topk = expected_source // capacity * topk + expected_lane
+    expected_x = all_x[expected_source]
+    expected_ids = torch.where(local_routes, all_indices - rank * local_experts, -1)[expected_source]
+    expected_weights = gather(full_weights)[expected_source] if with_weights else None
+
+    def check(payload, recv_ids, recv_weights, handle):
+        source = handle.recv_src_metadata[:, 0].long()
+        order = slice(None) if deterministic else source.argsort()
+        exact(source[order], expected_source)
+        exact(handle.recv_src_metadata[:, 1].long()[order], expected_peer_topk)
+        exact(payload[order], expected_x)
+        exact(recv_ids[order], expected_ids)
+        if with_weights:
+            exact(recv_weights[order], expected_weights)
+        else:
+            assert recv_weights is None
+
     buffer = deep_ep.EPBuffer(dist.group.WORLD,
                               num_max_tokens_per_rank=capacity,
                               hidden=hidden,
@@ -53,19 +80,10 @@ def test_case(deep_ep, deterministic, asynchronous, with_weights, skew):
             result[-1].current_stream_wait()
         return result[:4]
 
-    materialized, ref_ids, ref_weights, ref_handle = dispatch(False)
+    check(*dispatch(False))
     view, recv_ids, recv_weights, handle = dispatch(True)
     payload = view.slab.index_select(0, view.row_indices)
-    source = handle.recv_src_metadata[:, 0].long()
-    exact(payload, all_x[source // capacity, source % capacity])
-    order = source.argsort()
-    ref_order = ref_handle.recv_src_metadata[:, 0].argsort()
-    exact(payload[order], materialized[ref_order])
-    exact(recv_ids[order], ref_ids[ref_order])
-    if with_weights:
-        exact(recv_weights[order], ref_weights[ref_order])
-    else:
-        assert recv_weights is None
+    check(payload, recv_ids, recv_weights, handle)
     rejected(lambda: buffer.dispatch(x, **kwargs), RuntimeError)
     rejected(lambda: buffer.combine(payload, handle), RuntimeError)
     rejected(buffer.destroy, RuntimeError)
@@ -82,18 +100,26 @@ def test_case(deep_ep, deterministic, asynchronous, with_weights, skew):
                                   for peer in range(world)]).sum(dim=0).to(x.dtype)
     exact(combined, expected_count[:, None].expand_as(x))
 
-    # Release must order buffer reuse after the delayed reader.
-    view, _, _, delayed_handle = dispatch(True)
-    delayed_source = delayed_handle.recv_src_metadata[:, 0].long()
-    delayed_expected = all_x[delayed_source // capacity, delayed_source % capacity]
-    side = torch.cuda.Stream()
-    with torch.cuda.stream(side):
+    # First wait on a third stream; release must protect both delayed readers.
+    view, delayed_ids, delayed_weights, delayed_handle, event = buffer.dispatch(x,
+                                                                                borrow_recv=True,
+                                                                                **(kwargs | dict(async_with_compute_stream=True)))
+    ready = torch.cuda.Stream()
+    with torch.cuda.stream(ready):
         torch.cuda._sleep(4_000_000)
-        delayed = view.slab.index_select(0, view.row_indices)
-    view.release(side)
+        event.current_stream_wait()
+    readers = [torch.cuda.Stream(), torch.cuda.Stream()]
+    delayed = []
+    for reader, delay in zip(readers, (4_000_000, 64_000_000)):
+        with torch.cuda.stream(reader):
+            torch.cuda._sleep(delay)
+            delayed.append(view.slab.index_select(0, view.row_indices))
+    view.release(*readers)
+    assert not readers[-1].query(), 'Delayed reader finished before buffer reuse was tested'
     dispatch(False, x + 1)
-    side.synchronize()
-    exact(delayed, delayed_expected)
+    for reader, received in zip(readers, delayed):
+        reader.synchronize()
+        check(received, delayed_ids, delayed_weights, delayed_handle)
 
     for extra in [dict(do_expand=True), dict(defer_epilogue=True), dict(do_cpu_sync=False), dict(handle=handle)]:
         rejected(lambda extra=extra: buffer.dispatch(x, borrow_recv=True, **(kwargs | extra)), ValueError)
