@@ -170,7 +170,7 @@ static void launch_dispatch_copy_epilogue(void* buffer, void* workspace,
                                           int* psum_num_recv_tokens_per_expert,
                                           void* recv_x, void* recv_sf,
                                           topk_idx_t* recv_topk_idx, float* recv_topk_weights,
-                                          int* recv_src_metadata,
+                                          int* recv_src_metadata, int64_t* recv_row_indices,
                                           int* channel_linked_list,
                                           int* num_unaligned_recv_tokens_per_expert,
                                           const int& num_recv_tokens, const int& num_max_tokens_per_rank,
@@ -182,7 +182,7 @@ static void launch_dispatch_copy_epilogue(void* buffer, void* workspace,
                                           const int& num_sms, const int& num_smem_bytes,
                                           const int& num_channels,
                                           const bool& do_expand, const bool& cached_mode,
-                                          const bool& do_zero_padding,
+                                          const bool& do_zero_padding, const bool& materialize_recv_x,
                                           const at::cuda::CUDAStream& stream) {
     // Maximize shared memory utilization
     const auto token_layout = layout::TokenLayout(num_hidden_bytes, num_sf_packs * sizeof(sf_pack_t), num_topk, true);
@@ -194,9 +194,9 @@ static void launch_dispatch_copy_epilogue(void* buffer, void* workspace,
 #include <deep_ep/impls/ep/dispatch_copy_epilogue.cuh>
 
 static void __instantiate_kernel() {{
-    auto ptr = reinterpret_cast<void*>(&deep_ep::ep::dispatch_copy_epilogue_impl<{}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}>);
+    auto ptr = reinterpret_cast<void*>(&deep_ep::ep::dispatch_copy_epilogue_impl<{}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}>);
 }}
-)", do_expand, cached_mode, do_zero_padding,
+)", do_expand, cached_mode, do_zero_padding, materialize_recv_x,
         num_sms, num_channels, num_warps,
         num_scaleout_ranks, num_scaleup_ranks,
         num_hidden_bytes, num_sf_packs,
@@ -207,7 +207,7 @@ static void __instantiate_kernel() {{
     jit->launch(
         kernel, {
             .stream = stream.stream(),
-            .num_smem_bytes = num_smem_bytes,
+            .num_smem_bytes = materialize_recv_x ? num_smem_bytes : 0,
             .grid_dim = dim3(num_sms, 1, 1),
             .block_dim = dim3(num_threads, 1, 1),
             .enable_pdl = true,
@@ -216,7 +216,7 @@ static void __instantiate_kernel() {{
         psum_num_recv_tokens_per_scaleup_rank,
         psum_num_recv_tokens_per_expert,
         recv_x, recv_sf, recv_topk_idx, recv_topk_weights,
-        recv_src_metadata,
+        recv_src_metadata, recv_row_indices,
         channel_linked_list,
         num_unaligned_recv_tokens_per_expert,
         num_recv_tokens,

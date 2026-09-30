@@ -1,4 +1,3 @@
-import functools
 import os
 import math
 import torch
@@ -12,6 +11,7 @@ from deep_ep._C import EventHandle
 
 from .allocator import BufferAllocator
 from .base import BufferBase
+from .recv_view import DispatchRecvView
 from .. import comm
 from ..utils.event import EventOverlap
 from ..utils.math import align
@@ -113,11 +113,12 @@ class EPHandle:
     def deterministic_sort(self,
                            do_cpu_sync: bool,
                            is_cached_dispatch: bool,
-                           recv_x: torch.Tensor,
+                           recv_x: Optional[torch.Tensor],
                            recv_sf: Optional[torch.Tensor],
                            recv_topk_idx: torch.Tensor,
                            recv_topk_weights: torch.Tensor,
-                           channel_linked_list: Optional[torch.Tensor]):
+                           channel_linked_list: Optional[torch.Tensor],
+                           recv_row_indices: Optional[torch.Tensor] = None):
         """
         Sort received tokens to guarantee deterministic dispatch output.
         The principle:
@@ -160,6 +161,7 @@ class EPHandle:
             # Non-expand mode
             # If cached dispatch is enabled, the `dispatch` kernel stores values according to `dst_buffer_slot_idx`, and the `dispatch_copy_epilogue_impl` kernel writes the info of token i into the i-th slot
             permute(recv_x, orig_indices)
+            permute(recv_row_indices, orig_indices)
             permute(recv_sf, orig_indices)
             permute(recv_topk_weights, orig_indices)
             permute(recv_topk_idx, orig_indices)
@@ -294,7 +296,7 @@ class EPBuffer(BufferBase):
         self.allow_multiple_reduction = allow_multiple_reduction
         self.prefer_overlap_with_compute = prefer_overlap_with_compute
         self.deterministic = deterministic
-        
+
         # Create NCCL comm handle
         self.nccl_comm_handle = comm.get_nccl_comm_handle(group)
 
@@ -362,10 +364,15 @@ class EPBuffer(BufferBase):
         group.barrier()
         torch.cuda.synchronize()
 
+    def _check_recv_view_released(self) -> None:
+        if getattr(self, '_active_recv_view', None) is not None:
+            raise RuntimeError('Release the dispatch receive view before reusing or destroying this buffer')
+
     def destroy(self) -> None:
         """
         Destroy the C++ runtime and release resources. Requires `explicitly_destroy=True` at construction.
         """
+        self._check_recv_view_released()
         super().destroy()
         self.context = None
         self.nccl_comm_handle = None
@@ -577,8 +584,9 @@ class EPBuffer(BufferBase):
                  do_expand: bool = False,
                  do_zero_padding: bool = False,
                  use_tma_aligned_col_major_sf: bool = False,
-                 defer_epilogue: bool = False) \
-            -> Union[Tuple[Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]],
+                 defer_epilogue: bool = False,
+                 borrow_recv: bool = False) \
+            -> Union[Tuple[Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor], DispatchRecvView],
                            Optional[torch.Tensor], Optional[torch.Tensor],
                            EPHandle, EventOverlap], EventOverlap]:
         """
@@ -620,11 +628,17 @@ class EPBuffer(BufferBase):
             do_zero_padding: whether to zero out the alignment padding slots in the expanded output.
                 Only valid when `do_expand` is True. Ensures alignment gaps between experts are zeroed.
             use_tma_aligned_col_major_sf: whether to use TMA-aligned column-major layout for scale factors.
+            borrow_recv: return a DispatchRecvView instead of a materialized receive tensor.
+                Requires fresh compact BF16 dispatch in one NVLink domain, exact CPU counts, and
+                defer_epilogue=False. Wait the dispatch event, enqueue indexed consumers, then
+                release the view with every consuming stream before reusing or destroying this buffer.
+                The view cannot be retained for backward; a cached materialized replay is supported.
             defer_epilogue: whether to defer the CPU receive-count wait and copy epilogue until
                 `event.current_stream_wait()` is called. This requires `async_with_compute_stream=True`.
 
         Returns:
             recv_x: received tokens, the same type and tuple as the input `x`.
+                With `borrow_recv=True`, a DispatchRecvView owning a lease on the receive buffer.
                 Only returned when `defer_epilogue=False`.
             recv_topk_idx: received expert indices. Only returned when `defer_epilogue=False`.
             recv_topk_weights: received expert weights (`None` if `topk_weights` was not provided).
@@ -635,6 +649,11 @@ class EPBuffer(BufferBase):
                 of the five-item tuple. Call `event.current_stream_wait()` to run the copy epilogue and obtain
                 `(recv_x, recv_topk_idx, recv_topk_weights, handle)`.
         """
+        self._check_recv_view_released()
+        if borrow_recv and (handle is not None or do_expand or defer_epilogue or do_cpu_sync is False or
+                            not isinstance(x, torch.Tensor) or x.dtype != torch.bfloat16 or
+                            self.num_scaleout_ranks != 1 or self.num_rdma_ranks != 1):
+            raise ValueError('borrow_recv requires fresh compact BF16 dispatch, CPU counts, one NVLink domain, and no deferred epilogue')
         assert not do_handle_copy, '`do_handle_copy` must be False; handle copying is no longer supported'
         check_torch_deterministic()
 
@@ -642,7 +661,7 @@ class EPBuffer(BufferBase):
         num_topk = (handle.topk_idx if topk_idx is None else topk_idx).shape[1]
         num_sms = self.get_theoretical_num_sms(num_experts, num_topk) if num_sms == 0 else align(num_sms, 2)
         num_qps = self.get_theoretical_num_qps(num_sms) if num_qps == 0 else num_qps
-        assert num_qps <= self.num_allocated_qps, f'Allocated QPs are not enough'
+        assert num_qps <= self.num_allocated_qps, 'Allocated QPs are not enough'
 
         # Unpack SF
         x, sf = x if isinstance(x, tuple) else (x, None)
@@ -696,7 +715,7 @@ class EPBuffer(BufferBase):
                                                                  do_cpu_sync, do_expand,
                                                                  do_zero_padding,
                                                                  use_tma_aligned_col_major_sf,
-                                                                 defer_epilogue)
+                                                                 defer_epilogue, not borrow_recv)
         event_overlap = EventOverlap(event)
 
         def finalize_dispatch(dispatch_result: tuple, deterministic_by_hook: bool):
@@ -710,7 +729,7 @@ class EPBuffer(BufferBase):
              recv_src_metadata,
              dst_buffer_slot_idx,
              token_metadata_at_forward,
-             channel_linked_list) = dispatch_result
+             channel_linked_list, recv_row_indices) = dispatch_result
 
             # Create handle if not cached
             nonlocal handle
@@ -730,21 +749,28 @@ class EPBuffer(BufferBase):
                               token_metadata_at_forward,
                               channel_linked_list) if handle is None else handle
 
-            # Do deterministic
-            if self.deterministic:
-                deterministic_epilogue = functools.partial(
-                    handle.deterministic_sort,
-                    do_cpu_sync, is_cached_dispatch,
-                    recv_x, recv_sf, recv_topk_idx, recv_topk_weights, channel_linked_list
-                )
-                if deterministic_by_hook:
-                    event_overlap.register_hook_after_wait(deterministic_epilogue)
-                else:
-                    deterministic_epilogue()
+            recv_view = None
+            if borrow_recv:
+                slab = self.runtime.get_dispatch_recv_slab(x, num_topk, num_max_tokens_per_rank)
+                recv_view = DispatchRecvView(self, slab, recv_row_indices)
+                self._active_recv_view = recv_view
 
-            # Return values
-            recv_x = (recv_x, recv_sf) if recv_sf is not None else recv_x
-            return recv_x, recv_topk_idx, recv_topk_weights, handle
+            def complete_dispatch():
+                if self.deterministic:
+                    handle.deterministic_sort(
+                        do_cpu_sync, is_cached_dispatch, recv_x, recv_sf,
+                        recv_topk_idx, recv_topk_weights, channel_linked_list, recv_row_indices)
+                if recv_view is not None:
+                    recv_view._mark_ready()
+
+            if self.deterministic or recv_view is not None:
+                if deterministic_by_hook:
+                    event_overlap.register_hook_after_wait(complete_dispatch)
+                else:
+                    complete_dispatch()
+
+            received = recv_view if recv_view is not None else ((recv_x, recv_sf) if recv_sf is not None else recv_x)
+            return received, recv_topk_idx, recv_topk_weights, handle
 
         # Just launch the dispatch
         if deferred_epilogue is not None:
@@ -810,12 +836,13 @@ class EPBuffer(BufferBase):
                 of the three-item tuple. Call `event.current_stream_wait()` to run the reduce epilogue and
                 obtain `(combined_x, combined_topk_weights)`.
         """
+        self._check_recv_view_released()
         check_torch_deterministic()
 
         # Automatic decide SM and QP count
         num_sms = handle.num_sms if num_sms == 0 else align(num_sms, 2)
         num_qps = self.get_theoretical_num_qps(num_sms) if num_qps == 0 else num_qps
-        assert num_qps <= self.num_allocated_qps, f'Allocated QPs are not enough'
+        assert num_qps <= self.num_allocated_qps, 'Allocated QPs are not enough'
 
         bias_0, bias_1 = EPBuffer._unpack_bias(bias)
         result, event, deferred_epilogue = self.runtime.combine(x, topk_weights,
@@ -875,6 +902,7 @@ class EPBuffer(BufferBase):
             num_sms: the number of SMs to use; 0 uses `lb_get_theoretical_num_sms()`.
             previous_event: the event to wait for before communication; defaults to waiting for the current stream
         """
+        self._check_recv_view_released()
         redundant_expert_weights = ([redundant_expert_weights] if isinstance(redundant_expert_weights, torch.Tensor)
                                     else list(redundant_expert_weights))
         expert_weights = [expert_weights] if isinstance(expert_weights, torch.Tensor) else list(expert_weights)
@@ -901,6 +929,7 @@ class EPBuffer(BufferBase):
             num_sms: the number of SMs to use; 0 uses `lb_get_theoretical_num_sms()`.
             previous_event: the event to wait for before communication; defaults to waiting for the current stream
         """
+        self._check_recv_view_released()
         num_sms = self.lb_get_theoretical_num_sms() if num_sms == 0 else align(num_sms, 2)
         return EventOverlap(self.runtime.lb_reduce_grads(
             redundant_expert_grads, expert_grads, redundancy_mapping, num_sms, previous_event))

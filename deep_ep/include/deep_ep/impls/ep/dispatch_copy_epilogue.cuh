@@ -9,7 +9,7 @@
 
 namespace deep_ep::ep {
 
-template <bool kDoExpand, bool kCachedMode, bool kDoZeroPadding,
+template <bool kDoExpand, bool kCachedMode, bool kDoZeroPadding, bool kMaterializeRecvX,
           // NOTES: this channel concept only applies for scale-out ranks
           int kNumSMs, int kNumChannels, int kNumWarps,
           int kNumScaleoutRanks, int kNumScaleupRanks,
@@ -26,12 +26,14 @@ dispatch_copy_epilogue_impl(void* buffer, void* workspace,
                             int* psum_num_recv_tokens_per_expert,
                             void* recv_x, sf_pack_t* recv_sf,
                             topk_idx_t* recv_topk_idx, float* recv_topk_weights,
-                            int* recv_src_metadata,
+                            int* recv_src_metadata, int64_t* recv_row_indices,
                             int* channel_linked_list,
                             int* num_unaligned_recv_tokens_per_expert,
                             int num_recv_tokens,
                             const int recv_sf_token_stride, const int recv_sf_hidden_stride,
                             const int scaleout_rank_idx, const int scaleup_rank_idx) {
+    EP_STATIC_ASSERT(kMaterializeRecvX or (not kDoExpand and kNumSFPacks == 0 and kNumScaleoutRanks == 1),
+                     "Borrowed receive only supports compact, intra-node BF16 dispatch");
     // Utils
     const auto sm_idx = static_cast<int>(blockIdx.x), thread_idx = static_cast<int>(threadIdx.x);
     const auto warp_idx = ptx::get_warp_idx(), lane_idx = ptx::get_lane_idx();
@@ -52,8 +54,10 @@ dispatch_copy_epilogue_impl(void* buffer, void* workspace,
     // Init TMA
     ptx::arrival_phase phase = 0;
     const auto mbarrier_ptr = tma_buffer.get_mbarrier_ptr();
-    if (ptx::elect_one_sync())
-        ptx::mbarrier_init_with_fence(mbarrier_ptr, 1);
+    if constexpr (kMaterializeRecvX) {
+        if (ptx::elect_one_sync())
+            ptx::mbarrier_init_with_fence(mbarrier_ptr, 1);
+    }
     __syncwarp();
 
     // Will block until the main dispatch kernel has finished and all data are visible
@@ -80,17 +84,25 @@ dispatch_copy_epilogue_impl(void* buffer, void* workspace,
             current_rank_end = ptx::exchange(stored_psum_num_recv_tokens, stored_lane_idx);
         }
         const auto buffer_token = scaleup_buffer.get_rank_buffer(current_rank_idx).get_token_buffer(i - current_rank_start);
+        if constexpr (not kMaterializeRecvX) {
+            if (ptx::elect_one_sync())
+                recv_row_indices[i] = static_cast<int64_t>(current_rank_idx) * kNumMaxTokensPerRank + i - current_rank_start;
+        }
+
 
         // Wait buffer releases
-        ptx::tma_store_wait();
+        if constexpr (kMaterializeRecvX)
+            ptx::tma_store_wait();
         __syncwarp();
 
         // Issue TMA loads
         // Including all stuffs: data, SF, top-k metadata
-        if (ptx::elect_one_sync()) {
-            ptx::tma_load_1d(tma_buffer.get_base_ptr(), buffer_token.get_base_ptr(),
-                             mbarrier_ptr, tma_buffer.get_num_bytes<false>());
-            ptx::mbarrier_arrive_and_set_tx(mbarrier_ptr, tma_buffer.get_num_bytes<false>());
+        if constexpr (kMaterializeRecvX) {
+            if (ptx::elect_one_sync()) {
+                ptx::tma_load_1d(tma_buffer.get_base_ptr(), buffer_token.get_base_ptr(),
+                                 mbarrier_ptr, tma_buffer.get_num_bytes<false>());
+                ptx::mbarrier_arrive_and_set_tx(mbarrier_ptr, tma_buffer.get_num_bytes<false>());
+            }
         }
         __syncwarp();
 
@@ -124,9 +136,15 @@ dispatch_copy_epilogue_impl(void* buffer, void* workspace,
         __syncwarp();
 
         // Wait for TMA arrival
-        if (ptx::elect_one_sync())
-            ptx::mbarrier_wait_and_flip_phase(mbarrier_ptr, phase);
+        if constexpr (kMaterializeRecvX) {
+            if (ptx::elect_one_sync())
+                ptx::mbarrier_wait_and_flip_phase(mbarrier_ptr, phase);
+        }
         __syncwarp();
+
+        // Metadata-only mode must skip the activation LOAD as well as its
+        // store. Read the small metadata fields directly after the PDL fence.
+        const auto metadata_token = kMaterializeRecvX ? tma_buffer : buffer_token;
 
         // Maintain linked list
         if constexpr (kDoCreateLinkedList) {
@@ -136,10 +154,12 @@ dispatch_copy_epilogue_impl(void* buffer, void* workspace,
         }
 
         // Issue TMA stores for data
-        if (kDoExpand ? (dst_tensor_idx >= 0) : ptx::elect_one_sync()) {
-            ptx::tma_store_1d(math::advance_ptr(recv_x, static_cast<int64_t>(dst_tensor_idx) * kNumHiddenBytes),
-                              tma_buffer.get_hidden_ptr(), kNumHiddenBytes);
-            ptx::tma_store_commit();
+        if constexpr (kMaterializeRecvX) {
+            if (kDoExpand ? (dst_tensor_idx >= 0) : ptx::elect_one_sync()) {
+                ptx::tma_store_1d(math::advance_ptr(recv_x, static_cast<int64_t>(dst_tensor_idx) * kNumHiddenBytes),
+                                  tma_buffer.get_hidden_ptr(), kNumHiddenBytes);
+                ptx::tma_store_commit();
+            }
         }
         __syncwarp();
 
@@ -179,10 +199,10 @@ dispatch_copy_epilogue_impl(void* buffer, void* workspace,
 
         // Store the top-k weights
         if (kDoExpand and recv_topk_weights != nullptr and dst_tensor_idx >= 0) {
-            recv_topk_weights[dst_tensor_idx] = tma_buffer.get_topk_weights_ptr()[lane_idx];
+            recv_topk_weights[dst_tensor_idx] = metadata_token.get_topk_weights_ptr()[lane_idx];
         } else if (not kDoExpand and recv_topk_weights != nullptr and lane_idx < kNumTopk) {
             // For backward, weights are optional
-            recv_topk_weights[i * kNumTopk + lane_idx] = tma_buffer.get_topk_weights_ptr()[lane_idx];
+            recv_topk_weights[i * kNumTopk + lane_idx] = metadata_token.get_topk_weights_ptr()[lane_idx];
         }
         __syncwarp();
 
@@ -192,7 +212,7 @@ dispatch_copy_epilogue_impl(void* buffer, void* workspace,
         //   - Hybrid mode: the slot index and master top-k lane index
         if constexpr (not kCachedMode) {
             if (ptx::elect_one_sync()) {
-                recv_src_metadata[i * kMetadataStride + 0] = *tma_buffer.get_src_token_global_idx_ptr();
+                recv_src_metadata[i * kMetadataStride + 0] = *metadata_token.get_src_token_global_idx_ptr();
                 if constexpr (kNumScaleoutRanks == 1) {
                     recv_src_metadata[i * kMetadataStride + 1] = current_rank_idx * kNumTopk + master_src_topk_idx;
                 } else {
