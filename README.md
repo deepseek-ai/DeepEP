@@ -4,9 +4,11 @@ DeepEP (DeepEveryParallel) is a high-performance communication library for machi
 
 ## News
 
-- **V2 release**: A complete refactoring of expert parallelism, with support for larger scale-up and scale-out domains and the lightweight **NCCL Gin backend**.
+- **Ascend version release**
+  - Same API and full performance on HUAWEI Ascend 950 NPUs
+  - Check [DeepEP-Ascend](https://github.com/deepseek-ai/DeepEP-Ascend) for more details
 
-- **V2.5 update**:
+- **V2.5 release**:
   - Split `ElasticBuffer` into `EPBuffer`, `EngramBuffer`, `PPBuffer`, and `BucketBuffer`, sharing the `BufferBase` lifecycle
   - Add `BufferAllocator` for planning symmetric tensor allocations before buffer construction
   - Add batched all-gather, reduce-scatter, and all-reduce through `BucketBuffer`, with sessions for ordinary PyTorch tensors
@@ -14,6 +16,8 @@ DeepEP (DeepEveryParallel) is a high-performance communication library for machi
   - Support deferred EP epilogues, cached expanded layouts, and zero padding between experts
   - Support multi-layer Engram storage on GPU or CPU, with one wait hook per layer
   - Fully remove V1, including its APIs, NVSHMEM backend, and legacy documentation. NVSHMEM is no longer a dependency
+
+- **V2 release**: A complete refactoring of expert parallelism, with support for larger scale-up and scale-out domains and the lightweight **NCCL Gin backend**.
 
 ### New features
 
@@ -508,7 +512,7 @@ The following links describe separate implementations and research branches. The
 
 ## Acknowledgement
 
-DeepEP is built on top of the [NCCL](https://github.com/nvidia/nccl) Gin backend. Thanks to @sjeaugey, @pakmarkthub, @sb17v, @xiaofanl-nvidia, and the NCCL team for their support!
+DeepEP is built on top of the [NCCL](https://github.com/nvidia/nccl) Gin backend. Thanks to [@sjeaugey](https://github.com/sjeaugey), [@pakmarkthub](https://github.com/pakmarkthub), [@sb17v](https://github.com/sb17v), [@xiaofanl-nvidia](https://github.com/xiaofanl-nvidia), and the NCCL team for their support!
 
 We also acknowledge [MoonEP](https://github.com/MoonshotAI/MoonEP) and [UltraEP](https://github.com/Dots-Infra/UltraEP) for their work on dynamic expert replication and the weight/gradient exchange that supports expert load balancing.
 
