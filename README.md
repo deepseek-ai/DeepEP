@@ -284,8 +284,6 @@ With `async_with_compute_stream=True`, call `event.current_stream_wait()` before
 
 Borrowed storage is intended for forward consumers; retaining it for backward is unsupported. After release, the returned handle can be used for ordinary materialized cached replay. Expanded layouts, FP8, cached borrowed dispatch, deferred epilogues, and multiple NVLink domains are outside this initial API. The option defaults to `False`; whether it reduces latency depends on the consumer and token count.
 
-See `tests/ep/test_recv_view.py` for event ordering, cross-stream lifetime, replay, combine, and layout checks.
-
 ### Deferred epilogues
 
 Dispatch and combine accept `defer_epilogue=True` together with `async_with_compute_stream=True`. In this mode, the call returns an `EventOverlap` directly. Calling `.wait()` runs the deferred epilogue on the current stream and returns `(recv_x, recv_topk_idx, recv_topk_weights, handle)` for dispatch, or `(combined_x, combined_topk_weights)` for combine.

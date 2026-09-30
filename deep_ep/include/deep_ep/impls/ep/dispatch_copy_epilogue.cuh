@@ -153,8 +153,7 @@ __global__ void __launch_bounds__(kNumThreads, 1) dispatch_copy_epilogue_impl(vo
         }
         __syncwarp();
 
-        // Metadata-only mode must skip the activation LOAD as well as its
-        // store. Read the small metadata fields directly after the PDL fence.
+        // Borrowed mode reads metadata directly from the buffer after the PDL fence.
         const auto metadata_token = kMaterializeRecvX ? tma_buffer : buffer_token;
 
         // Maintain linked list

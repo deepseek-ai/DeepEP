@@ -1,16 +1,13 @@
-"""An exclusive, forward-only view of compact BF16 dispatch payloads."""
 import torch
 
 from .. import comm
 
 
 class DispatchRecvView:
-    """Read logical row ``r`` as ``slab[row_indices[r]]`` after dispatch wait.
+    """Forward-only receive storage: logical row ``r`` is ``slab[row_indices[r]]``.
 
-    The payload belongs to the communication buffer. Keep host calls serialized
-    and release this view after enqueueing all consumers, passing every consuming
-    CUDA stream. Copies of ``slab`` references are invalid after release. Saving
-    this view for backward is unsupported; use a materialized cached replay.
+    Keep host calls serialized. After enqueueing all consumers, release with every
+    consuming CUDA stream. Raw slab references become invalid after release.
     """
 
     def __init__(self, owner, slab, row_indices):

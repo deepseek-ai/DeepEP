@@ -612,12 +612,10 @@ class EPBuffer(BufferBase):
             do_zero_padding: whether to zero out the alignment padding slots in the expanded output.
                 Only valid when `do_expand` is True. Ensures alignment gaps between experts are zeroed.
             use_tma_aligned_col_major_sf: whether to use TMA-aligned column-major layout for scale factors.
-            borrow_recv: return a DispatchRecvView instead of a materialized receive tensor.
-                Requires fresh compact BF16 dispatch in one NVLink domain, exact CPU counts, and
-                defer_epilogue=False. Wait the dispatch event only for asynchronous dispatch,
-                enqueue indexed consumers, then
-                release the view with every consuming stream before reusing or destroying this buffer.
-                The view cannot be retained for backward; a cached materialized replay is supported.
+            borrow_recv: return a forward-only DispatchRecvView instead of a receive tensor.
+                Requires fresh compact BF16 dispatch, exact CPU counts, one physical NVLink domain,
+                and defer_epilogue=False. For asynchronous dispatch, wait the returned event first.
+                Release on all consuming streams before reusing or destroying this buffer.
             defer_epilogue: whether to defer the CPU receive-count wait and copy epilogue until
                 `event.current_stream_wait()` is called. This requires `async_with_compute_stream=True`.
 

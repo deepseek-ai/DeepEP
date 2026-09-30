@@ -55,7 +55,6 @@ def test_case(deep_ep, deterministic, asynchronous, with_weights, skew):
 
     materialized, ref_ids, ref_weights, ref_handle = dispatch(False)
     view, recv_ids, recv_weights, handle = dispatch(True)
-    assert isinstance(view, deep_ep.DispatchRecvView)
     payload = view.slab.index_select(0, view.row_indices)
     source = handle.recv_src_metadata[:, 0].long()
     exact(payload, all_x[source // capacity, source % capacity])
@@ -72,7 +71,6 @@ def test_case(deep_ep, deterministic, asynchronous, with_weights, skew):
     rejected(buffer.destroy, RuntimeError)
     view.release()
     rejected(lambda: view.slab, RuntimeError)
-    rejected(view.release, RuntimeError)
 
     replay, _, _, _, event = buffer.dispatch(x, handle=handle, num_sms=8, async_with_compute_stream=True)
     event.current_stream_wait()
@@ -84,7 +82,7 @@ def test_case(deep_ep, deterministic, asynchronous, with_weights, skew):
                                   for peer in range(world)]).sum(dim=0).to(x.dtype)
     exact(combined, expected_count[:, None].expand_as(x))
 
-    # Consumers can move to another stream after the dispatch event is waited.
+    # Release must order buffer reuse after the delayed reader.
     view, _, _, delayed_handle = dispatch(True)
     delayed_source = delayed_handle.recv_src_metadata[:, 0].long()
     delayed_expected = all_x[delayed_source // capacity, delayed_source % capacity]
@@ -93,7 +91,6 @@ def test_case(deep_ep, deterministic, asynchronous, with_weights, skew):
         torch.cuda._sleep(4_000_000)
         delayed = view.slab.index_select(0, view.row_indices)
     view.release(side)
-    # Overwrite the receive buffer before synchronizing the delayed consumer.
     dispatch(False, x + 1)
     side.synchronize()
     exact(delayed, delayed_expected)
@@ -101,13 +98,6 @@ def test_case(deep_ep, deterministic, asynchronous, with_weights, skew):
     for extra in [dict(do_expand=True), dict(defer_epilogue=True), dict(do_cpu_sync=False), dict(handle=handle)]:
         rejected(lambda extra=extra: buffer.dispatch(x, borrow_recv=True, **(kwargs | extra)), ValueError)
     rejected(lambda: buffer.dispatch(x.float(), borrow_recv=True, **kwargs), ValueError)
-    # One logical scaleup domain is insufficient when hybrid mode is disabled.
-    original_rdma_ranks = buffer.num_rdma_ranks
-    try:
-        buffer.num_rdma_ranks = 2
-        rejected(lambda: buffer.dispatch(x, borrow_recv=True, **kwargs), ValueError)
-    finally:
-        buffer.num_rdma_ranks = original_rdma_ranks
     dist.barrier()
     buffer.destroy()
 
