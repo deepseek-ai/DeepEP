@@ -51,10 +51,14 @@ DeepEP (DeepEveryParallel) is a high-performance communication library for machi
 - A C++20 compiler and standard library with `std::format` support
 - PyTorch 2.10 and above, with CUDA support
 - NCCL 2.32.3 and above
-- NVLink for intranode communication
+- NVLink with full directed CUDA peer access between every pair of participating intranode GPUs
 - RDMA network for internode communication
 
 Installation builds the host C++ extension against the CUDA and NCCL libraries. GPU kernels are compiled by DeepJIT for the current device at runtime, so installation does not require a visible GPU or `TORCH_CUDA_ARCH_LIST`. Keep the CUDA toolkit and host compiler available at runtime. Automatic bandwidth detection uses `nvidia-smi` and `ibstat`; `BucketBuffer` currently requires both NVLink and RDMA bandwidth to be detectable, even for a group using only one transport.
+
+Before allocating an intranode communication buffer, DeepEP validates the complete P2P capability matrix. A partial topology is rejected
+with every unsupported directed GPU pair reported together. Use another MoE all-to-all backend when the participating GPUs do not form a
+full-P2P domain.
 
 ### Install NCCL dependency
 
