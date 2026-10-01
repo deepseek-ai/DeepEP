@@ -1,7 +1,0 @@
-add_deep_ep_library(legacy_layout_cuda layout.cu)
-add_deep_ep_library(legacy_intranode_cuda intranode.cu)
-add_deep_ep_library(legacy_internode_cuda internode.cu)
-add_deep_ep_library(legacy_internode_ll_cuda internode_ll.cu)
-
-# Link these libraries later
-set(LEGACY_CUDA_LIBRARIES legacy_layout_cuda legacy_intranode_cuda legacy_internode_cuda legacy_internode_ll_cuda CACHE INTERNAL "Legacy kernels")

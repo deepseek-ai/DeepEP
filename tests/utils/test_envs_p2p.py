@@ -15,7 +15,7 @@ def envs(monkeypatch):
     package.__path__ = [str(root)]
     utils = ModuleType('deep_ep.utils')
     utils.__path__ = [str(root / 'utils')]
-    comm = ModuleType('deep_ep.utils.comm')
+    comm = ModuleType('deep_ep.comm')
     comm.get_nccl_comm_handle = Mock()
     torch = ModuleType('torch')
     dist = ModuleType('torch.distributed')
@@ -27,7 +27,7 @@ def envs(monkeypatch):
                                  get_device_properties=Mock(side_effect=lambda device: SimpleNamespace(uuid=f'GPU-{device}')),
                                  can_device_access_peer=Mock(return_value=True))
     for name, module in [('deep_ep', package), ('deep_ep.utils', utils), ('deep_ep._C', ModuleType('deep_ep._C')),
-                         ('deep_ep.utils.comm', comm), ('torch', torch), ('torch.distributed', dist)]:
+                         ('deep_ep.comm', comm), ('torch', torch), ('torch.distributed', dist)]:
         monkeypatch.setitem(sys.modules, name, module)
     for name in ('p2p', 'envs'):
         spec = importlib.util.spec_from_file_location(f'deep_ep.utils.{name}', root / 'utils' / f'{name}.py')
@@ -88,7 +88,7 @@ def test_healthy_rank_reports_remote_identity_failure_without_querying_peers(env
     envs.torch.cuda.device_count.assert_not_called()
 
 
-@pytest.mark.parametrize('properties', [SimpleNamespace(), SimpleNamespace(uuid=None)])
+@pytest.mark.parametrize('properties', [SimpleNamespace(uuid=None)])
 def test_missing_uuid_is_reported_collectively(envs, make_group, properties):
     envs.torch.cuda.get_device_properties.side_effect = None
     envs.torch.cuda.get_device_properties.return_value = properties

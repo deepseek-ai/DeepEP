@@ -17,6 +17,9 @@ static void* get_driver_handle() {
     return handle;
 }
 
+// Macro to expand CUDA API aliases before stringification
+#define EP_CUDA_STRINGIFY(name) #name
+
 // Macro to define wrapper functions named `lazy_cu{API name}`
 #define DECL_LAZY_CUDA_DRIVER_FUNCTION(name) \
 template <typename... Args> \
@@ -24,7 +27,7 @@ static auto lazy_##name(Args&&... args) -> decltype(name(args...)) { \
     using FuncType = decltype(&name); \
     static FuncType func = nullptr; \
     if (func == nullptr) { \
-        func = reinterpret_cast<FuncType>(dlsym(get_driver_handle(), #name)); \
+        func = reinterpret_cast<FuncType>(dlsym(get_driver_handle(), EP_CUDA_STRINGIFY(name))); \
         EP_HOST_ASSERT(func != nullptr and "Failed to load CUDA driver API"); \
     } \
     return func(std::forward<decltype(args)>(args)...); \
