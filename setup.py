@@ -1,13 +1,13 @@
 # Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-import os
-import subprocess
-import setuptools
 import importlib
-import shutil
+import os
 import re
-
+import shutil
+import subprocess
 from pathlib import Path
-from torch.utils.cpp_extension import BuildExtension, CUDAExtension
+
+import setuptools
+from torch.utils.cpp_extension import CUDA_HOME, BuildExtension, CUDAExtension
 
 
 def collect_package_files(package: str, relative_dir: str):
@@ -40,6 +40,21 @@ def to_nvcc_gencode(s: str) -> str:
         arch = f"{int(major)}{int(minor)}{suf.lower()}"
         flags.append(f"-gencode=arch=compute_{arch},code=sm_{arch}")
     return " ".join(flags)
+
+
+def get_nvtx_library():
+    """Prefer NVTX interop, falling back to the legacy library when it is installed."""
+    if CUDA_HOME is not None:
+        library_dirs = [Path(CUDA_HOME) / "lib64", Path(CUDA_HOME) / "lib"]
+        for name in ("nvtx3interop", "nvToolsExt"):
+            if any(
+                (directory / f"lib{name}{suffix}").is_file()
+                for directory in library_dirs
+                for suffix in (".so", ".a")
+            ):
+                return name
+    # Preserve the existing linker diagnostic if neither library can be found.
+    return "nvtx3interop"
 
 
 def get_extension_hybrid_ep_cpp():
@@ -77,7 +92,7 @@ def get_extension_hybrid_ep_cpp():
         os.path.join(current_dir, "csrc/hybrid_ep/backend/"),
     ]
     library_dirs = []
-    libraries = ["cuda", "nvtx3interop"]
+    libraries = ["cuda", get_nvtx_library()]
     extra_objects = []
     runtime_library_dirs = []
     extra_link_args = []
@@ -230,6 +245,10 @@ def get_extension_deep_ep_cpp():
     nvcc_flags = ['-O3', '-Xcompiler', '-O3']
     sources = ['csrc/deep_ep.cpp', 'csrc/kernels/runtime.cu', 'csrc/kernels/layout.cu', 'csrc/kernels/intranode.cu']
     include_dirs = ['csrc/']
+    if CUDA_HOME is not None:
+        cccl_include = Path(CUDA_HOME) / "include" / "cccl"
+        if cccl_include.is_dir():
+            include_dirs.append(str(cccl_include))
     library_dirs = []
     nvcc_dlink = []
     extra_link_args = ['-lcuda']
