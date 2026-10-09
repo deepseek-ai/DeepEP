@@ -93,25 +93,20 @@ struct ScopedFd {
   }
 };
 
-static ibv_mr* register_gpu_memory(
+ibv_mr* RDMACoordinator::register_gpu_memory(
     ibv_pd* pd,
     void* address,
     size_t length,
-    int access,
-    bool dmabuf_supported,
-    int local_rank,
-    const char* buffer_name) {
+    int access) {
   if (pd == nullptr) {
     std::ostringstream error;
-    error << "HybridEP cannot register GPU buffer '" << buffer_name
-          << "': the RDMA protection domain is null";
+    error << "HybridEP cannot register GPU buffer: the RDMA protection domain is null";
     append_registration_context(error, pd, address, length, access);
     throw std::runtime_error(error.str());
   }
   if (address == nullptr || length == 0) {
     std::ostringstream error;
-    error << "HybridEP cannot register GPU buffer '" << buffer_name
-          << "': address must be non-null and length must be nonzero";
+    error << "HybridEP cannot register GPU buffer: address must be non-null and length must be nonzero";
     append_registration_context(error, pd, address, length, access);
     throw std::runtime_error(error.str());
   }
@@ -123,10 +118,9 @@ static ibv_mr* register_gpu_memory(
   }
 
   const int legacy_errno = errno;
-  if (!dmabuf_supported) {
+  if (gpu_handler == nullptr || !gpu_handler->support_dmabuf) {
     std::ostringstream error;
-    error << "HybridEP failed to register GPU buffer '" << buffer_name
-          << "' with ibv_reg_mr: ";
+    error << "HybridEP failed to register GPU buffer with ibv_reg_mr: ";
     append_errno(error, legacy_errno);
     append_registration_context(error, pd, address, length, access);
     error << "; CUDA reports no DMA-BUF support";
@@ -138,8 +132,7 @@ static ibv_mr* register_gpu_memory(
   if (page_size_value <= 0) {
     const int page_size_errno = errno;
     std::ostringstream error;
-    error << "HybridEP could not determine the host page size while registering GPU buffer '"
-          << buffer_name << "' with DMA-BUF: ";
+    error << "HybridEP could not determine the host page size while registering GPU buffer with DMA-BUF: ";
     append_errno(error, page_size_errno);
     error << "; ibv_reg_mr failed with ";
     append_errno(error, legacy_errno);
@@ -152,8 +145,7 @@ static ibv_mr* register_gpu_memory(
   const size_t dmabuf_offset = iova - dmabuf_base;
   if (length > SIZE_MAX - dmabuf_offset) {
     std::ostringstream error;
-    error << "HybridEP DMA-BUF registration range overflows for GPU buffer '"
-          << buffer_name << "': page_size=" << page_size
+    error << "HybridEP DMA-BUF registration range overflows for GPU buffer: page_size=" << page_size
           << "; ibv_reg_mr failed with ";
     append_errno(error, legacy_errno);
     append_registration_context(error, pd, address, length, access);
@@ -164,8 +156,7 @@ static ibv_mr* register_gpu_memory(
   const size_t alignment_padding = trailing_bytes == 0 ? 0 : page_size - trailing_bytes;
   if (unaligned_length > SIZE_MAX - alignment_padding) {
     std::ostringstream error;
-    error << "HybridEP DMA-BUF registration range overflows for GPU buffer '"
-          << buffer_name << "': page_size=" << page_size
+    error << "HybridEP DMA-BUF registration range overflows for GPU buffer: page_size=" << page_size
           << "; ibv_reg_mr failed with ";
     append_errno(error, legacy_errno);
     append_registration_context(error, pd, address, length, access);
@@ -186,8 +177,7 @@ static ibv_mr* register_gpu_memory(
     cuGetErrorName(export_status, &error_name);
     cuGetErrorString(export_status, &error_description);
     std::ostringstream error;
-    error << "HybridEP failed to export GPU buffer '" << buffer_name
-          << "' as DMA-BUF after ibv_reg_mr failed: "
+    error << "HybridEP failed to export GPU buffer as DMA-BUF after ibv_reg_mr failed: "
           << (error_name != nullptr ? error_name : "unknown CUDA error")
           << " (" << (error_description != nullptr ? error_description : "no description")
           << "); ibv_reg_mr failed with ";
@@ -206,8 +196,7 @@ static ibv_mr* register_gpu_memory(
   const int dmabuf_errno = errno;
   if (mr == nullptr) {
     std::ostringstream error;
-    error << "HybridEP failed to DMA-BUF register GPU buffer '" << buffer_name
-          << "': ";
+    error << "HybridEP failed to DMA-BUF register GPU buffer: ";
     append_errno(error, dmabuf_errno);
     error << "; ibv_reg_mr failed with ";
     append_errno(error, legacy_errno);
@@ -557,14 +546,12 @@ void RDMACoordinator::update_config(BufferConfig config) {
 }
 
 void RDMACoordinator::allocate_buffers() {
-  const bool dmabuf_supported =
-      gpu_handler != nullptr && gpu_handler->support_dmabuf;
   // Mark cleanup as necessary before the first allocation. Both allocation
   // routines may throw while only a subset of their resources exists.
   buffer_allocated = true;
   try {
-    allocate_combine_buffers(dmabuf_supported);
-    allocate_dispatch_buffers(dmabuf_supported);
+    allocate_combine_buffers();
+    allocate_dispatch_buffers();
   } catch (...) {
     destroy();
     throw;
@@ -622,7 +609,7 @@ void RDMACoordinator::init(
   rdma_initialized = true;
 }
 
-void RDMACoordinator::allocate_dispatch_buffers(bool dmabuf_supported){
+void RDMACoordinator::allocate_dispatch_buffers(){
   dispatch_buffers.data_type = buffer_config.token_data_type;
   size_t sizeof_token_data_type = get_token_data_type_size(dispatch_buffers.data_type);
 
@@ -676,36 +663,28 @@ void RDMACoordinator::allocate_dispatch_buffers(bool dmabuf_supported){
   // Allocate memory region
   attn_input_token_mr = register_gpu_memory(
       ib_pd, dispatch_buffers.attn_input_token,
-      attn_input_token_elts * sizeof_token_data_type, mr_access_flag,
-      dmabuf_supported, local_rank, "dispatch.attn_input_token");
+      attn_input_token_elts * sizeof_token_data_type, mr_access_flag);
   dispatch_rdma_inter_node_group_token_mr = register_gpu_memory(
       ib_pd, dispatch_buffers.rdma_inter_node_group_token,
-      rdma_inter_node_group_token_elts * sizeof_token_data_type, mr_access_flag,
-      dmabuf_supported, local_rank, "dispatch.rdma_inter_node_group_token");
+      rdma_inter_node_group_token_elts * sizeof_token_data_type, mr_access_flag);
   attn_input_flags_mr = register_gpu_memory(
       ib_pd, dispatch_buffers.attn_input_flags,
-      rdma_inter_node_group_flags_elts * sizeof(uint64_t), mr_access_flag,
-      dmabuf_supported, local_rank, "dispatch.attn_input_flags");
+      rdma_inter_node_group_flags_elts * sizeof(uint64_t), mr_access_flag);
   dispatch_rdma_inter_node_group_flags_mr = register_gpu_memory(
       ib_pd, dispatch_buffers.rdma_inter_node_group_flags,
-      rdma_inter_node_group_flags_elts * sizeof(uint64_t), mr_access_flag,
-      dmabuf_supported, local_rank, "dispatch.rdma_inter_node_group_flags");
+      rdma_inter_node_group_flags_elts * sizeof(uint64_t), mr_access_flag);
   attn_input_prob_mr = register_gpu_memory(
       ib_pd, dispatch_buffers.attn_input_prob,
-      attn_input_prob_elts * sizeof(float), mr_access_flag,
-      dmabuf_supported, local_rank, "dispatch.attn_input_prob");
+      attn_input_prob_elts * sizeof(float), mr_access_flag);
   dispatch_rdma_inter_node_group_prob_mr = register_gpu_memory(
       ib_pd, dispatch_buffers.rdma_inter_node_group_prob,
-      rdma_inter_node_group_prob_elts * sizeof(float), mr_access_flag,
-      dmabuf_supported, local_rank, "dispatch.rdma_inter_node_group_prob");
+      rdma_inter_node_group_prob_elts * sizeof(float), mr_access_flag);
   attn_input_token_scaling_factor_mr = register_gpu_memory(
       ib_pd, dispatch_buffers.attn_input_scaling_factor,
-      attn_input_token_scaling_factor_elts * sizeof(float), mr_access_flag,
-      dmabuf_supported, local_rank, "dispatch.attn_input_scaling_factor");
+      attn_input_token_scaling_factor_elts * sizeof(float), mr_access_flag);
   dispatch_rdma_inter_node_group_scaling_factor_mr = register_gpu_memory(
       ib_pd, dispatch_buffers.rdma_inter_node_group_scaling_factor,
-      rdma_inter_node_group_scaling_factor_elts * sizeof(float), mr_access_flag,
-      dmabuf_supported, local_rank, "dispatch.rdma_inter_node_group_scaling_factor");
+      rdma_inter_node_group_scaling_factor_elts * sizeof(float), mr_access_flag);
 
   // Set dispatch queue pair attributes.
   int num_of_dispatch_qps = (buffer_config.num_of_nodes - 1) * buffer_config.num_of_blocks_dispatch_api;
@@ -813,7 +792,7 @@ void RDMACoordinator::allocate_dispatch_buffers(bool dmabuf_supported){
   free(h_qps_gpu);
 }
 
-void RDMACoordinator::allocate_combine_buffers(bool dmabuf_supported){
+void RDMACoordinator::allocate_combine_buffers(){
   // Calculate rdma buffers sizes
   auto rdma_intra_node_red_token_elts = buffer_config.max_num_of_tokens_per_rank *
                                         (buffer_config.num_of_nodes - 1) * buffer_config.hidden_dim;
@@ -852,28 +831,22 @@ void RDMACoordinator::allocate_combine_buffers(bool dmabuf_supported){
 
   rdma_intra_node_red_token_mr = register_gpu_memory(
       ib_pd, combine_buffers.rdma_intra_node_red_token,
-      rdma_intra_node_red_token_elts * sizeof(uint16_t), mr_access_flag,
-      dmabuf_supported, local_rank, "combine.rdma_intra_node_red_token");
+      rdma_intra_node_red_token_elts * sizeof(uint16_t), mr_access_flag);
   combine_rdma_inter_node_group_token_mr = register_gpu_memory(
       ib_pd, combine_buffers.rdma_inter_node_group_token,
-      rdma_inter_node_group_token_elts * sizeof(uint16_t), mr_access_flag,
-      dmabuf_supported, local_rank, "combine.rdma_inter_node_group_token");
+      rdma_inter_node_group_token_elts * sizeof(uint16_t), mr_access_flag);
   attn_output_flags_mr = register_gpu_memory(
       ib_pd, combine_buffers.attn_output_flags,
-      rdma_inter_node_group_flags_elts * sizeof(uint64_t), mr_access_flag,
-      dmabuf_supported, local_rank, "combine.attn_output_flags");
+      rdma_inter_node_group_flags_elts * sizeof(uint64_t), mr_access_flag);
   combine_rdma_inter_node_group_flags_mr = register_gpu_memory(
       ib_pd, combine_buffers.rdma_inter_node_group_flags,
-      rdma_inter_node_group_flags_elts * sizeof(uint64_t), mr_access_flag,
-      dmabuf_supported, local_rank, "combine.rdma_inter_node_group_flags");
+      rdma_inter_node_group_flags_elts * sizeof(uint64_t), mr_access_flag);
   rdma_intra_node_red_prob_mr = register_gpu_memory(
       ib_pd, combine_buffers.rdma_intra_node_red_prob,
-      rdma_intra_node_red_prob_elts * sizeof(float), mr_access_flag,
-      dmabuf_supported, local_rank, "combine.rdma_intra_node_red_prob");
+      rdma_intra_node_red_prob_elts * sizeof(float), mr_access_flag);
   combine_rdma_inter_node_group_prob_mr = register_gpu_memory(
       ib_pd, combine_buffers.rdma_inter_node_group_prob,
-      rdma_inter_node_group_prob_elts * sizeof(float), mr_access_flag,
-      dmabuf_supported, local_rank, "combine.rdma_inter_node_group_prob");
+      rdma_inter_node_group_prob_elts * sizeof(float), mr_access_flag);
 
   // Set combine queue pair attributes.
   int num_of_combine_qps = (buffer_config.num_of_nodes - 1) * buffer_config.num_of_blocks_combine_api;

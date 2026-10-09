@@ -144,8 +144,9 @@ public:
     InterNodeCombineBuffers combine_buffers;
 
 private:
-    void allocate_dispatch_buffers(bool dmabuf_supported);
-    void allocate_combine_buffers(bool dmabuf_supported);
+    struct ibv_mr* register_gpu_memory(struct ibv_pd* pd, void* address, size_t length, int access);
+    void allocate_dispatch_buffers();
+    void allocate_combine_buffers();
     int gid_index = 0;
     int node_rank = -1;
     int local_rank = -1;
