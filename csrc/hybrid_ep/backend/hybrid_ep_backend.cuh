@@ -5,6 +5,8 @@
 
 #include "utils.cuh"
 #include <assert.h>
+#include <cstdio>
+#include <cstdlib>
 #include <cuda_bf16.h>
 #include <cuda/ptx>
 #ifdef HYBRID_EP_BUILD_MULTINODE_ENABLE
@@ -4294,6 +4296,34 @@ __global__ void device_sync_kernel(uint32_t* intra_node_remote_flags, uint32_t* 
   *parity = flag_parity ^ 1;
 }
 
+// Optional host preference for sharing an SM with large-shared-memory compute.
+// This does not allocate shared memory to the device sync kernel.
+template<int NUM_OF_RANKS_PER_NODE>
+static inline void configure_device_sync_shared_memory_carveout()
+{
+  static const int requested = []() {
+    const char* value = std::getenv("HYBRID_EP_DEVICE_SYNC_SMEM_CARVEOUT");
+    if (!value) return -2;  // Unset: retain the CUDA-selected preference.
+    char* end = nullptr;
+    const long parsed = std::strtol(value, &end, 10);
+    if (end == value || *end != '\0' || parsed < -1 || parsed > 100) {
+      std::fprintf(stderr, "[Error] HYBRID_EP_DEVICE_SYNC_SMEM_CARVEOUT must be -1 or an integer from 0 to 100.\n");
+      std::abort();
+    }
+    return static_cast<int>(parsed);
+  }();
+  if (requested == -2) return;
+
+  // Query the active device/context rather than caching a process-wide flag.
+  // A later device, or a recreated context, needs its own function preference.
+  cudaFuncAttributes attributes{};
+  CUDA_CHECK(cudaFuncGetAttributes(&attributes, device_sync_kernel<NUM_OF_RANKS_PER_NODE>));
+  if (attributes.preferredShmemCarveout != requested) {
+    CUDA_CHECK(cudaFuncSetAttribute(device_sync_kernel<NUM_OF_RANKS_PER_NODE>,
+                                   cudaFuncAttributePreferredSharedMemoryCarveout, requested));
+  }
+}
+
 // This kernel will update expected_rdma_flag_value by increasing the expected_rdma_flag_value by EXPECTED_RDMA_FLAG_VALUE_INCREMENT in local device memory.
 // When permute fusion is enabled, will also update expected_permute_flag_value or expected_unpermute_flag_value in local device memory
 // by increasing the expected_permute_flag_value or expected_unpermute_flag_value by EXPECTED_PERMUTE_UNPERMUTE_FLAG_VALUE_INCREMENT.
@@ -5949,6 +5979,7 @@ public:
     constexpr int SMEM_SIZE = sizeof(dispatch_kernel_smem_t);
 #endif
     CUDA_CHECK(cudaFuncSetAttribute(dispatch_kernel_ptr, cudaFuncAttributeMaxDynamicSharedMemorySize, SMEM_SIZE));
+    if constexpr(DEVICE_SIDE_SYNC) configure_device_sync_shared_memory_carveout<NUM_OF_RANKS_PER_NODE>();
 
     // Launch update_expected_value_kernel to update expected flag value.
     update_expected_value_kernel<NUM_OF_NODES, 1, 1>
@@ -6070,6 +6101,7 @@ public:
     constexpr int SMEM_SIZE = sizeof(combine_kernel_smem_t);
 #endif
     CUDA_CHECK(cudaFuncSetAttribute(combine_kernel_ptr, cudaFuncAttributeMaxDynamicSharedMemorySize, SMEM_SIZE));
+    if constexpr(DEVICE_SIDE_SYNC) configure_device_sync_shared_memory_carveout<NUM_OF_RANKS_PER_NODE>();
 
     // Launch update_expected_value_kernel to update expected flag value.
     update_expected_value_kernel<NUM_OF_NODES, 1, NUM_OF_DATA_PIPELINE_PER_BLOCK>

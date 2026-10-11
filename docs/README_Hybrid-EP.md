@@ -267,6 +267,22 @@ srun --export=ALL,NIXL_ETCD_ENDPOINTS=http://node01:2379 \
 
 > **Tip:** etcd only needs to be started once per allocation. You do not need to restart it between successive `srun` invocations — the run-ID mechanism (`SLURM_STEP_ID`) automatically prevents key collisions across runs.
 
+### Device-side sync shared-memory preference
+
+`HYBRID_EP_DEVICE_SYNC_SMEM_CARVEOUT` optionally sets the CUDA shared-memory
+carveout preference on `device_sync_kernel`, when device-side synchronization
+is enabled. Set it before the first dispatch/combine call. Unset preserves the
+CUDA-selected preference; `-1` explicitly requests CUDA's default; `0`–`100`
+requests a percentage of the maximum shared-memory partition.
+
+For example, `HYBRID_EP_DEVICE_SYNC_SMEM_CARVEOUT=100` can make the sync kernel's
+preference compatible with a concurrent compute kernel that needs a large
+shared-memory partition. This is a CUDA preference, not an allocation of shared
+memory to sync or a guarantee of co-residency. Measure the complete workload:
+the useful setting depends on the GPU and other concurrently running kernels.
+The preference is checked in the active device/context, including after a
+device/context change. Invalid values fail with a configuration error.
+
 ### NIXL Runtime Configuration
 
 When using the NIXL inter-node path (`USE_NIXL=1`), the following environment variables can be used to tune performance and reliability. All variables are optional and have sensible defaults.
