@@ -80,6 +80,18 @@ bash install.sh
 
 Then import `deep_ep` in your Python project.
 
+### Docker
+
+A minimal PyTorch CUDA devel image that builds and installs DeepEP is under [`docker/`](docker/):
+
+```bash
+git submodule update --init --recursive
+docker build --platform=linux/amd64 -f docker/Dockerfile -t deepep:local .
+docker run --rm -it --gpus all --ipc=host deepep:local
+```
+
+See [docker/README.md](docker/README.md) for base-image overrides and limits (RDMA, multi-node, and host NVIDIA requirements).
+
 ### Development and tests
 
 ```bash
