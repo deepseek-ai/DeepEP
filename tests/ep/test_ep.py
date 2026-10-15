@@ -409,7 +409,7 @@ def test_dispatch_combine(buffer: deep_ep.EPBuffer, args: argparse.Namespace):
                     launch(buffer, 'dispatch', with_previous_event, async_with_compute_stream, args.defer_epilogue, dispatch_args)
                 if not args.do_cpu_sync:
                     assert num_recv_tokens == handle_twice.psum_num_recv_tokens_per_scaleup_rank[-1].item()
-                recv_x_twice_bf16 = get_recv_x_bf16(recv_x_twice)
+                recv_x_twice_bf16 = get_recv_x_bf16(recv_x_twice)[:num_recv_tokens]
                 assert torch.equal(recv_x_bf16, recv_x_twice_bf16)
                 assert torch.equal(recv_topk_idx, recv_topk_idx_twice[:num_recv_tokens])
                 assert torch.equal(recv_topk_weights, recv_topk_weights_twice[:num_recv_tokens])
