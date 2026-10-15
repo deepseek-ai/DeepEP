@@ -1,0 +1,327 @@
+{
+  "scope": "Experimental compact BF16 dispatch-to-ready benchmark; no production patch or full-training claim.",
+  "estimator": "Mean of block medians of 5 maximum-rank samples; 36 blocks per arm/case over 3 fresh processes.",
+  "tested_source": "93eb6eb238127e96c6d7a4a625a6dad158348509",
+  "rows": [
+    {
+      "case": "perf-t2048-h4096-cap1-balanced-gemm0",
+      "ms": {
+        "late_full": 0.6717908333333333,
+        "late_prefix": 0.5342178888888889,
+        "early_full": 0.67789725,
+        "early_prefix": 0.5436938333333333,
+        "upstream_syncfree": 0.6216783055555556,
+        "upstream_defer": 0.3517883611111111
+      },
+      "by_process": {
+        "performance-repeat1": {
+          "late_full": 0.6853874166666667,
+          "late_prefix": 0.5178029166666667,
+          "early_full": 0.6603750833333334,
+          "early_prefix": 0.5290919166666667,
+          "upstream_syncfree": 0.6049456666666666,
+          "upstream_defer": 0.40011525
+        },
+        "performance-repeat2": {
+          "late_full": 0.65868025,
+          "late_prefix": 0.561793,
+          "early_full": 0.6742613333333334,
+          "early_prefix": 0.5231545,
+          "upstream_syncfree": 0.6472776666666666,
+          "upstream_defer": 0.3221510833333333
+        },
+        "performance-repeat3": {
+          "late_full": 0.6713048333333334,
+          "late_prefix": 0.52305775,
+          "early_full": 0.6990553333333334,
+          "early_prefix": 0.5788350833333333,
+          "upstream_syncfree": 0.6128115833333333,
+          "upstream_defer": 0.33309875
+        }
+      },
+      "early_prefix_vs_late_full_reduction_pct": 19.067988672069312,
+      "early_prefix_vs_syncfree_reduction_pct": 12.544184271080905,
+      "early_prefix_vs_defer_reduction_pct": -54.551398919536595
+    },
+    {
+      "case": "perf-t2048-h4096-cap1-balanced-gemm8",
+      "ms": {
+        "late_full": 0.8276898611111111,
+        "late_prefix": 0.6997194444444444,
+        "early_full": 0.8317934444444445,
+        "early_prefix": 0.7065478333333334,
+        "upstream_syncfree": 0.7995278333333333,
+        "upstream_defer": 0.457396
+      },
+      "by_process": {
+        "performance-repeat1": {
+          "late_full": 0.8221973333333333,
+          "late_prefix": 0.68821825,
+          "early_full": 0.8205545833333333,
+          "early_prefix": 0.6941615833333333,
+          "upstream_syncfree": 0.7955519166666667,
+          "upstream_defer": 0.4478235
+        },
+        "performance-repeat2": {
+          "late_full": 0.8202189166666667,
+          "late_prefix": 0.6889068333333334,
+          "early_full": 0.8325845833333333,
+          "early_prefix": 0.6956693333333334,
+          "upstream_syncfree": 0.789515,
+          "upstream_defer": 0.4579115833333333
+        },
+        "performance-repeat3": {
+          "late_full": 0.8406533333333334,
+          "late_prefix": 0.72203325,
+          "early_full": 0.8422411666666667,
+          "early_prefix": 0.7298125833333333,
+          "upstream_syncfree": 0.8135165833333333,
+          "upstream_defer": 0.46645291666666666
+        }
+      },
+      "early_prefix_vs_late_full_reduction_pct": 14.636161860815077,
+      "early_prefix_vs_syncfree_reduction_pct": 11.629363747395072,
+      "early_prefix_vs_defer_reduction_pct": -54.47179978253709
+    },
+    {
+      "case": "perf-t2048-h4096-cap1-skewed-gemm0",
+      "ms": {
+        "late_full": 0.9181307777777777,
+        "late_prefix": 0.8966636944444445,
+        "early_full": 0.9219780555555556,
+        "early_prefix": 0.8752858055555556,
+        "upstream_syncfree": 0.7311251666666667,
+        "upstream_defer": 0.71023475
+      },
+      "by_process": {
+        "performance-repeat1": {
+          "late_full": 0.9131225000000001,
+          "late_prefix": 0.9093781666666667,
+          "early_full": 0.9193703333333333,
+          "early_prefix": 0.8626248333333333,
+          "upstream_syncfree": 0.7246270833333334,
+          "upstream_defer": 0.7105334166666667
+        },
+        "performance-repeat2": {
+          "late_full": 0.9165714166666666,
+          "late_prefix": 0.9048889166666667,
+          "early_full": 0.9167639166666667,
+          "early_prefix": 0.8952248333333334,
+          "upstream_syncfree": 0.7450085833333333,
+          "upstream_defer": 0.7114485833333333
+        },
+        "performance-repeat3": {
+          "late_full": 0.9246984166666666,
+          "late_prefix": 0.875724,
+          "early_full": 0.9297999166666666,
+          "early_prefix": 0.86800775,
+          "upstream_syncfree": 0.7237398333333334,
+          "upstream_defer": 0.70872225
+        }
+      },
+      "early_prefix_vs_late_full_reduction_pct": 4.666543509838883,
+      "early_prefix_vs_syncfree_reduction_pct": -19.717641446558808,
+      "early_prefix_vs_defer_reduction_pct": -23.238943962620183
+    },
+    {
+      "case": "perf-t2048-h4096-cap1-skewed-gemm8",
+      "ms": {
+        "late_full": 0.963854,
+        "late_prefix": 0.88969675,
+        "early_full": 0.9563711111111111,
+        "early_prefix": 0.90673475,
+        "upstream_syncfree": 0.8949106388888889,
+        "upstream_defer": 0.7164446388888889
+      },
+      "by_process": {
+        "performance-repeat1": {
+          "late_full": 0.99577325,
+          "late_prefix": 0.8843593333333333,
+          "early_full": 0.938522,
+          "early_prefix": 0.9005720833333333,
+          "upstream_syncfree": 0.88979175,
+          "upstream_defer": 0.7155835833333333
+        },
+        "performance-repeat2": {
+          "late_full": 0.939477,
+          "late_prefix": 0.8942176666666667,
+          "early_full": 0.97823975,
+          "early_prefix": 0.90440275,
+          "upstream_syncfree": 0.8953433333333334,
+          "upstream_defer": 0.7176304166666667
+        },
+        "performance-repeat3": {
+          "late_full": 0.95631175,
+          "late_prefix": 0.89051325,
+          "early_full": 0.9523515833333334,
+          "early_prefix": 0.9152294166666667,
+          "upstream_syncfree": 0.8995968333333333,
+          "upstream_defer": 0.7161199166666666
+        }
+      },
+      "early_prefix_vs_late_full_reduction_pct": 5.926130928543117,
+      "early_prefix_vs_syncfree_reduction_pct": -1.3212616542129574,
+      "early_prefix_vs_defer_reduction_pct": -26.560337084275766
+    },
+    {
+      "case": "perf-t2048-h4096-cap4-balanced-gemm0",
+      "ms": {
+        "late_full": 1.1326811388888889,
+        "late_prefix": 0.5336350277777778,
+        "early_full": 1.1432907222222222,
+        "early_prefix": 0.5300136666666666,
+        "upstream_syncfree": 0.975007,
+        "upstream_defer": 0.3418962222222222
+      },
+      "by_process": {
+        "performance-repeat1": {
+          "late_full": 1.143382,
+          "late_prefix": 0.5554655000000001,
+          "early_full": 1.157132,
+          "early_prefix": 0.5264381666666667,
+          "upstream_syncfree": 0.9593661666666666,
+          "upstream_defer": 0.3462735
+        },
+        "performance-repeat2": {
+          "late_full": 1.1307715833333334,
+          "late_prefix": 0.518357,
+          "early_full": 1.1275263333333334,
+          "early_prefix": 0.5249811666666666,
+          "upstream_syncfree": 0.9759355833333333,
+          "upstream_defer": 0.35246641666666667
+        },
+        "performance-repeat3": {
+          "late_full": 1.1238898333333334,
+          "late_prefix": 0.5270825833333334,
+          "early_full": 1.1452138333333333,
+          "early_prefix": 0.5386216666666667,
+          "upstream_syncfree": 0.9897192499999999,
+          "upstream_defer": 0.32694875
+        }
+      },
+      "early_prefix_vs_late_full_reduction_pct": 53.2071605618341,
+      "early_prefix_vs_syncfree_reduction_pct": 45.640014208445,
+      "early_prefix_vs_defer_reduction_pct": -55.02179673754153
+    },
+    {
+      "case": "perf-t2048-h4096-cap4-balanced-gemm8",
+      "ms": {
+        "late_full": 1.315315861111111,
+        "late_prefix": 0.7096908611111111,
+        "early_full": 1.3136875277777778,
+        "early_prefix": 0.7121690833333333,
+        "upstream_syncfree": 1.133601,
+        "upstream_defer": 0.4569514722222222
+      },
+      "by_process": {
+        "performance-repeat1": {
+          "late_full": 1.3108045,
+          "late_prefix": 0.7042265833333333,
+          "early_full": 1.3406756666666668,
+          "early_prefix": 0.7332126666666667,
+          "upstream_syncfree": 1.1416513333333334,
+          "upstream_defer": 0.46312383333333335
+        },
+        "performance-repeat2": {
+          "late_full": 1.3207771666666666,
+          "late_prefix": 0.71069075,
+          "early_full": 1.2996984166666667,
+          "early_prefix": 0.708577,
+          "upstream_syncfree": 1.1265741666666667,
+          "upstream_defer": 0.44712
+        },
+        "performance-repeat3": {
+          "late_full": 1.3143659166666666,
+          "late_prefix": 0.71415525,
+          "early_full": 1.3006885,
+          "early_prefix": 0.6947175833333333,
+          "upstream_syncfree": 1.1325775,
+          "upstream_defer": 0.4606105833333333
+        }
+      },
+      "early_prefix_vs_late_full_reduction_pct": 45.85566065236,
+      "early_prefix_vs_syncfree_reduction_pct": 37.176388929320524,
+      "early_prefix_vs_defer_reduction_pct": -55.85223522094158
+    },
+    {
+      "case": "perf-t2048-h4096-cap4-skewed-gemm0",
+      "ms": {
+        "late_full": 1.398506388888889,
+        "late_prefix": 0.8753066388888889,
+        "early_full": 1.4081712777777777,
+        "early_prefix": 0.8726345,
+        "upstream_syncfree": 1.1940875277777778,
+        "upstream_defer": 0.7126258055555555
+      },
+      "by_process": {
+        "performance-repeat1": {
+          "late_full": 1.3912181666666668,
+          "late_prefix": 0.8625565,
+          "early_full": 1.3886775833333334,
+          "early_prefix": 0.8740731666666667,
+          "upstream_syncfree": 1.1938675,
+          "upstream_defer": 0.7200143333333333
+        },
+        "performance-repeat2": {
+          "late_full": 1.3959968333333332,
+          "late_prefix": 0.877967,
+          "early_full": 1.4159285,
+          "early_prefix": 0.8720506666666666,
+          "upstream_syncfree": 1.1926980833333334,
+          "upstream_defer": 0.7099546666666666
+        },
+        "performance-repeat3": {
+          "late_full": 1.4083041666666667,
+          "late_prefix": 0.8853964166666667,
+          "early_full": 1.41990775,
+          "early_prefix": 0.8717796666666666,
+          "upstream_syncfree": 1.195697,
+          "upstream_defer": 0.7079084166666667
+        }
+      },
+      "early_prefix_vs_late_full_reduction_pct": 37.60239445932695,
+      "early_prefix_vs_syncfree_reduction_pct": 26.92039070000243,
+      "early_prefix_vs_defer_reduction_pct": -22.453396045587116
+    },
+    {
+      "case": "perf-t2048-h4096-cap4-skewed-gemm8",
+      "ms": {
+        "late_full": 1.4175554166666666,
+        "late_prefix": 0.8842406944444444,
+        "early_full": 1.4137120277777777,
+        "early_prefix": 0.9004626666666666,
+        "upstream_syncfree": 1.355869611111111,
+        "upstream_defer": 0.7208673888888889
+      },
+      "by_process": {
+        "performance-repeat1": {
+          "late_full": 1.411197,
+          "late_prefix": 0.8798905833333334,
+          "early_full": 1.4068811666666665,
+          "early_prefix": 0.89866625,
+          "upstream_syncfree": 1.3509841666666667,
+          "upstream_defer": 0.7315095833333334
+        },
+        "performance-repeat2": {
+          "late_full": 1.4290448333333334,
+          "late_prefix": 0.8851865833333333,
+          "early_full": 1.4148523333333334,
+          "early_prefix": 0.90403,
+          "upstream_syncfree": 1.3619539166666668,
+          "upstream_defer": 0.7203086666666667
+        },
+        "performance-repeat3": {
+          "late_full": 1.4124244166666666,
+          "late_prefix": 0.8876449166666667,
+          "early_full": 1.4194025833333335,
+          "early_prefix": 0.89869175,
+          "upstream_syncfree": 1.35467075,
+          "upstream_defer": 0.7107839166666666
+        }
+      },
+      "early_prefix_vs_late_full_reduction_pct": 36.47778026314668,
+      "early_prefix_vs_syncfree_reduction_pct": 33.5878126268533,
+      "early_prefix_vs_defer_reduction_pct": -24.91377478659389
+    }
+  ]
+}
