@@ -54,7 +54,7 @@ DeepEP (DeepEveryParallel) is a high-performance communication library for machi
 - NVLink for intranode communication
 - RDMA network for internode communication
 
-Installation builds the host C++ extension against the CUDA and NCCL libraries. GPU kernels are compiled by DeepJIT for the current device at runtime, so installation does not require a visible GPU or `TORCH_CUDA_ARCH_LIST`. Keep the CUDA toolkit and host compiler available at runtime. Automatic bandwidth detection uses `nvidia-smi` and `ibstat`; `BucketBuffer` currently requires both NVLink and RDMA bandwidth to be detectable, even for a group using only one transport.
+Installation builds the host C++ extension against the CUDA and NCCL libraries. GPU kernels are compiled by DeepJIT for the current device at runtime, so installation does not require a visible GPU or `TORCH_CUDA_ARCH_LIST`. Keep the CUDA toolkit and host compiler available at runtime. Automatic bandwidth detection uses `nvidia-smi` and `ibstat`; `BucketBuffer` requires both NVLink and RDMA bandwidth to be detectable only when a group spans both transports.
 
 ### Install NCCL dependency
 
@@ -91,11 +91,15 @@ python tests/ep/test_ep.py
 python tests/bucket/test_all_gather.py
 python tests/bucket/test_reduce_scatter.py
 python tests/bucket/test_all_reduce.py
+python tests/bucket/test_mixed.py
+python tests/bucket/test_session.py
 python tests/buffer/test_allocation.py
+python tests/comm/test_barrier.py
 python tests/ep/test_prefetch_weights.py
 python tests/ep/test_reduce_grads.py
 python tests/engram/test_engram.py
 python tests/pp/test_pp.py
+python tests/utils/test_gate.py
 ```
 
 The test scripts require NumPy and spawn local GPU workers. For multi-node tests, launch the same script on each node with a shared `MASTER_ADDR` and `MASTER_PORT`, setting `WORLD_SIZE` to the number of nodes and `RANK` to the node index. These are the conventions of `init_dist` in [deep_ep/utils/envs.py](deep_ep/utils/envs.py); adapt it to your cluster if needed. The tests default to `NCCL_IB_SL=1` and `EP_OVERRIDE_RDMA_SL=1` unless already set. Weight-prefetch and gradient-reduction tests use a single NVLink domain; PP tests require an RDMA-only group.

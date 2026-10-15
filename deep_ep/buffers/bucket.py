@@ -213,8 +213,11 @@ class BucketBuffer(BufferBase):
         self.nccl_comm_handles = [comm.get_nccl_comm_handle(item) for item in self.groups]
 
         # Bandwidths for planning the hybrid pipelines
-        nvl_gbs, rdma_gbs = get_nvlink_gbs(), get_rdma_gbs()
-        assert nvl_gbs > 0 and rdma_gbs > 0, 'Failed to detect the NVLink or RDMA bandwidth'
+        # NOTES: NVLink-only and RDMA-only groups do not use them, so skip the detection
+        is_hybrid = any(min(comm.get_physical_domain_size(item)) > 1 for item in self.groups)
+        nvl_gbs, rdma_gbs = (get_nvlink_gbs(), get_rdma_gbs()) if is_hybrid else (0, 0)
+        assert not is_hybrid or (nvl_gbs > 0 and rdma_gbs > 0), \
+            'Failed to detect the NVLink or RDMA bandwidth, which is required by hybrid groups'
 
         # Create CPP runtime
         self.runtime = _C.BucketBuffer(
