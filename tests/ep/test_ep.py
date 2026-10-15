@@ -420,7 +420,9 @@ def test_dispatch_combine(buffer: deep_ep.EPBuffer, args: argparse.Namespace):
                 expanded_recv_x_twice_bf16 = get_recv_x_bf16(expanded_recv_x_twice)
                 assert torch.equal(expanded_recv_x_bf16[valid_expanded_indices], expanded_recv_x_twice_bf16[valid_expanded_indices])
                 if expert_alignment == 1:
-                    assert torch.equal(expanded_recv_topk_weights, expanded_recv_topk_weights_twice)  # Only check for `topk_weight` if `expert_alignment == 1`, since its padding isn't initialized
+                    # No expert padding, but unused receive capacity is still undefined.
+                    assert torch.equal(expanded_recv_topk_weights[:num_expanded_tokens],
+                                       expanded_recv_topk_weights_twice[:num_expanded_tokens])
 
             # Test cumulative stats counter
             cumulative_local_expert_recv_stats = torch.zeros((num_local_experts, ), dtype=torch.int, device='cuda')
