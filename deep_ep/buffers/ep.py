@@ -286,6 +286,9 @@ class EPBuffer(BufferBase):
             explicitly_destroy: If this flag is set to True, you need to explicitly call `destroy()` to release resources;
                 otherwise, the resources will be released by the destructor.
         """
+        # Validate the full directed P2P domain before communicator or buffer allocation.
+        check_nvlink_connections(group)
+
         # Some useful utilities
         self.group = group
         self.rank_idx = group.rank()
@@ -320,9 +323,6 @@ class EPBuffer(BufferBase):
 
         # Store default values
         self.num_max_tokens_per_rank = num_max_tokens_per_rank
-
-        # Check PCIe GPUs
-        check_nvlink_connections(group)
 
         # Automatic maximum QP count allowed
         if num_allocated_qps == 0:
