@@ -69,7 +69,7 @@ public:
         BufferBase(explicitly_destroy),
         num_storage_bytes(num_storage_bytes),
         nvl_bandwidth(nvl_gbs * 1e9f), rdma_bandwidth(rdma_gbs * 1e9f) {
-        EP_HOST_ASSERT(nvl_gbs > 0 and rdma_gbs > 0);
+        EP_HOST_ASSERT(nvl_gbs >= 0 and rdma_gbs >= 0);
         const auto num_groups = static_cast<int>(nccl_comms.size());
         EP_HOST_ASSERT(num_groups > 0 and rank_indices.size() == num_groups and num_ranks.size() == num_groups);
         EP_HOST_ASSERT(num_groups <= kNumMaxContexts and
@@ -83,6 +83,8 @@ public:
         contexts.reserve(num_groups);
         for (int i = 0; i < num_groups; ++ i) {
             const auto [num_rdma_ranks, num_nvl_ranks] = comm::get_physical_domain_size(nccl_comms[i]);
+            EP_HOST_ASSERT((num_rdma_ranks == 1 or num_nvl_ranks == 1 or (nvl_gbs > 0 and rdma_gbs > 0)) and
+                           "Hybrid groups require NVLink and RDMA bandwidths");
             const auto num_allocated_qps = num_rdma_ranks == 1 ? 1 : kNumMaxQPs / num_rdma_ranks;
             contexts.emplace_back(std::make_shared<comm::Context>(
                 nccl_comms[i], symmetric::shared_comm_t{}, num_ranks[i], rank_indices[i],
