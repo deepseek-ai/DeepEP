@@ -397,7 +397,7 @@ def test_dispatch_combine(buffer: deep_ep.EPBuffer, args: argparse.Namespace):
                     launch(buffer, 'dispatch', with_previous_event, async_with_compute_stream, args.defer_epilogue, dispatch_args)
                 if not args.do_cpu_sync:
                     assert num_recv_tokens == handle_twice.psum_num_recv_tokens_per_scaleup_rank[-1].item()
-                recv_x_twice_bf16 = get_recv_x_bf16(recv_x_twice)
+                recv_x_twice_bf16 = get_recv_x_bf16(recv_x_twice)[:num_recv_tokens]
                 assert torch.equal(recv_x_bf16, recv_x_twice_bf16)
                 assert torch.equal(recv_topk_idx, recv_topk_idx_twice[:num_recv_tokens])
                 assert torch.equal(recv_topk_weights, recv_topk_weights_twice[:num_recv_tokens])
@@ -408,7 +408,9 @@ def test_dispatch_combine(buffer: deep_ep.EPBuffer, args: argparse.Namespace):
                 expanded_recv_x_twice_bf16 = get_recv_x_bf16(expanded_recv_x_twice)
                 assert torch.equal(expanded_recv_x_bf16[valid_expanded_indices], expanded_recv_x_twice_bf16[valid_expanded_indices])
                 if expert_alignment == 1:
-                    assert torch.equal(expanded_recv_topk_weights, expanded_recv_topk_weights_twice)  # Only check for `topk_weight` if `expert_alignment == 1`, since its padding isn't initialized
+                    # No expert padding, but unused receive capacity is still undefined.
+                    assert torch.equal(expanded_recv_topk_weights[:num_expanded_tokens],
+                                       expanded_recv_topk_weights_twice[:num_expanded_tokens])
 
             # Test cumulative stats counter
             cumulative_local_expert_recv_stats = torch.zeros((num_local_experts, ), dtype=torch.int, device='cuda')
