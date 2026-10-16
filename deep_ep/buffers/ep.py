@@ -595,7 +595,7 @@ class EPBuffer(BufferBase):
                 Stored by reference in the handle; must not be modified until all uses of the handle complete.
                 Must be `None` if `handle` is provided.
             topk_weights: `[num_tokens, num_topk]` with `torch.float`, the expert weights of each token to dispatch.
-                Must be `None` if `handle` is provided.
+                Can be provided with `handle` (e.g. for backward pass with cached expand).
             cumulative_local_expert_recv_stats: `[num_local_experts]` with `torch.int`, a cumulative expert count
                 tensor for statistics, useful for online EP load balance monitoring.
             num_experts: the number of all experts. Inferred from `handle` if provided.
