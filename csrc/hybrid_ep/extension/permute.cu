@@ -284,6 +284,7 @@ __global__ __launch_bounds__(kKernelMaxThreads, 1) void unpermute_kernel(
     const int* __restrict__ dense_chunk_layout,
     const int* __restrict__ dense_to_expert_map,
     int num_dense_chunks,
+    int num_dispatched_tokens_value,
     int num_local_experts,
     int hidden_size,
     int local_rank,
@@ -298,7 +299,8 @@ __global__ __launch_bounds__(kKernelMaxThreads, 1) void unpermute_kernel(
   const int tokens_per_block = blockDim.x / lanes_per_token;
   const int lane = threadIdx.x % lanes_per_token;
   const int token_slot = threadIdx.x / lanes_per_token;
-  const int num_dense_tokens = num_dense_chunks > 0 ? dense_chunk_layout[num_dense_chunks - 1] : 0;
+  const int num_dense_tokens = num_dispatched_tokens_value >= 0 ? num_dispatched_tokens_value
+      : (num_dense_chunks > 0 ? dense_chunk_layout[num_dense_chunks - 1] : 0);
   const int hidden_size_fp4 = hidden_size / num_eles_per_float4;
 
   // Read expert outputs as float4, accumulate in fp32 bf16x2 pairs, then write
@@ -437,6 +439,7 @@ void unpermute_launcher(UnpermuteArgs args) {
           args.dense_chunk_layout.data_ptr<int>(),
           args.dense_to_expert_map.data_ptr<int>(),
           static_cast<int>(args.dense_chunk_layout.numel()),
+          args.num_dispatched_tokens_value,
           args.num_of_local_experts,
           args.hidden_size,
           args.local_rank,

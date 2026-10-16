@@ -403,6 +403,8 @@ HybridEPBuffer::combine_with_unpermute(
   args.fuse_unpermute_combine = fuse_unpermute_combine;
   args.non_blocking = non_blocking;
   args.enable_unpermute = true;
+  const auto& count = handle.num_dispatched_tokens_tensor;
+  args.num_dispatched_tokens_value = count.is_cuda() ? -1 : *count.data_ptr<int>();
   args.stream = at::cuda::getCurrentCUDAStream();
   args.dense_chunk_layout = handle.dense_chunk_layout;
   args.dense_to_expert_map = handle.dense_to_expert_map;
