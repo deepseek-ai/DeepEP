@@ -122,6 +122,7 @@ Combine tokens from experts back to original positions. Use corresponding method
 | `handle` | `tuple` | Metadata from dispatch (required) |
 | `pad_multiple` | `int` | Padding alignment (`combine_with_unpermute` only) |
 | `fuse_unpermute_combine` | `bool` | Fuse unpermute into the combine kernel (default: False) |
+| `non_blocking` | `bool` | Must repeat the `non_blocking` of the dispatch that produced `handle` (`combine_with_unpermute` only, default: False) |
 
 **Outputs:**
 | Return | Type | Description |
