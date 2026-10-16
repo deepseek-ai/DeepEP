@@ -31,8 +31,6 @@ TOPK = int(os.environ.get("TOPK", 8))
 PAD_MULTIPLE = int(os.environ.get("PAD_MULTIPLE", 32))
 SEED = int(os.environ.get("SEED", 1025))
 
-USE_MNNVL = os.environ.get("USE_MNNVL", "0").strip().lower() in {"1", "true", "t", "yes", "y", "on"}
-
 NUM_OF_RANKS_PER_NODE = None
 NUM_OF_NODES = None
 NUM_OF_EXPERTS = None
@@ -527,13 +525,21 @@ def test_main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
             )
 
             global NUM_OF_RANKS_PER_NODE, NUM_OF_NODES, NUM_OF_EXPERTS
-            if USE_MNNVL:
-                NUM_OF_RANKS_PER_NODE = buffer.num_of_hybrid_ep_ranks_per_nvlink_domain
-                NUM_OF_NODES = buffer.num_of_nodes
-            else:
-                NUM_OF_RANKS_PER_NODE = args.num_processes
-                NUM_OF_NODES = group.size() // NUM_OF_RANKS_PER_NODE
+            # The NVLink domain the buffer detects may span several nodes
+            # (MNNVL), so it is not derivable from the launcher's per-node
+            # process count. The dispatched prob vector is indexed by
+            # rank-within-domain, and the reference must use the same width
+            # or it slices the wrong experts.
+            NUM_OF_RANKS_PER_NODE = buffer.num_of_hybrid_ep_ranks_per_nvlink_domain
+            NUM_OF_NODES = buffer.num_of_nodes
             NUM_OF_EXPERTS = NUM_LOCAL_EXPERTS * NUM_OF_RANKS_PER_NODE * NUM_OF_NODES
+            if group.rank() == 0:
+                # Surface the topology: if it is ever wrong, the symptom is an
+                # expert-slicing mismatch, which is a confusing way to find out.
+                print(f"[topology] ranks_per_nvlink_domain={NUM_OF_RANKS_PER_NODE} "
+                      f"num_of_nodes={NUM_OF_NODES} num_of_experts={NUM_OF_EXPERTS} "
+                      f"(from the buffer; override with "
+                      f"NUM_OF_HYBRID_EP_RANKS_PER_NVLINK_DOMAIN)", flush=True)
 
             ref = TorchRef(
                 ep_group=group,

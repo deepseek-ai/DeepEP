@@ -70,6 +70,10 @@ public:
         torch::Tensor tokens_per_expert; 
 
         int64_t num_permuted_tokens = -1;
+        // Caller-supplied dispatched token count. When >= 0 it is used verbatim to
+        // size the outputs instead of reading num_dispatched_tokens_tensor back on
+        // the host, which is what makes the no-permute path CUDA-graph capturable.
+        int64_t num_dispatched_tokens = -1;
         // Misc
         int pad_multiple;  // Used in the padding case of permute
         bool enable_permute = false;
