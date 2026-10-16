@@ -144,6 +144,7 @@ public:
     InterNodeCombineBuffers combine_buffers;
 
 private:
+    struct ibv_mr* register_gpu_memory(struct ibv_pd* pd, void* address, size_t length, int access);
     void allocate_dispatch_buffers();
     void allocate_combine_buffers();
     int gid_index = 0;
@@ -170,7 +171,7 @@ private:
     struct ibv_mr *dispatch_rdma_inter_node_group_scaling_factor_mr = nullptr;
     struct remote_info *dispatch_remote_info_vec = nullptr;
     struct dispatch_memory_region_info_t *dispatch_mr_info_h = nullptr;
-    struct gverbs_context dispatch_gverbs_ctx;
+    struct gverbs_context dispatch_gverbs_ctx {};
     struct dispatch_memory_region_info_t *dispatch_mr_info_d = nullptr;
 
     struct ibv_mr *rdma_intra_node_red_token_mr = nullptr;
@@ -181,7 +182,7 @@ private:
     struct ibv_mr *combine_rdma_inter_node_group_flags_mr = nullptr;
     struct remote_info *combine_remote_info_vec = nullptr;
     struct combine_memory_region_info_t *combine_mr_info_h = nullptr;
-    struct gverbs_context combine_gverbs_ctx;
+    struct gverbs_context combine_gverbs_ctx {};
     struct combine_memory_region_info_t *combine_mr_info_d = nullptr;
 
     void exchange_remote_rdma_info(remote_info* dst, remote_info *src, int num_of_qps);
