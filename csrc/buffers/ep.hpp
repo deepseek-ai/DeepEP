@@ -307,7 +307,10 @@ public:
              const bool& do_cpu_sync,
              const bool& do_expand, const bool& do_zero_padding,
              const bool& use_tma_aligned_col_major_sf,
-             const bool& defer_epilogue) const {
+             const bool& defer_epilogue, const bool& materialize_recv_x) const {
+        EP_HOST_ASSERT(materialize_recv_x or (context->num_scaleout_ranks == 1 and context->num_rdma_ranks == 1 and not do_expand and
+                       not sf.has_value() and x.scalar_type() == torch::kBFloat16 and
+                       do_cpu_sync and not cached_num_recv_tokens.has_value() and not defer_epilogue));
         // Check SM count
         EP_HOST_ASSERT(num_sms > 0 and num_sms <= jit->device.get_num_sms());
         EP_HOST_ASSERT((num_sms > 1 or context->num_scaleout_ranks == 1 or context->num_scaleup_ranks == 1) and
@@ -671,7 +674,11 @@ public:
             // Allocate received tensors
             // `recv_src_metadata` includes source token indices and buffer slot indices
             const auto num_allocated_tokens = do_expand ? num_expanded_tokens : num_recv_tokens;
-            auto recv_x = torch::empty({num_allocated_tokens, hidden}, x.options());
+            std::optional<torch::Tensor> recv_x, recv_row_indices;
+            if (materialize_recv_x)
+                recv_x = torch::empty({num_allocated_tokens, hidden}, x.options());
+            else
+                recv_row_indices = torch::empty({num_recv_tokens}, x.options().dtype(torch::kInt64));
             auto recv_sf = std::optional<torch::Tensor>();
             auto recv_topk_idx = std::optional<torch::Tensor>();
             auto recv_topk_weights = std::optional<torch::Tensor>();
@@ -724,9 +731,10 @@ public:
             launch_dispatch_copy_epilogue(context->buffer, context->workspace,
                                           psum_num_recv_tokens_per_scaleup_rank.data_ptr<int>(),
                                           psum_num_recv_tokens_per_expert.data_ptr<int>(),
-                                          recv_x.data_ptr(), recv_sf_ptr,
+                                          recv_x.has_value() ? recv_x->data_ptr() : nullptr, recv_sf_ptr,
                                           recv_topk_idx_ptr, recv_topk_weights_ptr,
                                           recv_src_metadata.data_ptr<int>(),
+                                          recv_row_indices.has_value() ? recv_row_indices->data_ptr<int64_t>() : nullptr,
                                           channel_linked_list_ptr,
                                           num_unaligned_recv_tokens_per_expert_ptr,
                                           num_recv_tokens, num_max_tokens_per_rank,
@@ -739,7 +747,7 @@ public:
                                           jit->device.get_num_smem_bytes(),
                                           num_channels,
                                           do_expand, cached_mode,
-                                          do_zero_padding,
+                                          do_zero_padding, materialize_recv_x,
                                           stream);
 
             auto result = pybind11::make_tuple(
@@ -753,12 +761,13 @@ public:
                 recv_src_metadata,
                 dst_buffer_slot_idx,
                 token_metadata_at_forward,
-                channel_linked_list);
+                channel_linked_list, recv_row_indices);
 
             // For non-deferring tensor recording
             if (tensors_to_record_opt.has_value()) {
                 auto& tensors = tensors_to_record_opt->get();
                 tensors.push_back(recv_x);
+                tensors.push_back(recv_row_indices);
                 tensors.push_back(recv_sf);
                 tensors.push_back(recv_topk_idx);
                 tensors.push_back(recv_topk_weights);
@@ -784,6 +793,18 @@ public:
         const auto event = stream_control_epilogue(
             tensors_to_record, compute_stream, allocate_on_comm_stream, async_with_compute_stream);
         return pybind11::make_tuple(result, event, pybind11::none());
+    }
+
+    torch::Tensor get_dispatch_recv_slab(const torch::Tensor& x, const int& num_topk,
+                                         const int& num_max_tokens_per_rank) const {
+        EP_HOST_ASSERT(not destroyed and context->num_scaleout_ranks == 1 and context->num_rdma_ranks == 1);
+        EP_HOST_ASSERT(x.is_cuda() and x.scalar_type() == torch::kBFloat16 and x.dim() == 2);
+        const auto token_layout = layout::TokenLayout(x.size(1) * x.element_size(), 0, num_topk, true);
+        const auto slots = static_cast<int64_t>(context->num_scaleup_ranks) * num_max_tokens_per_rank;
+        const auto stride_bytes = token_layout.get_num_bytes<false, int64_t>();
+        EP_HOST_ASSERT(slots * stride_bytes <= context->num_gpu_buffer_bytes);
+        return torch::from_blob(context->buffer, {slots, x.size(1)},
+                                {stride_bytes / static_cast<int64_t>(x.element_size()), 1}, x.options());
     }
 
     pybind11::tuple
@@ -1087,6 +1108,7 @@ static void register_apis(pybind11::module_& m) {
         .def_readonly("context", &EPBuffer::context)
         .def_readonly("lb_storage", &EPBuffer::lb_storage)
         .def("dispatch", &EPBuffer::dispatch)
+        .def("get_dispatch_recv_slab", &EPBuffer::get_dispatch_recv_slab)
         .def("combine", &EPBuffer::combine)
         .def("lb_prefetch_weights", &EPBuffer::lb_prefetch_weights)
         .def("lb_reduce_grads", &EPBuffer::lb_reduce_grads);
