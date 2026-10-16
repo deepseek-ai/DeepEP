@@ -280,6 +280,12 @@ The expanded `recv_topk_weights` is one-dimensional, with one value per expert r
 
 Training saves the forward `handle` for `combine_backward` and `dispatch_backward`. The backward helpers above return tensors and an event; wait on that event before using the tensors. Cached dispatch replays the saved expanded layout without another receive-count CPU synchronization. Keep the original `topk_idx` unchanged until all uses of the handle finish.
 
+### Borrowed receive storage
+
+For a fresh compact BF16 dispatch within one physical NVLink domain, with exact CPU receive counts and `defer_epilogue=False`, `borrow_recv=True` returns a `DispatchRecvView` in place of `recv_x`: logical receive row `r` is stored at `view.slab[view.row_indices[r]]`, so an indexed consumer can read the communication buffer directly and skip the activation copy of the dispatch epilogue. For asynchronous dispatch, wait the returned event before touching the view; consumers on other streams call `view.wait()` first.
+
+The view holds an exclusive lease on the buffer. After enqueueing all consumers, call `view.release()` on the consuming stream, or pass every consuming stream to `view.release(*streams)`: later communication is ordered after those consumers, and dispatch, combine, load-balancing calls and `destroy()` reject an active view. Keep host calls on the same buffer serialized; the view adds no thread-safety guarantee of its own. The storage is forward-only and cannot be retained for backward; use an ordinary cached replay with the returned handle instead. Expanded layouts, FP8, cached dispatch, deferred epilogues and multi-domain setups are not supported, and whether the mode pays off depends on the consumer and the token count.
+
 ### Deferred epilogues
 
 Dispatch and combine accept `defer_epilogue=True` together with `async_with_compute_stream=True`. In this mode, the call returns an `EventOverlap` directly. Calling `.wait()` runs the deferred epilogue on the current stream and returns `(recv_x, recv_topk_idx, recv_topk_weights, handle)` for dispatch, or `(combined_x, combined_topk_weights)` for combine.
