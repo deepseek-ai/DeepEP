@@ -3,6 +3,7 @@ import os
 import torch
 import torch.distributed as dist
 from typing import Union, Tuple, Optional
+from unittest.mock import patch
 
 import deep_ep
 from deep_ep.utils.math import (
@@ -142,6 +143,17 @@ def test_dispatch_combine(buffer: deep_ep.EPBuffer, args: argparse.Namespace):
             )  # Reduce within rank, then globally, for non-expand combine mode
             torch.cuda.synchronize()
 
+        def launch_dispatch(params):
+            launch_args = (buffer, 'dispatch', with_previous_event, async_with_compute_stream, args.defer_epilogue, params)
+            if not buffer.deterministic or args.skip_check:
+                return launch(*launch_args)
+            with patch('torch.sort', wraps=torch.sort) as sort:
+                result = launch(*launch_args)
+            # Cached expanded dispatch already writes to the saved sorted slots.
+            expected_sorts = 0 if params.get('do_expand', False) and params.get('handle') is not None else 1
+            assert sort.call_count == expected_sorts, (sort.call_count, expected_sorts)
+            return result
+
         # Do dispatch
         dispatch_args = dict(
             x=x, topk_idx=topk_idx, topk_weights=topk_weights,
@@ -152,13 +164,13 @@ def test_dispatch_combine(buffer: deep_ep.EPBuffer, args: argparse.Namespace):
             allocate_on_comm_stream=allocate_on_comm_stream,
             do_cpu_sync=args.do_cpu_sync)
         recv_x, recv_topk_idx, recv_topk_weights, handle, dispatch_event = \
-            launch(buffer, 'dispatch', with_previous_event, async_with_compute_stream, args.defer_epilogue, dispatch_args)
+            launch_dispatch(dispatch_args)
         recv_x_bf16 = get_recv_x_bf16(recv_x)
 
         # Expanding mode
         expanded_dispatch_args = dispatch_args | dict(do_expand=True, use_tma_aligned_col_major_sf=True)
         expanded_recv_x, expanded_recv_topk_idx, expanded_recv_topk_weights, expanded_handle, expanded_dispatch_event = \
-            launch(buffer, 'dispatch', with_previous_event, async_with_compute_stream, args.defer_epilogue, expanded_dispatch_args)
+            launch_dispatch(expanded_dispatch_args)
         expanded_recv_x_bf16 = get_recv_x_bf16(expanded_recv_x)
 
         # Cached mode
@@ -169,14 +181,14 @@ def test_dispatch_combine(buffer: deep_ep.EPBuffer, args: argparse.Namespace):
             allocate_on_comm_stream=allocate_on_comm_stream,
             handle=handle)
         cached_recv_x, cached_recv_topk_idx, cached_recv_topk_weights, cached_handle, cached_dispatch_event = \
-            launch(buffer, 'dispatch', with_previous_event, async_with_compute_stream, args.defer_epilogue, cached_dispatch_args)
+            launch_dispatch(cached_dispatch_args)
 
         # Cached expanding mode with zero padding
         cached_expanded_dispatch_args = cached_dispatch_args | dict(
             topk_weights=topk_weights, do_expand=True, use_tma_aligned_col_major_sf=True,
             do_zero_padding=True, handle=expanded_handle)
         cached_expanded_recv_x, _, cached_expanded_recv_topk_weights, _, _ = \
-            launch(buffer, 'dispatch', with_previous_event, async_with_compute_stream, args.defer_epilogue, cached_expanded_dispatch_args)
+            launch_dispatch(cached_expanded_dispatch_args)
         
         # Count the number of received tokens
         num_recv_tokens = handle.psum_num_recv_tokens_per_scaleup_rank[-1].item()
@@ -397,7 +409,7 @@ def test_dispatch_combine(buffer: deep_ep.EPBuffer, args: argparse.Namespace):
                     launch(buffer, 'dispatch', with_previous_event, async_with_compute_stream, args.defer_epilogue, dispatch_args)
                 if not args.do_cpu_sync:
                     assert num_recv_tokens == handle_twice.psum_num_recv_tokens_per_scaleup_rank[-1].item()
-                recv_x_twice_bf16 = get_recv_x_bf16(recv_x_twice)
+                recv_x_twice_bf16 = get_recv_x_bf16(recv_x_twice)[:num_recv_tokens]
                 assert torch.equal(recv_x_bf16, recv_x_twice_bf16)
                 assert torch.equal(recv_topk_idx, recv_topk_idx_twice[:num_recv_tokens])
                 assert torch.equal(recv_topk_weights, recv_topk_weights_twice[:num_recv_tokens])
@@ -408,7 +420,9 @@ def test_dispatch_combine(buffer: deep_ep.EPBuffer, args: argparse.Namespace):
                 expanded_recv_x_twice_bf16 = get_recv_x_bf16(expanded_recv_x_twice)
                 assert torch.equal(expanded_recv_x_bf16[valid_expanded_indices], expanded_recv_x_twice_bf16[valid_expanded_indices])
                 if expert_alignment == 1:
-                    assert torch.equal(expanded_recv_topk_weights, expanded_recv_topk_weights_twice)  # Only check for `topk_weight` if `expert_alignment == 1`, since its padding isn't initialized
+                    # No expert padding, but unused receive capacity is still undefined.
+                    assert torch.equal(expanded_recv_topk_weights[:num_expanded_tokens],
+                                       expanded_recv_topk_weights_twice[:num_expanded_tokens])
 
             # Test cumulative stats counter
             cumulative_local_expert_recv_stats = torch.zeros((num_local_experts, ), dtype=torch.int, device='cuda')
