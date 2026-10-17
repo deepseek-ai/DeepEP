@@ -99,6 +99,7 @@ class EPHandle:
 
         # For deterministic features
         self.cached_recv_src_metadata_before_sort = None
+        self.cached_compact_recv_permutation = None
 
         # `topk_idx` cannot change in the handle
         self._topk_idx = topk_idx
@@ -133,17 +134,37 @@ class EPHandle:
         #  1. Cache it for later sorting
         #  2. Only permute `self.recv_src_metadata` in non-cached mode
         if not is_cached_dispatch:
+            self.cached_compact_recv_permutation = None
             self.cached_recv_src_metadata_before_sort = self.recv_src_metadata.clone()
         assert self.cached_recv_src_metadata_before_sort is not None
-        sort_keys = self.cached_recv_src_metadata_before_sort[:, 0]
 
-        # Ignore trailing tokens by setting their `sort_keys` to max
-        num_recv_tokens = self.psum_num_recv_tokens_per_scaleup_rank[-1] if not do_cpu_sync else self.recv_src_metadata.shape[0]
-        if not do_cpu_sync:
-            oob_tokens_mask = torch.arange(0, self.recv_src_metadata.shape[0], device=self.recv_src_metadata.device) >= num_recv_tokens
-            sort_keys = sort_keys.clone()
-            sort_keys[oob_tokens_mask] = torch.iinfo(sort_keys.dtype).max
-        orig_indices = torch.sort(sort_keys).indices
+        # Cached compact dispatch replays the same native slots and receive counts.
+        # Reuse only on the permutation's allocation stream, outside CUDA Graph capture.
+        compact_permutation_cache = self.cached_compact_recv_permutation
+        reuse_compact_permutation = False
+        if not self.do_expand:
+            metadata = self.cached_recv_src_metadata_before_sort
+            counts = self.psum_num_recv_tokens_per_scaleup_rank
+            compact_cache_allowed = not metadata.is_cuda or not torch.cuda.is_current_stream_capturing()
+            stream_key = (metadata.device, torch.cuda.current_stream(metadata.device).cuda_stream) if metadata.is_cuda and compact_cache_allowed else None
+            cache_key = (tuple(metadata.shape), None if metadata.is_inference() else metadata._version,
+                         tuple(self.recv_src_metadata.shape), tuple(counts.shape),
+                         None if counts.is_inference() else counts._version, stream_key)
+            reuse_compact_permutation = (compact_cache_allowed and is_cached_dispatch and compact_permutation_cache is not None and
+                                         compact_permutation_cache[0] is metadata and compact_permutation_cache[1] is counts and
+                                         compact_permutation_cache[2] == cache_key)
+
+        if reuse_compact_permutation:
+            orig_indices = compact_permutation_cache[3]
+        else:
+            sort_keys = self.cached_recv_src_metadata_before_sort[:, 0]
+            # Ignore trailing tokens by setting their `sort_keys` to max
+            num_recv_tokens = self.psum_num_recv_tokens_per_scaleup_rank[-1] if not do_cpu_sync else self.recv_src_metadata.shape[0]
+            if not do_cpu_sync:
+                oob_tokens_mask = torch.arange(0, self.recv_src_metadata.shape[0], device=self.recv_src_metadata.device) >= num_recv_tokens
+                sort_keys = sort_keys.clone()
+                sort_keys[oob_tokens_mask] = torch.iinfo(sort_keys.dtype).max
+            orig_indices = torch.sort(sort_keys).indices
 
         def get_reverse_permutation(perm: torch.Tensor) -> torch.Tensor:
             assert perm.dim() == 1
@@ -170,6 +191,9 @@ class EPHandle:
                 valid_mask = (channel_linked_list >= 0) & (channel_linked_list < num_recv_tokens)
                 to_indices = get_reverse_permutation(orig_indices)
                 channel_linked_list[valid_mask] = to_indices[channel_linked_list[valid_mask]].to(channel_linked_list.dtype)
+
+            if compact_cache_allowed and not reuse_compact_permutation:
+                self.cached_compact_recv_permutation = (metadata, counts, cache_key, orig_indices)
 
         elif not is_cached_dispatch:
             # Expand mode. In cached mode the copy epilogue places tokens according to
