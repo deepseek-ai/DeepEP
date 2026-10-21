@@ -36,6 +36,9 @@ class EventOverlap:
         # Useful for deterministic dispatch, which requires a sort (on the current stream) after `self.current_stream_wait()` is invoked
         self.hook_after_wait: Optional[Callable] = None
 
+        # Later waits must include GPU work enqueued by the hook.
+        self._epilogue_event: Optional[EventHandle] = None
+
     def current_stream_wait(self, release_handle: bool = False) -> Any:
         """
         The current stream `torch.cuda.current_stream()` waits for the event to be finished.
@@ -45,11 +48,14 @@ class EventOverlap:
         """
         assert self.event is not None
         self.event.current_stream_wait()
+        if self._epilogue_event is not None:
+            self._epilogue_event.current_stream_wait()
 
         # Call epilogue hook
         result = None
         if self.hook_after_wait is not None:
             result = self.hook_after_wait()
+            self._epilogue_event = EventHandle()
             self.hook_after_wait = None
 
         # In `self.event`, we also have some V2 APIs storing tensors to record in it,
@@ -57,6 +63,7 @@ class EventOverlap:
         # However, you better do it by yourself (to be compatible with multi-stream waits)
         if release_handle:
             self.event = None
+            self._epilogue_event = None
         return result
 
     def wait(self) -> Any:
