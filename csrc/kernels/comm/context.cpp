@@ -126,12 +126,13 @@ Context::Context(const int64_t& nccl_comm, const symmetric::shared_comm_t& share
             (allow_hybrid_mode ? props.railedGinType : props.ginType) != NCCL_GIN_TYPE_NONE and
             "NCCL GIN is unavailable. This is usually due to a network configuration issue, "
             "such as `allow_hybrid_mode=0` (disable direct RDMA kernels) in multi-plane network.");
+        const ncclGinType_t gin_type = static_cast<ncclGinType_t>(get_env<int>("EP_JIT_GIN_TYPE", NCCL_GIN_TYPE_GDAKI));
         EP_HOST_ASSERT(
-            props.ginSupport[NCCL_GIN_TYPE_GDAKI] and
-            "NCCL GDAKI is unavailable for this communicator.");
+            props.ginSupport[gin_type] and
+            "Requested GIN type (EP_JIT_GIN_TYPE) is unavailable for this communicator.");
 
         gin_min_stride = props.ginMinStride;
-        reqs.ginType = NCCL_GIN_TYPE_GDAKI;
+        reqs.ginType = gin_type;
         reqs.ginContextCount = num_allocated_qps;
         reqs.ginExclusiveContexts = true;
         reqs.ginQueueDepth = qp_depth > 0 ? qp_depth : kDefaultQPDepth;

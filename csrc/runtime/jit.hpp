@@ -36,10 +36,11 @@ inline void init_jit(const std::string& library_root_path, const std::string& nc
         nvcc_flags.emplace_back("--compiler-options=-Wno-deprecated-declarations,-Wno-abi");
         nvcc_flags.emplace_back("-I" + nccl_include_dir.string());
         nvcc_flags.emplace_back("-DEP_NUM_TOPK_IDX_BITS=" + std::to_string(EP_NUM_TOPK_IDX_BITS));
-        nvcc_flags.emplace_back("-DNCCL_GIN_GDAKI_ENABLE=1");
-        nvcc_flags.emplace_back("-DNCCL_GIN_PROXY_ENABLE=0");
-        nvcc_flags.emplace_back("-DNCCL_GIN_GPI_ENABLE=0");
-        nvcc_flags.emplace_back("-DNCCL_GIN_EFA_GDA_ENABLE=0");
+        const int ep_gin_type = get_env<int>("EP_JIT_GIN_TYPE", static_cast<int>(NCCL_GIN_TYPE_GDAKI));
+        nvcc_flags.emplace_back("-DNCCL_GIN_GDAKI_ENABLE="   + std::to_string(ep_gin_type == static_cast<int>(NCCL_GIN_TYPE_GDAKI)));
+        nvcc_flags.emplace_back("-DNCCL_GIN_PROXY_ENABLE="   + std::to_string(ep_gin_type == static_cast<int>(NCCL_GIN_TYPE_PROXY)));
+        nvcc_flags.emplace_back("-DNCCL_GIN_GPI_ENABLE="     + std::to_string(ep_gin_type == static_cast<int>(NCCL_GIN_TYPE_GPI)));
+        nvcc_flags.emplace_back("-DNCCL_GIN_EFA_GDA_ENABLE=" + std::to_string(ep_gin_type == static_cast<int>(NCCL_GIN_TYPE_EFA_GDA)));
         if (get_env<int>("EP_GIN_GDAKI_DEBUG", 0))
             nvcc_flags.emplace_back("-DNCCL_DEVICE_GIN_GDAKI_ENABLE_DEBUG=1");
         return runtime;

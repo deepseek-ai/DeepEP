@@ -425,6 +425,7 @@ DeepJIT reads `EP_JIT_*` first, then the corresponding `DJ_JIT_*` variable as a 
 | `EP_JIT_DUMP_ASM` | `0` | Generate both PTX and SASS artifacts on a cache miss. |
 | `EP_JIT_DUMP_PTX` | `0` | Generate PTX artifacts on a cache miss. |
 | `EP_JIT_DUMP_SASS` | `0` | Generate SASS artifacts on a cache miss; requires the toolkit's `cuobjdump`. |
+| `EP_JIT_GIN_TYPE` | `3` | Select the NCCL Gin transport backend. Values correspond to `ncclGinType_t`. Controls both the JIT-compiled kernel path and the runtime gin type requested from NCCL. `NCCL_GIN_TYPE` does not need to be set, but if it is, it should match. Changing this value requires clearing the JIT cache (`EP_JIT_CACHE_DIR`). |
 | `EP_GIN_GDAKI_DEBUG` | `0` | Compile JIT kernels with NCCL Gin GDAKI device debugging enabled. |
 
 DeepJIT discovers the CUDA toolkit through `CUDA_HOME`, then `CUDA_PATH`, then `nvcc` on `PATH`, and finally `/usr/local/cuda`.
