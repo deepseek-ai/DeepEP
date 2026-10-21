@@ -286,6 +286,8 @@ Dispatch and combine accept `defer_epilogue=True` together with `async_with_comp
 
 The returned result is produced by the first wait, so retain it for the following computation. Without other work to overlap, call `.wait()` immediately. `do_zero_padding=True` clears alignment gaps between experts; in the no-CPU-sync mode, it does not make unused output capacity valid data.
 
+With `do_cpu_sync=False`, compact receive outputs are capacity-sized ordinary allocations, not communication-buffer views: later dispatches do not overwrite them, and only the first `handle.psum_num_recv_tokens_per_scaleup_rank[-1]` rows are valid. Before cross-stream use, wait the dispatch event and its deterministic-sort hook, record a ready event afterwards, and have the consumer stream wait on it and call `prefix.record_stream(consumer)`; `record_stream` alone does not establish an execution dependency. A saved prefix view keeps the whole capacity allocation alive until backward, so clone the exact prefix when activation memory matters.
+
 If independent computation is already queued before the communication call, capture the input-ready event with `_buffer.capture()` before enqueueing that computation and pass it as `previous_event`. The forward helpers set `allocate_on_comm_stream=True` in this case, as required by EP. The deferred epilogue still runs on the current stream at `.wait()`; this also allows a combine `bias` produced by the intervening computation to be consumed there.
 
 ### Bucket collectives (experimental)
