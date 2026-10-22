@@ -20,6 +20,16 @@ find_pkgs = importlib.util.module_from_spec(find_pkgs_spec)
 find_pkgs_spec.loader.exec_module(find_pkgs)
 
 
+def render_default_envs(environ):
+    """Render build-time environment defaults as valid Python source."""
+    code = '# Pre-installed environment variables\n'
+    code += 'persistent_envs = dict()\n'
+    for name in persistent_env_names:
+        if name in environ:
+            code += f'persistent_envs[{name!r}] = {environ[name]!r}\n'
+    return code
+
+
 def get_package_version():
     with open(Path(current_dir) / 'deep_ep' / '__init__.py', 'r') as f:
         version_match = re.search(r'^__version__\s*=\s*(.*)$', f.read(), re.MULTILINE)
@@ -61,16 +71,12 @@ class CustomBuildPy(build_py):
             shutil.copytree(os.path.join(current_dir, name), dst, ignore=ignore)
 
     def generate_default_envs(self):
-        code = '# Pre-installed environment variables\n'
-        code += 'persistent_envs = dict()\n'
-        # noinspection PyShadowingNames
-        for name in persistent_env_names:
-            code += f"persistent_envs['{name}'] = '{os.environ[name]}'\n" if name in os.environ else ''
+        code = render_default_envs(os.environ)
 
         # Create temporary build directory
         build_include_dir = os.path.join(self.build_lib, 'deep_ep')
         os.makedirs(build_include_dir, exist_ok=True)
-        with open(os.path.join(self.build_lib, 'deep_ep', 'envs.py'), 'w') as f:
+        with open(os.path.join(build_include_dir, 'envs.py'), 'w') as f:
             f.write(code)
 
 
