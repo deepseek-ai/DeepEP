@@ -5890,11 +5890,15 @@ public:
     CUDA_CHECK(cudaMemsetAsync(preprocessing_local_experts_tmp, 0, preprocessing_local_experts_tmp_sz, stream));
 #endif
 
-    // Launch the preprocessing kernel to process the global routing map.
-    scan<NUM_THREADS_PER_BLOCK, NUM_OF_BLOCKS, LOCAL_EXPERTS_PADDING_SIZE, MAX_NUM_OF_TOKENS_PER_RANK, NUM_OF_TOKENS_PER_CHUNK, NUM_OF_RANKS_PER_NODE, NUM_OF_NODES, NUM_OF_EXPERTS_PER_RANK, TOPK>
-    <<<NUM_OF_BLOCKS, NUM_THREADS_PER_BLOCK, 0, stream>>>
-    (input_routing_data, preprocessing_tmp, preprocessing_local_experts_tmp, sparse_to_dense_map, rdma_to_attn_map, attn_to_rdma_map, num_of_tokens_for_experts, local_expert_routing_map,
-    dense_chunk_layout, dense_to_expert_map, num_of_local_experts_tokens, token_drop_triggered, node_rank, local_rank, local_experts_tokens_limit, num_of_tokens_per_rank);
+    // Cooperative launch guarantees forward progress while blocks poll each other's partial sums.
+    cudaLaunchAttribute attr{};
+    attr.id = cudaLaunchAttributeCooperative;
+    attr.val.cooperative = 1;
+    cudaLaunchConfig_t cfg = {dim3(NUM_OF_BLOCKS), dim3(NUM_THREADS_PER_BLOCK), 0, stream, &attr, 1};
+    CUDA_CHECK(cudaLaunchKernelEx(&cfg,
+      scan<NUM_THREADS_PER_BLOCK, NUM_OF_BLOCKS, LOCAL_EXPERTS_PADDING_SIZE, MAX_NUM_OF_TOKENS_PER_RANK, NUM_OF_TOKENS_PER_CHUNK, NUM_OF_RANKS_PER_NODE, NUM_OF_NODES, NUM_OF_EXPERTS_PER_RANK, TOPK>,
+      input_routing_data, preprocessing_tmp, preprocessing_local_experts_tmp, sparse_to_dense_map, rdma_to_attn_map, attn_to_rdma_map, num_of_tokens_for_experts, local_expert_routing_map,
+      dense_chunk_layout, dense_to_expert_map, num_of_local_experts_tokens, token_drop_triggered, node_rank, local_rank, local_experts_tokens_limit, num_of_tokens_per_rank));
 
     // Check if there is any CUDA error.
     CUDA_CHECK(cudaGetLastError());
