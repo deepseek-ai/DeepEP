@@ -196,7 +196,14 @@ Context::Context(const int64_t& nccl_comm, const symmetric::shared_comm_t& share
     // NOTES: `ncclCommWindowRegister` is collective: it internally calls bootstrapBarrier
     // across all ranks, so no explicit barrier is needed after this call.
     raw_window_ptr = this->symmetric_memory->ptr;
-    NCCL_CHECK(ncclCommWindowRegister(comm, raw_window_ptr, symmetric_memory->num_sym_bytes, &window, NCCL_WIN_STRICT_ORDERING));
+    // The main symmetric window carries the dispatch/combine payload and is accessed by both
+    // the LSA (NVLink) and GIN (RDMA) paths. `NCCL_WIN_STRICT_ORDERING` disables PCIe relaxed
+    // ordering on the underlying IB MR, which serializes RDMA writes; on hybrid inter-node EP
+    // this can cost ~6x dispatch/combine bandwidth. Default stays strict for correctness; set
+    // `EP_RELAXED_WIN_ORDERING=1` to opt into `NCCL_WIN_DEFAULT` on platforms where PCIe
+    // relaxed ordering is known to be safe.
+    const int main_win_flags = get_env<int>("EP_RELAXED_WIN_ORDERING", 0) ? NCCL_WIN_DEFAULT : NCCL_WIN_STRICT_ORDERING;
+    NCCL_CHECK(ncclCommWindowRegister(comm, raw_window_ptr, symmetric_memory->num_sym_bytes, &window, main_win_flags));
     NCCL_CHECK(ncclGetLsaDevicePointer(window, 0, nvl_rank_idx, &workspace));
     buffer = math::advance_ptr(workspace, num_workspace_bytes);
     if (enable_lsa_multimem)
