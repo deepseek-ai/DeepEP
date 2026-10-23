@@ -98,12 +98,19 @@ struct EPWorkspaceLayout {
 
     __forceinline__ __device__ __host__ int64_t* get_scaleout_channel_signaled_tail_ptr(
         const int& channel_idx, const int& scaleout_rank_idx) const {
-        return &signals.scaleout_channel_signaled_tail[channel_idx][scaleout_rank_idx];
+        // Pack by the runtime rank count instead of the compile-time inner dimension
+        // (`kNumMaxRanks`). Using the static 2D stride scatters consecutive channels'
+        // tail signals `kNumMaxRanks * sizeof(int64_t)` apart, so each channel's small
+        // RDMA signal write lands on a different page -- thrashing the NIC address-
+        // translation cache and GPU L2 and inflating the forward warp's tail-wait time.
+        return &signals.scaleout_channel_signaled_tail[0][0] +
+               (channel_idx * num_scaleout_ranks + scaleout_rank_idx);
     }
 
     __forceinline__ __device__ __host__ int* get_channel_scaleup_tail_ptr(
         const int& channel_idx, const int& scaleup_rank_idx) const {
-        return &signals.channel_scaleup_tail[channel_idx][scaleup_rank_idx];
+        return &signals.channel_scaleup_tail[0][0] +
+               (channel_idx * num_scaleup_ranks + scaleup_rank_idx);
     }
 
     __forceinline__ __device__ __host__ int* get_lb_chunk_idx_counter_ptr() const {
