@@ -32,7 +32,7 @@ class EnvOverride:
     def __exit__(self, *_):
         for name, value in self.original_values.items():
             if value is None:
-                os.environ.pop(name)
+                os.environ.pop(name, None)
             else:
                 os.environ[name] = value
 
