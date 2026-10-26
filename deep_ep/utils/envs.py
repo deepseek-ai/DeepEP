@@ -268,6 +268,16 @@ def get_rdma_gbs(nic_name: str = 'mlx5_0') -> float:
     Returns:
         gbs: the RDMA bandwidth in GB/s (0 if detection fails).
     """
+    # Allow declaring the true link bandwidth. In a bonded (802.3ad LAG) RDMA
+    # setup, ibstat reports a single member link's rate (e.g. a ConnectX-8 800G
+    # NIC shows 400, 4X NDR) rather than the bonded aggregate, so detection
+    # under-reports. When unset, detection is unchanged.
+    env_gbs = os.environ.get('EP_RDMA_GBS')
+    if env_gbs:
+        try:
+            return float(env_gbs)
+        except Exception:
+            pass
     # noinspection PyBroadException
     try:
         result = subprocess.run(['ibstat'], capture_output=True, text=True, check=True)
