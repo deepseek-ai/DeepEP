@@ -196,7 +196,20 @@ Context::Context(const int64_t& nccl_comm, const symmetric::shared_comm_t& share
     // NOTES: `ncclCommWindowRegister` is collective: it internally calls bootstrapBarrier
     // across all ranks, so no explicit barrier is needed after this call.
     raw_window_ptr = this->symmetric_memory->ptr;
-    NCCL_CHECK(ncclCommWindowRegister(comm, raw_window_ptr, symmetric_memory->num_sym_bytes, &window, NCCL_WIN_STRICT_ORDERING));
+    // The main symmetric window carries the dispatch/combine payload and is accessed by both
+    // the LSA (NVLink) and GIN (RDMA) paths. It was switched from NCCL_WIN_DEFAULT to
+    // NCCL_WIN_STRICT_ORDERING in #674 to fix the data-ordering hazard reported in #661:
+    // with PCIe relaxed ordering enabled on the IB MR *and* RDMA atomics using PCIe native
+    // AtomicOp (PCI_ATOMIC_MODE=4), a relaxed tail-signal atomic can bypass still-in-flight
+    // payload writes, so a consumer may observe the tail before the data has landed.
+    // STRICT_ORDERING avoids that by disabling IBV_ACCESS_RELAXED_ORDERING, but it serializes
+    // all RDMA writes to this window and costs ~6x dispatch/combine bandwidth on hybrid
+    // inter-node EP. The hazard does not arise when PCIe native atomics are not in use (e.g.
+    // PCI_ATOMIC_MODE=0), where relaxed ordering is both faster and, in our testing, correct.
+    // Keep strict as the default; opt into NCCL_WIN_DEFAULT via EP_RELAXED_WIN_ORDERING=1 on
+    // such platforms.
+    const int main_win_flags = get_env<int>("EP_RELAXED_WIN_ORDERING", 0) ? NCCL_WIN_DEFAULT : NCCL_WIN_STRICT_ORDERING;
+    NCCL_CHECK(ncclCommWindowRegister(comm, raw_window_ptr, symmetric_memory->num_sym_bytes, &window, main_win_flags));
     NCCL_CHECK(ncclGetLsaDevicePointer(window, 0, nvl_rank_idx, &workspace));
     buffer = math::advance_ptr(workspace, num_workspace_bytes);
     if (enable_lsa_multimem)
