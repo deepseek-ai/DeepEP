@@ -68,6 +68,8 @@ void SharedMemoryAllocator::malloc(void** ptr, size_t size_raw) {
 
         CU_CHECK(cuMemAddressReserve((CUdeviceptr*)ptr, size, granularity, 0, 0));
         CU_CHECK(cuMemMap((CUdeviceptr)*ptr, size, 0, handle, 0));
+        // The mapping keeps the memory alive; the physical allocation is freed at unmap.
+        CU_CHECK(cuMemRelease(handle));
         cu_mem_set_access_all(*ptr, size);
     } else {
         CUDA_CHECK(cudaMalloc(ptr, size_raw));
@@ -93,6 +95,7 @@ void SharedMemoryAllocator::get_mem_handle(MemHandle* mem_handle, void* ptr) {
         CU_CHECK(cuMemRetainAllocationHandle(&handle, ptr));
 
         CU_CHECK(cuMemExportToShareableHandle(&mem_handle->inner.cu_mem_fabric_handle, handle, CU_MEM_HANDLE_TYPE_FABRIC, 0));
+        CU_CHECK(cuMemRelease(handle));
     } else {
         CUDA_CHECK(cudaIpcGetMemHandle(&mem_handle->inner.cuda_ipc_mem_handle, ptr));
     }
@@ -107,6 +110,7 @@ void SharedMemoryAllocator::open_mem_handle(void** ptr, MemHandle* mem_handle) {
 
         CU_CHECK(cuMemAddressReserve((CUdeviceptr*)ptr, size, 0, 0, 0));
         CU_CHECK(cuMemMap((CUdeviceptr)*ptr, size, 0, handle, 0));
+        CU_CHECK(cuMemRelease(handle));
         cu_mem_set_access_all(*ptr, size);
     } else {
         CUDA_CHECK(cudaIpcOpenMemHandle(ptr, mem_handle->inner.cuda_ipc_mem_handle, cudaIpcMemLazyEnablePeerAccess));
