@@ -157,8 +157,9 @@ def bench_kineto(fn,
         profiler = torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CUDA], schedule=schedule, acc_events=True)
         dummy = torch.ones(1, dtype=torch.float, device='cuda')
         with profiler:
-            for i in range(2):
-                for _ in range(num_tests):
+            # Advance through profiler warmup once, then record all requested tests.
+            for iteration_count in (1, num_tests):
+                for _ in range(iteration_count):
                     # Flush L2 cache
                     flush_l2_cache(flush_l2)
 
