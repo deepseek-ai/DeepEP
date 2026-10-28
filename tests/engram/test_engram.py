@@ -95,6 +95,8 @@ def test(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
                     assert torch.equal(ref_sf_per_layer[layer_idx], fetched_sf), \
                         f'fp8 scaling-factor mismatch ({layer_idx=})'
 
+        del global_storages, global_storage
+
     # Performance test
     dist_print('Running performance test ...', once_in_node=True)
     indices = gen_indices()
