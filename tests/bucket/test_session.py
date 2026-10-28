@@ -14,6 +14,9 @@ from deep_ep.utils.envs import dist_print, init_dist
 from deep_ep.utils.math import align
 from deep_ep.utils.testing import parse_num_bytes
 
+all_gather_single = getattr(dist, 'all_gather_single', dist.all_gather_into_tensor)
+reduce_scatter_single = getattr(dist, 'reduce_scatter_single', dist.reduce_scatter_tensor)
+
 
 @torch.inference_mode()
 def test(local_rank: int, num_local_ranks: int, args: argparse.Namespace) -> None:
@@ -43,12 +46,12 @@ def test(local_rank: int, num_local_ranks: int, args: argparse.Namespace) -> Non
     all_gather_src = torch.randn(numel // num_ranks, dtype=torch.float32, device='cuda').view(-1, 4)
     all_gather_dst = torch.empty((num_ranks, *all_gather_src.shape), dtype=torch.float32, device='cuda')
     all_gather_ref = torch.empty_like(all_gather_dst)
-    dist.all_gather_single(all_gather_ref.view(-1), all_gather_src.view(-1), group=group)
+    all_gather_single(all_gather_ref.view(-1), all_gather_src.view(-1), group=group)
 
     # Construct reduce-scatter src and dst buffer
     reduce_scatter_src = torch.randn(numel, dtype=torch.float32, device='cuda').view(-1, 4)
     reduce_scatter_ref = torch.empty(numel // num_ranks, dtype=torch.float32, device='cuda')
-    dist.reduce_scatter_single(reduce_scatter_ref, reduce_scatter_src.view(-1), group=group)
+    reduce_scatter_single(reduce_scatter_ref, reduce_scatter_src.view(-1), group=group)
 
     # Construct all-reduce src and dst buffer
     all_reduce_src = torch.randn(numel, dtype=torch.float32, device='cuda')

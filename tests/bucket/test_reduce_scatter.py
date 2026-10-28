@@ -15,6 +15,8 @@ from deep_ep.utils.envs import dist_print, init_dist
 from deep_ep.utils.math import align
 from deep_ep.utils.testing import bench_kineto, parse_num_bytes
 
+reduce_scatter_single = getattr(dist, 'reduce_scatter_single', dist.reduce_scatter_tensor)
+
 
 def import_baseline():
     stochastic_round_bf16 = None
@@ -77,7 +79,7 @@ def test(local_rank: int, num_local_ranks: int, args: argparse.Namespace) -> Non
 
         reference = torch.zeros(src.numel() // num_ranks, dtype=torch.float32, device='cuda')
         if num_nvl_ranks > 1:
-            dist.reduce_scatter_single(reference, reference_input, group=group)
+            reduce_scatter_single(reference, reference_input, group=group)
         else:
             reference_input_all_to_all = torch.empty_like(reference_input)
             torch.distributed.all_to_all_single(reference_input_all_to_all, reference_input)
@@ -99,7 +101,7 @@ def test(local_rank: int, num_local_ranks: int, args: argparse.Namespace) -> Non
     nccl_input = original.clone()
     nccl_output = torch.empty(perf_src.numel() // num_ranks, dtype=torch.float32, device='cuda')
     nccl_duration = bench_kineto(
-        lambda: dist.reduce_scatter_single(nccl_output, nccl_input, group=group),
+        lambda: reduce_scatter_single(nccl_output, nccl_input, group=group),
         kernel_names='ncclDevKernel_ReduceScatter', barrier_comm_profiling=True,
         barrier=buffer.barrier)
 
