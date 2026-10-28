@@ -108,7 +108,6 @@ def test(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
             recv_tensors = [torch.empty(shape, dtype=torch.bfloat16, device='cuda') for _ in range(num_concurrent)]
 
             def loop(_hide_rdma_latency=hide_rdma_latency):
-                torch.zeros((131072, 32768), dtype=torch.int, device='cuda')
                 for t in send_tensors:
                     buffer.send(t, (rank_idx + 1) % num_ranks)
                 if _hide_rdma_latency:
