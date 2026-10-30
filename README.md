@@ -38,7 +38,7 @@ DeepEP (DeepEveryParallel) is a high-performance communication library for machi
 
 - EP dispatch and combine require GPU SMs; zero-SM RDMA EP is not supported
 - Bucket, Engram, and PP are experimental features
-- Engram requires a NCCL build providing `ncclGinOptFlagsWarpGet`
+- Engram requires a NCCL build with device-side Gin get support (`ncclGinOptFlagsDefault` / `ncclGinOptFlagsAggregateRequests`)
 
 ## Quick start
 
@@ -313,7 +313,7 @@ x.fill_(1)
 reduced_x = buffer.all_reduce(x).wait()
 ```
 
-All ranks must use the same allocation plan. Each collective also accepts a list of tensors, and `.wait()` returns the corresponding tensor or list of tensors. Results are views into the buffer; all-gather returns flattened views. Reduce-scatter and all-reduce accept FP32 inputs and sum contributions by default; use `scale` to scale the result. Reduce-scatter also supports `comm_precision="bf16"` for lower-precision communication while retaining FP32 input and output tensors.
+All ranks must use the same allocation plan. Each collective also accepts a list of tensors, and `.wait()` returns the corresponding tensor or list of tensors. Results are views into the buffer; all-gather returns flattened views. Reduce-scatter and all-reduce accept FP32 inputs and sum contributions by default; use `scale` to scale the result. Reduce-scatter also supports `comm_precision="bf16"` for lower-precision communication while retaining FP32 input and output tensors; `bf16` is only supported for RDMA-only domains (`num_nvl_ranks == 1` and `num_rdma_ranks > 1`) — NVLink-only and hybrid domains must use `"fp32"`.
 
 To use tensors allocated outside the bucket, wrap the collective calls in a `buffer.session()`. The session manages temporary bucket storage and the required staging copies:
 
