@@ -638,12 +638,6 @@ class EPBuffer(BufferBase):
         assert not do_handle_copy, '`do_handle_copy` must be False; handle copying is no longer supported'
         check_torch_deterministic()
 
-        # Automatic decide SM and QP count
-        num_topk = (handle.topk_idx if topk_idx is None else topk_idx).shape[1]
-        num_sms = self.get_theoretical_num_sms(num_experts, num_topk) if num_sms == 0 else align(num_sms, 2)
-        num_qps = self.get_theoretical_num_qps(num_sms) if num_qps == 0 else num_qps
-        assert num_qps <= self.num_allocated_qps, f'Allocated QPs are not enough'
-
         # Unpack SF
         x, sf = x if isinstance(x, tuple) else (x, None)
 
@@ -674,6 +668,12 @@ class EPBuffer(BufferBase):
         num_max_tokens_per_rank = value_or(num_max_tokens_per_rank, self.num_max_tokens_per_rank)
         expert_alignment = value_or(expert_alignment, 1)
         do_cpu_sync = value_or(do_cpu_sync, True)
+
+        # Automatic decide SM and QP count (after handle unpacking, which may fill num_experts/topk_idx)
+        num_topk = topk_idx.shape[1]
+        num_sms = self.get_theoretical_num_sms(num_experts, num_topk) if num_sms == 0 else align(num_sms, 2)
+        num_qps = self.get_theoretical_num_qps(num_sms) if num_qps == 0 else num_qps
+        assert num_qps <= self.num_allocated_qps, f'Allocated QPs are not enough'
 
         # Do dispatch
         result, event, deferred_epilogue = self.runtime.dispatch(x, sf, topk_idx, topk_weights,
