@@ -27,7 +27,25 @@ def check_nccl_so():
     # PyTorch may load another NCCL library, which is different to the linked one
     with open('/proc/self/maps', 'r') as f:
         loaded_nccl_so = None
-        for so in [line.strip().split(' ')[-1] for line in f if 'libnccl' in line]:
+        for line in f:
+            if 'libnccl' not in line:
+                continue
+            # The pathname is the sixth field of /proc/self/maps. It may contain
+            # spaces, and a mapped file whose inode has been replaced or removed
+            # is reported with a trailing ' (deleted)' marker that is not part of
+            # the path. Treating the last space-separated token as the path would
+            # hand '(deleted)' to the comparison below and surface a bare
+            # FileNotFoundError instead of a real NCCL diagnosis.
+            so = line.split(maxsplit=5)[-1].strip()
+            if so.endswith(' (deleted)'):
+                so = so[:-len(' (deleted)')]
+                raise AssertionError(
+                    f'The NCCL library mapped as {so} was replaced or removed while '
+                    f'it was still mapped (shown as "(deleted)" in /proc/self/maps). '
+                    f'This usually means the NCCL library changed underneath a running '
+                    f'process (e.g. a concurrent pip install/uninstall). Restart with a '
+                    f'stable NCCL installation instead of mutating a live environment.'
+                )
             loaded_nccl_so = so if loaded_nccl_so is None else loaded_nccl_so
             assert so == loaded_nccl_so, f'Duplicate NCCL runtime found in the current system: {so} and {loaded_nccl_so}'
     linked_nccl_so_candidates = sorted(glob.glob(f'{find_nccl_root()}/lib/libnccl.so*'))
