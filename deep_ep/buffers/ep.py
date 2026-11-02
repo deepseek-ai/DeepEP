@@ -17,7 +17,7 @@ from ..utils.event import EventOverlap
 from ..utils.math import align
 from ..utils.semantic import value_or, weak_lru
 from ..utils.envs import (
-    check_fast_rdma_atomic_support,
+    check_fast_rdma_atomic_support, check_group_consistency,
     check_nvlink_connections, check_torch_deterministic,
     get_nvlink_gbs, get_rdma_gbs,
     get_sm_read_gbs, get_sm_write_gbs
@@ -297,6 +297,12 @@ class EPBuffer(BufferBase):
         
         # Create NCCL comm handle
         self.nccl_comm_handle = comm.get_nccl_comm_handle(group)
+
+        # Peers must allocate identically shaped buffers
+        check_group_consistency(
+            group, num_bytes=num_bytes, num_max_tokens_per_rank=num_max_tokens_per_rank, hidden=hidden,
+            num_topk=num_topk, use_fp8_dispatch=use_fp8_dispatch, allow_hybrid_mode=allow_hybrid_mode,
+            allow_multiple_reduction=allow_multiple_reduction)
 
         # Calculate buffer size (already 2 MB-aligned from hint functions / calculate_ep_buffer_size)
         if num_bytes is None:

@@ -181,6 +181,24 @@ def check_nvlink_connections(group: dist.ProcessGroup) -> None:
         pynvml.nvmlShutdown()
 
 
+def check_group_consistency(group: dist.ProcessGroup, **settings) -> None:
+    """
+    Check that all ranks of a group use identical buffer settings, as peers must allocate
+    identically shaped buffers. Collective: every rank in the group must call it.
+
+    Arguments:
+        group: the communication group.
+        settings: the per-rank settings that must match, by name.
+    """
+    gathered = [None, ] * group.size()
+    dist.all_gather_object(gathered, settings, group)
+    for name, value in settings.items():
+        values = [s[name] for s in gathered]
+        if any(v != value for v in values):
+            raise ValueError(f'`{name}` differs across ranks: {dict(enumerate(values))}, '
+                             'use a group-wide value instead of one derived from the local rank')
+
+
 def check_torch_deterministic() -> None:
     """
     Ensure PyTorch deterministic algorithms and fill_uninitialized_memory are not both enabled.
