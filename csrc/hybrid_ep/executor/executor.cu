@@ -46,7 +46,11 @@ torch::Tensor Executor::allgather_routing_map(
     torch::Tensor global_routing_map;
     // At inter-node case, we will use NCCL allgather
     if(config.num_of_nodes > 1 || !enable_custom_allgather || !custom_allgather_aligned) {
-        global_routing_map = torch::empty(
+        // Reuse the allgather coordinator's preallocated output buffer. Metadata
+        // preprocessing runs on the same stream immediately after this collective,
+        // so the buffer is no longer live when the next dispatch reuses it.
+        global_routing_map = torch::from_blob(
+            allgather_obj.get_output_buffer(),
             {num_of_tokens_per_rank * group_size, num_cols},
             torch::TensorOptions().dtype(dtype).device(torch::kCUDA)
         );
