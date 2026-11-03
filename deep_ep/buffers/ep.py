@@ -15,7 +15,7 @@ from .base import BufferBase
 from .. import comm
 from ..utils.event import EventOverlap
 from ..utils.math import align
-from ..utils.semantic import value_or, weak_lru
+from ..utils.semantic import check_group_consistent_settings, value_or, weak_lru
 from ..utils.envs import (
     check_fast_rdma_atomic_support,
     check_nvlink_connections, check_torch_deterministic,
@@ -294,7 +294,24 @@ class EPBuffer(BufferBase):
         self.allow_multiple_reduction = allow_multiple_reduction
         self.prefer_overlap_with_compute = prefer_overlap_with_compute
         self.deterministic = deterministic
-        
+
+        # NOTES: the settings below must be identical on all ranks, otherwise the ranks allocate
+        # geometrically mismatched buffers and the failure only surfaces much later, as an opaque
+        # CUDA device-side assertion inside the dispatch/combine kernels. `__init__` is collective,
+        # so validate them with one extra object gather before creating any resource — host-only on
+        # CPU groups, and routed through the group's device on NCCL (the same call pattern as
+        # `check_nvlink_connections` below). `hidden`/`num_topk`/`use_fp8_dispatch` only feed the
+        # buffer-size calculation when `num_bytes is None`, so they are not compared otherwise
+        # (`num_max_tokens_per_rank` still is: it is stored as the default for later resizing)
+        check_group_consistent_settings(group,
+                                        num_bytes=num_bytes,
+                                        num_max_tokens_per_rank=num_max_tokens_per_rank,
+                                        hidden=hidden if num_bytes is None else None,
+                                        num_topk=num_topk if num_bytes is None else None,
+                                        use_fp8_dispatch=use_fp8_dispatch if num_bytes is None else None,
+                                        allow_hybrid_mode=allow_hybrid_mode,
+                                        allow_multiple_reduction=allow_multiple_reduction)
+
         # Create NCCL comm handle
         self.nccl_comm_handle = comm.get_nccl_comm_handle(group)
 
