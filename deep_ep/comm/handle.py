@@ -41,6 +41,12 @@ class NCCLCommHandle:
 _storage = dict()
 
 
+def create_nccl_comm_handle(group: dist.ProcessGroup) -> NCCLCommHandle:
+    nccl_unique_ids = [None] * group.size()
+    dist.all_gather_object(nccl_unique_ids, _C.get_local_nccl_unique_id(), group)
+    return NCCLCommHandle(_C.create_nccl_comm(nccl_unique_ids[0], group.size(), group.rank()), True)
+
+
 def get_nccl_comm_handle(group: dist.ProcessGroup, force_new_comm: bool = False) -> NCCLCommHandle:
     """
     Get or create an NCCL communicator handle for the given process group.
@@ -66,14 +72,8 @@ def get_nccl_comm_handle(group: dist.ProcessGroup, force_new_comm: bool = False)
         return _storage[group]
 
     # For old PyTorch, we have to recreate a NCCL comm
-    nccl_unique_ids = [None, ] * group.size()
-    dist.all_gather_object(nccl_unique_ids, _C.get_local_nccl_unique_id(), group)
-    root_unique_id = nccl_unique_ids[0]
-
-    # Create a new communicator
     key = time.time_ns() if force_new_comm else group
-    _storage[key] = NCCLCommHandle(
-        _C.create_nccl_comm(root_unique_id, group.size(), group.rank()), True)
+    _storage[key] = create_nccl_comm_handle(group)
     return _storage[key]
 
 
