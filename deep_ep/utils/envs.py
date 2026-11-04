@@ -234,6 +234,21 @@ def get_nvlink_gbs(factor: float = 0.9) -> float:
         return 0
 
 
+def _ibstat_ca_block(output: str, nic_name: str) -> str:
+    """Return only the requested CA's section of an ``ibstat`` listing."""
+    lines = output.splitlines()
+    header = f"CA '{nic_name}'"
+    for index, line in enumerate(lines):
+        if line.strip() == header:
+            block = []
+            for entry in lines[index + 1:]:
+                if entry.startswith("CA '"):
+                    break
+                block.append(entry)
+            return '\n'.join(block)
+    return ''
+
+
 @functools.lru_cache()
 def check_fast_rdma_atomic_support(nic_name: str = 'mlx5_0') -> bool:
     """
@@ -248,9 +263,8 @@ def check_fast_rdma_atomic_support(nic_name: str = 'mlx5_0') -> bool:
     # noinspection PyBroadException
     try:
         result = subprocess.run(['ibstat'], capture_output=True, text=True, check=True)
-        output = result.stdout
-        pattern = rf"CA '{nic_name}'.*?CA type:\s*(\S+)"
-        match = re.search(pattern, output, re.DOTALL)
+        output = _ibstat_ca_block(result.stdout, nic_name)
+        match = re.search(r'CA type:\s*(\S+)', output)
         assert match
         return match.group(1) == 'MT4131'
     except Exception:
@@ -271,9 +285,8 @@ def get_rdma_gbs(nic_name: str = 'mlx5_0') -> float:
     # noinspection PyBroadException
     try:
         result = subprocess.run(['ibstat'], capture_output=True, text=True, check=True)
-        output = result.stdout
-
-        pattern = rf"CA '{nic_name}'.*?Port \d+:\s*.*?Rate:\s*(\d+)"
+        output = _ibstat_ca_block(result.stdout, nic_name)
+        pattern = r'Port \d+:\s*.*?Rate:\s*(\d+)'
         match = re.search(pattern, output, re.DOTALL)
         assert match
         rate = int(match.group(1))
