@@ -205,19 +205,13 @@ def get_sm_write_gbs() -> float:
 
 
 @functools.lru_cache()
-def get_nvlink_gbs(factor: float = 0.9) -> float:
-    """
-    Get the total NVLink bandwidth in GB/s, cached.
-
-    Arguments:
-        factor: the bandwidth efficiency factor.
-
-    Returns:
-        gbs: the total NVLink bandwidth in GB/s (0 if detection fails).
-    """
-    # noinspection PyBroadException
+def _get_nvlink_gbs(device: int, factor: float) -> float:
+    """Query one CUDA device by UUID; device ordinals are process-local."""
     try:
-        result = subprocess.run(['nvidia-smi', 'nvlink', '-s'],
+        uuid = str(torch.cuda.get_device_properties(device).uuid)
+        if not uuid.startswith(('GPU-', 'MIG-')):
+            uuid = f'GPU-{uuid}'
+        result = subprocess.run(['nvidia-smi', 'nvlink', '-i', uuid, '-s'],
                                 capture_output=True, text=True, check=True)
         output = result.stdout
         pattern = r'GPU \d+:.*?(?=^GPU \d+:|^$)'
@@ -229,6 +223,36 @@ def get_nvlink_gbs(factor: float = 0.9) -> float:
         link_matches = re.findall(link_pattern, gpu_block)
         assert link_matches
         return sum(float(bw) for bw in link_matches) * factor
+    except subprocess.CalledProcessError as e:
+        # The command contains the device UUID, which need not be logged.
+        print(f'Failed to get NVLink connection speed: nvidia-smi exited with status {e.returncode}')
+        return 0
+    except Exception as e:
+        print(f'Failed to get NVLink connection speed: {e}')
+        return 0
+
+
+def _expose_nvlink_cache_methods(func):
+    """Keep the cache controls previously provided by lru_cache."""
+    func.cache_clear = _get_nvlink_gbs.cache_clear
+    func.cache_info = _get_nvlink_gbs.cache_info
+    func.cache_parameters = _get_nvlink_gbs.cache_parameters
+    return func
+
+
+@_expose_nvlink_cache_methods
+def get_nvlink_gbs(factor: float = 0.9) -> float:
+    """
+    Get the current CUDA device's total NVLink bandwidth in GB/s, cached per device.
+
+    Arguments:
+        factor: the bandwidth efficiency factor.
+
+    Returns:
+        gbs: the total NVLink bandwidth in GB/s (0 if detection fails).
+    """
+    try:
+        return _get_nvlink_gbs(torch.cuda.current_device(), factor)
     except Exception as e:
         print(f'Failed to get NVLink connection speed: {e}')
         return 0
