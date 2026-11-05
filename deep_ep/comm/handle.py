@@ -46,11 +46,17 @@ def get_nccl_comm_handle(group: dist.ProcessGroup, force_new_comm: bool = False)
     Get or create an NCCL communicator handle for the given process group.
     Results are cached, so subsequent calls with the same group return the same handle.
 
-    PyTorch's communicator is reused only if it already exists on the current device.
-    Otherwise a DeepEP-managed comm is created instead, and it stays cached for the
-    lifetime of the group entry (an extra NCCL communicator and its buffers), even if
-    PyTorch's own communicator materializes later. Call `destroy_all_managed_nccl_comm`
-    to release cached comms. Set `EP_REUSE_NCCL_COMM=0` to never reuse PyTorch's comm.
+    PyTorch's communicator is reused when its `_comm_ptr()` is non-null; otherwise a
+    DeepEP-managed comm is created instead, and it stays cached for the lifetime of the
+    group entry (an extra NCCL communicator and its buffers), even if PyTorch's own
+    communicator materializes later. Call `destroy_all_managed_nccl_comm` to release
+    cached comms. Set `EP_REUSE_NCCL_COMM=0` to never reuse PyTorch's comm.
+
+    Before the group's first op, call `torch.cuda.set_device(dev)` and pass `device_id=dev`
+    to `init_process_group`. If a rank's current device is not the device PyTorch used for
+    the group, ranks can take different branches and hang (stock `ProcessGroupNCCL`, where
+    `EP_REUSE_NCCL_COMM=0` does not avoid this on an NCCL-only group) or reuse a
+    communicator on another GPU (PyTorch 2.15's default `nccl` backend).
 
     Arguments:
         group: the communication group.
@@ -68,14 +74,13 @@ def get_nccl_comm_handle(group: dist.ProcessGroup, force_new_comm: bool = False)
     # New PyTorch has such API
     backend = group._get_backend(torch.device('cuda'))
     if not force_new_comm and hasattr(backend, '_comm_ptr') and int(os.getenv('EP_REUSE_NCCL_COMM', '1')):
-        # PyTorch creates NCCL communicators lazily: `_comm_ptr()` returns 0 until a
-        # collective has run on this group and device (or `init_process_group` got
-        # `device_id=...`), and a null handle would crash in C++ (`ncclTeamWorld`).
-        # No collective is needed to agree on this: PyTorch creates a group's
-        # communicator collectively, so ranks whose current device is the one PyTorch
-        # used for the group all see the same result. That fails if the group's first
-        # op ran on another device (e.g. `barrier()` without `device_ids`); use
-        # `EP_REUSE_NCCL_COMM=0` there. Staying collective-free keeps calls such as
+        # `_comm_ptr()` is 0 until PyTorch has created the group's communicator (the stock
+        # ProcessGroupNCCL creates one per device, lazily unless the group is bound with
+        # `device_id`, and looks up the current device), and a null handle would crash in
+        # C++ (`ncclTeamWorld`). PyTorch creates a group's
+        # communicator collectively, so the ranks agree without a collective here as long
+        # as every rank's current device is the device PyTorch used for the group; the
+        # docstring says how to ensure that. Staying collective-free keeps calls such as
         # `get_physical_domain_size(group)` local when PyTorch's comm exists.
         comm_ptr = backend._comm_ptr()
         if comm_ptr != 0:
