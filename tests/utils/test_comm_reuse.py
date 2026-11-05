@@ -3,8 +3,8 @@ from unittest import mock
 
 import torch.distributed as dist
 
-import deep_ep.utils.comm as comm_mod
-from deep_ep.utils.comm import get_nccl_comm_handle
+import deep_ep.comm.handle as comm_mod
+from deep_ep.comm.handle import get_nccl_comm_handle
 
 
 class _FakeBackend:
