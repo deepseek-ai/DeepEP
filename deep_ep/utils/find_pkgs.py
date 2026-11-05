@@ -2,6 +2,7 @@ import functools
 import os
 import sys
 from importlib.metadata import distributions
+from pathlib import Path
 from typing import Optional
 
 
@@ -11,7 +12,7 @@ def find_pkg_root(name: str, lib_name: Optional[str] = None, optional: bool = Fa
     Checks environment variables `EP_{NAME}_ROOT_DIR` and `{NAME}_DIR` first.
 
     Arguments:
-        name: the package name (e.g., `'nccl'`, `'nvshmem'`).
+        name: the package name (e.g., `'nccl'`).
         lib_name: the library filename to search for within the package files.
         optional: if ``False``, raises an assertion error when the package is not found.
 
@@ -68,15 +69,10 @@ def find_nccl_root(optional: bool = False):
     return find_pkg_root('nccl', lib_name='libnccl.so', optional=optional)
 
 
-@functools.lru_cache()
-def find_nvshmem_root(optional: bool = False):
-    """
-    Find the NVSHMEM installation root directory, cached.
-
-    Arguments:
-        optional: if `False`, raises an assertion error when NVSHMEM is not found.
-
-    Returns:
-        root: the NVSHMEM root directory.
-    """
-    return find_pkg_root('nvshmem', optional=optional)
+def get_nccl_lib_name(root: str) -> str:
+    """Resolve the unversioned library or the SONAME-only library shipped in pip wheels."""
+    lib_dir = Path(root) / 'lib'
+    for path in (lib_dir / 'libnccl.so', *sorted(lib_dir.glob('libnccl.so.*'))):
+        if path.is_file():
+            return path.name
+    raise ModuleNotFoundError(f'libnccl.so not found under {lib_dir}')

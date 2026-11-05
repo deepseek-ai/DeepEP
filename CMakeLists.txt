@@ -1,5 +1,5 @@
 # NOTES: this CMake is only for debugging; for setup, please use Torch extension
-cmake_minimum_required(VERSION 3.10)
+cmake_minimum_required(VERSION 3.18)
 project(deep_ep LANGUAGES CUDA CXX)
 set(CMAKE_VERBOSE_MAKEFILE ON)
 
@@ -11,8 +11,6 @@ list(APPEND CUDA_NVCC_FLAGS "-O3")
 list(APPEND CUDA_NVCC_FLAGS "--ptxas-options=--verbose,--register-usage-level=10,--warn-on-local-memory-usage")
 list(APPEND CUDA_NVCC_FLAGS "-Xcompiler=-rdynamic")
 list(APPEND CUDA_NVCC_FLAGS "-lineinfo")
-# Suppress warnings for the `fmt` library
-list(APPEND CUDA_NVCC_FLAGS "--diag-suppress=128,2417")
 
 set(USE_SYSTEM_NVTX on)
 set(CUDA_ARCH_LIST "9.0" CACHE STRING "List of CUDA architectures to compile")
@@ -22,12 +20,6 @@ find_package(CUDAToolkit REQUIRED)
 find_package(pybind11 REQUIRED)
 find_package(Torch REQUIRED)
 
-# NVSHMEM
-find_package(NVSHMEM REQUIRED HINTS ${NVSHMEM_ROOT_DIR}/lib/cmake/nvshmem)
-add_library(nvshmem ALIAS nvshmem::nvshmem)
-add_library(nvshmem_host ALIAS nvshmem::nvshmem_host)
-add_library(nvshmem_device ALIAS nvshmem::nvshmem_device)
-
 # NCCL
 # TODO: use `find_package` instead of manual checks
 if (NOT NCCL_ROOT_DIR)
@@ -35,18 +27,20 @@ if (NOT NCCL_ROOT_DIR)
 endif()
 
 set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CUDA_STANDARD 20)
+set(CMAKE_CUDA_STANDARD_REQUIRED ON)
 
-include_directories(deep_ep/include third-party/fmt/include)
-include_directories(${CUDA_TOOLKIT_ROOT_DIR}/include ${CUDA_TOOLKIT_ROOT_DIR}/include/cccl ${TORCH_INCLUDE_DIRS} ${PYTHON_INCLUDE_DIRS} ${NVSHMEM_INCLUDE_DIR} ${NCCL_ROOT_DIR}/include .)
-link_directories(${TORCH_INSTALL_PREFIX}/lib ${CUDA_TOOLKIT_ROOT_DIR}/lib ${NVSHMEM_LIB_DIR} ${NCCL_ROOT_DIR}/lib)
+include_directories(deep_ep/include third-party/deep_jit/include)
+include_directories(${CUDA_TOOLKIT_ROOT_DIR}/include ${CUDA_TOOLKIT_ROOT_DIR}/include/cccl ${TORCH_INCLUDE_DIRS} ${PYTHON_INCLUDE_DIRS} ${NCCL_ROOT_DIR}/include .)
+link_directories(${TORCH_INSTALL_PREFIX}/lib ${CUDA_TOOLKIT_ROOT_DIR}/lib ${NCCL_ROOT_DIR}/lib)
 
 # Add kernels
 add_subdirectory(csrc)
 
 # Link CPP and CUDA together
 pybind11_add_module(_C csrc/python_api.cpp)
-target_link_libraries(_C PRIVATE nccl ${RUNTIME_CUDA_LIBRARIES} ${LEGACY_CUDA_LIBRARIES} ${TORCH_LIBRARIES} torch_python)
+target_link_libraries(_C PRIVATE nccl ${RUNTIME_CUDA_LIBRARIES} ${TORCH_LIBRARIES} torch_python)
 
 # Enable kernel code indexing with CMake-based IDEs
 cuda_add_library(deep_ep_indexing_cuda STATIC csrc/indexing/main.cu)
