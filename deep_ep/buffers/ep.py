@@ -1,6 +1,8 @@
 import functools
+import glob
 import os
 import math
+import sys
 import torch
 import torch.distributed as dist
 from typing import Optional, Sequence, Tuple, Union
@@ -24,28 +26,28 @@ from ..utils.envs import (
 )
 
 
-# AWS EFA + aws-ofi-nccl GIN plugin uses a 128-slot per-peer request ring
-# (NCCL_OFI_GIN_RING_SIZE, see aws-ofi-nccl/src/rdma/gin/nccl_ofi_gin.cpp).
-# DeepEP V2's auto-QP formula (num_sms*16+1) easily produces 129+ QPs, which
-# overruns the ring and triggers a hard assert ("Next sequence number is in
-# use") surfaced to CUDA as CUDA_ERROR_LAUNCH_FAILED. Cap auto-sized QPs on
-# EFA to stay safely below the ring limit. `EP_EFA_MAX_QPS` overrides the
-# default (empirically validated at 2 on p5en.48xlarge).
-_EFA_MAX_QPS = int(os.environ.get('EP_EFA_MAX_QPS', 2))
+# QP budget on AWS EFA: an EFA device has a much smaller per-device QP budget
+# than Mellanox HCAs, so the automatic hybrid-mode allocation (65 or 129 QPs per
+# buffer) is sized for the wrong fabric there. When `num_allocated_qps` is left at
+# 0 (automatic) on EFA, cap the automatic value at `EP_EFA_MAX_QPS` (default 2,
+# validated on p5en.48xlarge). An explicit `num_allocated_qps` is always honoured.
+# Like the 65/129 choice, each rank decides from its own environment, so
+# `FI_PROVIDER` and `EP_EFA_MAX_QPS` must be the same on every rank.
+def _get_efa_max_qps() -> int:
+    """`EP_EFA_MAX_QPS`, read when an automatic QP count is capped on EFA (default 2, at least 1)."""
+    return max(1, int(os.environ.get('EP_EFA_MAX_QPS') or 2))
 
 
 def _is_efa_fabric() -> bool:
-    """Detect AWS EFA fabric via env var or sysfs rdmap*s0 device presence."""
-    if os.environ.get('FI_PROVIDER', '').lower() == 'efa':
-        return True
-    try:
-        import glob
-        # AWS EFA exposes HCAs as /sys/class/infiniband/rdmap<N>s0
-        if glob.glob('/sys/class/infiniband/rdmap*s0'):
-            return True
-    except Exception:
-        pass
-    return False
+    """Detect AWS EFA via `FI_PROVIDER=efa` or EFA devices in sysfs (`rdmap*s0` on P5-class instances)."""
+    return os.environ.get('FI_PROVIDER', '').lower() == 'efa' or bool(glob.glob('/sys/class/infiniband/rdmap*s0'))
+
+
+@functools.lru_cache(maxsize=None)
+def _notify_efa_qp_cap(num_auto_qps: int, num_capped_qps: int) -> None:
+    """Print the EFA QP cap notice once per process for each distinct cap."""
+    print(f'[DeepEP] EFA detected: capping automatic num_allocated_qps {num_auto_qps} -> {num_capped_qps} '
+          f'(QP budget on EFA; set EP_EFA_MAX_QPS or pass num_allocated_qps to override)', file=sys.stderr)
 
 
 class EPHandle:
@@ -304,7 +306,8 @@ class EPBuffer(BufferBase):
             prefer_overlap_with_compute: whether to prefer overlapping communication with compute.
             sl_idx: the optional RDMA service level index. It overrides `EP_DEFAULT_RDMA_SL` and can be overridden by
                 `EP_OVERRIDE_RDMA_SL`.
-            num_allocated_qps: the number of QPs to allocate for RDMA (0 for automatic).
+            num_allocated_qps: the number of QPs to allocate for RDMA (0 for automatic). On AWS EFA the automatic
+                value is capped at `EP_EFA_MAX_QPS` (default 2); pass a value here to use more QPs per call.
             num_cpu_timeout_secs: CPU-side timeout in seconds for CPU sync.
             num_gpu_timeout_secs: GPU-side timeout in seconds for GPU operations.
             explicitly_destroy: If this flag is set to True, you need to explicitly call `destroy()` to release resources;
@@ -356,16 +359,12 @@ class EPBuffer(BufferBase):
                 num_allocated_qps = 65 if check_fast_rdma_atomic_support() else 129
             else:
                 num_allocated_qps = 17
-            # AWS EFA + aws-ofi-nccl GIN plugin caps per-peer outstanding
-            # requests at 128; clamp auto-sized QP count to avoid ring overflow.
-            if _is_efa_fabric() and num_allocated_qps > _EFA_MAX_QPS:
-                import sys
-                print(
-                    f'[DeepEP] EFA detected: capping num_allocated_qps '
-                    f'{num_allocated_qps} -> {_EFA_MAX_QPS} to avoid GIN '
-                    f'128-slot ring overflow',
-                    file=sys.stderr)
-                num_allocated_qps = _EFA_MAX_QPS
+            # QP budget on EFA: cap the automatic value only (see `_get_efa_max_qps`)
+            if _is_efa_fabric():
+                num_efa_max_qps = _get_efa_max_qps()
+                if num_allocated_qps > num_efa_max_qps:
+                    _notify_efa_qp_cap(num_allocated_qps, num_efa_max_qps)
+                    num_allocated_qps = num_efa_max_qps
         self.num_allocated_qps = num_allocated_qps
 
         # Create CPP handle
@@ -591,10 +590,6 @@ class EPBuffer(BufferBase):
         if self.allow_hybrid_mode:
             num_qps = num_sms * 16 + 1
 
-        # AWS EFA: cap below the 128-slot aws-ofi-nccl GIN ring (see helper docstring).
-        if _is_efa_fabric():
-            num_qps = min(num_qps, _EFA_MAX_QPS)
-
         return min(num_qps, self.num_allocated_qps)
 
     def dispatch(self,
@@ -680,7 +675,8 @@ class EPBuffer(BufferBase):
         num_topk = (handle.topk_idx if topk_idx is None else topk_idx).shape[1]
         num_sms = self.get_theoretical_num_sms(num_experts, num_topk) if num_sms == 0 else align(num_sms, 2)
         num_qps = self.get_theoretical_num_qps(num_sms) if num_qps == 0 else num_qps
-        assert num_qps <= self.num_allocated_qps, f'Allocated QPs are not enough'
+        assert num_qps <= self.num_allocated_qps, \
+            f'Allocated QPs are not enough ({num_qps} > {self.num_allocated_qps}), pass a larger `num_allocated_qps`'
 
         # Unpack SF
         x, sf = x if isinstance(x, tuple) else (x, None)
@@ -853,7 +849,8 @@ class EPBuffer(BufferBase):
         # Automatic decide SM and QP count
         num_sms = handle.num_sms if num_sms == 0 else align(num_sms, 2)
         num_qps = self.get_theoretical_num_qps(num_sms) if num_qps == 0 else num_qps
-        assert num_qps <= self.num_allocated_qps, f'Allocated QPs are not enough'
+        assert num_qps <= self.num_allocated_qps, \
+            f'Allocated QPs are not enough ({num_qps} > {self.num_allocated_qps}), pass a larger `num_allocated_qps`'
 
         bias_0, bias_1 = EPBuffer._unpack_bias(bias)
         result, event, deferred_epilogue = self.runtime.combine(x, topk_weights,
