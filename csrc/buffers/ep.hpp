@@ -640,12 +640,51 @@ public:
                     }
 
                     // Ready and do next steps
-                    const auto get_buffer_info = [&]() {
+                    // NOTES: the GPU may publish a count while the message is being formatted, so format from one snapshot
+                    const auto get_buffer_info = [&](const std::optional<int64_t>& timeout_waited_secs = std::nullopt) {
+                        const auto num_counts = context->num_scaleup_ranks + num_local_experts;
+                        const auto count_ptr = host_workspace_layout.get_scaleup_rank_expert_count_ptr<false>();
+                        const auto snapshot = std::vector<int64_t>(count_ptr, count_ptr + num_counts);
+
                         std::stringstream ss;
                         ss << "CPU side received count (scaleup: " << context->scaleup_rank_idx << "): ";
-                        for (int i = 0; i < context->num_scaleup_ranks + num_local_experts; ++ i) {
-                            ss << host_workspace_layout.get_scaleup_rank_expert_count_ptr<false>()[i];
+                        for (int i = 0; i < num_counts; ++ i) {
+                            ss << snapshot[i];
                             ss << (i == context->num_scaleup_ranks - 1 ? " # ": " ");
+                        }
+                        if (not timeout_waited_secs.has_value())
+                            return ss.str();
+
+                        // On timeout, name the counts the GPU has not published
+                        // NOTES: an unpublished count reads 0 and a published count `n` reads `-(n + 1)`. The hybrid kernel
+                        // publishes each count when it completes; the non-hybrid kernel (one scale-out rank) writes all of them
+                        // in one burst after every peer has reported, so a partial set there means the snapshot raced that burst
+                        int num_unpublished = 0;
+                        std::stringstream unpublished_ss;
+                        for (int i = 0; i < num_counts; ++ i) {
+                            if (math::is_decoded_positive_ready(math::encode_decode_positive(snapshot[i])))
+                                continue;
+                            unpublished_ss << (num_unpublished ++ > 0 ? ", " : "");
+                            if (i < context->num_scaleup_ranks)
+                                unpublished_ss << "scaleup " << i;
+                            else
+                                unpublished_ss << "expert " << i - context->num_scaleup_ranks;
+                        }
+                        ss << "| rank: " << context->rank_idx << "/" << context->num_ranks
+                           << " (scaleout: " << context->scaleout_rank_idx << "/" << context->num_scaleout_ranks
+                           << ", scaleup: " << context->scaleup_rank_idx << "/" << context->num_scaleup_ranks << ")"
+                           << ", waited: " << timeout_waited_secs.value() << " s, limit: " << context->num_cpu_timeout_secs << " s, ";
+                        if (num_unpublished == 0) {
+                            ss << "every count is published in this snapshot, "
+                               << "so the timeout raced with a completion that landed just after the check";
+                        } else if (num_unpublished == num_counts) {
+                            ss << "no count is published, so the dispatch notify on this rank has not completed";
+                        } else if (context->num_scaleout_ranks == 1) {
+                            ss << "some counts are published in this snapshot, "
+                               << "so the timeout raced with the non-hybrid kernel writing them";
+                        } else {
+                            ss << "unpublished: " << unpublished_ss.str()
+                               << " (a raw count reads 0 while unpublished and -(n + 1) once n tokens are published)";
                         }
                         return ss.str();
                     };
@@ -657,8 +696,9 @@ public:
 
                     // Timeout checks
                     const auto now = std::chrono::high_resolution_clock::now();
-                    if (std::chrono::duration_cast<std::chrono::seconds>(now - start_cpu_time).count() > context->num_cpu_timeout_secs)
-                        throw EPExceptionWithLineInfo("Dispatch CPU wait", get_buffer_info());
+                    const auto num_waited_secs = std::chrono::duration_cast<std::chrono::seconds>(now - start_cpu_time).count();
+                    if (num_waited_secs > context->num_cpu_timeout_secs)
+                        throw EPExceptionWithLineInfo("Dispatch CPU wait", get_buffer_info(num_waited_secs));
                 }
             } else {
                 // Non-cached mode without CPU sync, allocate with the worst case
