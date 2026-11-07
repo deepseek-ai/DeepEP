@@ -306,7 +306,7 @@ class EPBuffer(BufferBase):
                 num_max_tokens_per_rank, hidden, num_topk, use_fp8_dispatch,
                 allow_hybrid_mode, allow_multiple_reduction)
 
-        if os.environ.get('EP_BUFFER_DEBUG', 0):
+        if int(os.environ.get('EP_BUFFER_DEBUG', 0)):
             print(f'Initializing EP buffer with {num_bytes} bytes at rank EP {group.rank()}/{group.size()}')
         self.num_bytes = num_bytes
 
@@ -532,7 +532,7 @@ class EPBuffer(BufferBase):
         num_sms = min(num_sms, num_device_sms // 2 * 2)
 
         # Summary
-        if os.environ.get('EP_BUFFER_DEBUG', 0):
+        if int(os.environ.get('EP_BUFFER_DEBUG', 0)):
             print(f'EP SM approximation: '
                   f'{sm_read=}, {sm_write=}, {rdma_traffic=}, {nvlink_traffic=}, '
                   f'{rdma_gbs=}, {nvlink_gbs=}, '
