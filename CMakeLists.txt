@@ -40,7 +40,7 @@ add_subdirectory(csrc)
 
 # Link CPP and CUDA together
 pybind11_add_module(_C csrc/python_api.cpp)
-target_link_libraries(_C PRIVATE nccl ${RUNTIME_CUDA_LIBRARIES} ${TORCH_LIBRARIES} torch_python)
+target_link_libraries(_C PRIVATE nccl ${RUNTIME_CUDA_LIBRARIES} ${MAGIC_CUDA_LIBRARIES} ${TORCH_LIBRARIES} torch_python)
 
 # Enable kernel code indexing with CMake-based IDEs
 cuda_add_library(deep_ep_indexing_cuda STATIC csrc/indexing/main.cu)

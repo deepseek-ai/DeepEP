@@ -101,7 +101,7 @@ __forceinline__ __device__ void st_bulk(void* smem_ptr) {
 }
 
 __forceinline__ __device__ void tma_store_fence() {
-    asm volatile("fence.proxy.async.shared::cta;");
+    asm volatile("fence.proxy.async.shared::cta;" ::: "memory");
 }
 
 template <int kNumRemainingWaits = 0>
