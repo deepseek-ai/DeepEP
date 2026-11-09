@@ -370,6 +370,7 @@ public:
         if (topk_weights.has_value()) {
             const auto [num_tokens__, num_topk_] = get_shape<2>(topk_weights.value());
             EP_HOST_ASSERT(num_tokens == num_tokens__);
+            EP_HOST_ASSERT(num_topk == num_topk_);
             EP_HOST_ASSERT(topk_weights->is_cuda() and topk_weights->is_contiguous());
             topk_weights_ptr = topk_weights->data_ptr<float>();
         }
