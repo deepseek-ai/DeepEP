@@ -193,7 +193,53 @@ __device__ uint32_t cvt_warp_fp16_to_fp4(PackedVec& vec, float SFScaleVal, uint8
   return e2m1Vec;
 }
 
-template <bool kUseFP8, bool kUseUE8M0, bool kUseNVFP4, bool kUseUE8M0ForNVFP4SF, bool kUseTopKWeights, int kHidden>
+// Quantizes 8 BF16 values into E4M3 and returns the UE8M0 scale of their 32-value block in `sf_value`.
+// The four adjacent lanes holding a block must call this together.
+__device__ __forceinline__ int2 cvt_warp_bf16_to_mxfp8(const int4& value, uint8_t& sf_value) {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 1000
+    constexpr int kNumElems = sizeof(int4) / sizeof(nv_bfloat16);
+    const auto bf16_values = reinterpret_cast<const nv_bfloat16*>(&value);
+    float fp32_values[kNumElems];
+    // `fmaxf` drops NaN operands, so seeding with a value keeps the maximum NaN only for an all-NaN block
+    float amax = fabsf(static_cast<float>(bf16_values[0]));
+
+    #pragma unroll
+    for (int j = 0; j < kNumElems; ++ j) {
+        fp32_values[j] = static_cast<float>(bf16_values[j]);
+        amax = fmaxf(amax, fabsf(fp32_values[j]));
+    }
+
+    // Reduce the maximum over the four lanes of the block
+    amax = fmaxf(amax, __shfl_xor_sync(0xffffffff, amax, 1));
+    amax = fmaxf(amax, __shfl_xor_sync(0xffffffff, amax, 2));
+    sf_value = __nv_cvt_float_to_e8m0(amax * reciprocal_approximate_ftz(kFinfoAmaxE4M3),
+                                   __NV_SATFINITE, cudaRoundPosInf);
+
+    // Inverse scale `2^(127 - sf_value)`, or zero for the bytes 0 (subnormal scale), 254 (infinite maximum)
+    // and 255 (NaN maximum)
+    const float scale = sf_value == 0 ? 0.0f :
+        __uint_as_float(static_cast<uint32_t>(max(254 - static_cast<int>(sf_value), 0)) << 23);
+
+    int2 result;
+    auto fp8x2_values = reinterpret_cast<__nv_fp8x2_storage_t*>(&result);
+    #pragma unroll
+    for (int j = 0; j < kNumElems; j += 2) {
+        // The clamp encodes NaN, including an infinity times the zero inverse scale, as 448
+        float2 fp32x2 = {fp32_values[j] * scale, fp32_values[j + 1] * scale};
+        fp32x2.x = fmaxf(fminf(fp32x2.x, kFinfoAmaxE4M3), -kFinfoAmaxE4M3);
+        fp32x2.y = fmaxf(fminf(fp32x2.y, kFinfoAmaxE4M3), -kFinfoAmaxE4M3);
+        fp8x2_values[j / 2] = __nv_cvt_float2_to_fp8x2(fp32x2, __NV_SATFINITE, __NV_E4M3);
+    }
+    return result;
+#else
+    EP_DEVICE_ASSERT(false and "MXFP8 dispatch requires SM100 or newer");
+    sf_value = 0;
+    return {0, 0};
+#endif
+}
+
+template <bool kUseFP8, bool kUseUE8M0, bool kUseNVFP4, bool kUseUE8M0ForNVFP4SF, bool kUseTopKWeights, int kHidden,
+          bool kUseMXFP8 = false>
 __global__ __launch_bounds__(1024, 1) void
 dispatch(void* packed_recv_x, void* packed_recv_x_scales,
          int* packed_recv_src_info, int64_t* packed_recv_layout_range,
@@ -223,18 +269,19 @@ dispatch(void* packed_recv_x, void* packed_recv_x_scales,
     const auto responsible_expert_idx = sm_id * num_warp_groups + warp_group_id;
 
     // May extract UE8M0 from the scales
-    using scale_t = std::conditional_t<kUseUE8M0 || kUseNVFP4, uint8_t, float>;
-    using packed_t = std::conditional_t<kUseUE8M0 || kUseNVFP4, uint32_t, float>;
+    using scale_t = std::conditional_t<kUseUE8M0 || kUseNVFP4 || kUseMXFP8, uint8_t, float>;
+    using packed_t = std::conditional_t<kUseUE8M0 || kUseNVFP4 || kUseMXFP8, uint32_t, float>;
     EP_STATIC_ASSERT(sizeof(packed_t) % sizeof(scale_t) == 0, "Invalid vector length");
     EP_STATIC_ASSERT(!(kUseFP8 && kUseNVFP4), "FP8 and NVFP4 cannot be used together");
+    EP_STATIC_ASSERT(!kUseMXFP8 || !(kUseFP8 || kUseNVFP4), "MXFP8 cannot be combined with another quantization mode");
 
     // FP8 staffs
-    constexpr int kNumPerChannels = kUseNVFP4 ? 16 : 128;
+    constexpr int kNumPerChannels = kUseNVFP4 ? 16 : (kUseMXFP8 ? 32 : 128);
     const int num_scales = kHidden / kNumPerChannels;
     constexpr size_t hidden_bytes =
     kUseNVFP4
         ? kHidden * sizeof(__nv_fp8_storage_t) / 2
-        : kHidden * (kUseFP8 ? sizeof(__nv_fp8_storage_t) : sizeof(nv_bfloat16));
+        : kHidden * ((kUseFP8 || kUseMXFP8) ? sizeof(__nv_fp8_storage_t) : sizeof(nv_bfloat16));
     const size_t hidden_int4 = hidden_bytes / sizeof(int4);
 
     // Message package: index at source (int), 3 reserved int fields, hidden data, FP8 scales
@@ -242,9 +289,9 @@ dispatch(void* packed_recv_x, void* packed_recv_x_scales,
     using vec_t = std::conditional_t<
         kUseNVFP4,
         int32_t,
-        std::conditional_t<kUseFP8, int2, int4>>;
-    using rdma_x_scale_t = std::conditional_t<kUseNVFP4, uint8_t, float>;
-    const size_t num_bytes_per_msg = sizeof(int4) + ((kUseFP8 || kUseNVFP4) ? (hidden_bytes + num_scales * sizeof(rdma_x_scale_t)) : hidden_bytes);
+        std::conditional_t<kUseFP8 || kUseMXFP8, int2, int4>>;
+    using rdma_x_scale_t = std::conditional_t<kUseNVFP4 || kUseMXFP8, uint8_t, float>;
+    const size_t num_bytes_per_msg = sizeof(int4) + ((kUseFP8 || kUseNVFP4 || kUseMXFP8) ? (hidden_bytes + num_scales * sizeof(rdma_x_scale_t)) : hidden_bytes);
     const size_t num_int4_per_msg = num_bytes_per_msg / sizeof(int4);
     EP_DEVICE_ASSERT(num_bytes_per_msg % sizeof(int4) == 0);
 
@@ -292,7 +339,7 @@ dispatch(void* packed_recv_x, void* packed_recv_x_scales,
                 SFScaleVal = *(static_cast<const float*>(x_global_scale));
             }
 
-            // FP8 or NVFP4 cast
+            // Quantize the dispatch payload.
             EP_STATIC_ASSERT(hidden_bf16_int4 % 32 == 0, "Must use the full warp to reduce");
             #pragma unroll
             for (int i = thread_id; i < hidden_bf16_int4; i += num_threads) {
@@ -326,6 +373,12 @@ dispatch(void* packed_recv_x, void* packed_recv_x_scales,
                         fp8x2_values[j / 2] = __nv_cvt_float2_to_fp8x2(fp32x2, __NV_SATFINITE, __NV_E4M3);
                     }
                     rdma_x_vec[i] = int2_value;
+                } else if constexpr (kUseMXFP8) {
+                    uint8_t sf_value;
+                    auto result = cvt_warp_bf16_to_mxfp8(int4_value, sf_value);
+                    if (lane_id % (kNumPerChannels / kNumElemsPerRead) == 0)
+                        rdma_x_scales[i * kNumElemsPerRead / kNumPerChannels] = sf_value;
+                    rdma_x_vec[i] = result;
                 } else if constexpr (kUseNVFP4) {
                     // Convert to NVFP4
                     uint8_t sf_val;
@@ -548,7 +601,7 @@ dispatch(void* packed_recv_x, void* packed_recv_x_scales,
                     auto scale = extract_required_scale_format<kUseUE8M0>(ld_nc_global(src_scales + lane_id + 32));
                     recv_x_scales[token_idx * token_stride + pack_idx * pack_stride + elem_idx] = scale;
                 }
-            } else if constexpr (kUseNVFP4) {
+            } else if constexpr (kUseNVFP4 || kUseMXFP8) {
                  // The physical layout is (l, rm, rk, 32, 4, 4)
                 const auto src_scales = reinterpret_cast<uint8_t*>(reinterpret_cast<uint8_t*>(src_data) + hidden_bytes);
                 const auto num_elems_per_pack = static_cast<int>(sizeof(packed_t) / sizeof(scale_t));
@@ -592,7 +645,7 @@ void dispatch(void* packed_recv_x, void* packed_recv_x_scales,
               int num_tokens, int hidden, int num_max_dispatch_tokens_per_rank,
               int num_topk, int num_experts, int rank, int num_ranks,
               bool use_fp8, bool round_scale, bool use_ue8m0,
-              bool use_nvfp4, bool use_ue8m0_for_sf,
+              bool use_nvfp4, bool use_ue8m0_for_sf, bool use_mxfp8,
               void* workspace, int num_device_sms,
               cudaStream_t stream, int phases) {
     constexpr int kNumMaxTopK = 11;
@@ -635,6 +688,10 @@ if (use_nvfp4 and use_ue8m0_for_sf and use_topk_weights) \
     dispatch_func = dispatch<false, false, true, true, true, hidden>; \
 if (not use_fp8 and not use_nvfp4 and use_topk_weights) \
     dispatch_func = dispatch<false, false, false, false, true, hidden>; \
+if (use_mxfp8 and not use_topk_weights) \
+    dispatch_func = dispatch<false, false, false, false, false, hidden, true>; \
+if (use_mxfp8 and use_topk_weights) \
+    dispatch_func = dispatch<false, false, false, false, true, hidden, true>; \
 LAUNCH_KERNEL(&cfg, dispatch_func, \
               packed_recv_x, packed_recv_x_scales, \
               packed_recv_src_info, packed_recv_layout_range, \
