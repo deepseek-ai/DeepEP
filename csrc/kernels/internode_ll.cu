@@ -238,8 +238,8 @@ __device__ __forceinline__ int2 cvt_warp_bf16_to_mxfp8(const int4& value, uint8_
 #endif
 }
 
-template <bool kUseFP8, bool kUseUE8M0, bool kUseNVFP4, bool kUseUE8M0ForNVFP4SF, bool kUseTopKWeights, int kHidden,
-          bool kUseMXFP8 = false>
+template <bool kUseFP8, bool kUseUE8M0, bool kUseNVFP4, bool kUseUE8M0ForNVFP4SF, bool kUseMXFP8,
+          bool kUseTopKWeights, int kHidden>
 __global__ __launch_bounds__(1024, 1) void
 dispatch(void* packed_recv_x, void* packed_recv_x_scales,
          int* packed_recv_src_info, int64_t* packed_recv_layout_range,
@@ -373,12 +373,6 @@ dispatch(void* packed_recv_x, void* packed_recv_x_scales,
                         fp8x2_values[j / 2] = __nv_cvt_float2_to_fp8x2(fp32x2, __NV_SATFINITE, __NV_E4M3);
                     }
                     rdma_x_vec[i] = int2_value;
-                } else if constexpr (kUseMXFP8) {
-                    uint8_t sf_value;
-                    auto result = cvt_warp_bf16_to_mxfp8(int4_value, sf_value);
-                    if (lane_id % (kNumPerChannels / kNumElemsPerRead) == 0)
-                        rdma_x_scales[i * kNumElemsPerRead / kNumPerChannels] = sf_value;
-                    rdma_x_vec[i] = result;
                 } else if constexpr (kUseNVFP4) {
                     // Convert to NVFP4
                     uint8_t sf_val;
@@ -393,6 +387,12 @@ dispatch(void* packed_recv_x, void* packed_recv_x_scales,
                         }
                     // Cast into send buffer
                     rdma_x_vec[i] = *reinterpret_cast<vec_t*>(&result);
+                } else if constexpr (kUseMXFP8) {
+                    uint8_t sf_value;
+                    auto result = cvt_warp_bf16_to_mxfp8(int4_value, sf_value);
+                    if (lane_id % (kNumPerChannels / kNumElemsPerRead) == 0)
+                        rdma_x_scales[i * kNumElemsPerRead / kNumPerChannels] = sf_value;
+                    rdma_x_vec[i] = result;
                 } else {
                     // Reinterpret-cast is for C++14 compatibility
                     rdma_x_vec[i] = *reinterpret_cast<vec_t*>(&int4_value);
@@ -669,29 +669,29 @@ void dispatch(void* packed_recv_x, void* packed_recv_x_scales,
 
 #define DISPATCH_LAUNCH_CASE(hidden) { \
 const bool use_topk_weights = (topk_weights != nullptr); \
-auto dispatch_func = dispatch<false, false, false, false, false, hidden>; \
+auto dispatch_func = dispatch<false, false, false, false, false, false, hidden>; \
 if (use_fp8 and not use_ue8m0 and not use_topk_weights) \
-    dispatch_func = dispatch<true, false, false, false, false, hidden>; \
+    dispatch_func = dispatch<true, false, false, false, false, false, hidden>; \
 if (use_fp8 and not use_ue8m0 and use_topk_weights) \
-    dispatch_func = dispatch<true, false, false, false, true, hidden>; \
+    dispatch_func = dispatch<true, false, false, false, false, true, hidden>; \
 if (use_fp8 and use_ue8m0 and not use_topk_weights) \
-    dispatch_func = dispatch<true, true, false, false, false, hidden>; \
+    dispatch_func = dispatch<true, true, false, false, false, false, hidden>; \
 if (use_fp8 and use_ue8m0 and use_topk_weights) \
-    dispatch_func = dispatch<true, true, false, false, true, hidden>; \
+    dispatch_func = dispatch<true, true, false, false, false, true, hidden>; \
 if (use_nvfp4 and not use_ue8m0_for_sf and not use_topk_weights) \
-    dispatch_func = dispatch<false, false, true, false, false, hidden>; \
+    dispatch_func = dispatch<false, false, true, false, false, false, hidden>; \
 if (use_nvfp4 and not use_ue8m0_for_sf and use_topk_weights) \
-    dispatch_func = dispatch<false, false, true, false, true, hidden>; \
+    dispatch_func = dispatch<false, false, true, false, false, true, hidden>; \
 if (use_nvfp4 and use_ue8m0_for_sf and not use_topk_weights) \
-    dispatch_func = dispatch<false, false, true, true, false, hidden>; \
+    dispatch_func = dispatch<false, false, true, true, false, false, hidden>; \
 if (use_nvfp4 and use_ue8m0_for_sf and use_topk_weights) \
-    dispatch_func = dispatch<false, false, true, true, true, hidden>; \
-if (not use_fp8 and not use_nvfp4 and use_topk_weights) \
-    dispatch_func = dispatch<false, false, false, false, true, hidden>; \
+    dispatch_func = dispatch<false, false, true, true, false, true, hidden>; \
 if (use_mxfp8 and not use_topk_weights) \
-    dispatch_func = dispatch<false, false, false, false, false, hidden, true>; \
+    dispatch_func = dispatch<false, false, false, false, true, false, hidden>; \
 if (use_mxfp8 and use_topk_weights) \
-    dispatch_func = dispatch<false, false, false, false, true, hidden, true>; \
+    dispatch_func = dispatch<false, false, false, false, true, true, hidden>; \
+if (not use_fp8 and not use_nvfp4 and not use_mxfp8 and use_topk_weights) \
+    dispatch_func = dispatch<false, false, false, false, false, true, hidden>; \
 LAUNCH_KERNEL(&cfg, dispatch_func, \
               packed_recv_x, packed_recv_x_scales, \
               packed_recv_src_info, packed_recv_layout_range, \

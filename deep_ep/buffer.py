@@ -644,9 +644,8 @@ class Buffer:
                              dispatch_wait_recv_cost_stats: Optional[torch.Tensor] = None,
                              x_global_scale: Optional[torch.Tensor] = None,
                              use_fp8: bool = True, round_scale: bool = False, use_ue8m0: bool = False,
-                             use_nvfp4: bool = False, use_ue8m0_for_sf: bool = False,
-                             async_finish: bool = False, return_recv_hook: bool = False,
-                             *, use_mxfp8: bool = False):
+                             use_nvfp4: bool = False, use_ue8m0_for_sf: bool = False, use_mxfp8: bool = False,
+                             async_finish: bool = False, return_recv_hook: bool = False):
         """
         A low-latency implementation for dispatching with IBGDA.
         This kernel requires all the ranks (no matter intranode or internode) should be visible via RDMA
@@ -675,15 +674,15 @@ class Buffer:
             use_ue8m0: whether use UE8M0 as scaling factor format (available only with `round_scale=True`).
             use_nvfp4: whether to enable NVFP4 casting, with this, the received data will be a tuple of NVFP4 tensor and scaling factors.
             use_ue8m0_for_sf: whether use UE8M0 as NVFP4 scaling factor format (available only with `use_nvfp4=True`).
-            async_finish: the current stream will not wait for the communication kernels to be finished if set.
-            return_recv_hook: return a receiving hook if set. If set, the kernel will just do the RDMA request issues,
-                but **without actually receiving the data**. You must call the received hook to make sure the data's arrival.
-                If you do not set this flag, the kernel will ensure the data's arrival.
             use_mxfp8: quantize to E4M3 with one UE8M0 scale per 32 values on SM100 or newer.
                 Requires `use_fp8=False` and `use_nvfp4=False`. Scales are rounded up to powers of two;
                 `round_scale`, `use_ue8m0`, `use_ue8m0_for_sf` and `x_global_scale` must remain unset.
                 NaN and infinite values encode as 448. An infinity zeroes the other values of its block, while a
                 NaN leaves them and the scale unchanged unless the whole block is NaN.
+            async_finish: the current stream will not wait for the communication kernels to be finished if set.
+            return_recv_hook: return a receiving hook if set. If set, the kernel will just do the RDMA request issues,
+                but **without actually receiving the data**. You must call the received hook to make sure the data's arrival.
+                If you do not set this flag, the kernel will ensure the data's arrival.
 
         Returns:
             recv_x: a tensor or tuple with received tokens for each expert.
