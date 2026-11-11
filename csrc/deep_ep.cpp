@@ -1249,10 +1249,14 @@ Buffer::low_latency_dispatch(const torch::Tensor& x, const torch::Tensor& topk_i
                              const std::optional<torch::Tensor>& x_global_scale,
                              int num_max_dispatch_tokens_per_rank, int num_experts,
                              bool use_fp8, bool round_scale, bool use_ue8m0,
-                             bool use_nvfp4, bool use_ue8m0_for_sf,
+                             bool use_nvfp4, bool use_ue8m0_for_sf, bool use_mxfp8,
                              bool async, bool return_recv_hook) {
 #ifndef DISABLE_NVSHMEM
     EP_HOST_ASSERT(low_latency_mode);
+    if (use_mxfp8) {
+        EP_HOST_ASSERT(not (use_fp8 or use_nvfp4 or round_scale or use_ue8m0 or use_ue8m0_for_sf or x_global_scale.has_value()));
+        EP_HOST_ASSERT(at::cuda::getDeviceProperties(device_id)->major >= 10 and "MXFP8 dispatch requires SM100 or newer");
+    }
 
     // Tensor checks
     // By default using `ptp128c` FP8 cast
@@ -1299,7 +1303,7 @@ Buffer::low_latency_dispatch(const torch::Tensor& x, const torch::Tensor& topk_i
 
     // Allocate packed tensors
     auto packed_recv_x = torch::empty({num_local_experts, num_ranks * num_max_dispatch_tokens_per_rank, use_nvfp4 ? hidden / 2 : hidden},
-                                      x.options().dtype(use_nvfp4 ? torch::kUInt8 : (use_fp8 ? torch::kFloat8_e4m3fn: torch::kBFloat16)));
+                                      x.options().dtype(use_nvfp4 ? torch::kUInt8 : ((use_fp8 or use_mxfp8) ? torch::kFloat8_e4m3fn: torch::kBFloat16)));
     auto packed_recv_src_info = torch::empty({num_local_experts, num_ranks * num_max_dispatch_tokens_per_rank}, torch::dtype(torch::kInt32).device(torch::kCUDA));
     auto packed_recv_topk_weights = topk_weights.has_value() ? std::optional<torch::Tensor>(torch::empty({num_local_experts, num_ranks * num_max_dispatch_tokens_per_rank}, torch::dtype(torch::kFloat32).device(torch::kCUDA))) : std::nullopt;
     auto packed_recv_rank_info = topk_weights.has_value() ? std::optional<torch::Tensor>(torch::empty({num_local_experts, num_ranks * num_max_dispatch_tokens_per_rank}, torch::dtype(torch::kInt32).device(torch::kCUDA))) : std::nullopt;
@@ -1325,8 +1329,8 @@ Buffer::low_latency_dispatch(const torch::Tensor& x, const torch::Tensor& topk_i
         }
         packed_recv_x_scales = torch::transpose(packed_recv_x_scales.value(), 1, 2);
         packed_recv_x_scales_ptr = packed_recv_x_scales->data_ptr();
-    }else if (use_nvfp4) {
-        constexpr int kNumPerChannels = 16;
+    }else if (use_nvfp4 or use_mxfp8) {
+        const int kNumPerChannels = use_mxfp8 ? 32 : 16;
         constexpr int NUM_SF_ELEMS_PER_PACK = 4;
         constexpr int mTileSize_dim_0 = 32;
         constexpr int mTileSize_dim_1 = 4;
@@ -1338,7 +1342,10 @@ Buffer::low_latency_dispatch(const torch::Tensor& x, const torch::Tensor& topk_i
         auto rm = (m + 127) / 128;
         auto rk = (hidden + (kNumPerChannels * NUM_SF_ELEMS_PER_PACK) -1 ) / (kNumPerChannels * NUM_SF_ELEMS_PER_PACK);
         // The physical layout is (l, rm, rk, 32, 4, 4).
-        if (use_ue8m0_for_sf) {
+        if (use_mxfp8) {
+            packed_recv_x_scales = torch::empty({l, rm, rk, 32, 4, 4},
+                                                x.options().dtype(torch::kUInt8));
+        } else if (use_ue8m0_for_sf) {
             packed_recv_x_scales = torch::empty({l, rm, rk, 32, 4, 4},
                                                 torch::dtype(torch::kInt).device(torch::kCUDA));
         } else {
@@ -1348,9 +1355,11 @@ Buffer::low_latency_dispatch(const torch::Tensor& x, const torch::Tensor& topk_i
         // After permute, the logical shape is (32, 4, rm, 4, rk, l)
         packed_recv_x_scales = packed_recv_x_scales.value().permute({3, 4, 1, 5, 2, 0});
 
-        // The physical layout is (l, m, k // 2).
-        // After permute, the logical shape is (m, k // 2, l).
-        packed_recv_x = packed_recv_x.permute({1, 2, 0});
+        if (use_nvfp4) {
+            // The physical layout is (l, m, k // 2).
+            // After permute, the logical shape is (m, k // 2, l).
+            packed_recv_x = packed_recv_x.permute({1, 2, 0});
+        }
 
         packed_recv_x_scales_ptr = packed_recv_x_scales->data_ptr();
         EP_HOST_ASSERT(packed_recv_x_scales_ptr != nullptr);
@@ -1375,7 +1384,7 @@ Buffer::low_latency_dispatch(const torch::Tensor& x, const torch::Tensor& topk_i
                                num_tokens, hidden, num_max_dispatch_tokens_per_rank,
                                num_topk, num_experts, rank, num_ranks,
                                use_fp8, round_scale, use_ue8m0,
-                               use_nvfp4, use_ue8m0_for_sf,
+                               use_nvfp4, use_ue8m0_for_sf, use_mxfp8,
                                workspace, num_device_sms,
                                launch_stream, phases);
     };

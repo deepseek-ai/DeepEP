@@ -644,7 +644,7 @@ class Buffer:
                              dispatch_wait_recv_cost_stats: Optional[torch.Tensor] = None,
                              x_global_scale: Optional[torch.Tensor] = None,
                              use_fp8: bool = True, round_scale: bool = False, use_ue8m0: bool = False,
-                             use_nvfp4: bool = False, use_ue8m0_for_sf: bool = False,
+                             use_nvfp4: bool = False, use_ue8m0_for_sf: bool = False, use_mxfp8: bool = False,
                              async_finish: bool = False, return_recv_hook: bool = False):
         """
         A low-latency implementation for dispatching with IBGDA.
@@ -674,6 +674,11 @@ class Buffer:
             use_ue8m0: whether use UE8M0 as scaling factor format (available only with `round_scale=True`).
             use_nvfp4: whether to enable NVFP4 casting, with this, the received data will be a tuple of NVFP4 tensor and scaling factors.
             use_ue8m0_for_sf: whether use UE8M0 as NVFP4 scaling factor format (available only with `use_nvfp4=True`).
+            use_mxfp8: quantize to E4M3 with one UE8M0 scale per 32 values on SM100 or newer.
+                Requires `use_fp8=False` and `use_nvfp4=False`. Scales are rounded up to powers of two;
+                `round_scale`, `use_ue8m0`, `use_ue8m0_for_sf` and `x_global_scale` must remain unset.
+                NaN and infinite values encode as 448. An infinity zeroes the other values of its block, while a
+                NaN leaves them and the scale unchanged unless the whole block is NaN.
             async_finish: the current stream will not wait for the communication kernels to be finished if set.
             return_recv_hook: return a receiving hook if set. If set, the kernel will just do the RDMA request issues,
                 but **without actually receiving the data**. You must call the received hook to make sure the data's arrival.
@@ -692,7 +697,13 @@ class Buffer:
                 `[num_max_dispatch_tokens_per_rank * num_ranks, hidden // 2, num_local_experts]` with `torch.uint8`.
                 The second tensor is the corresponding scales for the first element with shape
                 `[32, 4, num_max_dispatch_tokens_per_rank * num_ranks // 128, 4, hidden // 64, num_local_experts]` with `torch.float8_e4m3fn`.
-                With `use_fp8=False and use_nvfp4=False`, the result would be a tensor shaped as
+                With `use_mxfp8=True`: values have shape
+                `[num_local_experts, num_max_dispatch_tokens_per_rank * num_ranks, hidden]` with `torch.float8_e4m3fn`.
+                Scales are `torch.uint8` UE8M0 bytes with logical shape `[32, 4, ceil(capacity / 128), 4,
+                hidden // 128, num_local_experts]` and physical layout `[num_local_experts, ceil(capacity / 128),
+                hidden // 128, 32, 4, 4]`, where `capacity = num_max_dispatch_tokens_per_rank * num_ranks`.
+                Only received rows and their scales are initialized. No global scale is needed.
+                With all quantization modes disabled, the result would be a tensor shaped as
                 `[num_local_experts, num_max_dispatch_tokens_per_rank * num_ranks, hidden]` with `torch.bfloat16`.
                 Moreover, not all tokens are valid, only some of the `num_max_dispatch_tokens_per_rank * num_ranks` are,
                 as we do not synchronize CPU received count with GPU (also not incompatible with CUDA graph if synced).
@@ -710,6 +721,8 @@ class Buffer:
 
             Note: Returns 5 elements when `topk_weights=None`, 7 elements when `topk_weights` is provided.
         """
+        if use_mxfp8 and (use_fp8 or use_nvfp4 or round_scale or use_ue8m0 or use_ue8m0_for_sf or x_global_scale is not None):
+            raise ValueError('use_mxfp8 requires all other quantization options to be disabled')
         packed_recv_x, packed_recv_x_scales, packed_recv_count, packed_recv_src_info, packed_recv_layout_range, packed_recv_topk_weights, packed_recv_rank_info, event, hook = \
             self.runtime.low_latency_dispatch(x, topk_idx,
                                               topk_weights,
@@ -718,7 +731,7 @@ class Buffer:
                                               x_global_scale,
                                               num_max_dispatch_tokens_per_rank, num_experts,
                                               use_fp8, round_scale, use_ue8m0,
-                                              use_nvfp4, use_ue8m0_for_sf,
+                                              use_nvfp4, use_ue8m0_for_sf, use_mxfp8,
                                               async_finish, return_recv_hook)
         handle = (packed_recv_src_info, packed_recv_layout_range, num_max_dispatch_tokens_per_rank, x.size(1), num_experts)
         tensors_to_record = (x, topk_idx,
@@ -727,7 +740,7 @@ class Buffer:
                              packed_recv_topk_weights, packed_recv_rank_info,
                              cumulative_local_expert_recv_stats,
                              x_global_scale)
-        if use_fp8 or use_nvfp4:
+        if use_fp8 or use_nvfp4 or use_mxfp8:
             packed_recv_x = (packed_recv_x, packed_recv_x_scales)
 
         # Return format depends on whether topk_weights was provided (backward compatibility)
