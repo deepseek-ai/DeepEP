@@ -1,5 +1,6 @@
 #pragma once
 
+#include <c10/cuda/CUDAGuard.h>
 #include <c10/util/accumulate.h>
 #include <cuda_runtime.h>
 #include <memory>
@@ -133,7 +134,8 @@ public:
     }
 
     static torch::cuda::CUDAStream stream_control_prologue(const std::optional<EventHandle>& previous_event,
-                                                           const bool& allocate_on_comm_stream) {
+                                                           const bool& allocate_on_comm_stream,
+                                                           c10::cuda::OptionalCUDAStreamGuard& allocation_stream_guard) {
         // Assertion for safety
         // `previous_event` implicitly means the overlapping computation kernels are launched first,
         // in order not to use the memory on the compute stream, we must allocate on the communication stream.
@@ -145,7 +147,7 @@ public:
         // NOTES: do not allocate tensors upfront!
         const auto compute_stream = stream_control_prologue(previous_event);
         if (allocate_on_comm_stream)
-            at::cuda::setCurrentCUDAStream(comm::get_comm_stream());
+            allocation_stream_guard.reset_stream(comm::get_comm_stream());
         return compute_stream;
     }
 
@@ -386,7 +388,9 @@ public:
 
         // Stream control
         // All new tensor allocations should happen after this
-        const auto compute_stream = stream_control_prologue(previous_event, allocate_on_comm_stream);
+        // Keep the guard alive until return, including exceptions before the stream epilogue.
+        c10::cuda::OptionalCUDAStreamGuard allocation_stream_guard;
+        const auto compute_stream = stream_control_prologue(previous_event, allocate_on_comm_stream, allocation_stream_guard);
         const auto comm_stream = comm::get_comm_stream();
 
         // The number of received tokens per expert
@@ -859,7 +863,9 @@ public:
 
         // Stream control
         // All new tensor allocations should happen after this
-        const auto compute_stream = stream_control_prologue(previous_event, allocate_on_comm_stream);
+        // Keep the guard alive until return, including exceptions before the stream epilogue.
+        c10::cuda::OptionalCUDAStreamGuard allocation_stream_guard;
+        const auto compute_stream = stream_control_prologue(previous_event, allocate_on_comm_stream, allocation_stream_guard);
         const auto comm_stream = comm::get_comm_stream();
 
         // Check buffer size
