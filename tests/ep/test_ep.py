@@ -82,6 +82,12 @@ def test_dispatch_combine(buffer: deep_ep.EPBuffer, args: argparse.Namespace):
         topk_idx.masked_fill_(rand_mask < args.masked_ratio, -1)
         topk_weights.masked_fill_(topk_idx < 0, 0)
 
+    if not args.skip_check:
+        ref_y = generate_pre_combine_data(
+            dist.get_rank() * num_max_tokens_per_rank + torch.arange(num_tokens, device='cuda'),
+            num_max_tokens_per_rank, num_topk, hidden)
+        ref_y[topk_idx == -1] = 0
+
     # Run all tests
     dist_print('Running all test cases:', once_in_node=True)
     for (expert_alignment, use_fp8_dispatch, num_bias,
@@ -124,22 +130,21 @@ def test_dispatch_combine(buffer: deep_ep.EPBuffer, args: argparse.Namespace):
             else:
                 reduced_combine_recipe = (False, False)
                 combine_recipe = (True, False)
-            ref_y = generate_pre_combine_data(
-                dist.get_rank() * num_max_tokens_per_rank + torch.arange(num_tokens, device='cuda'),
-                num_max_tokens_per_rank, num_topk, hidden)
-            ref_y[topk_idx == -1] = 0
             ref_reduced_combined_y = ref_combine(
                 ref_y, topk_idx,
                 num_scaleout_ranks, num_scaleup_ranks, num_experts,
                 bias,
                 *reduced_combine_recipe
             )
-            ref_combined_y = ref_combine(
-                ref_y, topk_idx,
-                num_scaleout_ranks, num_scaleup_ranks,
-                num_experts, bias,
-                *combine_recipe
-            )  # Reduce within rank, then globally, for non-expand combine mode
+            if reduced_combine_recipe == combine_recipe:
+                ref_combined_y = ref_reduced_combined_y
+            else:
+                ref_combined_y = ref_combine(
+                    ref_y, topk_idx,
+                    num_scaleout_ranks, num_scaleup_ranks,
+                    num_experts, bias,
+                    *combine_recipe
+                )  # Reduce within rank, then globally, for non-expand combine mode
             torch.cuda.synchronize()
 
         # Do dispatch
