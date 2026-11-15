@@ -53,6 +53,10 @@ public:
     */
     std::any get_instance(std::string library_path, std::string kernel_key);
 
+    // Content hash of the generated code + compile flags, used to salt kernel
+    // cache keys so a shared cache cannot serve stale kernels from another build.
+    std::string content_salt(const std::string& code) const;
+
 
 private:
     std::string comm_id;              // hash(all ranks in the process_group)

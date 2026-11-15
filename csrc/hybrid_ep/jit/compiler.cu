@@ -8,6 +8,11 @@
 #include <pwd.h>
 #include <sys/types.h>
 #include <stdexcept>
+#include <cstdint>
+#include <fstream>
+#include <set>
+#include <vector>
+#include <iterator>
 
 inline std::string get_env(std::string name) {
     const char* env = std::getenv(name.c_str());
@@ -15,6 +20,19 @@ inline std::string get_env(std::string name) {
         return std::string("");
     }
     return std::string(env);
+}
+
+// FNV-1a 64-bit content hash, used to salt kernel cache keys so a shared
+// cache cannot serve kernels compiled from different source code or flags.
+inline std::string content_hash(const std::string& s) {
+    uint64_t hash = 1469598103934665603ULL;
+    for (unsigned char c : s) {
+        hash ^= c;
+        hash *= 1099511628211ULL;
+    }
+    char buf[17];
+    std::snprintf(buf, sizeof(buf), "%016llx", static_cast<unsigned long long>(hash));
+    return std::string(buf);
 }
 
 std::string get_jit_dir() {
@@ -28,13 +46,14 @@ std::string get_jit_dir() {
             cache_dir = "/tmp";  // Fallback 
         }
     }
-    // Use process-specific subdirectory to avoid race conditions when multiple
-    // processes compile kernels concurrently (e.g., torch.multiprocessing.spawn).
-    // Without this, one process could overwrite key.so while another loads it,
-    // causing "bad any_cast" when the wrong kernel type is loaded.
+    // Share one JIT directory across processes so that load_cached_kernels can
+    // actually hit: build() compiles into a unique temp name (timestamp + comm id)
+    // and get_instance() installs it with an atomic rename, so concurrent writers
+    // cannot corrupt each other or expose a half-written .so. Cross-version
+    // staleness is handled by salting the kernel key with a content hash of the
+    // generated code and compile flags (see NVCCCompiler::content_salt).
     std::string base_jit = cache_dir + "/.deepep/hybrid_ep/jit";
-    std::string proc_jit = base_jit + "/proc-" + std::to_string(getpid());
-    return proc_jit;
+    return base_jit;
 }
 
 NVCCCompiler::NVCCCompiler(std::string base_path, std::string comm_id): 
@@ -109,6 +128,40 @@ NVCCCompiler::NVCCCompiler(std::string base_path, std::string comm_id):
     inter_node_flags = flags + " " + include + " " + library;
 }
   
+
+std::string NVCCCompiler::content_salt(const std::string& code) const {
+    // Hash the generated code, every transitively `#include "..."`-ed source
+    // file, and the compile flags (which embed the target arch and include/lib
+    // paths), so kernels from a different DeepEP revision or build
+    // configuration get a different key instead of being silently reused from
+    // a shared cache.
+    std::string content = code + "\n" + intra_node_flags + "\n" + inter_node_flags;
+    std::vector<std::string> pending{code};
+    std::set<std::string> hashed;
+    while (!pending.empty()) {
+        const std::string text = pending.back();
+        pending.pop_back();
+        for (size_t pos = 0; pos < text.size();) {
+            const size_t h = text.find("#include \"", pos);
+            if (h == std::string::npos) break;
+            const size_t q1 = h + 10;
+            const size_t q2 = text.find('"', q1);
+            if (q2 == std::string::npos) break;
+            const std::string name = text.substr(q1, q2 - q1);
+            pos = q2 + 1;
+            if (!hashed.insert(name).second) continue;
+            for (const auto& dir : {base_path + "/backend", base_path}) {
+                std::ifstream f(dir + "/" + name, std::ios::binary);
+                if (!f) continue;
+                const std::string body((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+                content += "\n// " + name + "\n" + body;
+                pending.push_back(body);
+                break;
+            }
+        }
+    }
+    return content_hash(content);
+}
 
 std::string NVCCCompiler::build(std::string code, std::string signature, int local_rank, int node_rank, int num_of_nodes, bool enable_permute_fusion, bool enable_token_drop) {
     // Create the source directory
@@ -328,9 +381,11 @@ void KernelCache::run_preprocess_kernel(
         non_blocking
     );
     
+    auto preprocessing_code = nvcc_compiler.get_metadata_preprocessing_code(config);
+    preprocess_kernel_key += "-" + nvcc_compiler.content_salt(preprocessing_code);
+
     auto it = kernel_cache.find(preprocess_kernel_key);
     if (it == kernel_cache.end()) {
-        auto preprocessing_code = nvcc_compiler.get_metadata_preprocessing_code(config);
         auto preprocessing_path = nvcc_compiler.build(preprocessing_code, preprocess_kernel_key, local_rank, node_rank, config.num_of_nodes, fuse_permute_dispatch, enable_token_drop);
         kernel_cache[preprocess_kernel_key] = nvcc_compiler.get_instance(preprocessing_path, preprocess_kernel_key);
     }
@@ -393,10 +448,12 @@ void KernelCache::run_dispatch_kernel(
         non_blocking
     );
 
+    auto dispatch_code = nvcc_compiler.get_dispatch_code(config);
+    dispatch_kernel_key += "-" + nvcc_compiler.content_salt(dispatch_code);
+
     auto it = kernel_cache.find(dispatch_kernel_key);
     if (it == kernel_cache.end()) {
         // JIT Compile the kernel
-        auto dispatch_code = nvcc_compiler.get_dispatch_code(config);
         auto dispatch_path = nvcc_compiler.build(dispatch_code, dispatch_kernel_key, local_rank, node_rank, config.num_of_nodes, fuse_permute_dispatch, enable_token_drop);
         kernel_cache[dispatch_kernel_key] = nvcc_compiler.get_instance(dispatch_path, dispatch_kernel_key);
     }
@@ -450,10 +507,12 @@ void KernelCache::run_combine_kernel(
         non_blocking
     );
 
+    auto combine_code = nvcc_compiler.get_combine_code(config);
+    combine_kernel_key += "-" + nvcc_compiler.content_salt(combine_code);
+
     auto it = kernel_cache.find(combine_kernel_key);
     if (it == kernel_cache.end()) {
         // JIT Compile the kernel
-        auto combine_code = nvcc_compiler.get_combine_code(config);
         auto combine_path = nvcc_compiler.build(combine_code, combine_kernel_key, local_rank, node_rank, config.num_of_nodes, fuse_unpermute_combine, enable_token_drop);
         kernel_cache[combine_kernel_key] = nvcc_compiler.get_instance(combine_path, combine_kernel_key);
     }
