@@ -25,7 +25,7 @@ inline std::string get_env(std::string name) {
 // FNV-1a 64-bit content hash, used to salt kernel cache keys so a shared
 // cache cannot serve kernels compiled from different source code or flags.
 inline std::string content_hash(const std::string& s) {
-    uint64_t hash = 1469598103934665603ULL;
+    uint64_t hash = 14695981039346656037ULL;
     for (unsigned char c : s) {
         hash ^= c;
         hash *= 1099511628211ULL;
@@ -327,19 +327,30 @@ std::string NVCCCompiler::get_combine_code(HybridEpConfigInstance config) {
       )";
 }
 
-KernelCache::KernelCache(int node_rank, int local_rank, std::string base_path, std::string comm_id, bool load_cached_kernels): 
-node_rank(node_rank), local_rank(local_rank), nvcc_compiler(base_path, comm_id) {
-    // Load all cached kernels from the cache directory
+KernelCache::KernelCache(int node_rank, int local_rank, std::string base_path, std::string comm_id, bool load_cached_kernels):
+node_rank(node_rank), local_rank(local_rank), nvcc_compiler(base_path, comm_id), load_cached_kernels(load_cached_kernels) {
+    // Cached kernels are loaded lazily, keyed, in try_load_cached_kernel()
     jit_dir = get_jit_dir();
     std::filesystem::create_directories(jit_dir);
-    if(load_cached_kernels) {
-        for (const auto& entry : std::filesystem::directory_iterator(jit_dir)) {
-            if (entry.path().extension() == ".so") {
-                std::string kernel_key = entry.path().stem().string();
-                kernel_cache[kernel_key] = nvcc_compiler.get_instance(entry.path().string(), kernel_key);
-            }
-        }
+}
+
+bool KernelCache::try_load_cached_kernel(const std::string& kernel_key) {
+    if (!load_cached_kernels)
+        return false;
+    if (kernel_cache.find(kernel_key) != kernel_cache.end())
+        return true;
+    auto library_path = jit_dir + "/" + kernel_key + ".so";
+    std::error_code ec;
+    if (!std::filesystem::exists(library_path, ec))
+        return false;
+    try {
+        kernel_cache[kernel_key] = nvcc_compiler.get_instance(library_path, kernel_key);
+    } catch (const std::exception& e) {
+        printf("[Warning] Ignoring cached kernel `%s`: %s\n",
+               kernel_key.c_str(), e.what());
+        return false;
     }
+    return true;
 }
 
 void KernelCache::run_preprocess_kernel(
@@ -385,7 +396,7 @@ void KernelCache::run_preprocess_kernel(
     preprocess_kernel_key += "-" + nvcc_compiler.content_salt(preprocessing_code);
 
     auto it = kernel_cache.find(preprocess_kernel_key);
-    if (it == kernel_cache.end()) {
+    if (it == kernel_cache.end() && !try_load_cached_kernel(preprocess_kernel_key)) {
         auto preprocessing_path = nvcc_compiler.build(preprocessing_code, preprocess_kernel_key, local_rank, node_rank, config.num_of_nodes, fuse_permute_dispatch, enable_token_drop);
         kernel_cache[preprocess_kernel_key] = nvcc_compiler.get_instance(preprocessing_path, preprocess_kernel_key);
     }
@@ -452,7 +463,7 @@ void KernelCache::run_dispatch_kernel(
     dispatch_kernel_key += "-" + nvcc_compiler.content_salt(dispatch_code);
 
     auto it = kernel_cache.find(dispatch_kernel_key);
-    if (it == kernel_cache.end()) {
+    if (it == kernel_cache.end() && !try_load_cached_kernel(dispatch_kernel_key)) {
         // JIT Compile the kernel
         auto dispatch_path = nvcc_compiler.build(dispatch_code, dispatch_kernel_key, local_rank, node_rank, config.num_of_nodes, fuse_permute_dispatch, enable_token_drop);
         kernel_cache[dispatch_kernel_key] = nvcc_compiler.get_instance(dispatch_path, dispatch_kernel_key);
@@ -511,7 +522,7 @@ void KernelCache::run_combine_kernel(
     combine_kernel_key += "-" + nvcc_compiler.content_salt(combine_code);
 
     auto it = kernel_cache.find(combine_kernel_key);
-    if (it == kernel_cache.end()) {
+    if (it == kernel_cache.end() && !try_load_cached_kernel(combine_kernel_key)) {
         // JIT Compile the kernel
         auto combine_path = nvcc_compiler.build(combine_code, combine_kernel_key, local_rank, node_rank, config.num_of_nodes, fuse_unpermute_combine, enable_token_drop);
         kernel_cache[combine_kernel_key] = nvcc_compiler.get_instance(combine_path, combine_kernel_key);
