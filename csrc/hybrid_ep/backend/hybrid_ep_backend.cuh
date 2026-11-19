@@ -80,20 +80,31 @@ using Copy_t =
 // (single-node inter_node_G2S and multi-node intra_node_G2S warp groups).
 // TMA needs a 16 B aligned address and size, which a slice of E_per_rank * 4 B (e.g. 24 B for 6 experts) does not
 // have. Instead of a blocking single-thread copy from peer memory, load the 16 B aligned window that covers the
-// slice with TMA; the reduction skips the `lead` floats in front of the slice. Valid when every row starts 16 B
-// aligned and the widest window fits inside one row, so the window never leaves the row.
+// slice with TMA; the reduction skips the `lead` floats in front of the slice. Every prob row is a multiple of
+// 16 B (the dispatch and combine kernels static_assert this), so rows start 16 B aligned and the window, which
+// rounds the slice out to 16 B boundaries, always stays inside its row.
 template<int E_PER_RANK, int RANKS>
 __host__ __device__ constexpr bool prob_slice_uses_window_tma() {
   return (E_PER_RANK * sizeof(float)) % 16 != 0 &&
-         (E_PER_RANK * RANKS * sizeof(float)) % 16 == 0 &&
-         ((E_PER_RANK * sizeof(float) + 12 + 15) / 16) * 16 <= E_PER_RANK * RANKS * sizeof(float);
+         (E_PER_RANK * RANKS * sizeof(float)) % 16 == 0;
 }
 
-// Floats per G2S prob stage: the aligned window (rounded to 16 B so every stage starts 16 B aligned) or the slice.
+// Largest window, in floats, over all source ranks: the slice plus its lead, rounded up to 16 B.
+template<int E_PER_RANK, int RANKS>
+__host__ __device__ constexpr int prob_slice_max_window_floats() {
+  int max_floats = 0;
+  for (int src_rank = 0; src_rank < RANKS; ++src_rank) {
+    const int window_floats = (((src_rank * E_PER_RANK) % 4 + E_PER_RANK + 3) / 4) * 4;
+    max_floats = window_floats > max_floats ? window_floats : max_floats;
+  }
+  return max_floats;
+}
+
+// Floats per G2S prob stage: the largest window (a multiple of 16 B, so every stage starts 16 B aligned) or the slice.
 template<int E_PER_RANK, int RANKS>
 __host__ __device__ constexpr int prob_slice_g2s_slot_floats() {
   return prob_slice_uses_window_tma<E_PER_RANK, RANKS>()
-      ? (int)(((E_PER_RANK * sizeof(float) + 12 + 15) / 16) * 16 / sizeof(float))
+      ? prob_slice_max_window_floats<E_PER_RANK, RANKS>()
       : E_PER_RANK;
 }
 
@@ -2448,7 +2459,10 @@ inline __device__ void intra_node_G2S_warp_group_device_function(const int node_
                                                &smem_buffer_ptr->intra_node_mbarrier_G2S_buffer[token_stage][0]);
 
                       total_tx_size += (uint32_t)(NUM_OF_EXPERTS_PER_RANK * sizeof(float));
-                    } else if constexpr(prob_slice_uses_window_tma<NUM_OF_EXPERTS_PER_RANK, NUM_OF_RANKS_PER_NODE>()){
+                    } else {
+                      // Not 16 B sized: TMA the 16 B aligned window around the slice instead of a blocking copy.
+                      static_assert(prob_slice_uses_window_tma<NUM_OF_EXPERTS_PER_RANK, NUM_OF_RANKS_PER_NODE>(),
+                                    "The prob row must be a multiple of 16 B (experts per node multiple of 4).");
                       const int lead = prob_slice_window_lead<NUM_OF_EXPERTS_PER_RANK>(current_src_token_id);
                       const uint32_t window_bytes = (uint32_t)((((lead + NUM_OF_EXPERTS_PER_RANK) * sizeof(float) + 15) / 16) * 16);
                       cuda::ptx::cp_async_bulk(cuda::ptx::space_shared,
@@ -2459,8 +2473,6 @@ inline __device__ void intra_node_G2S_warp_group_device_function(const int node_
                                                &smem_buffer_ptr->intra_node_mbarrier_G2S_buffer[token_stage][0]);
 
                       total_tx_size += window_bytes;
-                    } else {
-                      scalar_copy_float_slice<NUM_OF_EXPERTS_PER_RANK>(local_prob_addr, remote_prob_addr);
                     }
                     // Store the source rank ID so the reduction warp group can place probs at the correct offset.
                     smem_buffer_ptr->intra_node_prob_src_rank_G2S_buffer[token_stage] = current_src_token_id;
@@ -3203,7 +3215,10 @@ inline __device__ void inter_node_G2S_warp_group_device_function(const int node_
                                                &smem_buffer_ptr->inter_node_mbarrier_G2S_buffer[token_stage][0]);
 
                       total_tx_size += (uint32_t)(NUM_OF_EXPERTS_PER_RANK * sizeof(float));
-                    } else if constexpr(prob_slice_uses_window_tma<NUM_OF_EXPERTS_PER_RANK, NUM_OF_RANKS_PER_NODE>()){
+                    } else {
+                      // Not 16 B sized: TMA the 16 B aligned window around the slice instead of a blocking copy.
+                      static_assert(prob_slice_uses_window_tma<NUM_OF_EXPERTS_PER_RANK, NUM_OF_RANKS_PER_NODE>(),
+                                    "The prob row must be a multiple of 16 B (experts per node multiple of 4).");
                       const int lead = prob_slice_window_lead<NUM_OF_EXPERTS_PER_RANK>(current_src_token_id);
                       const uint32_t window_bytes = (uint32_t)((((lead + NUM_OF_EXPERTS_PER_RANK) * sizeof(float) + 15) / 16) * 16);
                       cuda::ptx::cp_async_bulk(cuda::ptx::space_shared,
@@ -3214,8 +3229,6 @@ inline __device__ void inter_node_G2S_warp_group_device_function(const int node_
                                                &smem_buffer_ptr->inter_node_mbarrier_G2S_buffer[token_stage][0]);
 
                       total_tx_size += window_bytes;
-                    } else {
-                      scalar_copy_float_slice<NUM_OF_EXPERTS_PER_RANK>(local_prob_addr, remote_prob_addr);
                     }
                     // Store the source rank ID so the reduction warp group can place probs at the correct offset.
                     smem_buffer_ptr->inter_node_prob_src_rank_G2S_buffer[token_stage] = current_src_token_id;
