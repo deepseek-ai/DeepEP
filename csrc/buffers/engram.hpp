@@ -106,6 +106,25 @@ public:
         num_sf_packs = new_num_sf_packs;
     }
 
+    std::vector<torch::Tensor> get_storage_tensors() const {
+        EP_HOST_ASSERT(not destroyed and not num_entries_per_layer.empty());
+        EP_HOST_ASSERT(elem_size == 1 or elem_size == 2);
+        const auto dtype = elem_size == 1 ? torch::kFloat8_e4m3fn : torch::kBFloat16;
+        const auto device = context->use_cpu_rdma_storage ? torch::kCPU : torch::kCUDA;
+        // Retain the allocation itself: Context::finalize() releases its owner.
+        const auto storage_owner = context->get_symmetric_memory();
+        auto* storage_ptr = context->local_rdma_storage_ptr;
+        std::vector<torch::Tensor> storages;
+        storages.reserve(num_entries_per_layer.size());
+        for (const auto& num_entries: num_entries_per_layer) {
+            storages.push_back(torch::from_blob(
+                storage_ptr, {static_cast<int64_t>(num_entries), static_cast<int64_t>(hidden)},
+                [storage_owner](void*) {}, torch::TensorOptions().dtype(dtype).device(device)));
+            storage_ptr = math::advance_ptr(storage_ptr, storages.back().nbytes());
+        }
+        return storages;
+    }
+
     void write(const std::vector<torch::Tensor>& storages,
                const std::optional<std::vector<torch::Tensor>>& sfs) {
         comm::barrier(*context, context->barrier_signals, at::cuda::getCurrentCUDAStream(),
@@ -122,11 +141,16 @@ public:
             EP_HOST_ASSERT(num_entries == num_entries_per_layer[i] and storage_hidden == hidden);
             EP_HOST_ASSERT(storage.scalar_type() == torch::kBFloat16 or
                            storage.scalar_type() == torch::kFloat8_e4m3fn);
-            EP_HOST_ASSERT(storage.is_cuda() and storage.is_contiguous());
-            CUDA_RUNTIME_CHECK(cudaMemcpyAsync(
-                storage_ptr,
-                storage.data_ptr(), storage.nbytes(),
-                cudaMemcpyDefault, compute_stream));
+            EP_HOST_ASSERT(storage.element_size() == elem_size);
+            const auto is_local_storage = storage.data_ptr() == storage_ptr;
+            EP_HOST_ASSERT((storage.is_cuda() or (context->use_cpu_rdma_storage and is_local_storage)) and
+                           storage.is_contiguous());
+            if (not is_local_storage) {
+                CUDA_RUNTIME_CHECK(cudaMemcpyAsync(
+                    storage_ptr,
+                    storage.data_ptr(), storage.nbytes(),
+                    cudaMemcpyDefault, compute_stream));
+            }
             storage_ptr = math::advance_ptr(storage_ptr, storage.nbytes());
         }
 
@@ -309,6 +333,7 @@ static void register_apis(pybind11::module_& m) {
         .def(pybind11::init<int, int, int64_t, symmetric::shared_comm_t, int64_t, int64_t, bool, bool, std::optional<int>, int, int, int, bool>())
         .def_readonly("context", &EngramBuffer::context)
         .def("set_config", &EngramBuffer::set_config)
+        .def("get_storage_tensors", &EngramBuffer::get_storage_tensors)
         .def("write", &EngramBuffer::write)
         .def("fetch", &EngramBuffer::fetch)
         .def_static("create_shared_handle", &EngramBuffer::create_shared_handle)
