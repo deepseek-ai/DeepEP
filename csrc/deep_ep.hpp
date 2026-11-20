@@ -209,7 +209,7 @@ public:
                          const std::optional<torch::Tensor>& x_global_scale,
                          int num_max_dispatch_tokens_per_rank, int num_experts,
                          bool use_fp8, bool round_scale, bool use_ue8m0,
-                         bool use_nvfp4, bool use_ue8m0_for_sf,
+                         bool use_nvfp4, bool use_ue8m0_for_sf, bool use_mxfp8,
                          bool async, bool return_recv_hook);
 
     std::tuple<torch::Tensor, std::optional<EventHandle>, std::optional<std::function<void()>>>
