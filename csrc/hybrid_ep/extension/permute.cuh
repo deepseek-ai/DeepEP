@@ -38,6 +38,7 @@ struct PermuteArgs {
 };
 
 struct UnpermuteArgs {
+  int num_dispatched_tokens_value = -1;
   // Input tensors
   torch::Tensor permuted_tokens;
   c10::optional<torch::Tensor> permuted_probs;
