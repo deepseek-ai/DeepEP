@@ -53,6 +53,10 @@ public:
     */
     std::any get_instance(std::string library_path, std::string kernel_key);
 
+    // Content hash of the generated code + compile flags, used to salt kernel
+    // cache keys so a shared cache cannot serve stale kernels from another build.
+    std::string content_salt(const std::string& code) const;
+
 
 private:
     std::string comm_id;              // hash(all ranks in the process_group)
@@ -115,4 +119,12 @@ private:
     std::string base_path;  // The path of the installed package
     int local_rank;   // Used to generate the unique signature for each rank
     int node_rank;    // Used to generate the unique signature for each node
+    bool load_cached_kernels;
+
+    // Load a previously built kernel from the shared directory, keyed, on
+    // first use. Only the exact key is ever dlopen-ed, so artifacts left by
+    // other DeepEP builds (different content salt) can never be loaded or
+    // break startup. A cached file that fails to load is ignored and rebuilt,
+    // which also replaces the broken entry.
+    bool try_load_cached_kernel(const std::string& kernel_key);
 };
