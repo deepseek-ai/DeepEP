@@ -76,6 +76,44 @@ using Copy_t =
     >::type
   >::type;
 
+// Backward combine reads one source rank's E_per_rank prob slice out of a row of E_per_rank * ranks floats
+// (single-node inter_node_G2S and multi-node intra_node_G2S warp groups).
+// TMA needs a 16 B aligned address and size, which a slice of E_per_rank * 4 B (e.g. 24 B for 6 experts) does not
+// have. Instead of a blocking single-thread copy from peer memory, load the 16 B aligned window that covers the
+// slice with TMA; the reduction skips the `lead` floats in front of the slice. Every prob row is a multiple of
+// 16 B (the dispatch and combine kernels static_assert this), so rows start 16 B aligned and the window, which
+// rounds the slice out to 16 B boundaries, always stays inside its row.
+template<int E_PER_RANK, int RANKS>
+__host__ __device__ constexpr bool prob_slice_uses_window_tma() {
+  return (E_PER_RANK * sizeof(float)) % 16 != 0 &&
+         (E_PER_RANK * RANKS * sizeof(float)) % 16 == 0;
+}
+
+// Largest window, in floats, over all source ranks: the slice plus its lead, rounded up to 16 B.
+template<int E_PER_RANK, int RANKS>
+__host__ __device__ constexpr int prob_slice_max_window_floats() {
+  int max_floats = 0;
+  for (int src_rank = 0; src_rank < RANKS; ++src_rank) {
+    const int window_floats = (((src_rank * E_PER_RANK) % 4 + E_PER_RANK + 3) / 4) * 4;
+    max_floats = window_floats > max_floats ? window_floats : max_floats;
+  }
+  return max_floats;
+}
+
+// Floats per G2S prob stage: the largest window (a multiple of 16 B, so every stage starts 16 B aligned) or the slice.
+template<int E_PER_RANK, int RANKS>
+__host__ __device__ constexpr int prob_slice_g2s_slot_floats() {
+  return prob_slice_uses_window_tma<E_PER_RANK, RANKS>()
+      ? prob_slice_max_window_floats<E_PER_RANK, RANKS>()
+      : E_PER_RANK;
+}
+
+// Floats between the 16 B aligned window start and the slice of `src_rank`.
+template<int E_PER_RANK>
+__host__ __device__ constexpr int prob_slice_window_lead(int src_rank) {
+  return (src_rank * E_PER_RANK) % 4;
+}
+
 template<int NUM_OF_FLOATS>
 inline __device__ void scalar_copy_float_slice(float* dst, const float* src) {
   #pragma unroll
@@ -408,7 +446,8 @@ struct combine_kernel_dynamic_shared_memory_buffer_t<NUM_OF_STAGES_G2S, NUM_OF_S
 
   // Shared memory prob buffer for intra node red warp group G2S data movement. Should be 16B alignment so can be used with TMA. 128B is too strict.
   // Only used in BW combine. Only the source rank's E_per_rank slice is loaded (sparse prob optimization).
-  alignas(16) float intra_node_prob_G2S_buffer[NUM_OF_STAGES_G2S][NUM_OF_EXPERTS_PER_RANK];
+  // Holds the source rank's E_per_rank slice, through a 16 B aligned TMA window when the slice is not 16 B sized.
+  alignas(16) float intra_node_prob_G2S_buffer[NUM_OF_STAGES_G2S][prob_slice_g2s_slot_floats<NUM_OF_EXPERTS_PER_RANK, NUM_OF_RANKS_PER_NODE>()];
   // Shared memory prob buffer for intra node red warp group S2G data movement. Should be 16B alignment so can be used with TMA. 128B is too strict.
   // Only used in BW combine.
   alignas(16) float intra_node_prob_S2G_buffer[NUM_OF_STAGES_S2G][NUM_OF_EXPERTS_PER_RANK * NUM_OF_RANKS_PER_NODE];
@@ -459,8 +498,9 @@ struct combine_kernel_dynamic_shared_memory_buffer_t<NUM_OF_STAGES_G2S, NUM_OF_S
   alignas(128) uint16_t inter_node_token_S2G_buffer[NUM_OF_STAGES_S2G][HIDDEN_DIM];
 
   // Shared memory prob buffer for inter node red warp group G2S data movement. Should be 16B alignment so can be used with TMA. 128B is too strict.
-  // Only used in BW combine. Only the source rank's E_per_rank slice is loaded (sparse prob optimization).
-  alignas(16) float inter_node_prob_G2S_buffer[NUM_OF_STAGES_G2S][NUM_OF_EXPERTS_PER_RANK];
+  // Only used in BW combine. Only the source rank's E_per_rank slice is loaded (sparse prob optimization), through a
+  // 16 B aligned TMA window when the slice itself is not 16 B sized (see prob_slice_uses_window_tma).
+  alignas(16) float inter_node_prob_G2S_buffer[NUM_OF_STAGES_G2S][prob_slice_g2s_slot_floats<NUM_OF_EXPERTS_PER_RANK, NUM_OF_RANKS_PER_NODE>()];
   // Shared memory prob buffer for inter node red warp group S2G data movement. Should be 16B alignment so can be used with TMA. 128B is too strict.
   // Only used in BW combine.
   alignas(16) float inter_node_prob_S2G_buffer[NUM_OF_STAGES_S2G][NUM_OF_EXPERTS_PER_RANK * NUM_OF_RANKS_PER_NODE];
@@ -2420,7 +2460,19 @@ inline __device__ void intra_node_G2S_warp_group_device_function(const int node_
 
                       total_tx_size += (uint32_t)(NUM_OF_EXPERTS_PER_RANK * sizeof(float));
                     } else {
-                      scalar_copy_float_slice<NUM_OF_EXPERTS_PER_RANK>(local_prob_addr, remote_prob_addr);
+                      // Not 16 B sized: TMA the 16 B aligned window around the slice instead of a blocking copy.
+                      static_assert(prob_slice_uses_window_tma<NUM_OF_EXPERTS_PER_RANK, NUM_OF_RANKS_PER_NODE>(),
+                                    "The prob row must be a multiple of 16 B (experts per node multiple of 4).");
+                      const int lead = prob_slice_window_lead<NUM_OF_EXPERTS_PER_RANK>(current_src_token_id);
+                      const uint32_t window_bytes = (uint32_t)((((lead + NUM_OF_EXPERTS_PER_RANK) * sizeof(float) + 15) / 16) * 16);
+                      cuda::ptx::cp_async_bulk(cuda::ptx::space_shared,
+                                               cuda::ptx::space_global,
+                                               reinterpret_cast<void*>(local_prob_addr),
+                                               reinterpret_cast<const void*>(remote_prob_addr - lead),
+                                               window_bytes,
+                                               &smem_buffer_ptr->intra_node_mbarrier_G2S_buffer[token_stage][0]);
+
+                      total_tx_size += window_bytes;
                     }
                     // Store the source rank ID so the reduction warp group can place probs at the correct offset.
                     smem_buffer_ptr->intra_node_prob_src_rank_G2S_buffer[token_stage] = current_src_token_id;
@@ -2639,12 +2691,17 @@ inline __device__ void intra_node_red_warp_group_device_function(const int node_
               // Read the source rank ID and accumulate into the correct position in acc_prob.
               int src_rank = smem_buffer_ptr->intra_node_prob_src_rank_G2S_buffer[token_stage];
               int prob_offset = src_rank * NUM_OF_EXPERTS_PER_RANK;
+              // With the aligned-window load, the slice starts `lead` floats into the SMEM buffer.
+              int window_lead = 0;
+              if constexpr(prob_slice_uses_window_tma<NUM_OF_EXPERTS_PER_RANK, NUM_OF_RANKS_PER_NODE>()){
+                window_lead = prob_slice_window_lead<NUM_OF_EXPERTS_PER_RANK>(src_rank);
+              }
               #pragma unroll
               for(int n = 0; n < NUM_OF_PROB_VEC_ELEMENT_PER_THREAD; n++){
                 int global_element_id = INTRA_NODE_RED_GROUP::thread_rank() + n * INTRA_NODE_RED_GROUP::size();
                 int local_element_id = global_element_id - prob_offset;
                 if(local_element_id >= 0 && local_element_id < NUM_OF_EXPERTS_PER_RANK){
-                  acc_prob[n] += load_prob_base_ptr[local_element_id];
+                  acc_prob[n] += load_prob_base_ptr[local_element_id + window_lead];
                 }
               }
             }
@@ -3159,7 +3216,19 @@ inline __device__ void inter_node_G2S_warp_group_device_function(const int node_
 
                       total_tx_size += (uint32_t)(NUM_OF_EXPERTS_PER_RANK * sizeof(float));
                     } else {
-                      scalar_copy_float_slice<NUM_OF_EXPERTS_PER_RANK>(local_prob_addr, remote_prob_addr);
+                      // Not 16 B sized: TMA the 16 B aligned window around the slice instead of a blocking copy.
+                      static_assert(prob_slice_uses_window_tma<NUM_OF_EXPERTS_PER_RANK, NUM_OF_RANKS_PER_NODE>(),
+                                    "The prob row must be a multiple of 16 B (experts per node multiple of 4).");
+                      const int lead = prob_slice_window_lead<NUM_OF_EXPERTS_PER_RANK>(current_src_token_id);
+                      const uint32_t window_bytes = (uint32_t)((((lead + NUM_OF_EXPERTS_PER_RANK) * sizeof(float) + 15) / 16) * 16);
+                      cuda::ptx::cp_async_bulk(cuda::ptx::space_shared,
+                                               cuda::ptx::space_global,
+                                               reinterpret_cast<void*>(local_prob_addr),
+                                               reinterpret_cast<const void*>(remote_prob_addr - lead),
+                                               window_bytes,
+                                               &smem_buffer_ptr->inter_node_mbarrier_G2S_buffer[token_stage][0]);
+
+                      total_tx_size += window_bytes;
                     }
                     // Store the source rank ID so the reduction warp group can place probs at the correct offset.
                     smem_buffer_ptr->inter_node_prob_src_rank_G2S_buffer[token_stage] = current_src_token_id;
@@ -3477,12 +3546,17 @@ inline __device__ void inter_node_red_warp_group_device_function(const int node_
               // Read the source rank ID and accumulate into the correct position in acc_prob[0].
               int src_rank = smem_buffer_ptr->inter_node_prob_src_rank_G2S_buffer[token_stage];
               int prob_offset = src_rank * NUM_OF_EXPERTS_PER_RANK;
+              // With the aligned-window load, the slice starts `lead` floats into the SMEM buffer.
+              int window_lead = 0;
+              if constexpr(prob_slice_uses_window_tma<NUM_OF_EXPERTS_PER_RANK, NUM_OF_RANKS_PER_NODE>()){
+                window_lead = prob_slice_window_lead<NUM_OF_EXPERTS_PER_RANK>(src_rank);
+              }
               #pragma unroll
               for(int n = 0; n < NUM_OF_PROB_VEC_ELEMENT_PER_THREAD; n++){
                 int global_element_id = thread_rank_within_pipeline + n * NUM_OF_THREADS_PER_PIPELINE;
                 int local_element_id = global_element_id - prob_offset;
                 if(local_element_id >= 0 && local_element_id < NUM_OF_EXPERTS_PER_RANK){
-                  acc_prob[0][n] += load_prob_base_ptr[local_element_id];
+                  acc_prob[0][n] += load_prob_base_ptr[local_element_id + window_lead];
                 }
               }
             }
