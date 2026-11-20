@@ -150,8 +150,20 @@ class EngramBuffer(BufferBase):
         self.runtime.set_config(num_entries_per_layer, hidden, dtype.itemsize,
                                 num_max_tokens, num_entries_per_token, num_sf_packs)
 
+    def get_storage_tensors(self) -> List[torch.Tensor]:
+        """Return writable views of this rank's tables after ``set_config()``.
+
+        Views follow the configured layer order, shape ``[num_entries, hidden]``
+        and dtype on CPU or CUDA, according to ``use_cpu_rdma_storage``. FP8 scales
+        still go to ``write()`` separately. Finish loading before write/fetch,
+        and release views before reconfiguring. Views retain the allocation after
+        destroy, so release them promptly to reclaim the communication memory.
+        """
+        return self.runtime.get_storage_tensors()
+
     def write(self, storages: List[torch.Tensor],
               sfs: Optional[List[torch.Tensor]] = None) -> None:
+        """Copy tables and scales; tables already in their final storage are reused."""
         self.runtime.write(storages, sfs)
 
     def fetch(self, indices: torch.Tensor, num_qps: int = 0,

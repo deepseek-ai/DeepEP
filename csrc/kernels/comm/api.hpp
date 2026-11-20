@@ -80,6 +80,11 @@ public:
 
     void* get_sym_ptr(void* ptr, const int& dst_nvl_rank_idx) const;
 
+    std::shared_ptr<symmetric::SymmetricMemory> get_symmetric_memory() const {
+        EP_HOST_ASSERT(not finalized);
+        return symmetric_memory;
+    }
+
     void set_barrier_signals(void* ptr) {
         barrier_signals = ptr;
     }

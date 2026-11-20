@@ -54,6 +54,16 @@ def test(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
         local_storages.append(local_storage)
 
     buffer.write(local_storages, sfs=sfs)
+    # Check ordinary writes, then exercise in-place loading on the storage device.
+    storage_views = buffer.get_storage_tensors()
+    storage_device = torch.device('cpu') if args.use_cpu_rdma_storage else torch.device('cuda', torch.cuda.current_device())
+    for view, source, repeated in zip(storage_views, local_storages, buffer.get_storage_tensors(), strict=True):
+        assert view.shape == source.shape and view.dtype == source.dtype
+        assert view.device == storage_device and view.is_contiguous()
+        assert view.data_ptr() == repeated.data_ptr()
+        assert torch.equal(view.view(torch.uint8), source.view(torch.uint8).to(view.device))
+        view.copy_(source)
+    buffer.write(storage_views, sfs=sfs)
 
     def gen_indices():
         indices_per_layer = []
@@ -127,6 +137,10 @@ def test(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
 
     # Destroy the runtime and communication group
     buffer.destroy()
+    # Live views retain the mapping after communication is destroyed.
+    for view, source in zip(storage_views, local_storages, strict=True):
+        assert torch.equal(view.view(torch.uint8), source.view(torch.uint8).to(view.device))
+    del view, repeated, storage_views
     dist.destroy_process_group()
 
 
