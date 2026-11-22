@@ -23,7 +23,8 @@ engram_fetch_wait_impl(const ncclDevComm_t nccl_dev_comm,
 
         auto last_gin_req_int4 = __ldg(reinterpret_cast<int4*>(last_gin_requests + peer_context_idx));
         auto last_gin_req = *reinterpret_cast<ncclGinRequest_t*>(&last_gin_req_int4);
-        gin.wait(last_gin_req, cuda::memory_order_relaxed);
+        // Acquire pairs with the GIN completion signal so the fetched payload is visible.
+        gin.wait(last_gin_req, cuda::memory_order_acquire);
     }
 }
 
