@@ -399,6 +399,7 @@ class EPBuffer(BufferBase):
 
     def _register_deferred_epilogue(self, buffer_idx: int, event: EventOverlap, epilogue: Callable[[], tuple]) -> None:
         pending = object()
+        completed = torch.cuda.Event()
 
         def finish():
             if self._pending_epilogues[buffer_idx] is not pending:
@@ -406,7 +407,7 @@ class EPBuffer(BufferBase):
             stream = torch.cuda.current_stream()
             try:
                 result = epilogue()
-                completed = stream.record_event()
+                completed.record(stream)
             except Exception:
                 # The producer must finish writing host counts before another dispatch clears them.
                 stream.synchronize()
@@ -416,7 +417,7 @@ class EPBuffer(BufferBase):
             self._pending_epilogues[buffer_idx] = None
             return result
 
-        event.register_hook_after_wait(finish)
+        event.register_hook_after_wait(finish, completion_event=completed)
         self._pending_epilogues[buffer_idx] = pending
 
     def destroy(self) -> None:
@@ -827,8 +828,10 @@ class EPBuffer(BufferBase):
                     if recv_view is not None:
                         recv_view._mark_ready()
                 except Exception:
-                    if async_view:
+                    if recv_view is not None:
+                        # A partial sort may still use metadata allocated on the communication stream.
                         torch.cuda.current_stream().synchronize()
+                    if async_view:
                         self._active_recv_views[buffer_idx] = None
                     raise
 

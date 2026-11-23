@@ -133,7 +133,12 @@ def test_recv_view(group: dist.ProcessGroup, deterministic: bool, asynchronous: 
     rejected(lambda: buffer.dispatch(fp8, borrow_recv=True, **kwargs), ValueError)
     if deterministic and not with_weights and not skew:
         with patch.object(deep_ep.EPHandle, 'deterministic_sort', side_effect=torch.OutOfMemoryError('Injected sort OOM')):
-            rejected(lambda: dispatch(True), torch.OutOfMemoryError)
+            def fail_sort():
+                result = buffer.dispatch(x, borrow_recv=True, **(kwargs | dict(allocate_on_comm_stream=True)))
+                if asynchronous:
+                    result[-1].wait()
+
+            rejected(fail_sort, torch.OutOfMemoryError)
         view, _, _, _ = dispatch(True)
         view.release()
     dist.barrier(group=group)
@@ -209,13 +214,14 @@ def test_double_buffer(group: dist.ProcessGroup):
 
 def test_deferred_slots(group: dist.ProcessGroup):
     rank, world = group.rank(), group.size()
-    tokens, hidden, topk = 64, 256, 2
+    capacity, tokens, hidden, topk = 128, 64, 256, 2
     x = torch.arange(tokens, device='cuda', dtype=torch.bfloat16).unsqueeze(1).expand(tokens, hidden).contiguous()
     other_x = x + 100
+    cross_stream_copy = torch.empty_like(x)
     indices = torch.arange(rank * topk, (rank + 1) * topk, device='cuda', dtype=deep_ep.topk_idx_t).repeat(tokens, 1)
     half_indices = indices.clone()
     half_indices[tokens // 2:] = -1
-    buffer = deep_ep.EPBuffer(group, num_max_tokens_per_rank=tokens, hidden=hidden, num_topk=topk,
+    buffer = deep_ep.EPBuffer(group, num_max_tokens_per_rank=capacity, hidden=hidden, num_topk=topk,
                               num_buffers=2, deterministic=True, explicitly_destroy=True)
     launch_args = dict(async_with_compute_stream=True, allocate_on_comm_stream=True)
     dispatch_args = dict(num_experts=world * topk, num_sms=8, **launch_args)
@@ -235,11 +241,14 @@ def test_deferred_slots(group: dist.ProcessGroup):
     with torch.cuda.stream(waiter):
         torch.cuda._sleep(32_000_000)
         first, _, _, handle = late_dispatch.wait()
+    assert late_dispatch.wait() is None
+    cross_stream_copy.copy_(first)
     second, _, _, _, event = buffer.dispatch(other_x, topk_idx=indices, buffer_idx=0, previous_event=ready, **dispatch_args)
     event.wait()
     torch.cuda.current_stream().wait_stream(waiter)
     assert handle.num_recv_tokens_per_expert_list == [tokens] * topk
     exact(first, x)
+    exact(cross_stream_copy, x)
     exact(second, other_x)
 
     late_combine = buffer.combine(x, handle, buffer_idx=0, defer_epilogue=True, **launch_args)

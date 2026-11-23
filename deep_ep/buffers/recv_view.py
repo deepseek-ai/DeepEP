@@ -17,6 +17,7 @@ class DispatchRecvView:
         self._row_indices = row_indices
         self._buffer_idx = buffer_idx
         self._ready_event: Optional[torch.cuda.Event] = None
+        self._ready_stream: Optional[torch.cuda.Stream] = None
 
     @property
     def slab(self) -> torch.Tensor:
@@ -45,11 +46,12 @@ class DispatchRecvView:
             'Consumer streams must be on the receive-view device'
         events = []
         for stream in consumer_streams:
-            stream.wait_event(self._ready_event)
+            if stream != self._ready_stream:
+                stream.wait_event(self._ready_event)
             self._row_indices.record_stream(stream)
             events.append(stream.record_event())
         self._owner._release_recv_view(self._buffer_idx, tuple(events))
-        self._owner = self._slab = self._row_indices = self._ready_event = None
+        self._owner = self._slab = self._row_indices = self._ready_event = self._ready_stream = None
 
     def _check_ready(self) -> None:
         if self._slab is None:
@@ -58,4 +60,6 @@ class DispatchRecvView:
             raise RuntimeError('Wait the dispatch event before consuming the receive view')
 
     def _mark_ready(self) -> None:
-        self._ready_event = torch.cuda.current_stream(self._slab.device).record_event()
+        stream = torch.cuda.current_stream(self._slab.device)
+        self._ready_event = stream.record_event()
+        self._ready_stream = stream
