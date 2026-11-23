@@ -2,6 +2,7 @@
 
 #include <c10/util/accumulate.h>
 #include <cuda_runtime.h>
+#include <limits>
 #include <memory>
 #include <vector>
 #include <pybind11/functional.h>
@@ -21,9 +22,14 @@
 namespace deep_ep::ep {
 
 class EPBuffer: public BufferBase {
-    // Buffer bytes exclude workspace
-    // Memory layout: [Workspace, buffer]
-    int64_t num_buffer_bytes;
+    // Memory layout: [Workspace, EP buffer slot(s), LB storage]
+    int64_t num_buffer_bytes;  // Per slot
+    int num_buffers;
+
+    void* get_buffer(const int& buffer_idx) const {
+        EP_HOST_ASSERT(buffer_idx >= 0 and buffer_idx < num_buffers);
+        return math::advance_ptr(context->buffer, num_buffer_bytes * buffer_idx);
+    }
 
     // Host workspace
     void *host_workspace, *mapped_host_workspace;
@@ -57,22 +63,32 @@ public:
              const bool& prefer_overlap_with_compute,
              const std::optional<int>& sl_idx, const int& num_allocated_qps,
              const int& num_cpu_timeout_secs, const int& num_gpu_timeout_secs,
-             const bool& explicitly_destroy):
+             const bool& explicitly_destroy, const int& num_buffers):
         BufferBase(explicitly_destroy),
         num_buffer_bytes(num_buffer_bytes),
+        num_buffers(num_buffers),
         allow_hybrid_mode(allow_hybrid_mode),
         allow_multiple_reduction(allow_multiple_reduction),
         prefer_overlap_with_compute(prefer_overlap_with_compute) {
         EP_HOST_ASSERT(num_buffer_bytes > 0 and num_buffer_bytes % kNumAllocationAlignmentBytes == 0);
         EP_HOST_ASSERT(num_lb_buffer_bytes >= 0 and num_lb_buffer_bytes % kNumAllocationAlignmentBytes == 0);
+        EP_HOST_ASSERT(num_buffers == 1 or num_buffers == 2);
+        if (num_buffers == 2) {
+            const auto [num_rdma_ranks, num_nvl_ranks] = comm::get_physical_domain_size(nccl_comm);
+            EP_HOST_ASSERT(num_rdma_ranks == 1 and num_nvl_ranks == num_ranks and
+                           "Two EP buffer slots require a single NVLink domain");
+        }
 
         // Workspace is aligned to 2 MB so that it sits cleanly at the front of the GPU segment
         const auto num_workspace_bytes = math::align<int64_t>(
             layout::EPWorkspaceLayout::get_num_bytes(), kNumAllocationAlignmentBytes);
+        EP_HOST_ASSERT(num_buffer_bytes <=
+                       (std::numeric_limits<int64_t>::max() - num_workspace_bytes - num_lb_buffer_bytes) / num_buffers);
+        const auto num_ep_bytes = num_buffer_bytes * num_buffers;
 
         context = std::make_shared<comm::Context>(
             nccl_comm, symmetric::shared_comm_t{}, num_ranks, rank_idx,
-            num_workspace_bytes, num_buffer_bytes + num_lb_buffer_bytes, 0, true,
+            num_workspace_bytes, num_ep_bytes + num_lb_buffer_bytes, 0, true,
             allow_hybrid_mode, sl_idx, num_allocated_qps,
             0, num_cpu_timeout_secs, num_gpu_timeout_secs);
         main_context = context;
@@ -81,9 +97,9 @@ public:
 
         // Expose only the LB region; the preceding bytes remain reserved for EP communication.
         lb_storage = torch::from_blob(
-            context->buffer, {num_buffer_bytes + num_lb_buffer_bytes}, [context = context](void*) {},
+            context->buffer, {num_ep_bytes + num_lb_buffer_bytes}, [context = context](void*) {},
             torch::TensorOptions().dtype(torch::kByte).device(torch::kCUDA)
-        ).narrow(0, num_buffer_bytes, num_lb_buffer_bytes);
+        ).narrow(0, num_ep_bytes, num_lb_buffer_bytes);
 
         // Allocate host workspaces
         CUDA_RUNTIME_CHECK(cudaMallocHost(&host_workspace, layout::EPWorkspaceLayout::get_num_bytes(), cudaHostAllocMapped));
@@ -307,7 +323,8 @@ public:
              const bool& do_cpu_sync,
              const bool& do_expand, const bool& do_zero_padding,
              const bool& use_tma_aligned_col_major_sf,
-             const bool& defer_epilogue, const bool& materialize_recv_x) const {
+             const bool& defer_epilogue, const bool& materialize_recv_x, const int& buffer_idx) const {
+        const auto buffer = get_buffer(buffer_idx);
         EP_HOST_ASSERT(materialize_recv_x or (context->num_scaleout_ranks == 1 and context->num_rdma_ranks == 1 and not do_expand and
                        not sf.has_value() and x.scalar_type() == torch::kBFloat16 and
                        do_cpu_sync and not cached_num_recv_tokens.has_value() and not defer_epilogue));
@@ -573,7 +590,7 @@ public:
                         num_sf_packs, sf_token_stride, sf_hidden_stride,
                         num_experts, num_topk, expert_alignment,
                         context->dev_comm, context->window,
-                        context->buffer,
+                        buffer,
                         context->workspace, mapped_host_workspace,
                         context->scaleout_rank_idx, context->scaleup_rank_idx,
                         context->num_scaleout_ranks, context->num_scaleup_ranks,
@@ -728,7 +745,7 @@ public:
             EP_HOST_ASSERT(psum_num_recv_tokens_per_expert.size(0) == num_local_experts);
 
             // Launch copy kernels with full SMs
-            launch_dispatch_copy_epilogue(context->buffer, context->workspace,
+            launch_dispatch_copy_epilogue(buffer, context->workspace,
                                           psum_num_recv_tokens_per_scaleup_rank.data_ptr<int>(),
                                           psum_num_recv_tokens_per_expert.data_ptr<int>(),
                                           recv_x.has_value() ? recv_x->data_ptr() : nullptr, recv_sf_ptr,
@@ -796,14 +813,14 @@ public:
     }
 
     torch::Tensor get_dispatch_recv_slab(const torch::Tensor& x, const int& num_topk,
-                                         const int& num_max_tokens_per_rank) const {
+                                         const int& num_max_tokens_per_rank, const int& buffer_idx) const {
         EP_HOST_ASSERT(not destroyed and context->num_scaleout_ranks == 1 and context->num_rdma_ranks == 1);
         EP_HOST_ASSERT(x.is_cuda() and x.scalar_type() == torch::kBFloat16 and x.dim() == 2);
         const auto token_layout = layout::TokenLayout(x.size(1) * x.element_size(), 0, num_topk, true);
         const auto slots = static_cast<int64_t>(context->num_scaleup_ranks) * num_max_tokens_per_rank;
         const auto stride_bytes = token_layout.get_num_bytes<false, int64_t>();
-        EP_HOST_ASSERT(slots * stride_bytes <= context->num_gpu_buffer_bytes);
-        return torch::from_blob(context->buffer, {slots, x.size(1)},
+        EP_HOST_ASSERT(slots * stride_bytes <= num_buffer_bytes);
+        return torch::from_blob(get_buffer(buffer_idx), {slots, x.size(1)},
                                 {stride_bytes / static_cast<int64_t>(x.element_size()), 1}, x.options());
     }
 
@@ -824,7 +841,8 @@ public:
             const bool& async_with_compute_stream,
             const bool& allocate_on_comm_stream,
             const bool& use_expanded_layout,
-            const bool& defer_epilogue) const {
+            const bool& defer_epilogue, const int& buffer_idx) const {
+        const auto buffer = get_buffer(buffer_idx);
         // Check SM count
         EP_HOST_ASSERT(num_sms > 0 and num_sms <= jit->device.get_num_sms());
         EP_HOST_ASSERT((num_sms > 1 or context->num_scaleout_ranks == 1 or context->num_scaleup_ranks == 1) and
@@ -923,7 +941,7 @@ public:
             token_metadata_at_forward_ptr,
             channel_linked_list_ptr,
             context->dev_comm, context->window,
-            context->buffer, context->workspace,
+            buffer, context->workspace,
             num_reduced_tokens, num_max_tokens_per_rank,
             hidden, num_experts, num_topk,
             num_qps, context->num_gpu_timeout_cycles,
@@ -1104,7 +1122,7 @@ public:
 
 static void register_apis(pybind11::module_& m) {
     pybind11::class_<EPBuffer, BufferBase>(m, "EPBuffer")
-        .def(pybind11::init<int, int, int64_t, int64_t, int64_t, bool, bool, bool, std::optional<int>, int, int, int, bool>())
+        .def(pybind11::init<int, int, int64_t, int64_t, int64_t, bool, bool, bool, std::optional<int>, int, int, int, bool, int>())
         .def_readonly("context", &EPBuffer::context)
         .def_readonly("lb_storage", &EPBuffer::lb_storage)
         .def("dispatch", &EPBuffer::dispatch)

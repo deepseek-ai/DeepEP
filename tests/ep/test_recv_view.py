@@ -134,6 +134,73 @@ def test_recv_view(group: dist.ProcessGroup, deterministic: bool, asynchronous: 
     buffer.destroy()
 
 
+def test_double_buffer(group: dist.ProcessGroup):
+    rank, world = group.rank(), group.size()
+    capacity, hidden, topk = 128, 256, 2
+    tokens = world * (capacity // world // 2)
+    row = torch.arange(tokens, device='cuda')
+    indices = (2 * (row[:, None] % world) + torch.arange(topk, device='cuda')).to(deep_ep.topk_idx_t)
+    x = (1 + rank * capacity + row[:, None]).expand(tokens, hidden).to(torch.bfloat16).contiguous()
+    other_x = -x
+    expert_output = torch.ones_like(x)
+    slot_bytes = deep_ep.EPBuffer.get_buffer_size_hint(group, capacity, hidden, topk)
+    lb_plan = deep_ep.BufferAllocator()
+    lb_storage = lb_plan.allocate((128,), torch.uint8)
+    buffer = deep_ep.EPBuffer(group, num_bytes=slot_bytes, num_max_tokens_per_rank=capacity,
+                              num_buffers=2, lb_allocation_plan_or_num_bytes=lb_plan, explicitly_destroy=True)
+    lb_storage.fill_(39)
+    assert buffer.num_bytes == 2 * slot_bytes
+    ready = buffer.capture()
+    async_args = dict(previous_event=ready, allocate_on_comm_stream=True, async_with_compute_stream=True)
+    dispatch_args = dict(topk_idx=indices, num_experts=2 * world, num_sms=8, borrow_recv=True, **async_args)
+
+    reader = torch.cuda.Stream()
+    for release_before_dispatch in (False, True):
+        view0, _, _, handle0, event0 = buffer.dispatch(x, buffer_idx=0, **dispatch_args)
+        event0.wait()
+        ptr0 = view0.slab.data_ptr()
+        with torch.cuda.stream(reader):
+            view0.wait()
+            if release_before_dispatch:
+                # The first iteration warms both communication paths before the delayed read.
+                torch.cuda._sleep(512_000_000)
+            payload0 = view0.slab.index_select(0, view0.row_indices)
+            reader_done = reader.record_event()
+        if release_before_dispatch:
+            view0.release(reader)
+
+        view1, _, _, handle1, event1 = buffer.dispatch(other_x, buffer_idx=1, **dispatch_args)
+        event1.wait()
+        assert view1.slab.data_ptr() == ptr0 + slot_bytes
+        assert lb_storage.data_ptr() == ptr0 + 2 * slot_bytes
+        rejected(lambda: buffer.combine(expert_output, handle1, buffer_idx=1, **async_args), RuntimeError)
+        rejected(buffer.destroy, RuntimeError)
+        if release_before_dispatch:
+            torch.cuda.current_stream().synchronize()
+            assert not reader_done.query(), 'Dispatch on slot 1 waited for the slot 0 reader'
+        else:
+            rejected(lambda: buffer.dispatch(other_x, buffer_idx=0, **dispatch_args), RuntimeError)
+            view0.release(reader)
+
+        combined0, _, event = buffer.combine(expert_output, handle0, buffer_idx=0, **async_args)
+        event.wait()
+        torch.cuda.current_stream().wait_event(reader_done)
+        expected0 = (1 + handle0.recv_src_metadata[:, :1]).expand_as(payload0).to(x.dtype)
+        exact(payload0, expected0)
+        payload1 = view1.slab.index_select(0, view1.row_indices)
+        expected1 = -(1 + handle1.recv_src_metadata[:, :1]).expand_as(payload1).to(x.dtype)
+        exact(payload1, expected1)
+        view1.release()
+        combined1, _, event = buffer.combine(expert_output, handle1, buffer_idx=1, **async_args)
+        event.wait()
+        exact(combined0, expert_output)
+        exact(combined1, expert_output)
+
+    exact(lb_storage, torch.full_like(lb_storage, 39))
+    rejected(lambda: buffer.dispatch(x, buffer_idx=2, **dispatch_args), ValueError)
+    buffer.destroy()
+
+
 # noinspection PyUnusedLocal
 def test_loop(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
     rank, num_ranks, group = init_dist(local_rank, num_local_ranks)
@@ -145,6 +212,8 @@ def test_loop(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
                 for skew in (False, True):
                     test_recv_view(group, deterministic, asynchronous, with_weights, skew)
                     dist_print(f'PASS {deterministic=} {asynchronous=} {with_weights=} {skew=}', once_in_node=True)
+    test_double_buffer(group)
+    dist_print('PASS double-buffered receive views', once_in_node=True)
     dist.destroy_process_group()
 
 

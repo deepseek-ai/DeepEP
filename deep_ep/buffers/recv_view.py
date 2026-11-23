@@ -1,8 +1,6 @@
 import torch
 from typing import Optional
 
-from .. import comm
-
 
 class DispatchRecvView:
     """
@@ -13,10 +11,11 @@ class DispatchRecvView:
     references are invalid afterwards. Keep host calls on the same buffer serialized.
     """
 
-    def __init__(self, owner, slab: torch.Tensor, row_indices: torch.Tensor) -> None:
+    def __init__(self, owner, slab: torch.Tensor, row_indices: torch.Tensor, buffer_idx: int) -> None:
         self._owner = owner
         self._slab = slab
         self._row_indices = row_indices
+        self._buffer_idx = buffer_idx
         self._ready_event: Optional[torch.cuda.Event] = None
 
     @property
@@ -38,17 +37,18 @@ class DispatchRecvView:
 
     def release(self, *consumer_streams: torch.cuda.Stream) -> None:
         """
-        Order later communication after the consumers on the given streams (the current stream by default).
+        Order reuse of this slot after the consumers on the given streams (the current stream by default).
         """
         self._check_ready()
         consumer_streams = consumer_streams or (torch.cuda.current_stream(self._slab.device), )
-        comm_stream = comm.get_comm_stream(self._owner)
+        assert all(stream.device == self._slab.device for stream in consumer_streams), \
+            'Consumer streams must be on the receive-view device'
+        events = []
         for stream in consumer_streams:
-            assert stream.device == self._slab.device, 'Consumer streams must be on the receive-view device'
             stream.wait_event(self._ready_event)
             self._row_indices.record_stream(stream)
-            comm_stream.wait_stream(stream)
-        self._owner._active_recv_view = None
+            events.append(stream.record_event())
+        self._owner._release_recv_view(self._buffer_idx, tuple(events))
         self._owner = self._slab = self._row_indices = self._ready_event = None
 
     def _check_ready(self) -> None:
