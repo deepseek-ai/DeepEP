@@ -136,11 +136,9 @@ template <int kNumRanks, int kNumSMs, int kNumThreads, int kNumQPs, int64_t kNum
           int kNumWarps = kNumThreads / 32>
 __forceinline__ __device__ void gin_barrier_wo_local_sync(
     const NCCLGin& gin,
-    const int& scaleout_rank_idx, const int& scaleup_rank_idx,
     const int& sm_idx, const int& thread_idx) {
     const auto& nccl_dev_comm = gin.nccl_dev_comm;
     const auto global_warp_idx = sm_idx * kNumWarps + (thread_idx / 32);
-    const int& rank_idx = (std::is_same_v<team_t, ncclTeamTagWorld>) ? scaleup_rank_idx : scaleout_rank_idx;
     const int num_qps = kNumQPs == kFlushAllAllocatedQPs ? nccl_dev_comm.ginContextCount : kNumQPs;
 
     // Flush all QPs by all SMs (only needed for release semantics)
@@ -159,12 +157,23 @@ __forceinline__ __device__ void gin_barrier_wo_local_sync(
     }
 
     if (sm_idx == 0) {
-        // Use QP 0 to do barrier: signal slot `rank_idx` on every rank, then wait for every rank's slot
-        const NCCLGin barrier_gin(nccl_dev_comm, gin.nccl_window, 0, NCCL_GIN_RESOURCE_SHARING_CTA);
-        for (int i = thread_idx; i < kNumRanks; i += kNumThreads)
-            barrier_gin.signal<team_t>(i, ncclGin_SignalInc{static_cast<ncclGinSignal_t>(rank_idx)});
-        for (int i = thread_idx; i < kNumRanks; i += kNumThreads)
-            barrier_gin.wait_signal<team_t, kNumTimeoutCycles>(i, rank_idx);
+        // Fence every GIN context before publishing the barrier. A signal sent only
+        // through QP 0 can overtake data puts issued through another QP because the
+        // NIC does not order work across QPs. The NCCL barrier fence spans all
+        // contexts, so the receiver observes every preceding put before it returns.
+        if constexpr (std::is_same_v<team_t, ncclTeamTagWorld>) {
+            ncclGinBarrierSession<ncclCoopCta> barrier(
+                ncclCoopCta(), ncclGinAllContexts(nccl_dev_comm), ncclTeamTagWorld{}, kTag);
+            if (barrier.sync(ncclCoopCta(), cuda::memory_order_acq_rel, ncclGinFenceLevel::Put, kNumTimeoutCycles) !=
+                ncclSuccess)
+                ptx::trap();
+        } else {
+            ncclGinBarrierSession<ncclCoopCta> barrier(
+                ncclCoopCta(), ncclGinAllContexts(nccl_dev_comm), ncclTeamTagRail{}, kTag);
+            if (barrier.sync(ncclCoopCta(), cuda::memory_order_acq_rel, ncclGinFenceLevel::Put, kNumTimeoutCycles) !=
+                ncclSuccess)
+                ptx::trap();
+        }
     }
 }
 
@@ -179,7 +188,7 @@ __forceinline__ __device__ void scaleup_barrier_wo_local_sync(
             gin, signals, rank_idx, sm_idx, thread_idx);
     } else {
         gin_barrier_wo_local_sync<kNumRanks, kNumSMs, kNumThreads, kNumQPs, kNumTimeoutCycles, ncclTeamTagWorld, kTag, kFlushStores>(
-            gin, 1, rank_idx, sm_idx, thread_idx);
+            gin, sm_idx, thread_idx);
     }
 }
 
@@ -190,7 +199,7 @@ __forceinline__ __device__ void scaleout_barrier_wo_local_sync(
     const int& scaleout_rank_idx, const int& scaleup_rank_idx,
     const int& sm_idx, const int& thread_idx) {
     gin_barrier_wo_local_sync<kNumRanks, kNumSMs, kNumThreads, kNumQPs, kNumTimeoutCycles, ncclTeamTagRail, kTag, kFlushStores>(
-        gin, scaleout_rank_idx, scaleup_rank_idx, sm_idx, thread_idx);
+        gin, sm_idx, thread_idx);
 }
 
 template <bool kIsScaleupNVLink,

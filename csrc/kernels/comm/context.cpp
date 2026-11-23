@@ -152,6 +152,14 @@ Context::Context(const int64_t& nccl_comm, const symmetric::shared_comm_t& share
             reqs.ginTrafficClass = sl_idx.value();
         if (std::getenv("EP_OVERRIDE_RDMA_SL") != nullptr)
             reqs.ginTrafficClass = get_env<int>("EP_OVERRIDE_RDMA_SL");
+
+        // The device barrier tags are reserved in deep_ep/comm/barrier.cuh
+        // (kDeviceBarrierTag through kHybridCombineTag1).
+        constexpr int kNumGinBarrierTags = 10;
+        if (allow_hybrid_mode)
+            reqs.railGinBarrierCount = kNumGinBarrierTags;
+        else
+            reqs.worldGinBarrierCount = kNumGinBarrierTags;
     }
 #if NCCL_VERSION_CODE >= NCCL_VERSION(2, 31, 0)
     reqs.useRuntimeVersion = true;
