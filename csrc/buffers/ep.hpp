@@ -616,7 +616,8 @@ public:
 
         // Epilogue can be deferred, so it is a lambda
         auto epilogue = [=, this](const at::cuda::CUDAStream& stream,
-                                  const std::optional<std::reference_wrapper<tensor_list_t>>& tensors_to_record_opt) mutable {
+                                  const std::optional<std::reference_wrapper<tensor_list_t>>& tensors_to_record_opt,
+                                  const bool record_inputs = false) mutable {
             // Received token counters
             int num_recv_tokens = 0, num_expanded_tokens = 0;
             int counter_scaleup_rank_idx = 0, counter_local_expert_idx = 0;
@@ -746,6 +747,20 @@ public:
             }
             EP_HOST_ASSERT(psum_num_recv_tokens_per_expert.size(0) == num_local_experts);
 
+            if (record_inputs) {
+                psum_num_recv_tokens_per_scaleup_rank.record_stream(stream);
+                if (do_expand) {
+                    if (cached_mode)
+                        recv_src_metadata.record_stream(stream);
+                    else
+                        psum_num_recv_tokens_per_expert.record_stream(stream);
+                    if (do_zero_padding)
+                        num_unaligned_recv_tokens_per_expert.record_stream(stream);
+                }
+                if (context->num_scaleout_ranks > 1 and not cached_mode)
+                    channel_linked_list->record_stream(stream);
+            }
+
             // Launch copy kernels with full SMs
             launch_dispatch_copy_epilogue(buffer, context->workspace,
                                           psum_num_recv_tokens_per_scaleup_rank.data_ptr<int>(),
@@ -799,10 +814,16 @@ public:
         // NOTES: CPU sync will be deferred, too
         if (defer_epilogue) {
             EP_HOST_ASSERT(async_with_compute_stream);
+            if (cached_mode and do_expand)
+                tensors_to_record.push_back(cached_recv_src_metadata);
             const auto event = stream_control_epilogue(
                 tensors_to_record, compute_stream, allocate_on_comm_stream, true);
-            std::function<pybind11::object()> epilogue_hook = [epilogue = std::move(epilogue)]() mutable {
-                return epilogue(at::cuda::getCurrentCUDAStream(), std::nullopt);
+            // A retaining event already owns these inputs through completion of the epilogue.
+            const bool record_on_waiter = event->tensors_to_record.empty();
+            std::function<pybind11::object()> epilogue_hook =
+                [epilogue = std::move(epilogue), compute_stream, comm_stream, record_on_waiter]() mutable {
+                const auto stream = at::cuda::getCurrentCUDAStream();
+                return epilogue(stream, std::nullopt, record_on_waiter and stream != compute_stream and stream != comm_stream);
             };
             return pybind11::make_tuple(pybind11::none(), event, epilogue_hook);
         }
@@ -964,7 +985,8 @@ public:
 
         // Epilogue can be deferred, so it is a lambda
         auto epilogue = [=, this](const at::cuda::CUDAStream& stream,
-                                  const std::optional<std::reference_wrapper<tensor_list_t>>& tensors_to_record_opt) {
+                                  const std::optional<std::reference_wrapper<tensor_list_t>>& tensors_to_record_opt,
+                                  const bool record_inputs = false) {
             // Allocate output tensors
             auto combined_x = torch::empty({num_combined_tokens, hidden}, x.options());
             auto combined_topk_weights = std::optional<torch::Tensor>();
@@ -979,6 +1001,12 @@ public:
                 bias_opts[0].has_value() ? bias_opts[0]->data_ptr() : nullptr,
                 bias_opts[1].has_value() ? bias_opts[1]->data_ptr() : nullptr
             };
+            if (record_inputs) {
+                combined_topk_idx.record_stream(stream);
+                for (const auto& bias : bias_opts)
+                    if (bias.has_value())
+                        bias->record_stream(stream);
+            }
 
             // Combine pushed data
             launch_combine_reduce_epilogue(combined_x.data_ptr(),
@@ -1008,8 +1036,11 @@ public:
         if (defer_epilogue) {
             const auto event = stream_control_epilogue(
                 tensors_to_record, compute_stream, allocate_on_comm_stream, true);
-            std::function<pybind11::object()> epilogue_hook = [epilogue = std::move(epilogue)]() {
-                return epilogue(at::cuda::getCurrentCUDAStream(), std::nullopt);
+            const bool record_on_waiter = event->tensors_to_record.empty();
+            std::function<pybind11::object()> epilogue_hook =
+                [epilogue = std::move(epilogue), compute_stream, comm_stream, record_on_waiter]() {
+                const auto stream = at::cuda::getCurrentCUDAStream();
+                return epilogue(stream, std::nullopt, record_on_waiter and stream != compute_stream and stream != comm_stream);
             };
             return pybind11::make_tuple(pybind11::none(), event, epilogue_hook);
         }

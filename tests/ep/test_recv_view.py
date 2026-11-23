@@ -262,6 +262,29 @@ def test_deferred_slots(group: dist.ProcessGroup):
     exact(combined, x)
     exact(third, other_x)
     view.release()
+
+    # Allocate on the launch stream, then run the epilogue on a third stream.
+    # The reserve lets the allocator service the poison fill while the epilogue is pending.
+    launch = torch.cuda.Stream()
+    launch.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(launch):
+        bias = torch.full_like(x, 7)
+        bias_ptr = bias.data_ptr()
+        reserve = torch.empty_like(x)
+        pending = buffer.combine(x, handle, bias=bias, buffer_idx=0, defer_epilogue=True, **launch_args)
+    torch.cuda.synchronize()
+    with torch.cuda.stream(waiter):
+        torch.cuda._sleep(512_000_000)
+        biased, _ = pending.wait()
+        read_done = waiter.record_event()
+    del bias, reserve
+    buffer.get_comm_stream().synchronize()
+    with torch.cuda.stream(launch):
+        poison = torch.full_like(x, -100)
+    assert not read_done.query(), 'Deferred bias reader finished before allocator reuse was tested'
+    assert poison.data_ptr() != bias_ptr, 'Deferred epilogue bias reused before the waiter finished'
+    waiter.synchronize()
+    exact(biased, x + 7)
     buffer.destroy()
 
 
@@ -279,7 +302,7 @@ def test_loop(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
     test_double_buffer(group)
     dist_print('PASS double-buffered receive views', once_in_node=True)
     test_deferred_slots(group)
-    dist_print('PASS independent deferred slots and cross-stream slot reuse', once_in_node=True)
+    dist_print('PASS deferred slot ordering and third-stream allocator lifetime', once_in_node=True)
     dist.destroy_process_group()
 
 
