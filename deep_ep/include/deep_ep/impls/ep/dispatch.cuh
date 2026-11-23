@@ -39,7 +39,7 @@ dispatch_impl(
     const int num_tokens,
     const int sf_token_stride, const int sf_hidden_stride,
     const ncclDevComm_t nccl_dev_comm, const ncclWindow_t nccl_window, void* buffer,
-    void* workspace, void* mapped_host_workspace,
+    void* workspace, int64_t* mapped_host_recv_counts,
     const int rank_idx
 ) {
     constexpr int kNumExpertsPerRank = kNumExperts / kNumRanks;
@@ -52,7 +52,6 @@ dispatch_impl(
 
     // Workspaces
     const auto workspace_layout = layout::EPWorkspaceLayout(workspace, 1, kNumRanks, kNumExperts);
-    const auto host_workspace_layout = layout::EPWorkspaceLayout(mapped_host_workspace, 1, kNumRanks, kNumExperts);
 
     // The kernel uses a fixed space of dynamic shared memory (no static shared memory)
     extern __shared__ __align__(kNumTMAAlignmentBytes) int8_t smem[];
@@ -222,8 +221,7 @@ dispatch_impl(
             // Write host workspace
             if constexpr (kDoCPUSync) {
                 for (int i = thread_idx; i < kNumRanks + kNumExpertsPerRank; i += kNumNotifyThreads) {
-                    host_workspace_layout.get_scaleup_rank_expert_count_ptr<false>()[i] =
-                        math::encode_decode_positive(rank_expert_count[i]);
+                    mapped_host_recv_counts[i] = math::encode_decode_positive(rank_expert_count[i]);
                 }
                 __syncwarp();
             }

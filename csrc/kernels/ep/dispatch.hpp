@@ -42,7 +42,7 @@ static void launch_dispatch(void* x, void* sf,
                             const int& num_experts, const int& num_topk, const int& expert_alignment,
                             const deep_jit::NoRefPtr& nccl_dev_comm, const ncclWindow_t& nccl_window,
                             void* buffer,
-                            void* workspace, void* mapped_host_workspace,
+                            void* workspace, int64_t* mapped_host_recv_counts,
                             const int& scaleout_rank_idx, const int& scaleup_rank_idx,
                             const int& num_scaleout_ranks, const int& num_scaleup_ranks,
                             const bool& is_scaleup_nvlink,
@@ -142,7 +142,7 @@ static void __instantiate_kernel() {{
             sf_token_stride, sf_hidden_stride,
             nccl_dev_comm, nccl_window,
             buffer,
-            workspace, mapped_host_workspace,
+            workspace, mapped_host_recv_counts,
             scaleup_rank_idx
         );
     } else {
@@ -159,7 +159,7 @@ static void __instantiate_kernel() {{
             sf_token_stride, sf_hidden_stride,
             nccl_dev_comm, nccl_window,
             buffer,
-            workspace, mapped_host_workspace,
+            workspace, mapped_host_recv_counts,
             scaleout_rank_idx, scaleup_rank_idx
         );
     }

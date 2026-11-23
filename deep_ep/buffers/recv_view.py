@@ -58,5 +58,4 @@ class DispatchRecvView:
             raise RuntimeError('Wait the dispatch event before consuming the receive view')
 
     def _mark_ready(self) -> None:
-        self._ready_event = torch.cuda.Event()
-        self._ready_event.record(torch.cuda.current_stream(self._slab.device))
+        self._ready_event = torch.cuda.current_stream(self._slab.device).record_event()

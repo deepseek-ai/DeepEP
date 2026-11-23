@@ -31,8 +31,9 @@ class EPBuffer: public BufferBase {
         return math::advance_ptr(context->buffer, num_buffer_bytes * buffer_idx);
     }
 
-    // Host workspace
-    void *host_workspace, *mapped_host_workspace;
+    // Mapped host receive counts. Each slot stores its rank counts followed by its local expert counts.
+    static constexpr int kNumHostRecvCounts = kNumMaxRanks + layout::EPSignals::kNumMaxExpertsPerRank;
+    void *host_recv_counts, *mapped_host_recv_counts;
 
     // Whether to use hybrid mode (scale-out with scale-up)
     bool allow_hybrid_mode;
@@ -101,10 +102,9 @@ public:
             torch::TensorOptions().dtype(torch::kByte).device(torch::kCUDA)
         ).narrow(0, num_ep_bytes, num_lb_buffer_bytes);
 
-        // Allocate host workspaces
-        CUDA_RUNTIME_CHECK(cudaMallocHost(&host_workspace, layout::EPWorkspaceLayout::get_num_bytes(), cudaHostAllocMapped));
-        CUDA_RUNTIME_CHECK(cudaHostGetDevicePointer(&mapped_host_workspace, host_workspace, 0));
-        std::memset(host_workspace, 0, layout::EPWorkspaceLayout::get_num_bytes());
+        // Allocate mapped receive counts for all slots.
+        CUDA_RUNTIME_CHECK(cudaMallocHost(&host_recv_counts, num_buffers * kNumHostRecvCounts * sizeof(int64_t), cudaHostAllocMapped));
+        CUDA_RUNTIME_CHECK(cudaHostGetDevicePointer(&mapped_host_recv_counts, host_recv_counts, 0));
 
         // We should call a barrier at the end
         // The barrier should be called by Python `dist.barrier`
@@ -122,8 +122,7 @@ public:
         comm::barrier(*context, context->barrier_signals, at::cuda::getCurrentCUDAStream(),
                       context->num_gpu_timeout_cycles, true, true);
 
-        // Deallocate host workspaces
-        CUDA_RUNTIME_CHECK(cudaFreeHost(host_workspace));
+        CUDA_RUNTIME_CHECK(cudaFreeHost(host_recv_counts));
 
         // Destroy NCCL context
         context->finalize();
@@ -359,6 +358,8 @@ public:
         const auto [num_tokens, hidden] = get_shape<2>(x);
         const auto num_hidden_bytes = hidden * static_cast<int>(x.element_size());
         const auto num_local_experts = num_experts / context->num_ranks;
+        EP_HOST_ASSERT(num_experts >= 0 and num_experts <= layout::EPSignals::kNumMaxExperts and
+                       num_experts % context->num_ranks == 0 and num_local_experts <= layout::EPSignals::kNumMaxExpertsPerRank);
         EP_HOST_ASSERT(x.is_cuda() and x.is_contiguous());
         EP_HOST_ASSERT((x.size(1) * x.element_size()) % sizeof(int4) == 0);
         EP_HOST_ASSERT(num_tokens <= num_max_tokens_per_rank);
@@ -566,15 +567,16 @@ public:
                        context->num_scaleout_ranks, context->num_scaleup_ranks,
                        context->is_scaleup_nvlink) <= num_buffer_bytes);
 
-        // Ready and clean host workspace for this round
-        const auto host_workspace_layout = layout::EPWorkspaceLayout(
-            host_workspace,
-            context->num_scaleout_ranks,
-            context->num_scaleup_ranks,
-            num_experts);
-        std::fill_n(host_workspace_layout.get_scaleup_rank_count_ptr<false>(), context->num_scaleup_ranks, 0);
-        std::fill_n(host_workspace_layout.get_scaleup_expert_count_ptr<false>(), num_local_experts, 0);
-        std::atomic_thread_fence(std::memory_order_seq_cst);
+        // Start a new receive-count round on this slot.
+        const auto host_count_offset = buffer_idx * kNumHostRecvCounts;
+        const auto host_counts = static_cast<int64_t*>(host_recv_counts) + host_count_offset;
+        const auto mapped_counts = static_cast<int64_t*>(mapped_host_recv_counts) + host_count_offset;
+        const auto num_host_counts = context->num_scaleup_ranks + num_local_experts;
+        EP_HOST_ASSERT(num_host_counts <= kNumHostRecvCounts);
+        if (do_cpu_sync) {
+            std::fill_n(host_counts, num_host_counts, 0);
+            std::atomic_thread_fence(std::memory_order_seq_cst);
+        }
 
         // Do dispatch into the buffers (with SM limitation)
         launch_dispatch(x.data_ptr(), sf_ptr,
@@ -591,7 +593,7 @@ public:
                         num_experts, num_topk, expert_alignment,
                         context->dev_comm, context->window,
                         buffer,
-                        context->workspace, mapped_host_workspace,
+                        context->workspace, mapped_counts,
                         context->scaleout_rank_idx, context->scaleup_rank_idx,
                         context->num_scaleout_ranks, context->num_scaleup_ranks,
                         context->is_scaleup_nvlink,
@@ -641,7 +643,7 @@ public:
                     // Read number of received tokens from each scaleup rank
                     while (counter_scaleup_rank_idx < context->num_scaleup_ranks and ready) {
                         const auto count = math::encode_decode_positive(
-                            host_workspace_layout.get_scaleup_rank_count_ptr<false>()[counter_scaleup_rank_idx]);
+                            host_counts[counter_scaleup_rank_idx]);
                         if ((ready = math::is_decoded_positive_ready(count))) {
                             num_recv_tokens += count;
                             ++ counter_scaleup_rank_idx;
@@ -651,7 +653,7 @@ public:
                     // Read expert counts
                     while (counter_local_expert_idx < num_local_experts and ready) {
                         const auto count = math::encode_decode_positive(
-                            host_workspace_layout.get_scaleup_expert_count_ptr<false>()[counter_local_expert_idx]);
+                            host_counts[context->num_scaleup_ranks + counter_local_expert_idx]);
                         if ((ready = math::is_decoded_positive_ready(count))) {
                             num_recv_tokens_per_expert_list.push_back(count);
                             num_expanded_tokens += count;
@@ -663,8 +665,8 @@ public:
                     const auto get_buffer_info = [&]() {
                         std::stringstream ss;
                         ss << "CPU side received count (scaleup: " << context->scaleup_rank_idx << "): ";
-                        for (int i = 0; i < context->num_scaleup_ranks + num_local_experts; ++ i) {
-                            ss << host_workspace_layout.get_scaleup_rank_expert_count_ptr<false>()[i];
+                        for (int i = 0; i < num_host_counts; ++ i) {
+                            ss << host_counts[i];
                             ss << (i == context->num_scaleup_ranks - 1 ? " # ": " ");
                         }
                         return ss.str();

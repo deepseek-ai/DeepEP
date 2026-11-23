@@ -1,4 +1,5 @@
 import argparse
+from unittest.mock import patch
 import torch
 import torch.distributed as dist
 
@@ -93,7 +94,7 @@ def test_recv_view(group: dist.ProcessGroup, deterministic: bool, asynchronous: 
         rejected(access, RuntimeError)
 
     # The handle still supports ordinary cached replay and combine
-    replay, _, _, _, event = buffer.dispatch(x, handle=handle, num_sms=8, async_with_compute_stream=True)
+    replay, _, _, _, event = buffer.dispatch(x, handle=handle, async_with_compute_stream=True)
     event.current_stream_wait()
     exact(replay, payload)
     # Integer sums are exact even with an unspecified receive order
@@ -130,6 +131,11 @@ def test_recv_view(group: dist.ProcessGroup, deterministic: bool, asynchronous: 
     rejected(lambda: buffer.dispatch(x.float(), borrow_recv=True, **kwargs), ValueError)
     fp8 = (x.to(torch.float8_e4m3fn), torch.ones((tokens, hidden // 128), device='cuda'))
     rejected(lambda: buffer.dispatch(fp8, borrow_recv=True, **kwargs), ValueError)
+    if deterministic and not with_weights and not skew:
+        with patch.object(deep_ep.EPHandle, 'deterministic_sort', side_effect=torch.OutOfMemoryError('Injected sort OOM')):
+            rejected(lambda: dispatch(True), torch.OutOfMemoryError)
+        view, _, _, _ = dispatch(True)
+        view.release()
     dist.barrier(group=group)
     buffer.destroy()
 
@@ -201,6 +207,55 @@ def test_double_buffer(group: dist.ProcessGroup):
     buffer.destroy()
 
 
+def test_deferred_slots(group: dist.ProcessGroup):
+    rank, world = group.rank(), group.size()
+    tokens, hidden, topk = 64, 256, 2
+    x = torch.arange(tokens, device='cuda', dtype=torch.bfloat16).unsqueeze(1).expand(tokens, hidden).contiguous()
+    other_x = x + 100
+    indices = torch.arange(rank * topk, (rank + 1) * topk, device='cuda', dtype=deep_ep.topk_idx_t).repeat(tokens, 1)
+    half_indices = indices.clone()
+    half_indices[tokens // 2:] = -1
+    buffer = deep_ep.EPBuffer(group, num_max_tokens_per_rank=tokens, hidden=hidden, num_topk=topk,
+                              num_buffers=2, deterministic=True, explicitly_destroy=True)
+    launch_args = dict(async_with_compute_stream=True, allocate_on_comm_stream=True)
+    dispatch_args = dict(num_experts=world * topk, num_sms=8, **launch_args)
+    ready = buffer.capture()
+
+    late_dispatch = buffer.dispatch(x, topk_idx=indices, buffer_idx=0, defer_epilogue=True, **dispatch_args)
+    rejected(lambda: buffer.dispatch(other_x, topk_idx=indices, buffer_idx=0, **dispatch_args), RuntimeError)
+    rejected(buffer.destroy, RuntimeError)
+    torch.cuda.synchronize()
+    view, _, _, half_handle, event = buffer.dispatch(x, topk_idx=half_indices, buffer_idx=1, borrow_recv=True, **dispatch_args)
+    event.wait()
+    assert half_handle.num_recv_tokens_per_expert_list == [tokens // 2] * topk
+
+    # First wait runs the deferred epilogue on the waiter stream. The next collective uses
+    # an earlier input event, so only slot completion can keep it from overwriting the slab.
+    waiter = torch.cuda.Stream()
+    with torch.cuda.stream(waiter):
+        torch.cuda._sleep(32_000_000)
+        first, _, _, handle = late_dispatch.wait()
+    second, _, _, _, event = buffer.dispatch(other_x, topk_idx=indices, buffer_idx=0, previous_event=ready, **dispatch_args)
+    event.wait()
+    torch.cuda.current_stream().wait_stream(waiter)
+    assert handle.num_recv_tokens_per_expert_list == [tokens] * topk
+    exact(first, x)
+    exact(second, other_x)
+
+    late_combine = buffer.combine(x, handle, buffer_idx=0, defer_epilogue=True, **launch_args)
+    rejected(lambda: buffer.dispatch(other_x, topk_idx=indices, buffer_idx=0, **dispatch_args), RuntimeError)
+    with torch.cuda.stream(waiter):
+        torch.cuda._sleep(32_000_000)
+        combined, _ = late_combine.wait()
+    third, _, _, _, event = buffer.dispatch(other_x, topk_idx=indices, buffer_idx=0, previous_event=ready, **dispatch_args)
+    event.wait()
+    torch.cuda.current_stream().wait_stream(waiter)
+    exact(combined, x)
+    exact(third, other_x)
+    view.release()
+    buffer.destroy()
+
+
 # noinspection PyUnusedLocal
 def test_loop(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
     rank, num_ranks, group = init_dist(local_rank, num_local_ranks)
@@ -214,6 +269,8 @@ def test_loop(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
                     dist_print(f'PASS {deterministic=} {asynchronous=} {with_weights=} {skew=}', once_in_node=True)
     test_double_buffer(group)
     dist_print('PASS double-buffered receive views', once_in_node=True)
+    test_deferred_slots(group)
+    dist_print('PASS independent deferred slots and cross-stream slot reuse', once_in_node=True)
     dist.destroy_process_group()
 
 
