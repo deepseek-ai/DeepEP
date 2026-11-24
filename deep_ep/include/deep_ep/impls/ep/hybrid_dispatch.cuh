@@ -72,9 +72,8 @@ hybrid_dispatch_impl(
     // Named barrier indices
     constexpr int kNotifyBarrierIndex = 1;
 
-    // Skip finish signals on empty channels (`channel_idx >= num_tokens`) and on inactive peers in combine.
-    // Header-only version borrows tail row `kNumChannels` immediately past active channels `[0, kNumChannels)`.
-    // For full upstream integration with `num_sms == kNumMaxSMs`, add a dedicated `EPSignals` array instead.
+    // Skip finish signals on empty channels (`channel_idx >= num_tokens`) and on inactive peers in combine:
+    // each rank announces its `num_tokens` to every scale-out peer once per call (`EPSignals::scaleout_peer_num_tokens`)
     constexpr int kMaskHandoffBarrierBase = 2;
     constexpr int kSentMaskSmemIdx = 0;  // uint32 index in the send warp's (idle) TMA buffer
     EP_STATIC_ASSERT(kMaskHandoffBarrierBase + kNumChannelsPerSM <= 16,
@@ -82,14 +81,6 @@ hybrid_dispatch_impl(
     EP_STATIC_ASSERT(kNumScaleoutRanks <= kNumMaxRanks, "Too many scale-out ranks");
     EP_STATIC_ASSERT(kNumHiddenBytes >= (kSentMaskSmemIdx + 1) * static_cast<int>(sizeof(uint32_t)),
                      "TMA buffer too small for dispatch mask handoff");
-    constexpr int kPeerNumTokensSlotRow = kNumChannels;
-    EP_STATIC_ASSERT(kPeerNumTokensSlotRow < layout::EPSignals::kNumMaxChannels,
-                     "Peer num_tokens slot exceeds signaled tail workspace");
-    const auto get_scaleout_peer_num_tokens_ptr = [=](const int& src_scaleout_rank_idx) {
-        // NOTES: pass a prvalue; `kPeerNumTokensSlotRow` is a constexpr and must not bind by reference
-        return workspace_layout.get_scaleout_channel_signaled_tail_ptr(static_cast<int>(kPeerNumTokensSlotRow),
-                                                                       src_scaleout_rank_idx);
-    };
 
     // NCCL Gin handle
     // Each warp is a channel
@@ -406,7 +397,7 @@ hybrid_dispatch_impl(
         // Announce this rank's `num_tokens` once to every scale-out peer (including itself)
         if (sm_idx == 0 and scaleout_warp_idx == 0 and lane_idx < kNumScaleoutRanks) {
             gin.red_add_rel<ncclTeamTagRail>(
-                get_scaleout_peer_num_tokens_ptr(scaleout_rank_idx),
+                workspace_layout.get_scaleout_peer_num_tokens_ptr(scaleout_rank_idx),
                 static_cast<int64_t>((1ull << 32) | static_cast<uint64_t>(static_cast<uint32_t>(num_tokens))),
                 lane_idx);
         }
@@ -527,7 +518,7 @@ hybrid_dispatch_impl(
         // `num_tokens <= channel_idx` send no tokens and no finish signal on this channel
         int stored_peer_is_empty = 0;
         if (lane_idx < kNumScaleoutRanks) {
-            const auto num_tokens_ptr = get_scaleout_peer_num_tokens_ptr(lane_idx);
+            const auto num_tokens_ptr = workspace_layout.get_scaleout_peer_num_tokens_ptr(lane_idx);
             int64_t value = 0;
             comm::timeout_while<kNumTimeoutCycles>([&](const bool& is_last_check) {
                 value = ptx::ld_acquire_sys<int64_t>(num_tokens_ptr);
@@ -749,7 +740,7 @@ hybrid_dispatch_impl(
     // Reset received `num_tokens` slots after the grid sync above (next call cannot write before its start barrier).
     // NOTES: the slot is a target of remote NIC atomics, so reset it with a system-scope release store
     if (sm_idx == 0 and thread_idx < kNumScaleoutRanks)
-        ptx::st_release_sys<int64_t>(get_scaleout_peer_num_tokens_ptr(thread_idx), 0);
+        ptx::st_release_sys<int64_t>(workspace_layout.get_scaleout_peer_num_tokens_ptr(thread_idx), 0);
 }
 
 }  // namespace deep_ep::ep
