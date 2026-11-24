@@ -389,6 +389,9 @@ hybrid_combine_impl(nv_bfloat16* x,
 
         // Replay the dispatch
         int stored_num_tokens_recv[kNumScaleupRanksPerLane] = {}, stored_cached_scaleup_tail[kNumScaleupRanksPerLane] = {};
+        // `relay_scaleout_mask`: sources this channel returned tokens to; `expected_scaleout_mask`: peers
+        // this rank's dispatch channel sent tokens to (stored in field 1 of the sentinel metadata row)
+        uint32_t relay_scaleout_mask = 0, expected_scaleout_mask = 0;
         for (int i = 0; ; ++ i) {
             const auto src_token_global_idx = __ldg(token_metadata_at_forward + i * kNumForwardMetadataDims);
             const auto is_token_last_in_chunk = __ldg(token_metadata_at_forward + i * kNumForwardMetadataDims + 1);
@@ -399,8 +402,11 @@ hybrid_combine_impl(nv_bfloat16* x,
                 __ldg(token_metadata_at_forward + i * kNumForwardMetadataDims + 2 + lane_idx) : -1;
             auto stored_src_slot_idx = lane_idx < kNumTopk ?
                 __ldg(token_metadata_at_forward + i * kNumForwardMetadataDims + 2 + kNumTopk + lane_idx) : -1;
-            if (src_token_global_idx < 0)
+            if (src_token_global_idx < 0) {
+                expected_scaleout_mask = static_cast<uint32_t>(is_token_last_in_chunk);
                 break;
+            }
+            relay_scaleout_mask |= 1u << src_scaleout_rank_idx;
 
             // Scaleup rank mask
             EP_STATIC_ASSERT(kNumScaleupRanks <= 64, "Too many scale-up peers");
@@ -589,7 +595,8 @@ hybrid_combine_impl(nv_bfloat16* x,
         EP_STATIC_ASSERT(kNumScaleoutRanks <= 32, "Invalid ranks");
         const auto expected_signal = math::pack2<int, int64_t>(1, 0);
         gin.flush<ncclCoopWarp>();
-        if (lane_idx < kNumScaleoutRanks) {
+        // Signal only sources this channel actually returned tokens to
+        if (lane_idx < kNumScaleoutRanks and ((relay_scaleout_mask >> lane_idx) & 1)) {
             // Update remote tails
             gin.red_add_rel<ncclTeamTagRail>(
                 workspace_layout.get_scaleout_channel_signaled_tail_ptr(channel_idx, scaleout_rank_idx),
@@ -598,7 +605,8 @@ hybrid_combine_impl(nv_bfloat16* x,
         __syncwarp();
 
         // Wait tail arrival
-        if (lane_idx < kNumScaleoutRanks) {
+        // Wait only on peers this rank's dispatch channel sent tokens to
+        if (lane_idx < kNumScaleoutRanks and ((expected_scaleout_mask >> lane_idx) & 1)) {
             const auto wait_ptr = workspace_layout.get_scaleout_channel_signaled_tail_ptr(channel_idx, lane_idx);
             comm::timeout_while<kNumTimeoutCycles>([=](const bool& is_last_check) {
                 const auto signal = ptx::ld_acquire_sys<int64_t>(wait_ptr);
