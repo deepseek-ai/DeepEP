@@ -35,6 +35,7 @@ class EventOverlap:
         # A hook that will be triggered after `current_stream_wait()`
         # Useful for deterministic dispatch, which requires a sort (on the current stream) after `self.current_stream_wait()` is invoked
         self.hook_after_wait: Optional[Callable] = None
+        self._hook_completion_event: Optional[torch.cuda.Event] = None
 
     def current_stream_wait(self, release_handle: bool = False) -> Any:
         """
@@ -44,7 +45,10 @@ class EventOverlap:
             result: the return value of the registered hook, or `None` if no hook is registered.
         """
         assert self.event is not None
-        self.event.current_stream_wait()
+        if self.hook_after_wait is None and self._hook_completion_event is not None:
+            torch.cuda.current_stream().wait_event(self._hook_completion_event)
+        else:
+            self.event.current_stream_wait()
 
         # Call epilogue hook
         result = None
@@ -57,18 +61,22 @@ class EventOverlap:
         # However, you better do it by yourself (to be compatible with multi-stream waits)
         if release_handle:
             self.event = None
+            self._hook_completion_event = None
         return result
 
     def wait(self) -> Any:
         """Wait on the current stream and return the registered epilogue result."""
         return self.current_stream_wait()
 
-    def register_hook_after_wait(self, hook_after_wait: Callable) -> None:
+    def register_hook_after_wait(self, hook_after_wait: Callable,
+                                 *, completion_event: Optional[torch.cuda.Event] = None) -> None:
         """
-        Register a hook, which will be invoked after `self.current_stream_wait()`
+        Register a hook to run after the first wait. If supplied, the hook must record
+        `completion_event` before returning so later waits can follow it.
         """
         assert self.hook_after_wait is None, "A hook is already registered on this `EventOverlap`"
         self.hook_after_wait = hook_after_wait
+        self._hook_completion_event = completion_event
 
     def __call__(self, release_handle: bool = False) -> "EventOverlap":
         """

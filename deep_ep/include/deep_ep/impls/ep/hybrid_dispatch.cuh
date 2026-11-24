@@ -45,7 +45,7 @@ hybrid_dispatch_impl(
     // TODO(NCCL): so many params, plans to optimize?
     const ncclDevComm_t nccl_dev_comm, const ncclWindow_t nccl_window,
     void* buffer,
-    void* workspace, void* mapped_host_workspace,
+    void* workspace, int64_t* mapped_host_recv_counts,
     const int scaleout_rank_idx, const int scaleup_rank_idx) {
     constexpr int kNumExpertsPerRank = kNumExperts / kNumRanks;
     constexpr int kNumExpertsPerScaleout = kNumExperts / kNumScaleoutRanks;
@@ -61,7 +61,6 @@ hybrid_dispatch_impl(
 
     // Workspaces
     const auto workspace_layout = layout::EPWorkspaceLayout(workspace, kNumScaleoutRanks, kNumScaleupRanks, kNumExperts);
-    const auto host_workspace_layout = layout::EPWorkspaceLayout(mapped_host_workspace, kNumScaleoutRanks, kNumScaleupRanks, kNumExperts);
 
     // The kernel uses a fixed space of dynamic shared memory (no static shared memory)
     extern __shared__ __align__(kNumTMAAlignmentBytes) int8_t smem[];
@@ -271,8 +270,7 @@ hybrid_dispatch_impl(
 
                     workspace_layout.get_scaleup_rank_expert_count_ptr<false>()[thread_idx] = 0;
                     if constexpr (kDoCPUSync) {
-                        host_workspace_layout.get_scaleup_rank_expert_count_ptr<false>()[thread_idx] =
-                            math::encode_decode_positive(aligned_count);
+                        mapped_host_recv_counts[thread_idx] = math::encode_decode_positive(aligned_count);
                     }
 
                     // Update statistics counters

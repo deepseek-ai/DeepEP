@@ -280,11 +280,19 @@ The expanded `recv_topk_weights` is one-dimensional, with one value per expert r
 
 Training saves the forward `handle` for `combine_backward` and `dispatch_backward`. The backward helpers above return tensors and an event; wait on that event before using the tensors. Cached dispatch replays the saved expanded layout without another receive-count CPU synchronization. Keep the original `topk_idx` unchanged until all uses of the handle finish.
 
+### Borrowed receive storage
+
+For a fresh compact BF16 dispatch within one physical NVLink domain, with exact CPU receive counts and `defer_epilogue=False`, `borrow_recv=True` returns a `DispatchRecvView` in place of `recv_x`: logical receive row `r` is stored at `view.slab[view.row_indices[r]]`, so an indexed consumer can read the communication buffer directly and skip the activation copy of the dispatch epilogue. For asynchronous dispatch, wait the returned event before touching the view; consumers on other streams call `view.wait()` first.
+
+Each view holds an exclusive lease on its communication slot. After enqueueing all consumers, call `view.release()` on the consuming stream or pass every consuming stream to `view.release(*streams)`. Reuse of that slot waits for its readers. Release all active views before load-balancing calls or `destroy()`. Keep host calls on the same buffer serialized. Use an ordinary cached replay with the returned handle to obtain owned activations for backward.
+
+For a two-chunk pipeline, construct `EPBuffer(..., num_buffers=2)` in a single NVLink domain and pass `buffer_idx=0` or `buffer_idx=1` to dispatch and combine. This reserves two adjacent slots in one symmetric allocation. An explicit `num_bytes` sizes each slot and `buffer.num_bytes` reports their combined size. All ranks must use the same slot for each collective. Dispatch on slot 1 can overlap expert computation reading slot 0. Release the slot 0 view after enqueueing its consumers, then combine on slot 0 while the slot 1 view is still live. If the expert computation has already been queued on the caller's stream, use a `previous_event` captured when the next chunk's inputs were ready, together with `allocate_on_comm_stream=True` and `async_with_compute_stream=True`.
+
 ### Deferred epilogues
 
 Dispatch and combine accept `defer_epilogue=True` together with `async_with_compute_stream=True`. In this mode, the call returns an `EventOverlap` directly. Calling `.wait()` runs the deferred epilogue on the current stream and returns `(recv_x, recv_topk_idx, recv_topk_weights, handle)` for dispatch, or `(combined_x, combined_topk_weights)` for combine.
 
-The returned result is produced by the first wait, so retain it for the following computation. Without other work to overlap, call `.wait()` immediately. `do_zero_padding=True` clears alignment gaps between experts; in the no-CPU-sync mode, it does not make unused output capacity valid data.
+The returned result is produced by the first wait, so retain it for the following computation. Call `.wait()` before reusing the same buffer slot or destroying the buffer. Reuse waits for the epilogue on the stream that ran it. `do_zero_padding=True` clears alignment gaps between experts. In the no-CPU-sync mode, the valid prefix contains the received data.
 
 If independent computation is already queued before the communication call, capture the input-ready event with `_buffer.capture()` before enqueueing that computation and pass it as `previous_event`. The forward helpers set `allocate_on_comm_stream=True` in this case, as required by EP. The deferred epilogue still runs on the current stream at `.wait()`; this also allows a combine `bias` produced by the intervening computation to be consumed there.
 
@@ -399,7 +407,7 @@ Set runtime variables before importing `deep_ep` and creating buffers. Flags use
 | --- | --- | --- |
 | `EP_BUFFER_DEBUG` | Unset | Set to `1` to print initialization, topology, buffer-size, and SM-estimation diagnostics. Leave unset to disable all diagnostics; Python-side checks also treat the string `"0"` as enabled. |
 | `EP_SUPPRESS_NCCL_CHECK` | `0` | Skip the import-time checks for duplicate NCCL libraries and binary equality with the selected installation. Does not bypass the C++ device-communicator compatibility checks. |
-| `EP_AVOID_RECORD_STREAM` | `0` | For EP and bucket operations, retain tensors in the completion event instead of calling `record_stream`. Keep the event alive until communication has completed. |
+| `EP_AVOID_RECORD_STREAM` | `0` | For EP and bucket operations, retain tensors in the completion event instead of calling `record_stream`. Keep the event alive until GPU work has completed, including any deferred epilogue. |
 | `EP_REUSE_NCCL_COMM` | `1` | Reuse the PyTorch process group's NCCL communicator when its backend exposes `_comm_ptr`; otherwise create a DeepEP-managed communicator. |
 | `EP_DEFAULT_RDMA_SL` | Unset | Set the Gin traffic class/service level when the buffer's `sl_idx` is not supplied. If both are unset, use NCCL's default. |
 | `EP_OVERRIDE_RDMA_SL` | Unset | Override both `EP_DEFAULT_RDMA_SL` and the buffer's `sl_idx`. |

@@ -2,6 +2,7 @@
 
 #include <c10/util/accumulate.h>
 #include <cuda_runtime.h>
+#include <limits>
 #include <memory>
 #include <vector>
 #include <pybind11/functional.h>
@@ -21,12 +22,18 @@
 namespace deep_ep::ep {
 
 class EPBuffer: public BufferBase {
-    // Buffer bytes exclude workspace
-    // Memory layout: [Workspace, buffer]
-    int64_t num_buffer_bytes;
+    // Memory layout: [Workspace, EP buffer slot(s), LB storage]
+    int64_t num_buffer_bytes;  // Per slot
+    int num_buffers;
 
-    // Host workspace
-    void *host_workspace, *mapped_host_workspace;
+    void* get_buffer(const int& buffer_idx) const {
+        EP_HOST_ASSERT(buffer_idx >= 0 and buffer_idx < num_buffers);
+        return math::advance_ptr(context->buffer, num_buffer_bytes * buffer_idx);
+    }
+
+    // Mapped host receive counts. Each slot stores its rank counts followed by its local expert counts.
+    static constexpr int kNumHostRecvCounts = kNumMaxRanks + layout::EPSignals::kNumMaxExpertsPerRank;
+    void *host_recv_counts, *mapped_host_recv_counts;
 
     // Whether to use hybrid mode (scale-out with scale-up)
     bool allow_hybrid_mode;
@@ -57,22 +64,32 @@ public:
              const bool& prefer_overlap_with_compute,
              const std::optional<int>& sl_idx, const int& num_allocated_qps,
              const int& num_cpu_timeout_secs, const int& num_gpu_timeout_secs,
-             const bool& explicitly_destroy):
+             const bool& explicitly_destroy, const int& num_buffers):
         BufferBase(explicitly_destroy),
         num_buffer_bytes(num_buffer_bytes),
+        num_buffers(num_buffers),
         allow_hybrid_mode(allow_hybrid_mode),
         allow_multiple_reduction(allow_multiple_reduction),
         prefer_overlap_with_compute(prefer_overlap_with_compute) {
         EP_HOST_ASSERT(num_buffer_bytes > 0 and num_buffer_bytes % kNumAllocationAlignmentBytes == 0);
         EP_HOST_ASSERT(num_lb_buffer_bytes >= 0 and num_lb_buffer_bytes % kNumAllocationAlignmentBytes == 0);
+        EP_HOST_ASSERT(num_buffers == 1 or num_buffers == 2);
+        if (num_buffers == 2) {
+            const auto [num_rdma_ranks, num_nvl_ranks] = comm::get_physical_domain_size(nccl_comm);
+            EP_HOST_ASSERT(num_rdma_ranks == 1 and num_nvl_ranks == num_ranks and
+                           "Two EP buffer slots require a single NVLink domain");
+        }
 
         // Workspace is aligned to 2 MB so that it sits cleanly at the front of the GPU segment
         const auto num_workspace_bytes = math::align<int64_t>(
             layout::EPWorkspaceLayout::get_num_bytes(), kNumAllocationAlignmentBytes);
+        EP_HOST_ASSERT(num_buffer_bytes <=
+                       (std::numeric_limits<int64_t>::max() - num_workspace_bytes - num_lb_buffer_bytes) / num_buffers);
+        const auto num_ep_bytes = num_buffer_bytes * num_buffers;
 
         context = std::make_shared<comm::Context>(
             nccl_comm, symmetric::shared_comm_t{}, num_ranks, rank_idx,
-            num_workspace_bytes, num_buffer_bytes + num_lb_buffer_bytes, 0, true,
+            num_workspace_bytes, num_ep_bytes + num_lb_buffer_bytes, 0, true,
             allow_hybrid_mode, sl_idx, num_allocated_qps,
             0, num_cpu_timeout_secs, num_gpu_timeout_secs);
         main_context = context;
@@ -81,14 +98,13 @@ public:
 
         // Expose only the LB region; the preceding bytes remain reserved for EP communication.
         lb_storage = torch::from_blob(
-            context->buffer, {num_buffer_bytes + num_lb_buffer_bytes}, [context = context](void*) {},
+            context->buffer, {num_ep_bytes + num_lb_buffer_bytes}, [context = context](void*) {},
             torch::TensorOptions().dtype(torch::kByte).device(torch::kCUDA)
-        ).narrow(0, num_buffer_bytes, num_lb_buffer_bytes);
+        ).narrow(0, num_ep_bytes, num_lb_buffer_bytes);
 
-        // Allocate host workspaces
-        CUDA_RUNTIME_CHECK(cudaMallocHost(&host_workspace, layout::EPWorkspaceLayout::get_num_bytes(), cudaHostAllocMapped));
-        CUDA_RUNTIME_CHECK(cudaHostGetDevicePointer(&mapped_host_workspace, host_workspace, 0));
-        std::memset(host_workspace, 0, layout::EPWorkspaceLayout::get_num_bytes());
+        // Allocate mapped receive counts for all slots.
+        CUDA_RUNTIME_CHECK(cudaMallocHost(&host_recv_counts, num_buffers * kNumHostRecvCounts * sizeof(int64_t), cudaHostAllocMapped));
+        CUDA_RUNTIME_CHECK(cudaHostGetDevicePointer(&mapped_host_recv_counts, host_recv_counts, 0));
 
         // We should call a barrier at the end
         // The barrier should be called by Python `dist.barrier`
@@ -106,8 +122,7 @@ public:
         comm::barrier(*context, context->barrier_signals, at::cuda::getCurrentCUDAStream(),
                       context->num_gpu_timeout_cycles, true, true);
 
-        // Deallocate host workspaces
-        CUDA_RUNTIME_CHECK(cudaFreeHost(host_workspace));
+        CUDA_RUNTIME_CHECK(cudaFreeHost(host_recv_counts));
 
         // Destroy NCCL context
         context->finalize();
@@ -307,7 +322,11 @@ public:
              const bool& do_cpu_sync,
              const bool& do_expand, const bool& do_zero_padding,
              const bool& use_tma_aligned_col_major_sf,
-             const bool& defer_epilogue) const {
+             const bool& defer_epilogue, const bool& materialize_recv_x, const int& buffer_idx) const {
+        const auto buffer = get_buffer(buffer_idx);
+        EP_HOST_ASSERT(materialize_recv_x or (context->num_scaleout_ranks == 1 and context->num_rdma_ranks == 1 and not do_expand and
+                       not sf.has_value() and x.scalar_type() == torch::kBFloat16 and
+                       do_cpu_sync and not cached_num_recv_tokens.has_value() and not defer_epilogue));
         // Check SM count
         EP_HOST_ASSERT(num_sms > 0 and num_sms <= jit->device.get_num_sms());
         EP_HOST_ASSERT((num_sms > 1 or context->num_scaleout_ranks == 1 or context->num_scaleup_ranks == 1) and
@@ -339,6 +358,8 @@ public:
         const auto [num_tokens, hidden] = get_shape<2>(x);
         const auto num_hidden_bytes = hidden * static_cast<int>(x.element_size());
         const auto num_local_experts = num_experts / context->num_ranks;
+        EP_HOST_ASSERT(num_experts >= 0 and num_experts <= layout::EPSignals::kNumMaxExperts and
+                       num_experts % context->num_ranks == 0 and num_local_experts <= layout::EPSignals::kNumMaxExpertsPerRank);
         EP_HOST_ASSERT(x.is_cuda() and x.is_contiguous());
         EP_HOST_ASSERT((x.size(1) * x.element_size()) % sizeof(int4) == 0);
         EP_HOST_ASSERT(num_tokens <= num_max_tokens_per_rank);
@@ -546,15 +567,16 @@ public:
                        context->num_scaleout_ranks, context->num_scaleup_ranks,
                        context->is_scaleup_nvlink) <= num_buffer_bytes);
 
-        // Ready and clean host workspace for this round
-        const auto host_workspace_layout = layout::EPWorkspaceLayout(
-            host_workspace,
-            context->num_scaleout_ranks,
-            context->num_scaleup_ranks,
-            num_experts);
-        std::fill_n(host_workspace_layout.get_scaleup_rank_count_ptr<false>(), context->num_scaleup_ranks, 0);
-        std::fill_n(host_workspace_layout.get_scaleup_expert_count_ptr<false>(), num_local_experts, 0);
-        std::atomic_thread_fence(std::memory_order_seq_cst);
+        // Start a new receive-count round on this slot.
+        const auto host_count_offset = buffer_idx * kNumHostRecvCounts;
+        const auto host_counts = static_cast<int64_t*>(host_recv_counts) + host_count_offset;
+        const auto mapped_counts = static_cast<int64_t*>(mapped_host_recv_counts) + host_count_offset;
+        const auto num_host_counts = context->num_scaleup_ranks + num_local_experts;
+        EP_HOST_ASSERT(num_host_counts <= kNumHostRecvCounts);
+        if (do_cpu_sync) {
+            std::fill_n(host_counts, num_host_counts, 0);
+            std::atomic_thread_fence(std::memory_order_seq_cst);
+        }
 
         // Do dispatch into the buffers (with SM limitation)
         launch_dispatch(x.data_ptr(), sf_ptr,
@@ -570,8 +592,8 @@ public:
                         num_sf_packs, sf_token_stride, sf_hidden_stride,
                         num_experts, num_topk, expert_alignment,
                         context->dev_comm, context->window,
-                        context->buffer,
-                        context->workspace, mapped_host_workspace,
+                        buffer,
+                        context->workspace, mapped_counts,
                         context->scaleout_rank_idx, context->scaleup_rank_idx,
                         context->num_scaleout_ranks, context->num_scaleup_ranks,
                         context->is_scaleup_nvlink,
@@ -594,7 +616,8 @@ public:
 
         // Epilogue can be deferred, so it is a lambda
         auto epilogue = [=, this](const at::cuda::CUDAStream& stream,
-                                  const std::optional<std::reference_wrapper<tensor_list_t>>& tensors_to_record_opt) mutable {
+                                  const std::optional<std::reference_wrapper<tensor_list_t>>& tensors_to_record_opt,
+                                  const bool record_inputs = false) mutable {
             // Received token counters
             int num_recv_tokens = 0, num_expanded_tokens = 0;
             int counter_scaleup_rank_idx = 0, counter_local_expert_idx = 0;
@@ -621,7 +644,7 @@ public:
                     // Read number of received tokens from each scaleup rank
                     while (counter_scaleup_rank_idx < context->num_scaleup_ranks and ready) {
                         const auto count = math::encode_decode_positive(
-                            host_workspace_layout.get_scaleup_rank_count_ptr<false>()[counter_scaleup_rank_idx]);
+                            host_counts[counter_scaleup_rank_idx]);
                         if ((ready = math::is_decoded_positive_ready(count))) {
                             num_recv_tokens += count;
                             ++ counter_scaleup_rank_idx;
@@ -631,7 +654,7 @@ public:
                     // Read expert counts
                     while (counter_local_expert_idx < num_local_experts and ready) {
                         const auto count = math::encode_decode_positive(
-                            host_workspace_layout.get_scaleup_expert_count_ptr<false>()[counter_local_expert_idx]);
+                            host_counts[context->num_scaleup_ranks + counter_local_expert_idx]);
                         if ((ready = math::is_decoded_positive_ready(count))) {
                             num_recv_tokens_per_expert_list.push_back(count);
                             num_expanded_tokens += count;
@@ -643,8 +666,8 @@ public:
                     const auto get_buffer_info = [&]() {
                         std::stringstream ss;
                         ss << "CPU side received count (scaleup: " << context->scaleup_rank_idx << "): ";
-                        for (int i = 0; i < context->num_scaleup_ranks + num_local_experts; ++ i) {
-                            ss << host_workspace_layout.get_scaleup_rank_expert_count_ptr<false>()[i];
+                        for (int i = 0; i < num_host_counts; ++ i) {
+                            ss << host_counts[i];
                             ss << (i == context->num_scaleup_ranks - 1 ? " # ": " ");
                         }
                         return ss.str();
@@ -671,7 +694,11 @@ public:
             // Allocate received tensors
             // `recv_src_metadata` includes source token indices and buffer slot indices
             const auto num_allocated_tokens = do_expand ? num_expanded_tokens : num_recv_tokens;
-            auto recv_x = torch::empty({num_allocated_tokens, hidden}, x.options());
+            std::optional<torch::Tensor> recv_x, recv_row_indices;
+            if (materialize_recv_x)
+                recv_x = torch::empty({num_allocated_tokens, hidden}, x.options());
+            else
+                recv_row_indices = torch::empty({num_recv_tokens}, x.options().dtype(torch::kInt64));
             auto recv_sf = std::optional<torch::Tensor>();
             auto recv_topk_idx = std::optional<torch::Tensor>();
             auto recv_topk_weights = std::optional<torch::Tensor>();
@@ -720,13 +747,28 @@ public:
             }
             EP_HOST_ASSERT(psum_num_recv_tokens_per_expert.size(0) == num_local_experts);
 
+            if (record_inputs) {
+                psum_num_recv_tokens_per_scaleup_rank.record_stream(stream);
+                if (do_expand) {
+                    if (cached_mode)
+                        recv_src_metadata.record_stream(stream);
+                    else
+                        psum_num_recv_tokens_per_expert.record_stream(stream);
+                    if (do_zero_padding)
+                        num_unaligned_recv_tokens_per_expert.record_stream(stream);
+                }
+                if (context->num_scaleout_ranks > 1 and not cached_mode)
+                    channel_linked_list->record_stream(stream);
+            }
+
             // Launch copy kernels with full SMs
-            launch_dispatch_copy_epilogue(context->buffer, context->workspace,
+            launch_dispatch_copy_epilogue(buffer, context->workspace,
                                           psum_num_recv_tokens_per_scaleup_rank.data_ptr<int>(),
                                           psum_num_recv_tokens_per_expert.data_ptr<int>(),
-                                          recv_x.data_ptr(), recv_sf_ptr,
+                                          recv_x.has_value() ? recv_x->data_ptr() : nullptr, recv_sf_ptr,
                                           recv_topk_idx_ptr, recv_topk_weights_ptr,
                                           recv_src_metadata.data_ptr<int>(),
+                                          recv_row_indices.has_value() ? recv_row_indices->data_ptr<int64_t>() : nullptr,
                                           channel_linked_list_ptr,
                                           num_unaligned_recv_tokens_per_expert_ptr,
                                           num_recv_tokens, num_max_tokens_per_rank,
@@ -739,7 +781,7 @@ public:
                                           jit->device.get_num_smem_bytes(),
                                           num_channels,
                                           do_expand, cached_mode,
-                                          do_zero_padding,
+                                          do_zero_padding, materialize_recv_x,
                                           stream);
 
             auto result = pybind11::make_tuple(
@@ -753,12 +795,13 @@ public:
                 recv_src_metadata,
                 dst_buffer_slot_idx,
                 token_metadata_at_forward,
-                channel_linked_list);
+                channel_linked_list, recv_row_indices);
 
             // For non-deferring tensor recording
             if (tensors_to_record_opt.has_value()) {
                 auto& tensors = tensors_to_record_opt->get();
                 tensors.push_back(recv_x);
+                tensors.push_back(recv_row_indices);
                 tensors.push_back(recv_sf);
                 tensors.push_back(recv_topk_idx);
                 tensors.push_back(recv_topk_weights);
@@ -771,10 +814,16 @@ public:
         // NOTES: CPU sync will be deferred, too
         if (defer_epilogue) {
             EP_HOST_ASSERT(async_with_compute_stream);
+            if (cached_mode and do_expand)
+                tensors_to_record.push_back(cached_recv_src_metadata);
             const auto event = stream_control_epilogue(
                 tensors_to_record, compute_stream, allocate_on_comm_stream, true);
-            std::function<pybind11::object()> epilogue_hook = [epilogue = std::move(epilogue)]() mutable {
-                return epilogue(at::cuda::getCurrentCUDAStream(), std::nullopt);
+            // A retaining event already owns these inputs through completion of the epilogue.
+            const bool record_on_waiter = event->tensors_to_record.empty();
+            std::function<pybind11::object()> epilogue_hook =
+                [epilogue = std::move(epilogue), compute_stream, comm_stream, record_on_waiter]() mutable {
+                const auto stream = at::cuda::getCurrentCUDAStream();
+                return epilogue(stream, std::nullopt, record_on_waiter and stream != compute_stream and stream != comm_stream);
             };
             return pybind11::make_tuple(pybind11::none(), event, epilogue_hook);
         }
@@ -784,6 +833,18 @@ public:
         const auto event = stream_control_epilogue(
             tensors_to_record, compute_stream, allocate_on_comm_stream, async_with_compute_stream);
         return pybind11::make_tuple(result, event, pybind11::none());
+    }
+
+    torch::Tensor get_dispatch_recv_slab(const torch::Tensor& x, const int& num_topk,
+                                         const int& num_max_tokens_per_rank, const int& buffer_idx) const {
+        EP_HOST_ASSERT(not destroyed and context->num_scaleout_ranks == 1 and context->num_rdma_ranks == 1);
+        EP_HOST_ASSERT(x.is_cuda() and x.scalar_type() == torch::kBFloat16 and x.dim() == 2);
+        const auto token_layout = layout::TokenLayout(x.size(1) * x.element_size(), 0, num_topk, true);
+        const auto slots = static_cast<int64_t>(context->num_scaleup_ranks) * num_max_tokens_per_rank;
+        const auto stride_bytes = token_layout.get_num_bytes<false, int64_t>();
+        EP_HOST_ASSERT(slots * stride_bytes <= num_buffer_bytes);
+        return torch::from_blob(get_buffer(buffer_idx), {slots, x.size(1)},
+                                {stride_bytes / static_cast<int64_t>(x.element_size()), 1}, x.options());
     }
 
     pybind11::tuple
@@ -803,7 +864,8 @@ public:
             const bool& async_with_compute_stream,
             const bool& allocate_on_comm_stream,
             const bool& use_expanded_layout,
-            const bool& defer_epilogue) const {
+            const bool& defer_epilogue, const int& buffer_idx) const {
+        const auto buffer = get_buffer(buffer_idx);
         // Check SM count
         EP_HOST_ASSERT(num_sms > 0 and num_sms <= jit->device.get_num_sms());
         EP_HOST_ASSERT((num_sms > 1 or context->num_scaleout_ranks == 1 or context->num_scaleup_ranks == 1) and
@@ -902,7 +964,7 @@ public:
             token_metadata_at_forward_ptr,
             channel_linked_list_ptr,
             context->dev_comm, context->window,
-            context->buffer, context->workspace,
+            buffer, context->workspace,
             num_reduced_tokens, num_max_tokens_per_rank,
             hidden, num_experts, num_topk,
             num_qps, context->num_gpu_timeout_cycles,
@@ -923,7 +985,8 @@ public:
 
         // Epilogue can be deferred, so it is a lambda
         auto epilogue = [=, this](const at::cuda::CUDAStream& stream,
-                                  const std::optional<std::reference_wrapper<tensor_list_t>>& tensors_to_record_opt) {
+                                  const std::optional<std::reference_wrapper<tensor_list_t>>& tensors_to_record_opt,
+                                  const bool record_inputs = false) {
             // Allocate output tensors
             auto combined_x = torch::empty({num_combined_tokens, hidden}, x.options());
             auto combined_topk_weights = std::optional<torch::Tensor>();
@@ -938,6 +1001,12 @@ public:
                 bias_opts[0].has_value() ? bias_opts[0]->data_ptr() : nullptr,
                 bias_opts[1].has_value() ? bias_opts[1]->data_ptr() : nullptr
             };
+            if (record_inputs) {
+                combined_topk_idx.record_stream(stream);
+                for (const auto& bias : bias_opts)
+                    if (bias.has_value())
+                        bias->record_stream(stream);
+            }
 
             // Combine pushed data
             launch_combine_reduce_epilogue(combined_x.data_ptr(),
@@ -967,8 +1036,11 @@ public:
         if (defer_epilogue) {
             const auto event = stream_control_epilogue(
                 tensors_to_record, compute_stream, allocate_on_comm_stream, true);
-            std::function<pybind11::object()> epilogue_hook = [epilogue = std::move(epilogue)]() {
-                return epilogue(at::cuda::getCurrentCUDAStream(), std::nullopt);
+            const bool record_on_waiter = event->tensors_to_record.empty();
+            std::function<pybind11::object()> epilogue_hook =
+                [epilogue = std::move(epilogue), compute_stream, comm_stream, record_on_waiter]() {
+                const auto stream = at::cuda::getCurrentCUDAStream();
+                return epilogue(stream, std::nullopt, record_on_waiter and stream != compute_stream and stream != comm_stream);
             };
             return pybind11::make_tuple(pybind11::none(), event, epilogue_hook);
         }
@@ -1083,10 +1155,11 @@ public:
 
 static void register_apis(pybind11::module_& m) {
     pybind11::class_<EPBuffer, BufferBase>(m, "EPBuffer")
-        .def(pybind11::init<int, int, int64_t, int64_t, int64_t, bool, bool, bool, std::optional<int>, int, int, int, bool>())
+        .def(pybind11::init<int, int, int64_t, int64_t, int64_t, bool, bool, bool, std::optional<int>, int, int, int, bool, int>())
         .def_readonly("context", &EPBuffer::context)
         .def_readonly("lb_storage", &EPBuffer::lb_storage)
         .def("dispatch", &EPBuffer::dispatch)
+        .def("get_dispatch_recv_slab", &EPBuffer::get_dispatch_recv_slab)
         .def("combine", &EPBuffer::combine)
         .def("lb_prefetch_weights", &EPBuffer::lb_prefetch_weights)
         .def("lb_reduce_grads", &EPBuffer::lb_reduce_grads);
