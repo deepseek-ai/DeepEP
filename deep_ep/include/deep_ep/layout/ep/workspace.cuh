@@ -19,6 +19,8 @@ struct alignas(kNumRDMAAlignmentBytes) EPSignals {
     int64_t scaleout_channel_signaled_tail[kNumMaxChannels][kNumMaxRanks];
     int channel_scaleup_tail[kNumMaxChannels][kNumMaxRanks];
     int lb_chunk_idx_counter;
+    // Per-call `num_tokens` announced by each scale-out peer (hybrid dispatch skips empty channels)
+    int64_t scaleout_peer_num_tokens[kNumMaxRanks];
 };
 EP_STATIC_ASSERT(sizeof(EPSignals) <= kNumMaxSignalBytes, "Too many signals");
 
@@ -99,6 +101,10 @@ struct EPWorkspaceLayout {
     __forceinline__ __device__ __host__ int64_t* get_scaleout_channel_signaled_tail_ptr(
         const int& channel_idx, const int& scaleout_rank_idx) const {
         return &signals.scaleout_channel_signaled_tail[channel_idx][scaleout_rank_idx];
+    }
+
+    __forceinline__ __device__ __host__ int64_t* get_scaleout_peer_num_tokens_ptr(const int& scaleout_rank_idx) const {
+        return &signals.scaleout_peer_num_tokens[scaleout_rank_idx];
     }
 
     __forceinline__ __device__ __host__ int* get_channel_scaleup_tail_ptr(
