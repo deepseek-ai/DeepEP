@@ -541,7 +541,10 @@ class EPBuffer(BufferBase):
             rdma_traffic += (self.num_ranks - self.num_nvlink_ranks) / self.num_ranks
 
         # Found the bounded one
-        if self.num_scaleout_ranks > 1 and (rdma_traffic / rdma_gbs) > (nvlink_traffic / nvlink_gbs):
+        # NOTES: a domain without traffic has no bandwidth to compare, e.g., no NVLink with one GPU per node
+        rdma_time = rdma_traffic / rdma_gbs if rdma_traffic > 0 else 0
+        nvlink_time = nvlink_traffic / nvlink_gbs if nvlink_traffic > 0 else 0
+        if self.num_scaleout_ranks > 1 and rdma_time > nvlink_time:
             bounded_traffic, bounded_gbs = rdma_traffic, rdma_gbs
         else:
             bounded_traffic, bounded_gbs = nvlink_traffic, nvlink_gbs
