@@ -3,6 +3,7 @@
 #include <deep_ep/common/compiled.cuh>
 #include <deep_ep/common/exception.cuh>
 #include <deep_ep/layout/common/barrier.cuh>
+#include <deep_ep/layout/ep/eplb.cuh>
 
 namespace deep_ep::layout {
 
@@ -19,6 +20,7 @@ struct alignas(kNumRDMAAlignmentBytes) EPSignals {
     int64_t scaleout_channel_signaled_tail[kNumMaxChannels][kNumMaxRanks];
     int channel_scaleup_tail[kNumMaxChannels][kNumMaxRanks];
     int lb_chunk_idx_counter;
+    LBPrepareSignals lb_prepare_signals;
 };
 EP_STATIC_ASSERT(sizeof(EPSignals) <= kNumMaxSignalBytes, "Too many signals");
 

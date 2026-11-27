@@ -14,7 +14,7 @@ def test_unbalanced_scores():
                     if num_topk > num_experts:
                         continue
                     for ratio in [1.0, 2.0, 4.0]:
-                        for precise in [1, 0]:
+                        for precise, synthetic in [(1, 0), (0, 0), (0, 1)]:
                             total_rank_count = torch.zeros(num_ranks, device='cuda')
 
                             # This is the requirement from precise generation algorithm
@@ -25,8 +25,10 @@ def test_unbalanced_scores():
 
                             # Repeat for each rank
                             for rank_idx in range(num_ranks):
-                                scores = get_unbalanced_scores(num_tokens, num_experts, num_ranks, num_topk, ratio, precise)
+                                scores = get_unbalanced_scores(num_tokens, num_experts, num_ranks, num_topk, ratio, precise, synthetic)
                                 _topk_weights, topk_idx = torch.topk(scores, num_topk, dim=-1, largest=True, sorted=False)
+                                assert torch.isfinite(_topk_weights).all()
+                                assert (topk_idx.sort(dim=-1).values.diff(dim=-1) != 0).all()
                                 topk_idx = topk_idx // num_experts_per_rank
                                 row_indices = torch.arange(num_tokens).unsqueeze(1).expand(num_tokens, num_topk).flatten()
                                 topk_idx = topk_idx.flatten()
@@ -36,12 +38,14 @@ def test_unbalanced_scores():
                                 total_rank_count += rank_count
 
                             # Calculate the actual ratio and inequality
-                            practical_ratio = total_rank_count[0].item() / max(total_rank_count[1:].min().item(), 1)
+                            max_count = total_rank_count.max().item()
+                            other_mean = (total_rank_count.sum().item() - max_count) / (num_ranks - 1) if num_ranks > 1 else 1
+                            practical_ratio = max_count / max(other_mean, 1)
                             inequality = total_rank_count[1:].max().item() / max(total_rank_count[1:].min().item(), 1)
                             total_sent_tokens = int(total_rank_count.sum().item())
                             if num_tokens > 1000:
                                 if num_ranks in [8, 64] and num_experts_per_rank == 8:
-                                    print(f' > {precise=}, {num_ranks=:2d}, {num_topk=}, expected_ratio={ratio} | '
+                                    print(f' > {precise=}, {synthetic=}, {num_ranks=:2d}, {num_topk=}, expected_ratio={ratio} | '
                                         f'ratio={practical_ratio:6.3f}, {inequality=:6.3f}, {total_sent_tokens=:7d}')
 
                                 # Only check the ratio and inequality in precise mode

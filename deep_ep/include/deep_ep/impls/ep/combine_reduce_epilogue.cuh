@@ -10,6 +10,7 @@
 namespace deep_ep::ep {
 
 template <bool kUseExpandedLayout, bool kAllowMultipleReduction,
+          bool kOutputFP32,
           int kNumSMs, int kNumWarps,
           // TODO: merge these two variables into one (ensure the whole file does not contain "scaleup")
           int kNumScaleoutRanks, int kNumScaleupRanks,
@@ -22,7 +23,7 @@ template <bool kUseExpandedLayout, bool kAllowMultipleReduction,
           bool kUseRankLayout = use_rank_layout<kAllowMultipleReduction, kNumRanks, kNumTopk>(),
           int kNumTokensInLayout = get_num_tokens_in_layout<kAllowMultipleReduction, kNumRanks, kNumTopk>()>
 __global__ void __launch_bounds__(kNumThreads, 1)
-combine_reduce_epilogue_impl(nv_bfloat16* combined_x,
+combine_reduce_epilogue_impl(void* combined_x,
                              float* combined_topk_weights,
                              topk_idx_t* combined_topk_idx,
                              void* recv_buffer,
@@ -31,6 +32,7 @@ combine_reduce_epilogue_impl(nv_bfloat16* combined_x,
                              const int scaleout_rank_idx, const int scaleup_rank_idx) {
     constexpr int kNumExpertsPerScaleout = kNumExperts / kNumScaleoutRanks;
     constexpr int kNumExpertsPerRank = kNumExperts / (kNumScaleupRanks * kNumScaleoutRanks);
+    constexpr int kNumOutputBytes = kHidden * (kOutputFP32 ? sizeof(float) : sizeof(nv_bfloat16));
     EP_STATIC_ASSERT(kNumExperts % (kNumScaleupRanks * kNumScaleoutRanks) == 0, "Invalid number of experts or ranks");
 
     // Utils
@@ -45,14 +47,15 @@ combine_reduce_epilogue_impl(nv_bfloat16* combined_x,
         comm_token_layout, kNumTokensInLayout, kNumMaxTokensPerRank, recv_buffer);
 
     // Store buffers
-    const auto output_token_layout = layout::TokenLayout(kNumHiddenBytes, 0, 0, false);
+    const auto output_token_layout = layout::TokenLayout(kNumOutputBytes, 0, 0, false);
     const auto output_buffer = layout::BufferLayout<false>(output_token_layout, 1, num_combined_tokens, combined_x);
     const auto tma_buffer = layout::BufferLayout<false>(output_token_layout, kNumWarps, 1, smem)
         .get_rank_buffer(warp_idx).get_token_buffer(0);
 
     // Bias layout
-    const auto bias_0_buffer = layout::BufferLayout<false>(output_token_layout, 1, num_combined_tokens, bias_0);
-    const auto bias_1_buffer = layout::BufferLayout<false>(output_token_layout, 1, num_combined_tokens, bias_1);
+    const auto bias_token_layout = layout::TokenLayout(kNumHiddenBytes, 0, 0, false);
+    const auto bias_0_buffer = layout::BufferLayout<false>(bias_token_layout, 1, num_combined_tokens, bias_0);
+    const auto bias_1_buffer = layout::BufferLayout<false>(bias_token_layout, 1, num_combined_tokens, bias_1);
 
     // Will block until the main combine kernel has finished and all data are visible
     // NOTES: PDL is used, please do not use `__ldg`
@@ -98,14 +101,14 @@ combine_reduce_epilogue_impl(nv_bfloat16* combined_x,
         using combine_vec_t = typename CombineVecTraits<kHidden * sizeof(nv_bfloat16)>::vec_t;
         constexpr int kHiddenVec = kHidden * sizeof(nv_bfloat16) / sizeof(combine_vec_t);
         constexpr int kUnrollFactor = get_max_unroll_factor<kHiddenVec, 4>();
-        combine_reduce<kHiddenVec, kUnrollFactor, kNumTokensInLayout>(
+        combine_reduce<kHiddenVec, kUnrollFactor, kNumTokensInLayout, kOutputFP32>(
             lane_idx, topk_slot_idx, static_cast<combine_vec_t*>(tma_buffer.get_base_ptr()),
             /* Get source base */ [=](const int& slot_idx) {
                 return static_cast<combine_vec_t*>(
                     comm_buffer.get_rank_buffer(slot_idx).get_token_buffer(token_idx).get_base_ptr());
             },
             /* Wait buffer release */ [=]() {
-                ptx::tma_store_wait();
+                ptx::tma_store_wait_read();
                 __syncwarp();
             },
             /* Bias 0 */ bias_0 == nullptr ?
@@ -119,7 +122,7 @@ combine_reduce_epilogue_impl(nv_bfloat16* combined_x,
         // Issue TMA copy
         if (ptx::elect_one_sync()) {
             ptx::tma_store_1d(output_buffer.get_token_buffer(token_idx).get_base_ptr(),
-                              tma_buffer.get_base_ptr(), kNumHiddenBytes);
+                              tma_buffer.get_base_ptr(), kNumOutputBytes);
             ptx::tma_store_commit();
         }
         __syncwarp();

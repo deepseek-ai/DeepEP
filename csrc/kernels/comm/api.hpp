@@ -80,6 +80,12 @@ public:
 
     void* get_sym_ptr(void* ptr, const int& dst_nvl_rank_idx) const;
 
+    void resize(const int64_t& num_gpu_buffer_bytes,
+                const int64_t& num_rdma_storage_bytes,
+                const bool& allow_hybrid_mode,
+                const std::vector<int64_t>& old_buffer_bytes,
+                const std::vector<int64_t>& new_buffer_bytes);
+
     void set_barrier_signals(void* ptr) {
         barrier_signals = ptr;
     }

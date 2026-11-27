@@ -107,7 +107,7 @@ combine_impl(nv_bfloat16* x,
         }();
 
         // Hidden requirements
-        EP_STATIC_ASSERT(kHidden % (32 * sizeof(int4) / sizeof(nv_bfloat16)) == 0, "Invalid hidden");
+        EP_STATIC_ASSERT(kHidden % (32 * sizeof(int2) / sizeof(nv_bfloat16)) == 0, "Invalid hidden");
         using combine_vec_t = typename CombineVecTraits<kHidden * sizeof(nv_bfloat16)>::vec_t;
         constexpr int kHiddenVec = kHidden * sizeof(nv_bfloat16) / sizeof(combine_vec_t);
 
@@ -155,7 +155,7 @@ combine_impl(nv_bfloat16* x,
 
             // Reduce into shared memory
             constexpr int kUnrollFactor = get_max_unroll_factor<kHiddenVec, 4>();
-            combine_reduce<kHiddenVec, kUnrollFactor, math::constexpr_ceil_div(kNumTopk, kNumRanks)>(
+            combine_reduce<kHiddenVec, kUnrollFactor, math::constexpr_ceil_div(kNumTopk, kNumRanks), false>(
                 lane_idx, topk_slot_idx, static_cast<combine_vec_t*>(tma_buffer.get_base_ptr()),
                 /* Get source base */ [=](const int& slot_idx) {
                     return math::advance_ptr<combine_vec_t>(

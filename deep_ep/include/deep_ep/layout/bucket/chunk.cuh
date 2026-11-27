@@ -64,6 +64,7 @@ struct ChunkIterator {
     // States, valid after a successful `next()`
     comm::Bucket bucket;
     int chunk_idx;                      // Global chunk index across all buckets
+    int bucket_idx = 0;
     int num_chunk_bytes;                // Only the last chunk of a bucket may be smaller than `kNumBytesPerChunk`
     int64_t chunk_offset_in_bucket;     // Byte offset of this chunk within `bucket`
 
@@ -98,7 +99,7 @@ struct ChunkIterator {
     }
 
 private:
-    int bucket_idx = 0, bucket_start_chunk_idx = 0;
+    int bucket_start_chunk_idx = 0;
 };
 
 }  // namespace deep_ep::layout

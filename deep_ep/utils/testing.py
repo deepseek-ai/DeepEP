@@ -221,6 +221,37 @@ def bench_kineto(fn,
     return kernel_durations if is_tuple else kernel_durations[0]
 
 
+def generate_lognormal_topk(num_tokens: int, num_experts: int, num_topk: int, rank_idx: int,
+                            seed: int = 0, sigma: float = 0.9, device: str = 'cuda') -> torch.Tensor:
+    """Draw rank-specific routes without replacement from shared lognormal expert popularities.
+
+    `sigma` is the popularity spread of the routing load the planner targets. Popularities come from
+    `seed` and the routes from `seed + SEED_STRIDE * rank_idx`, so every rank shares the popularities
+    but draws its own tokens.
+    """
+    # Routes of consecutive ranks are drawn from generators this far apart
+    SEED_STRIDE = 1000
+    # Draw in chunks, so the Gumbel noise of a long token list never has to exist at once
+    TOKENS_PER_DRAW_CHUNK = 4096
+    # `log(0)` is -inf, so the uniform draw the noise is built from is clamped away from zero
+    MIN_UNIFORM = 1e-20
+
+    generator = torch.Generator(device='cpu').manual_seed(seed)
+    popularity = (sigma * torch.randn(num_experts, generator=generator, dtype=torch.float64,
+                                     device='cpu')).exp()
+    logits = popularity.log()
+    generator = torch.Generator(device='cpu').manual_seed(seed + SEED_STRIDE * rank_idx)
+    topk_idx = torch.empty(num_tokens, num_topk, dtype=torch.int64, device='cpu')
+    for start in range(0, num_tokens, TOKENS_PER_DRAW_CHUNK):
+        end = min(start + TOKENS_PER_DRAW_CHUNK, num_tokens)
+        # `-log(-log(U))` is standard Gumbel noise, the same draw `numpy.random.gumbel` makes
+        uniform = torch.rand(end - start, num_experts, generator=generator, dtype=torch.float64,
+                             device='cpu').clamp_min(MIN_UNIFORM)
+        gumbel = -torch.log(-torch.log(uniform))
+        topk_idx[start:end] = (logits.unsqueeze(0) + gumbel).topk(num_topk, dim=1).indices
+    return topk_idx.to(device)
+
+
 def parse_num_bytes(text: str) -> int:
     """Parse a byte count, optionally with a binary suffix: `1G`, `64M`, `512k`.
     """

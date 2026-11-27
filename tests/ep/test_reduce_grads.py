@@ -11,7 +11,7 @@ import torch.distributed as dist
 
 import deep_ep
 from deep_ep.utils.envs import dist_print, get_nvlink_gbs, get_physical_domain_size, init_dist
-from deep_ep.utils.testing import bench, parse_num_bytes
+from deep_ep.utils.testing import bench, generate_lognormal_topk, parse_num_bytes
 
 # Period of `make_pattern`'s ramp, chosen so adjacent 12 KiB chunks have different contents
 NUM_PATTERN_VALUES = (1 << 12) - 1
@@ -46,71 +46,29 @@ def expert_grad_key(expert_idx: int) -> int:
     return expert_idx
 
 
-def redundant_expert_grad_key(rank_idx: int, redundant_expert_idx: int, num_redundant_experts: int) -> int:
+def redundant_expert_grad_key(rank_idx: int, redundant_expert_idx: int, num_redundant_experts_per_rank: int) -> int:
     """Key of a redundant expert gradient, unique over `(rank_idx, redundant_expert_idx)`."""
-    return -1 - (rank_idx * num_redundant_experts + redundant_expert_idx)
+    return -1 - (rank_idx * num_redundant_experts_per_rank + redundant_expert_idx)
 
 
-def make_redundancy_mapping(num_ranks: int, num_redundant_experts: int, num_experts: int,
-                            empty_ratio: float, seed: int, pattern: str = 'random') -> torch.Tensor:
-    """The `[num_ranks, num_redundant_experts]` redundancy mapping, identical on every rank of the LSA domain.
-
-    Both indices are domain-local: row `l` is the rank at position `l` of the domain, and an
-    entry is an expert id in `[0, num_experts)`, the domain's own expert space.
-
-    A rank never hosts a redundant instance of its local experts, so `random` samples each row from
-    the `num_experts - num_local_experts` remote experts and shifts it past its own block.
-
-    `ring` and `spread` are benchmarking patterns rather than realistic ones. Both give every
-    rank exactly `num_redundant_experts` redundant gradients to pull, removing the imbalance that makes `random`'s GB/s
-    hard to read, and they differ only in how many peers those gradients come from: `ring` puts
-    all of them on one peer (rank `r` borrows only from rank `r + 1`), `spread` walks the
-    owner across all `num_ranks - 1` peers. Comparing the two separates a per-peer link limit
-    from an aggregate NVLink limit at identical bytes and identical balance.
-    """
-    # NOTES: everything here is pinned to CPU and explicitly typed, because `init_dist`
-    # sets the default device to CUDA and the default dtype to bf16 -- a bf16 `torch.rand`
-    # would silently change which redundant expert slots come out empty
-    num_local_experts = num_experts // num_ranks
-    if pattern in ('ring', 'spread'):
-        borrower = torch.arange(num_ranks, dtype=torch.int32, device='cpu').unsqueeze(1)
-        redundant_expert_indices = torch.arange(num_redundant_experts, dtype=torch.int32, device='cpu').unsqueeze(0)
-        # The offset is never 0 mod num_ranks, so a rank never borrows from itself
-        offset = 1 if pattern == 'ring' else 1 + redundant_expert_indices % (num_ranks - 1)
-        table = (borrower + offset) % num_ranks * num_local_experts + redundant_expert_indices % num_local_experts
-    else:
-        assert pattern == 'random', f'Unknown pattern {pattern}'
-        generator = torch.Generator().manual_seed(seed)
-        table = torch.randint(0, num_experts - num_local_experts, (num_ranks, num_redundant_experts),
-                              generator=generator, dtype=torch.int32, device='cpu')
-        own_block_start = (torch.arange(num_ranks, dtype=torch.int32, device='cpu') * num_local_experts).unsqueeze(1)
-        table += (table >= own_block_start).to(torch.int32) * num_local_experts
-        empty = torch.rand((num_ranks, num_redundant_experts), generator=generator,
-                           dtype=torch.float32, device='cpu') < empty_ratio
-        table.masked_fill_(empty, -1)
-
-    owners = torch.div(table, num_local_experts, rounding_mode='floor')
-    assert ((table < 0) | (owners != torch.arange(num_ranks, dtype=torch.int32, device='cpu').unsqueeze(1))).all(), \
-        'A rank must never hold a redundant instance of its local experts'
-    return table.contiguous().cuda()
-
-
-def expected_expert_grads(redundancy_mapping: torch.Tensor, rank_idx: int, num_ranks: int,
-                          num_redundant_experts: int, num_local_experts: int, hidden: int) -> torch.Tensor:
+def expected_expert_grads(redundancy_mapping: torch.Tensor, rank_idx: int, rdma_rank_idx: int,
+                          nvl_rank_idx: int, num_nvl_ranks: int, num_redundant_experts_per_rank: int,
+                          num_main_experts_per_rank: int, hidden: int) -> torch.Tensor:
     """What `expert_grads` must hold afterwards: its seed plus the gradients from every matching redundant expert.
 
     A rank never pulls from its own row.
     """
-    expected = torch.stack([make_pattern(hidden, expert_grad_key(rank_idx * num_local_experts + local_expert_idx))
-                            for local_expert_idx in range(num_local_experts)])
-    for remote_rank_idx in range(num_ranks):
-        if remote_rank_idx == rank_idx:
+    expected = torch.stack([make_pattern(hidden, expert_grad_key(rank_idx * num_main_experts_per_rank + local_expert_idx))
+                            for local_expert_idx in range(num_main_experts_per_rank)])
+    for remote_nvl_rank_idx in range(num_nvl_ranks):
+        if remote_nvl_rank_idx == nvl_rank_idx:
             continue
-        for redundant_expert_idx in range(num_redundant_experts):
-            expert_idx = int(redundancy_mapping[remote_rank_idx, redundant_expert_idx].item())
-            if expert_idx >= 0 and expert_idx // num_local_experts == rank_idx:
-                expected[expert_idx % num_local_experts] += \
-                    make_pattern(hidden, redundant_expert_grad_key(remote_rank_idx, redundant_expert_idx, num_redundant_experts))
+        remote_rank_idx = rdma_rank_idx * num_nvl_ranks + remote_nvl_rank_idx
+        for redundant_expert_idx in range(num_redundant_experts_per_rank):
+            expert_idx = int(redundancy_mapping[remote_nvl_rank_idx, redundant_expert_idx].item())
+            if expert_idx >= 0 and expert_idx // num_main_experts_per_rank == nvl_rank_idx:
+                expected[expert_idx % num_main_experts_per_rank] += \
+                    make_pattern(hidden, redundant_expert_grad_key(remote_rank_idx, redundant_expert_idx, num_redundant_experts_per_rank))
     return expected
 
 
@@ -118,13 +76,14 @@ def expected_expert_grads(redundancy_mapping: torch.Tensor, rank_idx: int, num_r
 def test(local_rank: int, num_local_ranks: int, args: argparse.Namespace) -> None:
     rank_idx, num_ranks, group = init_dist(local_rank, num_local_ranks)
     num_rdma_ranks, num_nvl_ranks = get_physical_domain_size(group)
-    assert num_rdma_ranks == 1, 'Grad reduction pulls over NVLink only, so it is intra-node'
+    rdma_rank_idx, nvl_rank_idx = rank_idx // num_nvl_ranks, rank_idx % num_nvl_ranks
 
     # Settings
     num_experts = args.num_experts
     assert num_experts % num_ranks == 0
-    num_local_experts = num_experts // num_ranks
-    num_redundant_experts, num_sms = args.num_redundant_experts, args.num_sms
+    num_main_experts_per_rank = num_experts // num_ranks
+    # `lb_get_redundancy_mapping` hands back one copy slot per local expert, empty slots marked -1
+    num_redundant_experts_per_rank, num_sms = num_main_experts_per_rank, args.num_sms
 
     # Correctness sweeps a table of hidden sizes; the benchmark runs on its own, much larger
     # one, so that its GB/s is not distorted by launch overhead.
@@ -133,20 +92,20 @@ def test(local_rank: int, num_local_ranks: int, args: argparse.Namespace) -> Non
 
     assert all(h * torch.float32.itemsize % deep_ep.get_num_tma_alignment() == 0 for h in hiddens), \
         'Each expert gradient must be TMA-aligned'
-    assert num_experts + num_ranks * num_redundant_experts < NUM_PATTERN_VALUES, \
+    assert num_experts + num_ranks * num_redundant_experts_per_rank < NUM_PATTERN_VALUES, \
         'Two blobs would share a key modulo the pattern period'
 
     # Plan every symmetric redundant expert gradient pool once, including the benchmark pools.
     plan = deep_ep.BufferAllocator()
-    redundant_expert_grad_sets = [plan.allocate((num_redundant_experts, h), torch.float32) for h in hiddens]
+    redundant_expert_grad_sets = [plan.allocate((num_redundant_experts_per_rank, h), torch.float32) for h in hiddens]
     buffer = deep_ep.EPBuffer(group, num_bytes=deep_ep.get_num_allocation_alignment(),
                               lb_allocation_plan_or_num_bytes=plan, explicitly_destroy=True)
     num_sms = buffer.lb_get_theoretical_num_sms() if num_sms == 0 else num_sms
 
     dist_print(f'Config:\n'
                f' > Ranks: {num_rdma_ranks} x {num_nvl_ranks}\n'
-               f' > Experts: {num_experts} ({num_local_experts} local), '
-               f'redundant experts: {num_redundant_experts}\n'
+               f' > Experts: {num_experts} ({num_main_experts_per_rank} local), '
+               f'redundant experts: {num_redundant_experts_per_rank}\n'
                f' > Correctness hidden sweep: {list(CORRECTNESS_HIDDENS)} fp32\n'
                f' > Perf hidden: {perf_hidden} fp32 '
                f'({perf_hidden * torch.float32.itemsize / 1e6:.1f} MB per expert)\n'
@@ -155,26 +114,31 @@ def test(local_rank: int, num_local_ranks: int, args: argparse.Namespace) -> Non
 
     # This rank's original expert gradients, one set per hidden size. They stay
     # local -- the kernel only reduces into them, so they never have to be symmetric.
-    expert_grad_sets = [torch.empty((num_local_experts, h), dtype=torch.float32, device='cuda') for h in hiddens]
+    expert_grad_sets = [torch.empty((num_main_experts_per_rank, h), dtype=torch.float32, device='cuda') for h in hiddens]
 
     *sweep_expert_grad_sets, perf_expert_grads = expert_grad_sets
     *sweep_redundant_expert_grad_sets, perf_redundant_expert_grads = redundant_expert_grad_sets
 
+    def current_mapping(round_idx: int = 0) -> torch.Tensor:
+        """The redundancy mapping this round runs with: `lb_get_redundancy_mapping`'s plan for a lognormal load."""
+        topk_idx = generate_lognormal_topk(args.num_tokens, num_experts, args.num_topk, rank_idx, args.seed + round_idx)
+        _, redundancy_mapping = buffer.lb_get_redundancy_mapping(topk_idx, num_experts, num_redundant_experts_per_rank, args.token_alignment, 0)
+        return redundancy_mapping
+
     def seed_buffers(hidden: int, expert_grads: torch.Tensor, redundant_expert_grads: torch.Tensor) -> None:
         """Refill both sides. `expert_grads` accumulates, so it must be reseeded every round."""
-        for local_expert_idx in range(num_local_experts):
+        for local_expert_idx in range(num_main_experts_per_rank):
             expert_grads[local_expert_idx] = make_pattern(
-                hidden, expert_grad_key(rank_idx * num_local_experts + local_expert_idx))
-        for redundant_expert_idx in range(num_redundant_experts):
-            redundant_expert_grads[redundant_expert_idx] = make_pattern(hidden, redundant_expert_grad_key(rank_idx, redundant_expert_idx, num_redundant_experts))
+                hidden, expert_grad_key(rank_idx * num_main_experts_per_rank + local_expert_idx))
+        for redundant_expert_idx in range(num_redundant_experts_per_rank):
+            redundant_expert_grads[redundant_expert_idx] = make_pattern(hidden, redundant_expert_grad_key(rank_idx, redundant_expert_idx, num_redundant_experts_per_rank))
 
     # Check correctness over every hidden size.
     dist_print(f'Checking correctness over {len(CORRECTNESS_HIDDENS)} hidden sizes '
                f'x {args.num_rounds} rounds ...', once_in_node=True)
     for hidden, expert_grads, redundant_expert_grads in zip(CORRECTNESS_HIDDENS, sweep_expert_grad_sets, sweep_redundant_expert_grad_sets, strict=True):
         for round_idx in range(args.num_rounds):
-            redundancy_mapping = make_redundancy_mapping(num_ranks, num_redundant_experts, num_experts,
-                                                   args.empty_ratio, args.seed + round_idx, args.pattern)
+            redundancy_mapping = current_mapping(round_idx)
 
             # The seed must be visible to peers before anyone pulls
             seed_buffers(hidden, expert_grads, redundant_expert_grads)
@@ -186,9 +150,10 @@ def test(local_rank: int, num_local_ranks: int, args: argparse.Namespace) -> Non
                 previous_event=buffer.capture() if round_idx % 2 else None).wait()
             torch.cuda.synchronize()
 
-            expected = expected_expert_grads(redundancy_mapping, rank_idx, num_ranks,
-                                          num_redundant_experts, num_local_experts, hidden)
-            for local_expert_idx in range(num_local_experts):
+            expected = expected_expert_grads(
+                redundancy_mapping, rank_idx, rdma_rank_idx, nvl_rank_idx, num_nvl_ranks,
+                num_redundant_experts_per_rank, num_main_experts_per_rank, hidden)
+            for local_expert_idx in range(num_main_experts_per_rank):
                 assert torch.equal(expert_grads[local_expert_idx], expected[local_expert_idx]), \
                     f'{hidden=}, {round_idx=}: gradient of local expert ' \
                     f'{local_expert_idx} is wrong ' \
@@ -198,19 +163,18 @@ def test(local_rank: int, num_local_ranks: int, args: argparse.Namespace) -> Non
             # Never writes the redundant expert gradient pool. A swapped TMA source/destination would land
             # here rather than in the check above, so it is worth testing explicitly.
             dist.barrier(group)
-            for redundant_expert_idx in range(num_redundant_experts):
+            for redundant_expert_idx in range(num_redundant_experts_per_rank):
                 assert torch.equal(redundant_expert_grads[redundant_expert_idx],
-                                   make_pattern(hidden, redundant_expert_grad_key(rank_idx, redundant_expert_idx, num_redundant_experts))), \
+                                   make_pattern(hidden, redundant_expert_grad_key(rank_idx, redundant_expert_idx, num_redundant_experts_per_rank))), \
                     f'{hidden=}, {round_idx=}: redundant expert gradient {redundant_expert_idx} was modified'
 
-    # Perf: count the redundant experts contributing gradients to each rank.
+    # Perf: count the redundant experts contributing gradients to each rank in this NVLink domain.
     # That is the same set `lb_prefetch_weights` pushes, just read from the other end.
-    redundancy_mapping = make_redundancy_mapping(num_ranks, num_redundant_experts, num_experts,
-                                           args.empty_ratio, args.seed, args.pattern)
-    owners = torch.div(redundancy_mapping, num_local_experts, rounding_mode='floor')
-    redundant_experts_per_owner = [int(((redundancy_mapping >= 0) & (owners == r)).sum().item()) for r in range(num_ranks)]
+    redundancy_mapping = current_mapping()
+    owners = torch.div(redundancy_mapping, num_main_experts_per_rank, rounding_mode='floor')
+    redundant_experts_per_owner = [int(((redundancy_mapping >= 0) & (owners == r)).sum().item()) for r in range(num_nvl_ranks)]
     num_bytes_per_redundant_expert = perf_hidden * torch.float32.itemsize
-    num_pulled_bytes = redundant_experts_per_owner[rank_idx] * num_bytes_per_redundant_expert
+    num_pulled_bytes = redundant_experts_per_owner[nvl_rank_idx] * num_bytes_per_redundant_expert
     num_critical_bytes = max(redundant_experts_per_owner) * num_bytes_per_redundant_expert
 
     # Values are never checked here, so a zero fill is enough -- it only keeps the repeated
@@ -223,7 +187,7 @@ def test(local_rank: int, num_local_ranks: int, args: argparse.Namespace) -> Non
     t, _, _ = bench(lambda: buffer.lb_reduce_grads(
         perf_redundant_expert_grads, perf_expert_grads, redundancy_mapping, num_sms=num_sms).wait())
     dist_print('Performance:', once_in_node=True)
-    dist_print(f' > Redundant experts pulled per rank: {redundant_experts_per_owner} (this rank {redundant_experts_per_owner[rank_idx]})',
+    dist_print(f' > Redundant experts pulled per NVLink rank: {redundant_experts_per_owner} (this rank {redundant_experts_per_owner[nvl_rank_idx]})',
                once_in_node=True)
     dist_print(f' > Rank {rank_idx} perf ({num_sms=}): '
                f'{t * 1e6:7.1f} us | '
@@ -242,14 +206,15 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Test expert grad reduction')
     parser.add_argument('--num-processes', type=int, default=8)
     parser.add_argument('--num-experts', type=int, default=64)
-    parser.add_argument('--num-redundant-experts', type=int, default=8)
     parser.add_argument('--num-hidden-bytes', type=parse_num_bytes, default=64 << 20,
                         help='Grad bytes per expert in the benchmark, with an optional binary '
                              'suffix: 64M (default), 512K, or plain bytes.')
     parser.add_argument('--num-rounds', type=int, default=2,
                         help='Copy tables per hidden size, on top of the size sweep')
-    parser.add_argument('--empty-ratio', type=float, default=0.25)
-    parser.add_argument('--pattern', type=str, default='random', choices=('random', 'ring', 'spread'))
+    parser.add_argument('--num-tokens', type=int, default=8192,
+                        help='Tokens per rank fed to lb_get_redundancy_mapping')
+    parser.add_argument('--num-topk', type=int, default=6)
+    parser.add_argument('--token-alignment', type=int, default=128)
     parser.add_argument('--num-sms', type=int, default=0, help='0 uses the bandwidth-based SM estimate')
     parser.add_argument('--seed', type=int, default=0)
     args = parser.parse_args()
