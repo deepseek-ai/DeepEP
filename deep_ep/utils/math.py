@@ -33,10 +33,10 @@ def per_token_cast_to_fp8(x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
     m, n = x.shape
     aligned_n = align(n, 128)
     x_padded = torch.nn.functional.pad(x, (0, aligned_n - n), mode='constant', value=0)
-    x_padded_view = x_padded.view(m, -1, 128)
-    x_amax = x_padded_view.abs().float().amax(dim=2).view(m, -1).clamp(1e-4)
+    x_padded_view = x_padded.view(m, aligned_n // 128, 128)
+    x_amax = x_padded_view.abs().float().amax(dim=2).view(m, aligned_n // 128).clamp(1e-4)
     return (x_padded_view * (448.0 / x_amax.unsqueeze(2))).to(torch.float8_e4m3fn).view(
-        m, aligned_n)[:, :n].contiguous(), (x_amax / 448.0).view(m, -1)
+        m, aligned_n)[:, :n].contiguous(), (x_amax / 448.0).view(m, aligned_n // 128)
 
 
 @torch.compile(dynamic=True)
