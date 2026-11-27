@@ -166,10 +166,11 @@ class EPHandle:
             if not is_cached_dispatch:
                 permute(self.recv_src_metadata, orig_indices)
 
-            if not is_cached_dispatch and channel_linked_list is not None:
+            if not is_cached_dispatch and channel_linked_list is not None and orig_indices.numel() != 0:
                 valid_mask = (channel_linked_list >= 0) & (channel_linked_list < num_recv_tokens)
                 to_indices = get_reverse_permutation(orig_indices)
-                channel_linked_list[valid_mask] = to_indices[channel_linked_list[valid_mask]].to(channel_linked_list.dtype)
+                indices = channel_linked_list.masked_fill(~valid_mask, 0)
+                channel_linked_list.copy_(torch.where(valid_mask, to_indices[indices].to(channel_linked_list.dtype), channel_linked_list))
 
         elif not is_cached_dispatch:
             # Expand mode. In cached mode the copy epilogue places tokens according to
@@ -183,9 +184,11 @@ class EPHandle:
             # Valid tokens precede padding tokens, and valid tokens are sorted by `src_token_global_idx`.
             src_token_global_index_max_x2 = 10000000000    # 1e10
             tensor_dim0_after_expand = recv_x.shape[0]
+            if tensor_dim0_after_expand == 0:
+                return
 
             expert_token_idx_start = self.psum_num_recv_tokens_per_expert - self.num_unaligned_recv_tokens_per_expert
-            token_idx2expert_idx = torch.bucketize(torch.arange(tensor_dim0_after_expand, device='cuda'),
+            token_idx2expert_idx = torch.bucketize(torch.arange(tensor_dim0_after_expand, device=recv_x.device),
                                                    expert_token_idx_start[1:], right=True, out_int32=False)
             sort_keys_for_expanded_tensors = token_idx2expert_idx * src_token_global_index_max_x2
 
@@ -193,8 +196,11 @@ class EPHandle:
             src_global_idx = self.cached_recv_src_metadata_before_sort[:, 0]
             valid_mask = slots >= 0
             if not do_cpu_sync:
-                valid_mask[oob_tokens_mask] = False
-            sort_keys_for_expanded_tensors.scatter_add_(0, slots[valid_mask], -src_token_global_index_max_x2//2 + src_global_idx.unsqueeze(1).expand_as(slots)[valid_mask].to(torch.int64))
+                valid_mask &= ~oob_tokens_mask.unsqueeze(1)
+            # Keep the route table at its capture shape. Invalid routes add zero and may alias slot zero.
+            indices = slots.masked_fill(~valid_mask, 0)
+            offsets = torch.where(valid_mask, src_global_idx.to(torch.int64).unsqueeze(1) - src_token_global_index_max_x2 // 2, 0)
+            sort_keys_for_expanded_tensors.scatter_add_(0, indices.flatten(), offsets.flatten())
 
             orig_indices_for_expanded_tensors = torch.sort(sort_keys_for_expanded_tensors, stable=True).indices.to(torch.int32)
             permute(recv_x, orig_indices_for_expanded_tensors)
@@ -202,7 +208,7 @@ class EPHandle:
             permute(recv_topk_weights, orig_indices_for_expanded_tensors)
 
             to_indices_for_expanded_tensors = get_reverse_permutation(orig_indices_for_expanded_tensors)
-            self.recv_src_metadata[:, 2:][valid_mask] = to_indices_for_expanded_tensors[self.recv_src_metadata[:, 2:][valid_mask]]
+            self.recv_src_metadata[:, 2:].copy_(torch.where(valid_mask, to_indices_for_expanded_tensors[indices], slots))
 
 
 class EPBuffer(BufferBase):
