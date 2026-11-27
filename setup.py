@@ -80,7 +80,9 @@ if __name__ == '__main__':
     cxx_flags = ['-std=c++20', '-O3', '-Wno-deprecated-declarations', '-Wno-unused-variable', '-Wno-sign-compare', '-Wno-reorder', '-Wno-attributes']
     sources = ['csrc/python_api.cpp',
                'csrc/kernels/comm/context.cpp',
-               'csrc/kernels/driver/driver.cpp']
+               'csrc/kernels/driver/driver.cpp',
+               'csrc/kernels/magic/runtime.cu']
+    nvcc_flags = ['-std=c++20', '-O3']
     include_dirs = [f'{current_dir}/deep_ep/include',
                     f'{current_dir}/third-party/deep_jit/include',
                     '/usr/local/cuda/include/cccl']
@@ -96,10 +98,12 @@ if __name__ == '__main__':
     if 'EP_NUM_TOPK_IDX_BITS' in os.environ:
         num_topk_idx_bits = int(os.environ['EP_NUM_TOPK_IDX_BITS'])
         cxx_flags.append(f'-DEP_NUM_TOPK_IDX_BITS={num_topk_idx_bits}')
+        nvcc_flags.append(f'-DEP_NUM_TOPK_IDX_BITS={num_topk_idx_bits}')
 
     # Put them together
     extra_compile_args = {
         'cxx': cxx_flags,
+        'nvcc': nvcc_flags,
     }
 
     # Summary

@@ -65,6 +65,7 @@ from .buffers.ep import EPBuffer, EPHandle
 from .buffers.engram import EngramBuffer
 from .buffers.bucket import BucketBuffer, BucketSession
 from .buffers.pp import PPBuffer
+from .buffers.magic import MagicBuffer
 # noinspection PyUnresolvedReferences
 from .utils.event import EventOverlap, EventHandle
 

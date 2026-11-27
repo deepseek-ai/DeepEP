@@ -7,6 +7,7 @@
 #include "buffers/bucket.hpp"
 #include "buffers/engram.hpp"
 #include "buffers/ep.hpp"
+#include "buffers/magic.hpp"
 #include "buffers/pp.hpp"
 #include "comm/api.hpp"
 #include "runtime/jit.hpp"
@@ -48,4 +49,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
 
     // Register pipeline-parallel send/recv APIs
     deep_ep::pp::register_apis(m);
+
+    deep_ep::magic::register_apis(m);
 }

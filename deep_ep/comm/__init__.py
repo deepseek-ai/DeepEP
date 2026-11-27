@@ -1,6 +1,7 @@
 from .barrier import barrier
 from .handle import (
     NCCLCommHandle,
+    create_nccl_comm_handle,
     destroy_all_managed_nccl_comm,
     get_logical_domain_size,
     get_nccl_comm_handle,
@@ -12,6 +13,7 @@ from .stream import get_comm_stream
 __all__ = [
     'NCCLCommHandle',
     'barrier',
+    'create_nccl_comm_handle',
     'destroy_all_managed_nccl_comm',
     'get_comm_stream',
     'get_logical_domain_size',

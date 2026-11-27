@@ -10,5 +10,6 @@ endfunction()
 
 add_subdirectory(comm)
 add_subdirectory(driver)
+add_subdirectory(magic)
 
 set(RUNTIME_CUDA_LIBRARIES runtime_comm runtime_driver CACHE INTERNAL "Runtime kernels")
