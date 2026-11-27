@@ -135,15 +135,14 @@ class EPHandle:
         if not is_cached_dispatch:
             self.cached_recv_src_metadata_before_sort = self.recv_src_metadata.clone()
         assert self.cached_recv_src_metadata_before_sort is not None
-        sort_keys = self.cached_recv_src_metadata_before_sort[:, 0]
+        if self.do_expand and is_cached_dispatch:
+            # The copy epilogue already uses the saved, deterministically sorted slots.
+            return
 
-        # Ignore trailing tokens by setting their `sort_keys` to max
+        # Track unused receive capacity for both compact and expanded layouts.
         num_recv_tokens = self.psum_num_recv_tokens_per_scaleup_rank[-1] if not do_cpu_sync else self.recv_src_metadata.shape[0]
         if not do_cpu_sync:
             oob_tokens_mask = torch.arange(0, self.recv_src_metadata.shape[0], device=self.recv_src_metadata.device) >= num_recv_tokens
-            sort_keys = sort_keys.clone()
-            sort_keys[oob_tokens_mask] = torch.iinfo(sort_keys.dtype).max
-        orig_indices = torch.sort(sort_keys).indices
 
         def get_reverse_permutation(perm: torch.Tensor) -> torch.Tensor:
             assert perm.dim() == 1
@@ -158,6 +157,13 @@ class EPHandle:
 
         if not self.do_expand:
             # Non-expand mode
+            sort_keys = self.cached_recv_src_metadata_before_sort[:, 0]
+            if not do_cpu_sync:
+                # Ignore trailing tokens by setting their `sort_keys` to max.
+                sort_keys = sort_keys.clone()
+                sort_keys[oob_tokens_mask] = torch.iinfo(sort_keys.dtype).max
+            orig_indices = torch.sort(sort_keys).indices
+
             # If cached dispatch is enabled, the `dispatch` kernel stores values according to `dst_buffer_slot_idx`, and the `dispatch_copy_epilogue_impl` kernel writes the info of token i into the i-th slot
             permute(recv_x, orig_indices)
             permute(recv_sf, orig_indices)
@@ -172,8 +178,6 @@ class EPHandle:
                 channel_linked_list[valid_mask] = to_indices[channel_linked_list[valid_mask]].to(channel_linked_list.dtype)
 
         elif not is_cached_dispatch:
-            # Expand mode. In cached mode the copy epilogue places tokens according to
-            # `self.recv_src_metadata[:, 2:]`, so we only need to permute when `is_cached_dispatch` is `False`.
             # In expand mode, `recv_x`, `recv_sf`, and `recv_topk_weights` are grouped by expert ID, possibly with padding (expert alignment). We permute tokens within each expert and update `self.recv_src_metadata[:, 2:]` accordingly.
 
             # Now we're going to construct the sorting key, which is:
