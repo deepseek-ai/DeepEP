@@ -21,18 +21,19 @@ def find_pkg_root(name: str, lib_name: Optional[str] = None, optional: bool = Fa
     """
     upper = name.upper()
     for env_name in (f'EP_{upper}_ROOT_DIR', f'{upper}_DIR'):
-        if env_name in os.environ:
+        if os.environ.get(env_name):
             return os.environ[env_name]
 
     path_priority = {p: i for i, p in enumerate(sys.path)}
     best, best_priority = None, len(sys.path)
 
     for dist in distributions():
-        dist_name = (dist.metadata['Name'] or '').lower()
+        metadata = dist.metadata
+        dist_name = (metadata['Name'] if metadata and 'Name' in metadata else '').lower()
         if f'nvidia-{name}' not in dist_name and f'nvidia_{name}' not in dist_name:
             continue
 
-        dist_site = str(dist._path.parent)
+        dist_site = str(dist._path.parent) if hasattr(dist, '_path') and dist._path else ''
         priority = path_priority.get(dist_site, len(sys.path))
         if priority > best_priority:
             continue
@@ -45,9 +46,10 @@ def find_pkg_root(name: str, lib_name: Optional[str] = None, optional: bool = Fa
                     best, best_priority = root, priority
                     break
         else:
-            pkg_dir = os.path.join(dist_site, 'nvidia', name)
-            if os.path.isdir(pkg_dir):
-                best, best_priority = pkg_dir, priority
+            if dist_site:
+                pkg_dir = os.path.join(dist_site, 'nvidia', name)
+                if os.path.isdir(pkg_dir):
+                    best, best_priority = pkg_dir, priority
 
     # Raise error if not optional
     if not optional:
@@ -71,8 +73,11 @@ def find_nccl_root(optional: bool = False):
 
 def get_nccl_lib_name(root: str) -> str:
     """Resolve the unversioned library or the SONAME-only library shipped in pip wheels."""
-    lib_dir = Path(root) / 'lib'
-    for path in (lib_dir / 'libnccl.so', *sorted(lib_dir.glob('libnccl.so.*'))):
-        if path.is_file():
-            return path.name
-    raise ModuleNotFoundError(f'libnccl.so not found under {lib_dir}')
+    candidate_dirs = [Path(root) / 'lib', Path(root) / 'lib64', Path(root)]
+    for lib_dir in candidate_dirs:
+        if not lib_dir.is_dir():
+            continue
+        for path in (lib_dir / 'libnccl.so', *sorted(lib_dir.glob('libnccl.so.*'))):
+            if path.is_file():
+                return path.name
+    raise ModuleNotFoundError(f'libnccl.so not found under {root}')

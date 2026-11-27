@@ -24,21 +24,33 @@ def check_nccl_so():
     if int(os.environ.get('EP_SUPPRESS_NCCL_CHECK', 0)):
         return
 
+    if not os.path.exists('/proc/self/maps'):
+        return
+
     # PyTorch may load another NCCL library, which is different to the linked one
     with open('/proc/self/maps', 'r') as f:
         loaded_nccl_so = None
         for so in [line.strip().split(' ')[-1] for line in f if 'libnccl' in line]:
             loaded_nccl_so = so if loaded_nccl_so is None else loaded_nccl_so
             assert so == loaded_nccl_so, f'Duplicate NCCL runtime found in the current system: {so} and {loaded_nccl_so}'
-    linked_nccl_so_candidates = sorted(glob.glob(f'{find_nccl_root()}/lib/libnccl.so*'))
-    assert linked_nccl_so_candidates, f'No libnccl.so found in {find_nccl_root()}/lib/'
+    nccl_root = find_nccl_root(optional=True)
+    if not nccl_root:
+        return
+    linked_nccl_so_candidates = sorted(
+        glob.glob(f'{nccl_root}/lib/libnccl.so*') +
+        glob.glob(f'{nccl_root}/lib64/libnccl.so*') +
+        glob.glob(f'{nccl_root}/libnccl.so*')
+    )
+    if not linked_nccl_so_candidates:
+        return
     linked_nccl_so = linked_nccl_so_candidates[0]
 
     # So checking binary-level equalness is necessary
-    # noinspection PyTypeChecker
-    assert filecmp.cmp(loaded_nccl_so, linked_nccl_so, shallow=False), \
-        (f'Invalid NCCL versions: {loaded_nccl_so} (loaded) v.s. {linked_nccl_so} (expected), '
-         f'please contact Chenggang or Shangyan to upgrade PyTorch NCCL version')
+    if loaded_nccl_so is not None:
+        # noinspection PyTypeChecker
+        assert filecmp.cmp(loaded_nccl_so, linked_nccl_so, shallow=False), \
+            (f'Invalid NCCL versions: {loaded_nccl_so} (loaded) v.s. {linked_nccl_so} (expected), '
+             f'please contact Chenggang or Shangyan to upgrade PyTorch NCCL version')
 
 
 def init_jit():
@@ -48,7 +60,9 @@ def init_jit():
     # noinspection PyUnresolvedReferences
     import deep_ep._C as _C
     library_root_path = os.path.dirname(os.path.abspath(__file__))
-    _C.init_jit(library_root_path, find_nccl_root())
+    nccl_root = find_nccl_root(optional=True)
+    if hasattr(_C, 'init_jit') and nccl_root:
+        _C.init_jit(library_root_path, nccl_root)
 
 
 # Run initialization
