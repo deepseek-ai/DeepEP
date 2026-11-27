@@ -99,6 +99,7 @@ class EPHandle:
 
         # For deterministic features
         self.cached_recv_src_metadata_before_sort = None
+        self.cached_sort_indices = None
 
         # `topk_idx` cannot change in the handle
         self._topk_idx = topk_idx
@@ -130,20 +131,22 @@ class EPHandle:
 
         # NOTE: `self.recv_src_metadata` is generated once during non-cached dispatch and is not
         # regenerated during cached dispatch (applies to both expand and non-expand mode). So we:
-        #  1. Cache it for later sorting
+        #  1. Cache it, sort it once and reuse the permutation for cached dispatch
         #  2. Only permute `self.recv_src_metadata` in non-cached mode
         if not is_cached_dispatch:
             self.cached_recv_src_metadata_before_sort = self.recv_src_metadata.clone()
         assert self.cached_recv_src_metadata_before_sort is not None
-        sort_keys = self.cached_recv_src_metadata_before_sort[:, 0]
-
-        # Ignore trailing tokens by setting their `sort_keys` to max
-        num_recv_tokens = self.psum_num_recv_tokens_per_scaleup_rank[-1] if not do_cpu_sync else self.recv_src_metadata.shape[0]
-        if not do_cpu_sync:
-            oob_tokens_mask = torch.arange(0, self.recv_src_metadata.shape[0], device=self.recv_src_metadata.device) >= num_recv_tokens
-            sort_keys = sort_keys.clone()
-            sort_keys[oob_tokens_mask] = torch.iinfo(sort_keys.dtype).max
-        orig_indices = torch.sort(sort_keys).indices
+        if not is_cached_dispatch:
+            # Cached dispatch refills the same slots, so the permutation is sorted once per handle
+            num_recv_tokens = self.psum_num_recv_tokens_per_scaleup_rank[-1] if not do_cpu_sync else self.recv_src_metadata.shape[0]
+            sort_keys = self.cached_recv_src_metadata_before_sort[:, 0]
+            if not do_cpu_sync:
+                # Ignore trailing tokens by setting their `sort_keys` to max
+                oob_tokens_mask = torch.arange(0, self.recv_src_metadata.shape[0], device=self.recv_src_metadata.device) >= num_recv_tokens
+                sort_keys = sort_keys.clone()
+                sort_keys[oob_tokens_mask] = torch.iinfo(sort_keys.dtype).max
+            self.cached_sort_indices = torch.sort(sort_keys).indices
+        orig_indices = self.cached_sort_indices
 
         def get_reverse_permutation(perm: torch.Tensor) -> torch.Tensor:
             assert perm.dim() == 1
