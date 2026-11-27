@@ -11,7 +11,7 @@ namespace deep_ep::comm {
 template <bool kIsScaleupNVLink,
           int kNumSMs, int kNumThreads,
           int kNumScaleoutRanks, int kNumScaleupRanks,
-          int kNumQPs,
+          int kNumCollectiveQPs,
           int64_t kNumTimeoutCycles,
           bool kFlushStores, bool kSequential>
 __global__ void __launch_bounds__(kNumThreads, 1)
@@ -25,18 +25,18 @@ barrier_impl(const ncclDevComm_t nccl_dev_comm, const ncclWindow_t nccl_window, 
         // Scaleout barrier
         if constexpr (kNumScaleoutRanks > 1)
             gpu_barrier<kIsScaleupNVLink, kNumScaleoutRanks, kNumScaleupRanks,
-                        kNumSMs, kNumThreads, kNumQPs, kNumTimeoutCycles, kKernelBarrierTag,
-                        kFlushStores, true, false>(
+                        kNumSMs, kNumThreads, kNumCollectiveQPs, kNumTimeoutCycles, kKernelBarrierTag,
+                        kFlushStores, true, false, kNumCollectiveQPs>(
                 gin, barrier_signals, scaleout_rank_idx, scaleup_rank_idx, sm_idx, thread_idx, true, false);
 
         // Scaleup barrier, and it needs to flush the RDMA requests issued by scaleout barrier
         gpu_barrier<kIsScaleupNVLink, kNumScaleoutRanks, kNumScaleupRanks,
-                    kNumSMs, kNumThreads, kNumQPs, kNumTimeoutCycles, kKernelBarrierTag, kFlushStores, true, false>(
+                    kNumSMs, kNumThreads, kNumCollectiveQPs, kNumTimeoutCycles, kKernelBarrierTag, kFlushStores, true, false, kNumCollectiveQPs>(
             gin, barrier_signals, scaleout_rank_idx, scaleup_rank_idx, sm_idx, thread_idx, false, true);
     } else {
         gpu_barrier<kIsScaleupNVLink, kNumScaleoutRanks, kNumScaleupRanks,
-                    kNumSMs, kNumThreads, kNumQPs, kNumTimeoutCycles, kKernelBarrierTag,
-                    kFlushStores, true, false>(
+                    kNumSMs, kNumThreads, kNumCollectiveQPs, kNumTimeoutCycles, kKernelBarrierTag,
+                    kFlushStores, true, false, kNumCollectiveQPs>(
             gin, barrier_signals, scaleout_rank_idx, scaleup_rank_idx, sm_idx, thread_idx);
     }
 }

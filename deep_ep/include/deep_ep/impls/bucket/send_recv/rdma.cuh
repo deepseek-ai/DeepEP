@@ -24,7 +24,6 @@ rdma_send_recv(const ncclDevComm_t nccl_dev_comm,
                      "Num send recv entries must not exceed num threads per QP.");
 
     const auto thread_idx = static_cast<int>(threadIdx.x);
-    const auto rank_idx = ncclTeamRail(nccl_dev_comm).rank;
     const auto qp_idx = thread_idx / kNumThreadsPerQP;
     const auto entry_idx = thread_idx % kNumThreadsPerQP;
 
@@ -34,7 +33,7 @@ rdma_send_recv(const ncclDevComm_t nccl_dev_comm,
     // All ranks participate, even when their send list is empty.
     comm::scaleout_barrier_wo_local_sync<kNumRanks, kNumSMs, kNumThreads, kNumQPs,
                                         kNumTimeoutCycles, comm::kKernelBarrierTag, false>(
-        gin, rank_idx, 0, 0, thread_idx);
+        gin, 0, thread_idx);
     __syncthreads();
 
     // Issue send
