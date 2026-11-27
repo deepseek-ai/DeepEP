@@ -1,6 +1,6 @@
 #pragma once
 
-#include <array>
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <functional>
@@ -28,6 +28,8 @@
 #include "../kernels/bucket/all_gather.hpp"
 #include "../kernels/bucket/all_reduce.hpp"
 #include "../kernels/bucket/reduce_scatter.hpp"
+#include "../kernels/bucket/ring_send_recv.hpp"
+#include "../kernels/bucket/send_recv.hpp"
 #include "../runtime/jit.hpp"
 #include "../utils/event.hpp"
 
@@ -42,13 +44,11 @@ private:
     int64_t num_storage_bytes;
     float nvl_bandwidth, rdma_bandwidth;
 
-    // Allocator for operation indices in sequence
-    mutable std::array<uint64_t, kNumMaxContexts> seq_indices = {};
-
     static EventHandle stream_control_epilogue(const std::vector<torch::Tensor>& tensors = {}) {
         const auto comm_stream = comm::get_comm_stream();
         auto event = EventHandle(comm_stream);
-        if (get_env<int>("EP_AVOID_RECORD_STREAM", 0)) {
+        // `record_stream` is incompatible with CUDA Graph capture; retain references on `EventHandle` instead
+        if (get_env<int>("EP_AVOID_RECORD_STREAM", 0) or comm::is_stream_capturing(comm_stream)) {
             event.tensors_to_record.assign(tensors.begin(), tensors.end());
         } else {
             for (const auto& tensor: tensors)
@@ -92,6 +92,9 @@ public:
                 contexts.empty() ? nullptr : contexts.front()));
             auto& workspace = *static_cast<layout::BucketWorkspace*>(contexts.back()->workspace);
             contexts.back()->set_barrier_signals(&workspace.signals[i].barrier);
+            const auto arrived = layout::CopyEngineSignals::kArrivedSignal;
+            CUDA_RUNTIME_CHECK(cudaMemcpy(
+                &workspace.signals[i].copy_engine.arrived, &arrived, sizeof(uint64_t), cudaMemcpyHostToDevice));
 
             // All ranks of a group must have the same context id
             const auto gathered = torch::empty({num_ranks[i]}, torch::TensorOptions().dtype(torch::kInt).device(torch::kCUDA));
@@ -110,12 +113,94 @@ public:
         destroy_on_destruction("bucket");
     }
 
+    pybind11::tuple send_recv(
+        const std::vector<std::tuple<torch::Tensor, int, int64_t>>& send_ops,
+        const int& context_idx,
+        const int& num_sms) const {
+        EP_HOST_ASSERT(not destroyed);
+        EP_HOST_ASSERT(context_idx >= 0 and context_idx < static_cast<int>(contexts.size()));
+        const auto& context = contexts[context_idx];
+        EP_HOST_ASSERT(send_ops.size() <= layout::kNumMaxSendRecvEntries and
+                       "send_ops exceeds the maximum number of send-recv entries");
+
+        const auto check_tensor = [this](const torch::Tensor& tensor) {
+            EP_HOST_ASSERT(tensor.is_cuda() and tensor.device() == storage.device() and tensor.is_contiguous());
+            const auto offset = math::ptr_diff(tensor.data_ptr(), storage.data_ptr());
+            const auto num_bytes = static_cast<int64_t>(tensor.nbytes());
+            EP_HOST_ASSERT(offset >= 0 and num_bytes <= storage.numel() - offset);
+            EP_HOST_ASSERT(offset % kNumRDMAAlignmentBytes == 0 and num_bytes % kNumRDMAAlignmentBytes == 0);
+        };
+
+        int num_nvl_send_entries = 0, num_rdma_send_entries = 0;
+        layout::SendRecvList nvl_send_entries, rdma_send_entries;
+        for (const auto& [tensor, dst_rank_idx, dst_offset]: send_ops) {
+            // Empty sends are no-ops
+            if (tensor.numel() == 0)
+                continue;
+
+            check_tensor(tensor);
+            EP_HOST_ASSERT(dst_rank_idx >= 0 and dst_rank_idx < context->num_ranks);
+            const auto num_bytes = static_cast<int64_t>(tensor.nbytes());
+            EP_HOST_ASSERT(dst_offset >= 0 and num_bytes <= storage.numel() - dst_offset);
+            EP_HOST_ASSERT(dst_offset % kNumRDMAAlignmentBytes == 0);
+            // Storage uses the first context's mapping, so address convertion is needed
+            const auto src_offset = math::ptr_diff(tensor.data_ptr(), storage.data_ptr());
+            if (dst_rank_idx == context->rank_idx)
+                EP_HOST_ASSERT((src_offset == dst_offset or src_offset + num_bytes <= dst_offset or
+                                dst_offset + num_bytes <= src_offset) and
+                               "Self-copy source and destination must not partially overlap");
+            layout::SendRecvEntry entry{
+                context->rank_idx, dst_rank_idx, math::advance_ptr(context->buffer, src_offset), dst_offset, num_bytes};
+            // Separate pure RDMA sends from NVLink sends
+            if (use_rdma_send_recv(*context) or
+                (dst_rank_idx / context->num_nvl_ranks != context->rdma_rank_idx and
+                 dst_rank_idx % context->num_nvl_ranks == context->nvl_rank_idx)) {
+                entry.src_rank_idx = context->rdma_rank_idx;
+                entry.dst_rank_idx = dst_rank_idx / context->num_nvl_ranks;
+                rdma_send_entries[num_rdma_send_entries ++] = entry;
+            } else {
+                nvl_send_entries[num_nvl_send_entries ++] = entry;
+            }
+        }
+
+        // Group by forwarding rank and NVLink destination in cyclic order, with direct sends before forwarded sends.
+        std::stable_sort(nvl_send_entries.entries, nvl_send_entries.entries + num_nvl_send_entries,
+                         [&context](const auto& lhs, const auto& rhs) {
+            const auto key = [&context](const auto& entry) {
+                return std::tuple{
+                    (entry.dst_rank_idx % context->num_nvl_ranks - context->nvl_rank_idx +
+                     context->num_nvl_ranks) % context->num_nvl_ranks,
+                    entry.dst_rank_idx / context->num_nvl_ranks != context->rdma_rank_idx,
+                    (entry.dst_rank_idx - context->rank_idx + context->num_ranks) % context->num_ranks};
+            };
+            return key(lhs) < key(rhs);
+        });
+
+        const auto compute_stream = at::cuda::getCurrentCUDAStream();
+        const auto comm_stream = comm::get_comm_stream();
+        comm::stream_wait(comm_stream, compute_stream);
+        launch_send_recv(*context, num_nvl_send_entries, num_rdma_send_entries,
+                         nvl_send_entries, rdma_send_entries,
+                         context_idx, num_sms, comm_stream);
+
+        auto event = stream_control_epilogue();
+        std::function epilogue = [context, send_ops]() {
+            if (use_rdma_send_recv(*context))
+                // NOTES: Match the QPs used by RDMA send recv.
+                comm::barrier(*context, context->barrier_signals, at::cuda::getCurrentCUDAStream(),
+                              context->num_gpu_timeout_cycles, false, true, true, true,
+                              std::min(context->num_allocated_qps, 2));
+        };
+        return pybind11::make_tuple(event, epilogue, num_sms);
+    }
+
     std::tuple<std::vector<torch::Tensor>, EventHandle, int> reduce_scatter(
         const std::vector<torch::Tensor>& srcs,
         const int& context_idx,
         const int& num_sms,
         const std::string& comm_precision,
-        const float& scale) const {
+        const float& scale,
+        const std::vector<torch::Tensor>& dsts) const {
         EP_HOST_ASSERT(not destroyed);
 
         // Check config
@@ -127,6 +212,9 @@ public:
         EP_HOST_ASSERT(num_sms > 0 and "0-SM reduce-scatter is not implemented");
         EP_HOST_ASSERT(num_sms <= jit->device.get_num_sms());
 
+        const bool accumulate = not dsts.empty();
+        EP_HOST_ASSERT(not accumulate or dsts.size() == srcs.size());
+
         // Check context
         const auto& context = contexts[context_idx];
 
@@ -134,8 +222,9 @@ public:
         const auto storage_begin = reinterpret_cast<uintptr_t>(storage.data_ptr());
         const auto storage_end = storage_begin + num_storage_bytes;
         comm::BucketList buckets;
-        std::vector<torch::Tensor> dsts;
-        dsts.reserve(srcs.size());
+        auto dst_buckets = accumulate ? std::make_optional<comm::BucketList>() : std::nullopt;
+        std::vector<torch::Tensor> outputs;
+        outputs.reserve(srcs.size());
         for (int bucket_idx = 0; bucket_idx < num_buckets; ++ bucket_idx) {
             // TODO: support other dtypes
             const auto& src = srcs[bucket_idx];
@@ -154,15 +243,27 @@ public:
 
             // TODO: support >1D slicing
             const auto shard_numel = src.numel() / context->num_ranks;
-            auto dst = src.view({-1}).slice(
+            auto dst = accumulate ? dsts[bucket_idx] : src.view({-1}).slice(
                 0, context->rank_idx * shard_numel, (context->rank_idx + 1) * shard_numel);
+            if (accumulate) {
+                EP_HOST_ASSERT(dst.is_cuda() and dst.is_contiguous());
+                EP_HOST_ASSERT(dst.device() == storage.device() and src.device() == storage.device());
+                EP_HOST_ASSERT(dst.scalar_type() == torch::kFloat and dst.numel() == shard_numel);
+                const auto dst_begin = reinterpret_cast<uintptr_t>(dst.data_ptr());
+                EP_HOST_ASSERT(dst_begin % alignof(longlong4_t) == 0);
+                EP_HOST_ASSERT(dst_begin + dst.nbytes() <= src_begin or dst_begin >= src_end);
+                (*dst_buckets)[bucket_idx] = {
+                    .offset = math::ptr_diff(dst.data_ptr(), context->buffer),
+                    .num_bytes = static_cast<int64_t>(dst.nbytes()),
+                };
+            }
 
             // Create bucket (shard view)
             buckets[bucket_idx] = {
                 .offset = static_cast<int64_t>(src_begin - storage_begin),
                 .num_bytes = static_cast<int64_t>(dst.nbytes()),
             };
-            dsts.push_back(dst);
+            outputs.push_back(dst);
         }
 
         // Launch
@@ -172,13 +273,13 @@ public:
         launch_reduce_scatter(
             context->dev_comm, context->window,
             context->workspace, context->buffer, context->buffer_multimem,
-            num_buckets, buckets,
+            num_buckets, buckets, dst_buckets,
             context->num_rdma_ranks, context->num_nvl_ranks,
             num_sms, context->num_allocated_qps, context->num_gpu_timeout_cycles,
             scale, comm_precision, context_idx, comm_stream);
 
-        auto event = stream_control_epilogue();
-        return {dsts, event, num_sms};
+        auto event = stream_control_epilogue(dsts);
+        return {outputs, event, num_sms};
     }
 
     std::tuple<std::vector<torch::Tensor>, EventHandle, int> all_reduce(
@@ -209,9 +310,8 @@ public:
             const auto& src = srcs[bucket_idx];
             EP_HOST_ASSERT(src.is_cuda() and src.is_contiguous());
             EP_HOST_ASSERT(src.scalar_type() == torch::kFloat and src.numel() > 0);
-            // Each rank reduces one shard (numel / num_ranks) of float4 vectors
-            EP_HOST_ASSERT(src.nbytes() % (context->num_ranks * sizeof(float4)) == 0);
-            EP_HOST_ASSERT(src.nbytes() % (context->num_ranks * kNumTMAAlignmentBytes) == 0);
+            EP_HOST_ASSERT(src.nbytes() % sizeof(float4) == 0);
+            EP_HOST_ASSERT(src.nbytes() % kNumTMAAlignmentBytes == 0);
 
             const auto src_begin = reinterpret_cast<uintptr_t>(src.data_ptr());
             const auto src_end = src_begin + src.nbytes();
@@ -308,7 +408,7 @@ public:
         const auto comm_stream = comm::get_comm_stream();
         comm::stream_wait(comm_stream, compute_stream);
         launch_all_gather(*context, num_buckets, buckets, src_buckets, context_idx,
-                          seq_indices[context_idx], nvl_bandwidth, rdma_bandwidth, comm_stream);
+                          nvl_bandwidth, rdma_bandwidth, comm_stream);
 
         // Record and epilogue
         auto event = stream_control_epilogue(srcs);
@@ -316,9 +416,86 @@ public:
             if (context->num_rdma_ranks > 1) {
                 // NOTES: the hybrid path confirms every put by the tail signals before the barrier, no flush needed
                 comm::barrier(*context, context->barrier_signals, at::cuda::getCurrentCUDAStream(),
-                              context->num_gpu_timeout_cycles, false, true, context->num_nvl_ranks == 1);
+                              context->num_gpu_timeout_cycles, false, true, context->num_nvl_ranks == 1, true);
             }
             return pybind11::cast(gathered);
+        };
+        return pybind11::make_tuple(event, epilogue);
+    }
+
+    // `srcs` can be out of the storage on the pure NVLink path; `dsts` must belong to the storage
+    pybind11::tuple ring_send_recv(
+        const std::vector<torch::Tensor>& srcs,
+        const std::vector<torch::Tensor>& dsts,
+        const int& shift,
+        const bool& cyclic,
+        const int& context_idx,
+        const int& num_sms) const {
+        EP_HOST_ASSERT(not destroyed);
+
+        // Check config
+        const auto num_buckets = static_cast<int>(srcs.size());
+        EP_HOST_ASSERT(num_buckets > 0 and num_buckets <= comm::kNumMaxBuckets);
+        EP_HOST_ASSERT(static_cast<int>(dsts.size()) == num_buckets);
+        EP_HOST_ASSERT(context_idx >= 0 and context_idx < static_cast<int>(contexts.size()));
+        EP_HOST_ASSERT(num_sms == 0);
+
+        // Check context
+        const auto& context = contexts[context_idx];
+
+        // Create bucket lists
+        comm::BucketList src_buckets, dst_buckets;
+        for (int bucket_idx = 0; bucket_idx < num_buckets; ++ bucket_idx) {
+            const auto& src = srcs[bucket_idx];
+            const auto& dst = dsts[bucket_idx];
+            EP_HOST_ASSERT(src.is_cuda() and src.device() == storage.device() and src.is_contiguous() and src.numel() > 0);
+            EP_HOST_ASSERT(dst.is_cuda() and dst.device() == storage.device() and dst.is_contiguous());
+            EP_HOST_ASSERT(src.dtype() == dst.dtype() and src.numel() == dst.numel());
+
+            const auto num_bytes = static_cast<int64_t>(src.nbytes());
+            const auto src_offset = math::ptr_diff(src.data_ptr(), storage.data_ptr());
+            const auto dst_offset = math::ptr_diff(dst.data_ptr(), storage.data_ptr());
+            const bool src_in_buffer = src_offset >= 0 and src_offset + num_bytes <= num_storage_bytes;
+            EP_HOST_ASSERT(dst_offset >= 0 and dst_offset + num_bytes <= num_storage_bytes and
+                           "Output tensors must belong to this BucketBuffer");
+            EP_HOST_ASSERT((src_offset + num_bytes <= dst_offset or dst_offset + num_bytes <= src_offset) and
+                           "Input and output tensors must not overlap");
+            if (context->num_rdma_ranks > 1) {
+                EP_HOST_ASSERT(src_in_buffer and
+                               "Out-of-buffer inputs are only supported by the pure NVLink path");
+                EP_HOST_ASSERT(src_offset % kNumRDMAAlignmentBytes == 0 and
+                               dst_offset % kNumRDMAAlignmentBytes == 0);
+            }
+
+            // External sources on pure NVLink must be decoded against the selected context's buffer
+            src_buckets[bucket_idx] = {
+                .offset = src_in_buffer ? src_offset : math::ptr_diff(src.data_ptr(), context->buffer),
+                .num_bytes = num_bytes,
+            };
+            dst_buckets[bucket_idx] = {
+                .offset = dst_offset,
+                .num_bytes = num_bytes,
+            };
+        }
+
+        // Launch
+        const auto compute_stream = at::cuda::getCurrentCUDAStream();
+        const auto comm_stream = comm::get_comm_stream();
+        comm::stream_wait(comm_stream, compute_stream);
+        bool flush_stores = false;
+        launch_ring_send_recv(*context, num_buckets, src_buckets, dst_buckets,
+                              shift, cyclic, context_idx, flush_stores, comm_stream);
+
+        // Record and epilogue
+        auto event = stream_control_epilogue(srcs);
+        std::function epilogue = [context, dsts, flush_stores]() {
+            if (context->num_rdma_ranks > 1) {
+                // NOTES: cross-rail hybrid puts are confirmed by tail signals before the barrier, no flush needed
+                comm::barrier(*context, context->barrier_signals, at::cuda::getCurrentCUDAStream(),
+                              context->num_gpu_timeout_cycles, false, true, flush_stores, true,
+                              std::min(context->num_allocated_qps, layout::RingSendRecvSignals::kNumQPs));
+            }
+            return pybind11::cast(dsts);
         };
         return pybind11::make_tuple(event, epilogue);
     }
@@ -353,12 +530,17 @@ static void register_apis(pybind11::module_& m) {
              py::arg("explicitly_destroy") = false)
         .def_readonly("contexts", &BucketBuffer::contexts)
         .def_readonly("storage", &BucketBuffer::storage)
+        .def("send_recv", &BucketBuffer::send_recv,
+             py::arg("send_ops"),
+             py::arg("context_idx"),
+             py::arg("num_sms"))
         .def("reduce_scatter", &BucketBuffer::reduce_scatter,
              py::arg("srcs"),
              py::arg("context_idx"),
              py::arg("num_sms"),
              py::arg("comm_precision") = "fp32",
-             py::arg("scale") = 1.0f)
+             py::arg("scale") = 1.0f,
+             py::arg("dsts") = std::vector<torch::Tensor>{})
         .def("all_reduce", &BucketBuffer::all_reduce,
              py::arg("srcs"),
              py::arg("context_idx"),
@@ -367,6 +549,13 @@ static void register_apis(pybind11::module_& m) {
         .def("all_gather", &BucketBuffer::all_gather,
              py::arg("srcs"),
              py::arg("dsts"),
+             py::arg("context_idx") = 0,
+             py::arg("num_sms") = 0)
+        .def("ring_send_recv", &BucketBuffer::ring_send_recv,
+             py::arg("srcs"),
+             py::arg("dsts"),
+             py::arg("shift") = 1,
+             py::arg("cyclic") = false,
              py::arg("context_idx") = 0,
              py::arg("num_sms") = 0);
 }

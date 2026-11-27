@@ -78,7 +78,8 @@ constexpr int kNumMaxScaleoutRanks = kNumMaxRanks;
 constexpr int kNumMaxScaleupRanks = kNumMaxRanks;
 constexpr int kNumMaxContexts = 8;
 constexpr int kNumMaxQPs = 1024;
+constexpr int kFlushAllAllocatedQPs = -1;
 constexpr int kDefaultQPDepth = 1024;
-constexpr int kNumMaxSignalBytes = 16 * 1024 * 1024;
+constexpr int kNumMaxSignalBytes = 32 * 1024 * 1024;
 
 } // namespace deep_ep

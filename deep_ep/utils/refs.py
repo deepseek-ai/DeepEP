@@ -153,12 +153,14 @@ def generate_pre_combine_data(src_token_global_idx: torch.Tensor,
     return result.to(torch.bfloat16)
 
 
-def ordered_accumulate(data: torch.Tensor, initial_value: Optional[torch.Tensor] = None) -> torch.Tensor:
+def ordered_accumulate(data: torch.Tensor, out_dtype: torch.dtype,
+                       initial_value: Optional[torch.Tensor] = None) -> torch.Tensor:
     """
     Accumulate `data` in order along the num_topk dimension.
 
     Arguments:
     - `data`: Data to be accumulated, `[num_tokens, num_topk, hidden]`
+    - `out_dtype`: Output dtype
     - `initial_value`: Initial value for accumulation, `[num_tokens, hidden]`
 
     Returns:
@@ -171,19 +173,21 @@ def ordered_accumulate(data: torch.Tensor, initial_value: Optional[torch.Tensor]
         result = initial_value.clone()
     for i in range(num_topk):
         result += data[:, i, :].float()
-    return result.to(data.dtype)
+    return result.to(out_dtype)
 
 
 def combine(y: torch.Tensor, topk_idx: torch.Tensor,
             num_scaleout_ranks: int, num_scaleup_ranks: int, num_experts: int,
             bias: Optional[Union[Tuple[torch.Tensor, torch.Tensor], torch.Tensor]],
-            reduce_in_local: bool, reduce_in_scaleup: bool) -> torch.Tensor:
+            reduce_in_local: bool, reduce_in_scaleup: bool,
+            use_fp32_output: bool = False) -> torch.Tensor:
     """
     The reference implementation of (possibly multi-level reduction) combining tokens.
 
     Arguments:
     - `y`: Input tokens to be combined, `[num_tokens, num_topk, hidden]`
     - `topk_idx`: `[num_tokens, num_topk]`
+    - `use_fp32_output`: Return FP32 instead of BF16
     - `reduce_in_local` and `reduce_in_scaleup`: Whether to do reduction within rank and within scale-up group.
        - `(True, True)` -> Hybrid combine
        - `(True, False)` -> Non-hybrid combine
@@ -239,5 +243,5 @@ def combine(y: torch.Tensor, topk_idx: torch.Tensor,
     if reduce_in_scaleup:
         y = grouped_reduce(y, topk_idx // (num_experts_per_rank * num_scaleup_ranks))
     bias_sum = bias[0].float() + bias[1].float() if isinstance(bias, tuple) else bias.float() if bias is not None else None
-    result = ordered_accumulate(y, bias_sum)
+    result = ordered_accumulate(y, torch.float32 if use_fp32_output else torch.bfloat16, bias_sum)
     return result
