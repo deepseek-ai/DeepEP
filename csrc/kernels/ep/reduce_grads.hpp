@@ -22,7 +22,7 @@ static void launch_lb_reduce_grads(const comm::Context& context,
                                    float* redundant_expert_grads,
                                    float* expert_grads,
                                    const int* redundancy_mapping,
-                                   const int& num_redundant_experts,
+                                   const int& num_redundant_experts_per_rank,
                                    const int& num_local_experts,
                                    const int64_t& hidden,
                                    const int& num_sms,
@@ -48,7 +48,7 @@ static void launch_lb_reduce_grads(const comm::Context& context,
 static void __instantiate_kernel() {{
     auto ptr = reinterpret_cast<void*>(&deep_ep::ep::lb_reduce_grads<{}, {}, {}, {}, {}, {}, {}>);
 }}
-)", num_sms, num_warps, context.num_nvl_ranks, num_local_experts, num_redundant_experts,
+)", num_sms, num_warps, context.num_nvl_ranks, num_local_experts, num_redundant_experts_per_rank,
     num_chunk_bytes, context.num_gpu_timeout_cycles));
 
     // Launch

@@ -18,6 +18,7 @@ static void launch_barrier(const deep_jit::NoRefPtr& nccl_dev_comm, const ncclWi
                            void* signals,
                            const int& scaleout_rank_idx, const int& scaleup_rank_idx,
                            const int& num_scaleout_ranks, const int& num_scaleup_ranks,
+                           const int& num_qps,
                            const int64_t& num_timeout_cycles,
                            const bool& is_scaleup_nvlink,
                            const bool& flush_stores, const bool& sequential,
@@ -34,10 +35,11 @@ static void launch_barrier(const deep_jit::NoRefPtr& nccl_dev_comm, const ncclWi
 #include <deep_ep/impls/comm/barrier.cuh>
 
 static void __instantiate_kernel() {{
-    auto ptr = reinterpret_cast<void*>(&deep_ep::comm::barrier_impl<{}, {}, {}, {}, {}, {}, {}, {}>);
+    auto ptr = reinterpret_cast<void*>(&deep_ep::comm::barrier_impl<{}, {}, {}, {}, {}, {}, {}, {}, {}>);
 }}
 )", is_scaleup_nvlink, num_sms, kNumThreads,
         num_scaleout_ranks, num_scaleup_ranks,
+        num_qps,
         num_timeout_cycles, flush_stores, sequential));
 
     // Launch

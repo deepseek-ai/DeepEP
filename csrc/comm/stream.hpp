@@ -26,4 +26,10 @@ static void stream_wait(const at::cuda::CUDAStream& stream, const EventHandle& e
     stream.unwrap().wait(*event.event);
 }
 
+static bool is_stream_capturing(const at::cuda::CUDAStream& stream) {
+    cudaStreamCaptureStatus status = cudaStreamCaptureStatusNone;
+    CUDA_RUNTIME_CHECK(cudaStreamIsCapturing(stream.stream(), &status));
+    return status != cudaStreamCaptureStatusNone;
+}
+
 }  // namespace deep_ep::comm

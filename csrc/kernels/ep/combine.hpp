@@ -157,10 +157,12 @@ static void launch_combine_reduce_epilogue(void* combined_x,
                                            const int& scaleout_rank_idx, const int& scaleup_rank_idx,
                                            const int& num_sms, const int& num_smem_bytes,
                                            const bool& use_expanded_layout, const bool& allow_multiple_reduction,
+                                           const bool& use_fp32_output,
                                            const at::cuda::CUDAStream& stream) {
     // Maximize shared memory utilization
     // Too many warps may cause performance degrade, so we limit into 1024
-    const auto token_layout = layout::TokenLayout(hidden * sizeof(nv_bfloat16), 0, 0, false);
+    const auto output_elem_size = use_fp32_output ? sizeof(float) : sizeof(nv_bfloat16);
+    const auto token_layout = layout::TokenLayout(hidden * output_elem_size, 0, 0, false);
     const auto num_warps = std::min<int>(num_smem_bytes / token_layout.get_num_bytes<false>(), 32);
     const auto num_threads = num_warps * 32;
 
@@ -169,9 +171,9 @@ static void launch_combine_reduce_epilogue(void* combined_x,
 #include <deep_ep/impls/ep/combine_reduce_epilogue.cuh>
 
 static void __instantiate_kernel() {{
-    auto ptr = reinterpret_cast<void*>(&deep_ep::ep::combine_reduce_epilogue_impl<{}, {}, {}, {}, {}, {}, {}, {}, {}, {}>);
+    auto ptr = reinterpret_cast<void*>(&deep_ep::ep::combine_reduce_epilogue_impl<{}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}>);
 }}
-)", use_expanded_layout, allow_multiple_reduction,
+)", use_expanded_layout, allow_multiple_reduction, use_fp32_output,
         num_sms, num_threads / 32,
         num_scaleout_ranks, num_scaleup_ranks,
         hidden,
@@ -187,7 +189,7 @@ static void __instantiate_kernel() {{
             .block_dim = dim3(num_threads, 1, 1),
             .enable_pdl = true,
         },
-        static_cast<nv_bfloat16*>(combined_x),
+        combined_x,
         combined_topk_weights,
         combined_topk_idx,
         reduce_buffer,

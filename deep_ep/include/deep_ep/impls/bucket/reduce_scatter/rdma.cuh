@@ -12,7 +12,7 @@ namespace deep_ep::bucket {
 template <int kNumRanks, int kNumSMs,
           int kNumIssueWarps, int kNumReduceWarps,
           int kNumQPs,
-          int64_t kNumTimeoutCycles, bool kWithScale, int kContextIdx,
+          int64_t kNumTimeoutCycles, bool kWithScale, int kContextIdx, bool kAccumulate,
           int kNumIssueChunksPerBatch = 8,
           int kNumReduceChunksPerBatch = 8,
           int kNumWarps = kNumIssueWarps + kNumReduceWarps,
@@ -25,7 +25,8 @@ rdma_reduce_scatter(const ncclDevComm_t nccl_dev_comm, const ncclWindow_t window
                     void* workspace_ptr, void* buffer,
                     const float scale,
                     const int num_buckets,
-                    const __grid_constant__ comm::BucketList buckets) {
+                    const __grid_constant__ comm::BucketList buckets,
+                    const __grid_constant__ comm::BucketList dst_buckets) {
     // Check slots
     constexpr int kNumBytesPerChunk = 32 * 1024;
     constexpr int kNumElemsPerChunk = kNumBytesPerChunk / sizeof(float);
@@ -39,9 +40,9 @@ rdma_reduce_scatter(const ncclDevComm_t nccl_dev_comm, const ncclWindow_t window
     EP_STATIC_ASSERT(kNumReduceChunksPerBatch > 0 and kNumReduceChunksPerBatch <= 32,
                      "Reduce chunk batch size must be between 1 and 32");
 
-    // Registers
-    constexpr int kNumIssueRegisters = 112;
-    constexpr int kNumReduceRegisters = 144;
+    // Give accumulation more reduction registers for grouped target loads.
+    constexpr int kNumIssueRegisters = 96;
+    constexpr int kNumReduceRegisters = 160;
     constexpr int kNumInitialRegisters = (65536 / kNumThreads / 8) * 8;
     EP_STATIC_ASSERT(kNumIssueWarps % 4 == 0 and kNumReduceWarps % 4 == 0,
                      "Register roles must align to warp groups");
@@ -86,7 +87,7 @@ rdma_reduce_scatter(const ncclDevComm_t nccl_dev_comm, const ncclWindow_t window
         *signals.get_tail_ptr<kNumSlotsPerRank>(j, k) = 0;
     }
     comm::gpu_barrier<true, kNumRanks, 1,
-                   kNumSMs, kNumThreads, comm::kFlushAllAllocatedQPs,
+                   kNumSMs, kNumThreads, kFlushAllAllocatedQPs,
                    kNumTimeoutCycles, comm::kKernelBarrierTag, false, true, true>(
         gin, barrier_signals, rank_idx, 0, sm_idx, thread_idx);
 
@@ -142,11 +143,14 @@ rdma_reduce_scatter(const ncclDevComm_t nccl_dev_comm, const ncclWindow_t window
             EP_STATIC_ASSERT(kNumElemsPerChunk % (32 * kNumVecsPerIter * 4) == 0, "Unaligned reduction iteration");
             const int num_vecs = iterator.num_chunk_bytes / static_cast<int>(sizeof(float4));
             const bool full_chunk = iterator.num_chunk_bytes == kNumBytesPerChunk;
-            const auto dst_ptr = math::advance_ptr<float4>(buffer, iterator.bucket.offset + rank_idx * iterator.bucket.num_bytes + iterator.chunk_offset_in_bucket);
+            const auto local_ptr = math::advance_ptr<float4>(buffer, iterator.bucket.offset + rank_idx * iterator.bucket.num_bytes + iterator.chunk_offset_in_bucket);
+
             #pragma unroll 1
             for (int peer_offset = 1; peer_offset < kNumRanks; peer_offset += kNumReduceChunksPerBatch) {
                 const int num_batch_chunks = min(kNumReduceChunksPerBatch, kNumRanks - peer_offset);
                 const bool is_last_batch = peer_offset + num_batch_chunks == kNumRanks;
+                const auto dst_ptr = (kAccumulate and is_last_batch) ?
+                    math::advance_ptr<float4>(buffer, dst_buckets[iterator.bucket_idx].offset + iterator.chunk_offset_in_bucket) : local_ptr;
 
                 // Wait arrival in reverse cyclic order
                 const auto wait_rank_idx = (rank_idx - peer_offset - (lane_idx % kNumRanks) + 2 * kNumRanks) % kNumRanks;
@@ -160,14 +164,29 @@ rdma_reduce_scatter(const ncclDevComm_t nccl_dev_comm, const ncclWindow_t window
                 for (int i = 0; i < kNumElemsPerChunk / 4 / (32 * kNumVecsPerIter); ++ i) {
                     const auto vec_idx = i * 32 * kNumVecsPerIter + lane_idx;
                     float4 values[kNumVecsPerIter];
+                    float4 previous[kNumVecsPerIter];
+                    if constexpr (kAccumulate) {
+                        // Issue independent target loads before the source reductions.
+                        if (is_last_batch) {
+                            if (full_chunk) {
+                                #pragma unroll
+                                for (int k = 0; k < kNumVecsPerIter; ++ k)
+                                    previous[k] = ptx::ld_with_gt_pred(dst_ptr + vec_idx + k * 32);
+                            } else {
+                                #pragma unroll
+                                for (int k = 0; k < kNumVecsPerIter; ++ k)
+                                    previous[k] = ptx::ld_with_gt_pred(dst_ptr + vec_idx + k * 32, num_vecs, vec_idx + k * 32);
+                            }
+                        }
+                    }
                     if (full_chunk) {
                         #pragma unroll
                         for (int k = 0; k < kNumVecsPerIter; ++ k)
-                            values[k] = ptx::ld_with_gt_pred(dst_ptr + vec_idx + k * 32);
+                            values[k] = ptx::ld_with_gt_pred(local_ptr + vec_idx + k * 32);
                     } else {
                         #pragma unroll
                         for (int k = 0; k < kNumVecsPerIter; ++ k)
-                            values[k] = ptx::ld_with_gt_pred(dst_ptr + vec_idx + k * 32, num_vecs, vec_idx + k * 32);
+                            values[k] = ptx::ld_with_gt_pred(local_ptr + vec_idx + k * 32, num_vecs, vec_idx + k * 32);
                     }
 
                     #pragma unroll 1
@@ -200,6 +219,15 @@ rdma_reduce_scatter(const ncclDevComm_t nccl_dev_comm, const ncclWindow_t window
                         }
                     }
 
+                    // Accumulate into the external target on the final batch.
+                    if constexpr (kAccumulate) {
+                        if (is_last_batch) {
+                            #pragma unroll
+                            for (int k = 0; k < kNumVecsPerIter; ++ k)
+                                values[k] = ptx::fadd4(previous[k], values[k]);
+                        }
+                    }
+
                     // Store
                     if (full_chunk) {
                         #pragma unroll
@@ -227,7 +255,7 @@ rdma_reduce_scatter(const ncclDevComm_t nccl_dev_comm, const ncclWindow_t window
 
     // Ensure no later writes
     comm::gpu_barrier<true, kNumRanks, 1,
-                      kNumSMs, kNumThreads, comm::kFlushAllAllocatedQPs,
+                      kNumSMs, kNumThreads, kFlushAllAllocatedQPs,
                       kNumTimeoutCycles, comm::kKernelBarrierTag, true, true, false>(
         gin, barrier_signals, rank_idx, 0, sm_idx, thread_idx);
 }
@@ -235,7 +263,7 @@ rdma_reduce_scatter(const ncclDevComm_t nccl_dev_comm, const ncclWindow_t window
 template <int kNumRanks, int kNumSMs,
           int kNumCastWarps, int kNumIssueWarps, int kNumReduceWarps,
           int kNumQPs,
-          int64_t kNumTimeoutCycles, bool kWithScale, int kContextIdx,
+          int64_t kNumTimeoutCycles, bool kWithScale, int kContextIdx, bool kAccumulate,
           int kNumIssueChunksPerBatch = 8,
           int kNumReduceChunksPerBatch = 8,
           int kNumCastWarpsPerGroup = 4,
@@ -252,7 +280,8 @@ rdma_reduce_scatter_bf16(const ncclDevComm_t nccl_dev_comm, const ncclWindow_t w
                     void* workspace_ptr, void* buffer,
                     const float scale,
                     const int num_buckets,
-                    const __grid_constant__ comm::BucketList buckets) {
+                    const __grid_constant__ comm::BucketList buckets,
+                    const __grid_constant__ comm::BucketList dst_buckets) {
     // Check slots
     constexpr int kNumCommBytesPerChunk = (kNumRanks <= 8 ? 64 : 32) * 1024;
     constexpr int kNumBytesPerChunk = 2 * kNumCommBytesPerChunk;
@@ -283,8 +312,8 @@ rdma_reduce_scatter_bf16(const ncclDevComm_t nccl_dev_comm, const ncclWindow_t w
 
     // Registers
     constexpr int kNumCastRegisters = 80;
-    constexpr int kNumIssueRegisters = 80;
-    constexpr int kNumReduceRegisters = 120;
+    constexpr int kNumIssueRegisters = kNumRanks < 4 ? 80 : 64;
+    constexpr int kNumReduceRegisters = kNumRanks < 4 ? 192 : 128;
     constexpr int kNumInitialRegisters = (65536 / kNumThreads / 8) * 8;
     EP_STATIC_ASSERT(kNumCastWarps % 4 == 0 and kNumIssueWarps % 4 == 0 and kNumReduceWarps % 4 == 0,
                      "Register roles must align to warp groups");
@@ -340,7 +369,7 @@ rdma_reduce_scatter_bf16(const ncclDevComm_t nccl_dev_comm, const ncclWindow_t w
         *signals.get_tail_ptr<kNumSlotsPerRank>(j, k) = 0;
     }
     comm::gpu_barrier<true, kNumRanks, 1,
-                   kNumSMs, kNumThreads, comm::kFlushAllAllocatedQPs,
+                   kNumSMs, kNumThreads, kFlushAllAllocatedQPs,
                    kNumTimeoutCycles, comm::kKernelBarrierTag, false, true, true>(
         gin, barrier_signals, rank_idx, 0, sm_idx, thread_idx);
 
@@ -545,13 +574,15 @@ rdma_reduce_scatter_bf16(const ncclDevComm_t nccl_dev_comm, const ncclWindow_t w
                              "Unaligned reduction iteration");
             const int num_vecs = iterator.num_chunk_bytes / static_cast<int>(sizeof(longlong4_t));
             const auto num_bucket_bytes = iterator.bucket.num_bytes;
-            const auto dst_ptr = math::advance_ptr<longlong4_t>(buffer, iterator.bucket.offset + rank_idx * num_bucket_bytes + chunk_offset_bytes);
+            const auto local_ptr = math::advance_ptr<longlong4_t>(buffer, iterator.bucket.offset + rank_idx * num_bucket_bytes + chunk_offset_bytes);
 
             // Reduce remote peers in reverse cyclic order, storing partial FP32 sums between batches.
             #pragma unroll 1
             for (int peer_offset = 1; peer_offset < kNumRanks; peer_offset += kNumReduceChunksPerBatch) {
                 const int num_batch_chunks = min(kNumReduceChunksPerBatch, kNumRanks - peer_offset);
                 const bool is_last_batch = peer_offset + num_batch_chunks == kNumRanks;
+                const auto dst_ptr = (kAccumulate and is_last_batch) ?
+                    math::advance_ptr<longlong4_t>(buffer, dst_buckets[iterator.bucket_idx].offset + chunk_offset_bytes) : local_ptr;
 
                 ptx::named_barrier_unaligned<kNumReduceThreadsPerGroup + 32>(kReduceBarrierBaseIdx + reduce_warpgroup_idx);
 
@@ -559,16 +590,32 @@ rdma_reduce_scatter_bf16(const ncclDevComm_t nccl_dev_comm, const ncclWindow_t w
                 for (int i = 0; i < kNumElemsPerChunk / 8 / kNumThreadsPerReduceGroup; i += kNumVecsPerIter) {
                     const auto vec_idx = i * kNumThreadsPerReduceGroup + reduce_warp_idx_in_group * 32 + lane_idx;
                     const int num_remaining_vecs = num_vecs - vec_idx;
+
+                    longlong4_t previous[kNumRanks < 4 ? kNumVecsPerIter : 4];
+                    if constexpr (kAccumulate and kNumRanks < 4) {
+                        if (is_last_batch) {
+                            if (full_chunk) {
+                                #pragma unroll
+                                for (int k = 0; k < kNumVecsPerIter; ++ k)
+                                    previous[k] = ptx::ld_with_gt_pred(dst_ptr + vec_idx + k * kNumThreadsPerReduceGroup);
+                            } else {
+                                #pragma unroll
+                                for (int k = 0; k < kNumVecsPerIter; ++ k)
+                                    previous[k] = ptx::ld_with_gt_pred(dst_ptr + vec_idx + k * kNumThreadsPerReduceGroup, num_remaining_vecs, k * kNumThreadsPerReduceGroup);
+                            }
+                        }
+                    }
+
                     // The first batch loads the local contribution; later batches load the partial sum.
                     longlong4_t values[kNumVecsPerIter];
                     if (full_chunk) {
                         #pragma unroll
                         for (int k = 0; k < kNumVecsPerIter; ++ k)
-                            values[k] = ptx::ld_with_gt_pred(dst_ptr + vec_idx + k * kNumThreadsPerReduceGroup);
+                            values[k] = ptx::ld_with_gt_pred(local_ptr + vec_idx + k * kNumThreadsPerReduceGroup);
                     } else {
                         #pragma unroll
                         for (int k = 0; k < kNumVecsPerIter; ++ k)
-                            values[k] = ptx::ld_with_gt_pred(dst_ptr + vec_idx + k * kNumThreadsPerReduceGroup, num_remaining_vecs, k * kNumThreadsPerReduceGroup);
+                            values[k] = ptx::ld_with_gt_pred(local_ptr + vec_idx + k * kNumThreadsPerReduceGroup, num_remaining_vecs, k * kNumThreadsPerReduceGroup);
                     }
 
                     #pragma unroll 1
@@ -599,7 +646,35 @@ rdma_reduce_scatter_bf16(const ncclDevComm_t nccl_dev_comm, const ncclWindow_t w
                         }
                     }
 
-                    if constexpr (kWithScale) {
+                    if constexpr (kAccumulate) {
+                        if (is_last_batch) {
+                            #pragma unroll
+                            for (int g = 0; g < 2; ++ g) {
+                                if constexpr (kNumRanks >= 4) {
+                                    if (full_chunk) {
+                                        #pragma unroll
+                                        for (int k = 0; k < 4; ++ k)
+                                            previous[k] = ptx::ld_with_gt_pred(dst_ptr + vec_idx + (g * 4 + k) * kNumThreadsPerReduceGroup);
+                                    } else {
+                                        #pragma unroll
+                                        for (int k = 0; k < 4; ++ k)
+                                            previous[k] = ptx::ld_with_gt_pred(dst_ptr + vec_idx + (g * 4 + k) * kNumThreadsPerReduceGroup, num_remaining_vecs, (g * 4 + k) * kNumThreadsPerReduceGroup);
+                                    }
+                                }
+                                #pragma unroll
+                                for (int k = 0; k < 4; ++ k) {
+                                    #pragma unroll
+                                    for (int half_idx = 0; half_idx < 2; ++ half_idx) {
+                                        auto& value = reinterpret_cast<float4*>(&values[g * 4 + k])[half_idx];
+                                        if constexpr (kWithScale)
+                                            value = ptx::fmul4(value, scale);
+                                        const auto& prev = reinterpret_cast<const float4*>(&previous[(kNumRanks < 4 ? g * 4 : 0) + k])[half_idx];
+                                        value = ptx::fadd4(prev, value);
+                                    }
+                                }
+                            }
+                        }
+                    } else if constexpr (kWithScale) {
                         // Scale only the final sum, never an intermediate batch.
                         if (is_last_batch) {
                             #pragma unroll
@@ -629,7 +704,7 @@ rdma_reduce_scatter_bf16(const ncclDevComm_t nccl_dev_comm, const ncclWindow_t w
 
     // Ensure no later writes
     comm::gpu_barrier<true, kNumRanks, 1,
-                      kNumSMs, kNumThreads, comm::kFlushAllAllocatedQPs,
+                      kNumSMs, kNumThreads, kFlushAllAllocatedQPs,
                       kNumTimeoutCycles, comm::kKernelBarrierTag, true, true, false>(
         gin, barrier_signals, rank_idx, 0, sm_idx, thread_idx);
 }

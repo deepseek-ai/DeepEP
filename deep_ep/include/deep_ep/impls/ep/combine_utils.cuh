@@ -25,17 +25,12 @@ constexpr int get_max_unroll_factor() {
     throw std::logic_error("Invalid length, cannot find unrolling factor");
 }
 
-// Determine the vector type for combine loads/stores based on arch and hidden size alignment
+// Determine the vector type for combine loads/stores based on hidden size alignment
 template <int kHiddenBytes>
 struct CombineVecTraits {
-#if defined(__CUDA_ARCH__) and (__CUDA_ARCH__ >= 1000)
     // On SM100+, use `longlong4_t` (32 bytes) if hidden is aligned, otherwise fall back to `int4` (16 bytes)
     // NOTES: we observe some performance degrade with `longlong4_t`, temporarily disable it
-    static constexpr bool kUseLonglong4 = false;
-    using vec_t = std::conditional_t<kUseLonglong4, longlong4_t, int4>;
-#else
-    using vec_t = int4;
-#endif
+    using vec_t = std::conditional_t<kHiddenBytes % (32 * sizeof(int4)) == 0, int4, int2>;
 };
 
 template <int kNumValidTopk, typename fetch_func_t>
@@ -52,7 +47,7 @@ void compute_topk_slots(int (&topk_slot_idx)[kNumValidTopk], uint32_t mask,
     }
 }
 
-template <int kHiddenVec, int kUnrollFactor, int kNumExpectedTopk, int kNumValidTopk,
+template <int kHiddenVec, int kUnrollFactor, int kNumExpectedTopk, bool kOutputFP32, int kNumValidTopk,
           typename vec_t, typename get_src_buffer_ptr_func_t, typename wait_buffer_func_t>
 __device__ __forceinline__
 void combine_reduce(const int& lane_idx, int (&topk_slot_idx)[kNumValidTopk],
@@ -66,6 +61,7 @@ void combine_reduce(const int& lane_idx, int (&topk_slot_idx)[kNumValidTopk],
 
     // We use BF16 add as much as possible, as casting is slow
     const bool enable_hadd_bypass =
+        not kOutputFP32 and
         (bias_0 == nullptr and bias_1 == nullptr) and
         (kNumValidTopk <= 2 or topk_slot_idx[2] < 0);
     EP_STATIC_ASSERT(kNumValidTopk > 0, "Invalid top-k");
@@ -112,7 +108,7 @@ void combine_reduce(const int& lane_idx, int (&topk_slot_idx)[kNumValidTopk],
         #pragma unroll 1
         for (int i = 0; i < kHiddenVec / (kUnrollFactor * 32); ++ i) {
             // Add bias
-            float2 reduced[kUnrollFactor * kNumElemsPerVec / 2] = {};
+            alignas(vec_t) float2 reduced[kUnrollFactor * kNumElemsPerVec / 2] = {};
             const auto add_bias = [&](const vec_t* base_ptr) {
                 // Read
                 vec_t values[kUnrollFactor];
@@ -155,15 +151,25 @@ void combine_reduce(const int& lane_idx, int (&topk_slot_idx)[kNumValidTopk],
             if (i == 0)
                 wait_buffer_func();
 
-            // Cast into shared memory
+            // Store FP32 accumulators directly, or round to BF16
             #pragma unroll
             for (int j = 0; j < kUnrollFactor; ++ j) {
-                vec_t casted_value;
-                auto bf162_view = reinterpret_cast<nv_bfloat162*>(&casted_value);
-                #pragma unroll
-                for (int l = 0; l < kNumElemsPerVec / 2; ++ l)
-                    bf162_view[l] = __float22bfloat162_rn(reduced[j * (kNumElemsPerVec / 2) + l]);
-                dst_buffer_ptr[i * (kUnrollFactor * 32) + j * 32 + lane_idx] = casted_value;
+                const auto dst_idx = i * (kUnrollFactor * 32) + j * 32 + lane_idx;
+                if constexpr (kOutputFP32) {
+                    constexpr int kNumVecs = sizeof(float) / sizeof(nv_bfloat16);
+                    const auto values = reinterpret_cast<const vec_t*>(reduced + j * (kNumElemsPerVec / 2));
+                    const auto dst = dst_buffer_ptr + dst_idx * kNumVecs;
+                    #pragma unroll
+                    for (int k = 0; k < kNumVecs; ++ k)
+                        dst[k] = values[k];
+                } else {
+                    vec_t casted_value;
+                    auto bf162_view = reinterpret_cast<nv_bfloat162*>(&casted_value);
+                    #pragma unroll
+                    for (int l = 0; l < kNumElemsPerVec / 2; ++ l)
+                        bf162_view[l] = __float22bfloat162_rn(reduced[j * (kNumElemsPerVec / 2) + l]);
+                    dst_buffer_ptr[dst_idx] = casted_value;
+                }
             }
         }
     }
