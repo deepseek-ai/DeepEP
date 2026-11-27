@@ -280,6 +280,8 @@ The expanded `recv_topk_weights` is one-dimensional, with one value per expert r
 
 Training saves the forward `handle` for `combine_backward` and `dispatch_backward`. The backward helpers above return tensors and an event; wait on that event before using the tensors. Cached dispatch replays the saved expanded layout without another receive-count CPU synchronization. Keep the original `topk_idx` unchanged until all uses of the handle finish.
 
+The [fused BF16 expert epilogues example](examples/fused_expert_ops) shows optional Triton kernels for preparing expert gradients and packing the inputs to combine with either receive layout.
+
 ### Deferred epilogues
 
 Dispatch and combine accept `defer_epilogue=True` together with `async_with_compute_stream=True`. In this mode, the call returns an `EventOverlap` directly. Calling `.wait()` runs the deferred epilogue on the current stream and returns `(recv_x, recv_topk_idx, recv_topk_weights, handle)` for dispatch, or `(combined_x, combined_topk_weights)` for combine.
