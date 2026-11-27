@@ -10,7 +10,7 @@ class EventOverlap:
     A wrapper class to manage CUDA events, also for better overlapping convenience.
 
     Attributes:
-        event: the CUDA event captured.
+        event: the captured CUDA event, extended through the epilogue by the first wait.
         extra_tensors: an easier way to simulate PyTorch tensor `record_stream`, may be useful with CUDA graph.
     """
 
@@ -39,6 +39,7 @@ class EventOverlap:
     def current_stream_wait(self, release_handle: bool = False) -> Any:
         """
         The current stream `torch.cuda.current_stream()` waits for the event to be finished.
+        The first wait runs the registered hook, and later waits also wait for its CUDA work.
 
         Returns:
             result: the return value of the registered hook, or `None` if no hook is registered.
@@ -50,6 +51,8 @@ class EventOverlap:
         result = None
         if self.hook_after_wait is not None:
             result = self.hook_after_wait()
+            # Later consumers must also wait for work enqueued by the epilogue.
+            self.event.record_current_stream()
             self.hook_after_wait = None
 
         # In `self.event`, we also have some V2 APIs storing tensors to record in it,
