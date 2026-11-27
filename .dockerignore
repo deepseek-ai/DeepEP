@@ -1,0 +1,23 @@
+# Keep the build context small and avoid setup.py's dirty-tree assert.
+.git
+.github
+.venv
+venv
+**/__pycache__
+**/*.pyc
+**/*.pyo
+**/.DS_Store
+**/.idea
+**/.vscode
+**/.cache
+**/cmake-build-*/
+build/
+dist/
+*.egg-info/
+deep_ep.egg-info/
+*.so
+coredump/
+compile_commands.json
+.clangd
+.sisyphus/
+AGENTS.md
