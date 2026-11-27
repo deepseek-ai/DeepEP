@@ -76,4 +76,4 @@ from deep_ep._C import (
     topk_idx_t,
 )
 
-__version__ = '2.5.0'
+__version__ = '2.6.0'

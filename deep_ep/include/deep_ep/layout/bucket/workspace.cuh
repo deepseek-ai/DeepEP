@@ -3,9 +3,11 @@
 #include <deep_ep/layout/bucket/all_gather.cuh>
 #include <deep_ep/layout/bucket/all_reduce.cuh>
 #include <deep_ep/layout/common/barrier.cuh>
+#include <deep_ep/layout/common/copy_engine.cuh>
 #include <deep_ep/layout/bucket/chunk.cuh>
-#include <deep_ep/layout/bucket/copy_engine.cuh>
 #include <deep_ep/layout/bucket/reduce_scatter.cuh>
+#include <deep_ep/layout/bucket/ring_send_recv.cuh>
+#include <deep_ep/layout/bucket/send_recv.cuh>
 #include <deep_ep/common/compiled.cuh>
 #include <deep_ep/common/exception.cuh>
 
@@ -17,6 +19,8 @@ struct alignas(kNumRDMAAlignmentBytes) BucketSignals {
     AllGatherSignals all_gather;
     ReduceScatterSignals reduce_scatter;
     AllReduceSignals all_reduce;
+    RingSendRecvSignals ring_send_recv;
+    SendRecvSignals send_recv;
 };
 EP_STATIC_ASSERT(sizeof(BucketSignals) * kNumMaxContexts <= kNumMaxSignalBytes, "Too many signals");
 

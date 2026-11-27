@@ -10,7 +10,11 @@ from .. import comm
 
 
 class PPBuffer(BufferBase):
-    """Own contiguous symmetric storage for pipeline-parallel send/recv."""
+    """Own contiguous symmetric storage for pipeline-parallel send/recv.
+
+    Stream usage:
+        All operations run on the current stream.
+    """
 
     def __init__(self,
                  group: dist.ProcessGroup,

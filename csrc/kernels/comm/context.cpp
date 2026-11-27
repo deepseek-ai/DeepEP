@@ -241,6 +241,63 @@ std::tuple<int, int> Context::get_logical_domain_size() const {
     return {num_scaleout_ranks, num_scaleup_ranks};
 }
 
+void Context::resize(const int64_t& num_gpu_buffer_bytes,
+                     const int64_t& num_rdma_storage_bytes,
+                     const bool& allow_hybrid_mode,
+                     const std::vector<int64_t>& old_buffer_bytes,
+                     const std::vector<int64_t>& new_buffer_bytes) {
+    EP_HOST_ASSERT(not finalized);
+    EP_HOST_ASSERT(num_gpu_buffer_bytes >= 0 and num_gpu_buffer_bytes % kNumAllocationAlignmentBytes == 0);
+    EP_HOST_ASSERT(this->num_rdma_storage_bytes == 0 and num_rdma_storage_bytes == 0 and "Resizing RDMA storage is not supported");
+    EP_HOST_ASSERT(old_buffer_bytes.size() == new_buffer_bytes.size());
+    EP_HOST_ASSERT(symmetric_memory.use_count() == 1 and "Resizing shared symmetric memory is not supported");
+
+    auto new_symmetric_memory = symmetric::alloc(
+        num_workspace_bytes + num_gpu_buffer_bytes, num_rdma_storage_bytes,
+        use_cpu_rdma_storage,
+        allow_hybrid_mode, gin_min_stride, rank_idx / gin_min_stride,
+        symmetric::shared_comm_t{});
+
+    // Copy old buffer contents to new buffer
+    int64_t old_offset = num_workspace_bytes, new_offset = num_workspace_bytes;
+    CUDA_RUNTIME_CHECK(cudaMemcpy(new_symmetric_memory->ptr, symmetric_memory->ptr,
+                                  num_workspace_bytes, cudaMemcpyDeviceToDevice));
+    for (size_t i = 0; i < old_buffer_bytes.size(); ++ i) {
+        if (old_buffer_bytes[i] > 0 and new_buffer_bytes[i] > 0) {
+            CUDA_RUNTIME_CHECK(cudaMemcpy(
+                math::advance_ptr(new_symmetric_memory->ptr, new_offset),
+                math::advance_ptr(symmetric_memory->ptr, old_offset),
+                std::min(old_buffer_bytes[i], new_buffer_bytes[i]), cudaMemcpyDeviceToDevice));
+        }
+        old_offset += old_buffer_bytes[i];
+        new_offset += new_buffer_bytes[i];
+    }
+
+    CUDA_RUNTIME_CHECK(cudaDeviceSynchronize());
+
+    // Register new window and deregister old window
+    ncclWindow_t new_window;
+    void* new_raw_window_ptr = new_symmetric_memory->ptr;
+    void* new_workspace = nullptr;
+    NCCL_CHECK(ncclCommWindowRegister(
+        comm, new_raw_window_ptr, new_symmetric_memory->num_sym_bytes,
+        &new_window, NCCL_WIN_STRICT_ORDERING));
+    NCCL_CHECK(ncclGetLsaDevicePointer(new_window, 0, nvl_rank_idx, &new_workspace));
+    void* new_buffer_multimem = nullptr;
+    if (buffer_multimem != nullptr)
+        NCCL_CHECK(ncclGetLsaMultimemDevicePointer(new_window, num_workspace_bytes, &new_buffer_multimem));
+
+    NCCL_CHECK(ncclCommWindowDeregister(comm, window));
+    this->num_gpu_buffer_bytes = num_gpu_buffer_bytes;
+    this->num_rdma_storage_bytes = num_rdma_storage_bytes;
+    symmetric_memory = new_symmetric_memory;
+    window = new_window;
+    raw_window_ptr = new_raw_window_ptr;
+    workspace = new_workspace;
+    buffer = math::advance_ptr(new_workspace, num_workspace_bytes);
+    buffer_multimem = new_buffer_multimem;
+}
+
 void Context::finalize() {
     EP_HOST_ASSERT(not finalized);
     if (rdma_storage_windows_gpu != nullptr) {

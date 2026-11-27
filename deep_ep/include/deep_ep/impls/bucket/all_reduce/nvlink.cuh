@@ -3,7 +3,7 @@
 #include <deep_ep/comm/barrier.cuh>
 #include <deep_ep/common/math.cuh>
 #include <deep_ep/common/ptx.cuh>
-#include <deep_ep/common/utils.cuh>
+#include <deep_ep/layout/bucket/chunk.cuh>
 #include <deep_ep/layout/bucket/workspace.cuh>
 
 namespace deep_ep::bucket {
@@ -17,10 +17,13 @@ nvlink_all_reduce(const ncclDevComm_t nccl_dev_comm, const ncclWindow_t window,
                   const float scale,
                   const int num_buckets,
                   const __grid_constant__ comm::BucketList buckets) {
+    EP_STATIC_ASSERT(kNumThreads % 32 == 0, "Invalid thread count");
+
     // Indices
     const auto sm_idx = static_cast<int>(blockIdx.x);
     const auto thread_idx = static_cast<int>(threadIdx.x);
-    const auto global_thread_idx = sm_idx * kNumThreads + thread_idx;
+    const auto warp_idx = ptx::get_warp_idx();
+    const auto lane_idx = ptx::get_lane_idx();
     const auto rank_idx = ncclTeamLsa(nccl_dev_comm).rank;
 
     // Barrier to ensure data is arrived
@@ -32,22 +35,41 @@ nvlink_all_reduce(const ncclDevComm_t nccl_dev_comm, const ncclWindow_t window,
                       kNumTimeoutCycles, comm::kKernelBarrierTag, false, true, true>(
         gin, barrier_signals, 0, rank_idx, sm_idx, thread_idx);
 
-    // Fused reduce-scatter + multicast-store all-gather over this rank's shard slot
-    for (int bucket_idx = 0; bucket_idx < num_buckets; ++ bucket_idx) {
-        // NOTES: the bucket covers the full tensor, each rank owns one shard of it
-        const auto& bucket = buckets[bucket_idx];
-        const auto num_shard_bytes = bucket.num_bytes / kNumRanks;
-        const auto shard_offset = bucket.offset + rank_idx * num_shard_bytes;
-        const auto ptr = math::advance_ptr<float4>(buffer_multimem, shard_offset);
+    constexpr int kNumVectorsPerThread = 8;
+    constexpr int kNumWarps = kNumThreads / 32;
+    constexpr int kNumChunkBytes = kNumVectorsPerThread * 32 * static_cast<int>(sizeof(float4));
+    constexpr int kChunkStride = kNumRanks * kNumSMs * kNumWarps;
+    const int start_chunk_idx = (warp_idx * kNumSMs + sm_idx) * kNumRanks + rank_idx;
 
-        // TODO: merge iterations between buckets
-        utils::iterate_ld_st<kNumSMs, kNumThreads, 8>(
-            global_thread_idx,
-            num_shard_bytes / static_cast<int64_t>(sizeof(float4)),
-            ptr, ptr,
-            [](const float4* src, const int& lhs = 1, const int& rhs = 0) { return ptx::multimem_ld_reduce_add_f32_with_gt_pred(src, lhs, rhs); },
-            [](float4* dst, const float4& value, const int& lhs = 1, const int& rhs = 0) { ptx::multimem_st_f32_with_gt_pred(dst, value, lhs, rhs); },
-            [&](const float4& v) { return kWithScale ? ptx::fmul4(v, scale) : v; });
+    // Fused reduce-scatter + multicast-store all-gather over this rank's shard slot
+    auto iterator = layout::ChunkIterator<kNumChunkBytes, kChunkStride>(num_buckets, buckets, start_chunk_idx);
+    while (iterator.next()) {
+        const auto ptr = math::advance_ptr<float4>(
+            buffer_multimem, iterator.bucket.offset + iterator.chunk_offset_in_bucket);
+        float4 values[kNumVectorsPerThread];
+        if (iterator.num_chunk_bytes == kNumChunkBytes) {
+            #pragma unroll
+            for (int i = 0; i < kNumVectorsPerThread; ++ i)
+                values[i] = ptx::multimem_ld_reduce_add_f32_with_gt_pred(ptr + lane_idx + i * 32);
+            #pragma unroll
+            for (int i = 0; i < kNumVectorsPerThread; ++ i) {
+                const auto value = kWithScale ? ptx::fmul4(values[i], scale) : values[i];
+                ptx::multimem_st_f32_with_gt_pred(ptr + lane_idx + i * 32, value);
+            }
+        } else {
+            const int num_vecs = iterator.num_chunk_bytes / static_cast<int>(sizeof(float4));
+            #pragma unroll
+            for (int i = 0; i < kNumVectorsPerThread; ++ i) {
+                const int vec_idx = lane_idx + i * 32;
+                values[i] = ptx::multimem_ld_reduce_add_f32_with_gt_pred(ptr + vec_idx, num_vecs, vec_idx);
+            }
+            #pragma unroll
+            for (int i = 0; i < kNumVectorsPerThread; ++ i) {
+                const int vec_idx = lane_idx + i * 32;
+                const auto value = kWithScale ? ptx::fmul4(values[i], scale) : values[i];
+                ptx::multimem_st_f32_with_gt_pred(ptr + vec_idx, value, num_vecs, vec_idx);
+            }
+        }
     }
 
     // Ensure no overlapping writes
