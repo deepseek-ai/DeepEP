@@ -24,9 +24,6 @@ static constexpr int kHybridDispatchTag1 = 7;
 static constexpr int kHybridCombineTag0 = 8;
 static constexpr int kHybridCombineTag1 = 9;
 
-// Some reserved count
-static constexpr int kFlushAllAllocatedQPs = -1;
-
 template <int64_t kNumTimeoutCycles, typename func_t>
 __device__ __forceinline__ void timeout_while(const bool& condition, const func_t& func,
                                               int64_t start_clock = 0) {
@@ -132,7 +129,7 @@ __forceinline__ __device__ void nvlink_barrier_wo_local_sync(
 
 template <int kNumRanks, int kNumSMs, int kNumThreads, int kNumQPs, int64_t kNumTimeoutCycles,
           typename team_t, int kTag = kDeviceBarrierTag,
-          bool kFlushStores = true,
+          bool kFlushStores = true, int kNumCollectiveQPs = kFlushAllAllocatedQPs,
           int kNumWarps = kNumThreads / 32>
 __forceinline__ __device__ void gin_barrier_wo_local_sync(
     const NCCLGin& gin,
@@ -157,28 +154,30 @@ __forceinline__ __device__ void gin_barrier_wo_local_sync(
     }
 
     if (sm_idx == 0) {
-        // Fence every GIN context before publishing the barrier. A signal sent only
-        // through QP 0 can overtake data puts issued through another QP because the
-        // NIC does not order work across QPs. The NCCL barrier fence spans all
-        // contexts, so the receiver observes every preceding put before it returns.
-        if constexpr (std::is_same_v<team_t, ncclTeamTagWorld>) {
-            ncclGinBarrierSession<ncclCoopCta> barrier(
-                ncclCoopCta(), ncclGinAllContexts(nccl_dev_comm), ncclTeamTagWorld{}, kTag);
-            if (barrier.sync(ncclCoopCta(), cuda::memory_order_acq_rel, ncclGinFenceLevel::Put, kNumTimeoutCycles) !=
-                ncclSuccess)
+        const auto sync = [&](auto coop, auto contexts, ncclGinFenceLevel fence) {
+            ncclGinBarrierSession<decltype(coop)> barrier(coop, contexts, team_t{}, kTag);
+            if (barrier.sync(coop, cuda::memory_order_acq_rel, fence, kNumTimeoutCycles) != ncclSuccess)
                 ptx::trap();
+        };
+        if constexpr (not kFlushStores) {
+            // Control-only barriers have no pending puts to publish.
+            sync(ncclCoopCta(), ncclGin(nccl_dev_comm, 0, NCCL_GIN_RESOURCE_SHARING_CTA), ncclGinFenceLevel::None);
+        } else if constexpr (kNumCollectiveQPs == kFlushAllAllocatedQPs) {
+            // A rank-local QP tuning choice cannot select the collective signal set.
+            sync(ncclCoopCta(), ncclGinAllContexts(nccl_dev_comm), ncclGinFenceLevel::Put);
         } else {
-            ncclGinBarrierSession<ncclCoopCta> barrier(
-                ncclCoopCta(), ncclGinAllContexts(nccl_dev_comm), ncclTeamTagRail{}, kTag);
-            if (barrier.sync(ncclCoopCta(), cuda::memory_order_acq_rel, ncclGinFenceLevel::Put, kNumTimeoutCycles) !=
-                ncclSuccess)
-                ptx::trap();
+            // A signal on QP 0 cannot order puts on other QPs. Fence each active
+            // context, leaving unrelated contexts out of the collective.
+            for (int i = thread_idx / 32; i < kNumCollectiveQPs; i += kNumWarps)
+                sync(ncclCoopWarp(), ncclGin(nccl_dev_comm, i, NCCL_GIN_RESOURCE_SHARING_CTA), ncclGinFenceLevel::Put);
+            __syncthreads();
         }
     }
 }
 
 template <bool kIsScaleupNVLink, int kNumRanks, int kNumSMs, int kNumThreads, int kNumQPs,
-          int64_t kNumTimeoutCycles, int kTag = kDeviceBarrierTag, bool kFlushStores = true>
+          int64_t kNumTimeoutCycles, int kTag = kDeviceBarrierTag, bool kFlushStores = true,
+          int kNumCollectiveQPs = kFlushAllAllocatedQPs>
 __forceinline__ __device__ void scaleup_barrier_wo_local_sync(
     const NCCLGin& gin,
     layout::BarrierSignals& signals,
@@ -187,18 +186,17 @@ __forceinline__ __device__ void scaleup_barrier_wo_local_sync(
         nvlink_barrier_wo_local_sync<kNumRanks, kNumSMs, kNumThreads, kNumTimeoutCycles, kTag>(
             gin, signals, rank_idx, sm_idx, thread_idx);
     } else {
-        gin_barrier_wo_local_sync<kNumRanks, kNumSMs, kNumThreads, kNumQPs, kNumTimeoutCycles, ncclTeamTagWorld, kTag, kFlushStores>(
+        gin_barrier_wo_local_sync<kNumRanks, kNumSMs, kNumThreads, kNumQPs, kNumTimeoutCycles, ncclTeamTagWorld, kTag, kFlushStores, kNumCollectiveQPs>(
             gin, sm_idx, thread_idx);
     }
 }
 
 template <int kNumRanks, int kNumSMs, int kNumThreads, int kNumQPs, int64_t kNumTimeoutCycles, int kTag = kDeviceBarrierTag,
-          bool kFlushStores = true>
+          bool kFlushStores = true, int kNumCollectiveQPs = kFlushAllAllocatedQPs>
 __forceinline__ __device__ void scaleout_barrier_wo_local_sync(
     const NCCLGin& gin,
-    const int& scaleout_rank_idx, const int& scaleup_rank_idx,
     const int& sm_idx, const int& thread_idx) {
-    gin_barrier_wo_local_sync<kNumRanks, kNumSMs, kNumThreads, kNumQPs, kNumTimeoutCycles, ncclTeamTagRail, kTag, kFlushStores>(
+    gin_barrier_wo_local_sync<kNumRanks, kNumSMs, kNumThreads, kNumQPs, kNumTimeoutCycles, ncclTeamTagRail, kTag, kFlushStores, kNumCollectiveQPs>(
         gin, sm_idx, thread_idx);
 }
 
@@ -206,7 +204,8 @@ template <bool kIsScaleupNVLink,
           int kNumScaleoutRanks, int kNumScaleupRanks,
           int kNumSMs, int kNumThreads, int kNumQPs,
           int64_t kNumTimeoutCycles, int kTag = kDeviceBarrierTag,
-          bool kFlushStores = true, bool kSyncAtStart = true, bool kSyncAtEnd = true>
+          bool kFlushStores = true, bool kSyncAtStart = true, bool kSyncAtEnd = true,
+          int kNumCollectiveQPs = kFlushAllAllocatedQPs>
 __forceinline__ __device__ void gpu_barrier(const NCCLGin& gin,
                                             layout::BarrierSignals& signals,
                                             const int& scaleout_rank_idx, const int& scaleup_rank_idx,
@@ -233,7 +232,7 @@ __forceinline__ __device__ void gpu_barrier(const NCCLGin& gin,
         EP_DEVICE_ASSERT(kNumSMs >= 2 and "At least 2 SMs for a hybrid barrier");
         if (sm_idx == 0) {
             // First SM do the scaleup barrier
-            scaleup_barrier_wo_local_sync<kIsScaleupNVLink, kNumScaleupRanks, kNumSMs, kNumThreads, kNumQPs, kNumTimeoutCycles, kTag, kFlushStores>(
+            scaleup_barrier_wo_local_sync<kIsScaleupNVLink, kNumScaleupRanks, kNumSMs, kNumThreads, kNumQPs, kNumTimeoutCycles, kTag, kFlushStores, kNumCollectiveQPs>(
                 gin, signals, scaleup_rank_idx, sm_idx, thread_idx);
 
             // We need an extra grid sync, as the scaleout barrier will do a sync after flush, before the barrier
@@ -242,17 +241,17 @@ __forceinline__ __device__ void gpu_barrier(const NCCLGin& gin,
                 cooperative_groups::this_grid().sync();
         } else {
             // The remaining SMs do the scaleout barrier
-            scaleout_barrier_wo_local_sync<kNumScaleoutRanks, kNumSMs - 1, kNumThreads, kNumQPs, kNumTimeoutCycles, kTag, kFlushStores>(
-                gin, scaleout_rank_idx, scaleup_rank_idx, sm_idx - 1, thread_idx);
+            scaleout_barrier_wo_local_sync<kNumScaleoutRanks, kNumSMs - 1, kNumThreads, kNumQPs, kNumTimeoutCycles, kTag, kFlushStores, kNumCollectiveQPs>(
+                gin, sm_idx - 1, thread_idx);
         }
     } else if (do_scaleup) {
         // Scaleup only
-        scaleup_barrier_wo_local_sync<kIsScaleupNVLink, kNumScaleupRanks, kNumSMs, kNumThreads, kNumQPs, kNumTimeoutCycles, kTag, kFlushStores>(
+        scaleup_barrier_wo_local_sync<kIsScaleupNVLink, kNumScaleupRanks, kNumSMs, kNumThreads, kNumQPs, kNumTimeoutCycles, kTag, kFlushStores, kNumCollectiveQPs>(
             gin, signals, scaleup_rank_idx, sm_idx, thread_idx);
     } else if (do_scaleout) {
         // Scaleout only
-        scaleout_barrier_wo_local_sync<kNumScaleoutRanks, kNumSMs, kNumThreads, kNumQPs, kNumTimeoutCycles, kTag, kFlushStores>(
-            gin, scaleout_rank_idx, scaleup_rank_idx, sm_idx, thread_idx);
+        scaleout_barrier_wo_local_sync<kNumScaleoutRanks, kNumSMs, kNumThreads, kNumQPs, kNumTimeoutCycles, kTag, kFlushStores, kNumCollectiveQPs>(
+            gin, sm_idx, thread_idx);
     }
 
     // All the SMs should wait

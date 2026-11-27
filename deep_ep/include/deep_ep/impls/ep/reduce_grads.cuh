@@ -18,7 +18,7 @@ template <int kNumSMs,
           int kNumWarps,
           int kNumRanks,
           int kNumLocalExperts,
-          int kNumRedundantExperts,
+          int kNumRedundantExpertsPerRank,
           int kNumChunkBytes,
           int64_t kNumTimeoutCycles>
 __global__ void __launch_bounds__(kNumWarps * 32, 1)
@@ -47,7 +47,7 @@ lb_reduce_grads(const int* redundancy_mapping,
 
     // Build tasks
     const int rank_idx = ncclTeamLsa(nccl_dev_comm).rank;
-    smem_layout.build_tasks<kNumRanks, kNumLocalExperts, kNumRedundantExperts, kNumThreads, kNumWarps * kNumChunkBytes>(
+    smem_layout.build_tasks<kNumRanks, kNumLocalExperts, kNumRedundantExpertsPerRank, kNumThreads, kNumWarps * kNumChunkBytes>(
         redundancy_mapping, rank_idx, thread_idx, tma_buffers);
 
     // Initialize barriers and chunk counter

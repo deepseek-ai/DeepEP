@@ -3,10 +3,12 @@
 
 // Bucket
 #include <deep_ep/layout/bucket/reduce_scatter.cuh>
-#include <deep_ep/layout/bucket/copy_engine.cuh>
+#include <deep_ep/layout/common/copy_engine.cuh>
 #include <deep_ep/impls/bucket/reduce_scatter/nvlink.cuh>
 #include <deep_ep/impls/bucket/reduce_scatter/rdma.cuh>
 #include <deep_ep/impls/bucket/reduce_scatter/hybrid.cuh>
+#include <deep_ep/impls/bucket/send_recv/rdma.cuh>
+#include <deep_ep/impls/bucket/send_recv/hybrid.cuh>
 #include <deep_ep/impls/bucket/all_gather/rdma.cuh>
 #include <deep_ep/impls/bucket/all_gather/hybrid.cuh>
 #include <deep_ep/impls/bucket/all_reduce/nvlink.cuh>

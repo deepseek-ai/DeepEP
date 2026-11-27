@@ -82,7 +82,7 @@ def dist_print(s: str = '', once_in_node: bool = False) -> None:
     global _local_rank
     assert _local_rank is not None
     if not once_in_node or _local_rank == 0:
-        print(s, flush=True)
+        print(s + '\n', end='', flush=True)
     dist.barrier()
 
 
@@ -167,7 +167,6 @@ def check_nvlink_connections(group: dist.ProcessGroup) -> None:
         dist.all_gather_object(physical_device_indices, physical_device_idx, group)
 
         # Check whether they are all connected via NVLink
-        # Reference: https://github.com/vllm-project/vllm/blob/b8e809a057765c574726a6077fd124db5077ce1f/vllm/platforms/cuda.py#L438
         handles = [pynvml.nvmlDeviceGetHandleByIndex(i) for i in physical_device_indices]
         for i, handle in enumerate(handles):
             for j, peer_handle in enumerate(handles):

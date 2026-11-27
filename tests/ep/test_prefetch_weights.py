@@ -11,7 +11,7 @@ import torch.distributed as dist
 
 import deep_ep
 from deep_ep.utils.envs import dist_print, get_nvlink_gbs, get_physical_domain_size, init_dist
-from deep_ep.utils.testing import bench, parse_num_bytes
+from deep_ep.utils.testing import bench, generate_lognormal_topk, parse_num_bytes
 
 # Written into every redundant expert slot before a push. Slots whose expert index is `-1`
 # must still hold it afterwards, which also catches strayed writes.
@@ -59,68 +59,34 @@ def make_blob(global_expert_idx: int, num_bytes: int, payload_idx: int) -> torch
     return (idx % NUM_BLOB_VALUES).to(torch.uint8)
 
 
-def make_redundancy_mapping(num_ranks: int, num_redundant_experts: int, num_experts: int,
-                            empty_ratio: float, seed: int, pattern: str = 'random') -> torch.Tensor:
-    """The `[num_ranks, num_redundant_experts]` redundancy mapping, identical on every rank of the LSA domain.
-
-    Both indices are domain-local: row `l` is the rank at position `l` of the domain, and an
-    entry is an expert id in `[0, num_experts)`, the domain's own expert space.
-
-    A rank never hosts a redundant instance of its local experts, so `random` samples each row from
-    the `num_experts - num_local_experts` remote experts and shifts it past its own block.
-
-    `ring` is a benchmarking pattern rather than a realistic one: rank `r` takes every redundant expert
-    from rank `r + 1`, so each rank sends to exactly one peer and receives from exactly one
-    peer. That removes both the send imbalance and the receiver collisions of `random`,
-    which isolates how much of the gap to peak NVLink is traffic pattern rather than kernel.
-    """
-    num_local_experts = num_experts // num_ranks
-    if pattern == 'ring':
-        owner = ((torch.arange(num_ranks, dtype=torch.int32, device='cpu') + 1) % num_ranks).unsqueeze(1)
-        within = (torch.arange(num_redundant_experts, dtype=torch.int32, device='cpu') % num_local_experts).unsqueeze(0)
-        table = owner * num_local_experts + within
-    else:
-        assert pattern == 'random', f'Unknown pattern {pattern}'
-        generator = torch.Generator().manual_seed(seed)
-        table = torch.randint(0, num_experts - num_local_experts, (num_ranks, num_redundant_experts),
-                              generator=generator, dtype=torch.int32, device='cpu')
-        own_block_start = (torch.arange(num_ranks, dtype=torch.int32, device='cpu') * num_local_experts).unsqueeze(1)
-        table += (table >= own_block_start).to(torch.int32) * num_local_experts
-        empty = torch.rand((num_ranks, num_redundant_experts), generator=generator,
-                           dtype=torch.float32, device='cpu') < empty_ratio
-        table.masked_fill_(empty, -1)
-
-    owners = torch.div(table, num_local_experts, rounding_mode='floor')
-    assert ((table < 0) | (owners != torch.arange(num_ranks, dtype=torch.int32, device='cpu').unsqueeze(1))).all(), \
-        'A rank must never hold a redundant instance of its local experts'
-    return table.contiguous().cuda()
-
-
 def check(redundant_expert_weights: torch.Tensor, redundancy_mapping: torch.Tensor,
-          rank_idx: int, num_bytes: int, payload_idx: int, where: str) -> None:
+          nvl_rank_idx: int, domain_expert_offset: int, num_bytes: int, payload_idx: int, where: str) -> None:
     """Every redundant expert slot of this rank must hold its expert's blob, or the sentinel if unassigned."""
     name = PAYLOAD_NAMES[payload_idx]
     for redundant_expert_idx in range(redundant_expert_weights.size(0)):
-        expert_idx = int(redundancy_mapping[rank_idx, redundant_expert_idx].item())
+        expert_idx = int(redundancy_mapping[nvl_rank_idx, redundant_expert_idx].item())
         if expert_idx < 0:
             assert (redundant_expert_weights[redundant_expert_idx] == SENTINEL).all(), \
                 f'{where}: {name} redundant expert {redundant_expert_idx} is unassigned but was written'
         else:
-            assert torch.equal(redundant_expert_weights[redundant_expert_idx], make_blob(expert_idx, num_bytes, payload_idx)), \
-                f'{where}: {name} redundant expert {redundant_expert_idx} does not match expert {expert_idx}'
+            assert torch.equal(
+                redundant_expert_weights[redundant_expert_idx],
+                make_blob(domain_expert_offset + expert_idx, num_bytes, payload_idx),
+            ), f'{where}: {name} redundant expert {redundant_expert_idx} does not match expert {expert_idx}'
 
 
 @torch.inference_mode()
 def test(local_rank: int, num_local_ranks: int, args: argparse.Namespace) -> None:
     rank_idx, num_ranks, group = init_dist(local_rank, num_local_ranks)
     num_rdma_ranks, num_nvl_ranks = get_physical_domain_size(group)
-    assert num_rdma_ranks == 1, 'Weight prefetch pushes over NVLink only, so it is intra-node'
+    rdma_rank_idx, nvl_rank_idx = rank_idx // num_nvl_ranks, rank_idx % num_nvl_ranks
 
     # Settings
     num_experts = args.num_experts
     assert num_experts % num_ranks == 0
-    num_local_experts = num_experts // num_ranks
-    num_redundant_experts, num_sms = args.num_redundant_experts, args.num_sms
+    num_main_experts_per_rank = num_experts // num_ranks
+    # `lb_get_redundancy_mapping` hands back one copy slot per local expert, empty slots marked -1
+    num_redundant_experts_per_rank, num_sms = num_main_experts_per_rank, args.num_sms
 
     # Correctness sweeps a table of payload sizes.
     perf_payload = (args.num_hidden_bytes, args.num_sf0_bytes, args.num_sf1_bytes)
@@ -133,7 +99,7 @@ def test(local_rank: int, num_local_ranks: int, args: argparse.Namespace) -> Non
 
     # Plan every symmetric redundant expert pool once, including the benchmark pools.
     plan = deep_ep.BufferAllocator()
-    redundant_expert_weight_sets = [[plan.allocate((num_redundant_experts, n), torch.uint8) for n in payload]
+    redundant_expert_weight_sets = [[plan.allocate((num_redundant_experts_per_rank, n), torch.uint8) for n in payload]
                   for payload in payloads]
     buffer = deep_ep.EPBuffer(group, num_bytes=deep_ep.get_num_allocation_alignment(),
                               lb_allocation_plan_or_num_bytes=plan, explicitly_destroy=True)
@@ -141,8 +107,8 @@ def test(local_rank: int, num_local_ranks: int, args: argparse.Namespace) -> Non
 
     dist_print(f'Config:\n'
                f' > Ranks: {num_rdma_ranks} x {num_nvl_ranks}\n'
-               f' > Experts: {num_experts} ({num_local_experts} local), '
-               f'redundant experts: {num_redundant_experts}\n'
+               f' > Experts: {num_experts} ({num_main_experts_per_rank} local), '
+               f'redundant experts: {num_redundant_experts_per_rank}\n'
                f' > Correctness payload sweep: {[list(payload) for payload in PAYLOAD_SWEEP]} B\n'
                f' > Perf bytes per expert: {perf_payload[PAYLOAD_WEIGHTS]} weights, '
                f'{perf_payload[PAYLOAD_SF0]}/{perf_payload[PAYLOAD_SF1]} SF '
@@ -151,17 +117,23 @@ def test(local_rank: int, num_local_ranks: int, args: argparse.Namespace) -> Non
                once_in_node=True)
 
     # This rank's original expert weights, one set per payload size.
-    expert_weight_sets = [[torch.empty((num_local_experts, n), dtype=torch.uint8, device='cuda') for n in payload]
+    expert_weight_sets = [[torch.empty((num_main_experts_per_rank, n), dtype=torch.uint8, device='cuda') for n in payload]
                  for payload in payloads]
 
     *sweep_expert_weight_sets, perf_expert_weights = expert_weight_sets
     *sweep_redundant_expert_weight_sets, perf_redundant_expert_weights = redundant_expert_weight_sets
 
     for payload, expert_weights in zip(PAYLOAD_SWEEP, sweep_expert_weight_sets, strict=True):
-        for local_expert_idx in range(num_local_experts):
-            expert_idx = rank_idx * num_local_experts + local_expert_idx
+        for local_expert_idx in range(num_main_experts_per_rank):
+            expert_idx = rank_idx * num_main_experts_per_rank + local_expert_idx
             for payload_idx, num_bytes in enumerate(payload):
                 expert_weights[payload_idx][local_expert_idx] = make_blob(expert_idx, num_bytes, payload_idx)
+
+    def current_mapping(round_idx: int = 0) -> torch.Tensor:
+        """The redundancy mapping this round runs with: `lb_get_redundancy_mapping`'s plan for a lognormal load."""
+        topk_idx = generate_lognormal_topk(args.num_tokens, num_experts, args.num_topk, rank_idx, args.seed + round_idx)
+        _, redundancy_mapping = buffer.lb_get_redundancy_mapping(topk_idx, num_experts, num_redundant_experts_per_rank, args.token_alignment, 0)
+        return redundancy_mapping
 
     def prefetch(redundant_expert_weights: list, expert_weights: list, redundancy_mapping: torch.Tensor,
                  with_sf: bool, previous_event=None):
@@ -177,8 +149,7 @@ def test(local_rank: int, num_local_ranks: int, args: argparse.Namespace) -> Non
         for with_sf in (True, False):
             for round_idx in range(args.num_rounds):
                 where = f'{payload}, {with_sf=}, {round_idx=}'
-                redundancy_mapping = make_redundancy_mapping(num_ranks, num_redundant_experts, num_experts,
-                                                       args.empty_ratio, args.seed + round_idx, args.pattern)
+                redundancy_mapping = current_mapping(round_idx)
 
                 # The sentinel fill must be visible to peers before anyone pushes
                 for tensor in redundant_expert_weights:
@@ -194,25 +165,25 @@ def test(local_rank: int, num_local_ranks: int, args: argparse.Namespace) -> Non
                 torch.cuda.synchronize()
 
                 num_pushed = NUM_PAYLOADS if with_sf else 1
+                domain_expert_offset = rdma_rank_idx * num_nvl_ranks * num_main_experts_per_rank
                 for payload_idx in range(num_pushed):
-                    check(redundant_expert_weights[payload_idx], redundancy_mapping, rank_idx,
+                    check(redundant_expert_weights[payload_idx], redundancy_mapping, nvl_rank_idx, domain_expert_offset,
                           payload[payload_idx], payload_idx, where)
                 for payload_idx in range(num_pushed, NUM_PAYLOADS):
                     assert (redundant_expert_weights[payload_idx] == SENTINEL).all(), \
                         f'{where}: {PAYLOAD_NAMES[payload_idx]} was pushed even though it was not requested'
 
-    # Perf: count the redundant experts requesting weights from each rank.
-    redundancy_mapping = make_redundancy_mapping(num_ranks, num_redundant_experts, num_experts,
-                                           args.empty_ratio, args.seed, args.pattern)
-    owners = torch.div(redundancy_mapping, num_local_experts, rounding_mode='floor')
-    redundant_experts_per_sender = [int(((redundancy_mapping >= 0) & (owners == r)).sum().item()) for r in range(num_ranks)]
+    # Perf: count the redundant experts requesting weights from each rank in this NVLink domain.
+    redundancy_mapping = current_mapping()
+    owners = torch.div(redundancy_mapping, num_main_experts_per_rank, rounding_mode='floor')
+    redundant_experts_per_sender = [int(((redundancy_mapping >= 0) & (owners == r)).sum().item()) for r in range(num_nvl_ranks)]
     num_bytes_per_redundant_expert = sum(perf_payload)
-    num_pushed_bytes = redundant_experts_per_sender[rank_idx] * num_bytes_per_redundant_expert
+    num_pushed_bytes = redundant_experts_per_sender[nvl_rank_idx] * num_bytes_per_redundant_expert
     num_critical_bytes = max(redundant_experts_per_sender) * num_bytes_per_redundant_expert
 
     t, _, _ = bench(lambda: prefetch(perf_redundant_expert_weights, perf_expert_weights, redundancy_mapping, True).wait())
     dist_print('Performance:', once_in_node=True)
-    dist_print(f' > Redundant experts pushed per rank: {redundant_experts_per_sender} (this rank {redundant_experts_per_sender[rank_idx]})',
+    dist_print(f' > Redundant experts pushed per NVLink rank: {redundant_experts_per_sender} (this rank {redundant_experts_per_sender[nvl_rank_idx]})',
                once_in_node=True)
     dist_print(f' > Rank {rank_idx} perf ({num_sms=}): '
                f'{t * 1e6:7.1f} us | '
@@ -231,7 +202,6 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Test weight prefetch')
     parser.add_argument('--num-processes', type=int, default=8)
     parser.add_argument('--num-experts', type=int, default=64)
-    parser.add_argument('--num-redundant-experts', type=int, default=8)
     parser.add_argument('--num-hidden-bytes', type=parse_num_bytes, default=64 << 20,
                         help='Weight bytes per expert in the benchmark, with an optional binary '
                              'suffix: 64M (default), 512K, or plain bytes. Correctness sweeps '
@@ -242,8 +212,10 @@ if __name__ == '__main__':
                         help='Second scale-factor payload in the benchmark')
     parser.add_argument('--num-rounds', type=int, default=2,
                         help='Copy tables per payload size, on top of the size sweep')
-    parser.add_argument('--empty-ratio', type=float, default=0.25)
-    parser.add_argument('--pattern', type=str, default='random', choices=('random', 'ring'))
+    parser.add_argument('--num-tokens', type=int, default=8192,
+                        help='Tokens per rank fed to lb_get_redundancy_mapping')
+    parser.add_argument('--num-topk', type=int, default=6)
+    parser.add_argument('--token-alignment', type=int, default=128)
     parser.add_argument('--num-sms', type=int, default=0, help='0 uses the bandwidth-based SM estimate')
     parser.add_argument('--seed', type=int, default=0)
     args = parser.parse_args()
