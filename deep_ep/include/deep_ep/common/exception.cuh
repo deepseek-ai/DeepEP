@@ -74,7 +74,8 @@ do { \
     if (e != CUDA_SUCCESS) { \
         std::stringstream ss; \
         const char *name, *info; \
-        lazy_cuGetErrorName(e, &name), lazy_cuGetErrorString(e, &info); \
+        ::deep_jit::cuda::driver::lazy_cuGetErrorName(e, &name); \
+        ::deep_jit::cuda::driver::lazy_cuGetErrorString(e, &info); \
         ss << static_cast<int>(e) << " (" << name << ", " << info << ")"; \
         throw EPException("CUDA driver", __FILE__, __LINE__, ss.str()); \
     } \

@@ -35,6 +35,24 @@ def import_baseline():
     return stochastic_round_bf16
 
 
+def reduce_scatter_reference(source, rank_idx, group, num_rdma_ranks, num_nvl_ranks,
+                             use_bf16, stochastic_round_bf16):
+    reference_input = source
+    if use_bf16 and stochastic_round_bf16 is not None:
+        reference_input = stochastic_round_bf16(source, rank_idx, group.size())
+
+    reference = torch.zeros(source.numel() // group.size(), dtype=torch.float32, device='cuda')
+    if num_nvl_ranks > 1:
+        reduce_scatter_single(reference, reference_input, group=group)
+    else:
+        reference_input_all_to_all = torch.empty_like(reference_input)
+        torch.distributed.all_to_all_single(reference_input_all_to_all, reference_input)
+        for i in range(num_rdma_ranks):
+            peer = (rank_idx - i) % num_rdma_ranks
+            reference.add_(reference_input_all_to_all[peer * reference.numel(): (peer + 1) * reference.numel()])
+    return reference
+
+
 @torch.inference_mode()
 def test(local_rank: int, num_local_ranks: int, args: argparse.Namespace) -> None:
     rank_idx, num_ranks, group = init_dist(local_rank, num_local_ranks)
@@ -66,10 +84,7 @@ def test(local_rank: int, num_local_ranks: int, args: argparse.Namespace) -> Non
     for bucket_idx, src in enumerate((src_0, src_1)):
         torch.manual_seed(rank_idx * 17 + bucket_idx)
         src.normal_()
-        reference_input = src.clone()
-        if use_bf16 and stochastic_round_bf16 is not None:
-            reference_input = stochastic_round_bf16(src, rank_idx, num_ranks)
-        reference_inputs.append(reference_input)
+        reference_inputs.append(src.clone())
 
     handle = buffer.reduce_scatter([src_0, src_1], num_sms=num_sms, group=group, scale=scale, comm_precision=args.comm_precision)
     dsts = handle.wait()
@@ -77,15 +92,9 @@ def test(local_rank: int, num_local_ranks: int, args: argparse.Namespace) -> Non
     for src, dst, reference_input in zip((src_0, src_1), dsts, reference_inputs, strict=True):
         assert dst.data_ptr() == src.data_ptr() + rank_idx * dst.nbytes
 
-        reference = torch.zeros(src.numel() // num_ranks, dtype=torch.float32, device='cuda')
-        if num_nvl_ranks > 1:
-            reduce_scatter_single(reference, reference_input, group=group)
-        else:
-            reference_input_all_to_all = torch.empty_like(reference_input)
-            torch.distributed.all_to_all_single(reference_input_all_to_all, reference_input)
-            for i in range(num_rdma_ranks):
-                peer = (rank_idx - i) % num_rdma_ranks
-                reference.add_(reference_input_all_to_all[peer * reference.numel(): (peer + 1) * reference.numel()])
+        reference = reduce_scatter_reference(
+            reference_input, rank_idx, group, num_rdma_ranks, num_nvl_ranks,
+            use_bf16, stochastic_round_bf16)
         reference.mul_(scale)
 
         if num_nvl_ranks > 1:
@@ -107,6 +116,7 @@ def test(local_rank: int, num_local_ranks: int, args: argparse.Namespace) -> Non
 
     # Perf ours
     dist_print('Performance:', once_in_node=True)
+    perf_src.copy_(original)
     duration = bench_kineto(
         lambda: buffer.reduce_scatter(
             perf_src, num_sms=num_sms, group=group, scale=scale, comm_precision=args.comm_precision).wait(),

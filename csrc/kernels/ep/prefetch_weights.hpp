@@ -22,7 +22,7 @@ static void launch_lb_prefetch_weights(const comm::Context& context,
                                        const int& num_weights,
                                        const layout::EPWeightList& weights,
                                        const int* redundancy_mapping,
-                                       const int& num_redundant_experts,
+                                       const int& num_redundant_experts_per_rank,
                                        const int& num_local_experts,
                                        const int& num_sms,
                                        const at::cuda::CUDAStream& stream) {
@@ -43,7 +43,7 @@ static void launch_lb_prefetch_weights(const comm::Context& context,
 static void __instantiate_kernel() {{
     auto ptr = reinterpret_cast<void*>(&deep_ep::ep::lb_prefetch_weights<{}, {}, {}, {}, {}, {}, {}, {}>);
 }}
-)", num_sms, num_warps, context.num_nvl_ranks, num_local_experts, num_redundant_experts,
+)", num_sms, num_warps, context.num_nvl_ranks, num_local_experts, num_redundant_experts_per_rank,
     num_weights, num_chunk_bytes, context.num_gpu_timeout_cycles));
 
     // Launch

@@ -10,9 +10,11 @@
 #include <deep_ep/common/exception.cuh>
 #include <deep_ep/common/math.cuh>
 
-#include "../../utils/lazy_driver.hpp"
+#include <deep_jit/backend/cuda/driver.hpp>
 
 namespace deep_ep::symmetric {
+
+namespace cuda_driver = ::deep_jit::cuda::driver;
 
 // Shared allocation types: (pid, fd) handle and list of handles from all ranks
 using shared_handle_t = std::pair<int, int>;
@@ -25,8 +27,8 @@ struct DeviceContext {
 
     DeviceContext() {
         CUDA_RUNTIME_CHECK(cudaGetDevice(&device_idx));
-        CUDA_DRIVER_CHECK(lazy_cuDeviceGet(&device, device_idx));
-        CUDA_DRIVER_CHECK(lazy_cuDeviceGetAttribute(&numa_idx, CU_DEVICE_ATTRIBUTE_HOST_NUMA_ID, device));
+        CUDA_DRIVER_CHECK(cuda_driver::lazy_cuDeviceGet(&device, device_idx));
+        CUDA_DRIVER_CHECK(cuda_driver::lazy_cuDeviceGetAttribute(&numa_idx, CU_DEVICE_ATTRIBUTE_HOST_NUMA_ID, device));
     }
 
     CUmemAllocationProp gpu_alloc_prop(const bool& skip_fabric = false) const {
@@ -48,7 +50,7 @@ private:
         int flag = 0;
 #if CUDART_VERSION >= 13000
         if (not skip_fabric) {
-            CUDA_DRIVER_CHECK(lazy_cuDeviceGetAttribute(&flag, CU_DEVICE_ATTRIBUTE_HANDLE_TYPE_FABRIC_SUPPORTED, device));
+            CUDA_DRIVER_CHECK(cuda_driver::lazy_cuDeviceGetAttribute(&flag, CU_DEVICE_ATTRIBUTE_HANDLE_TYPE_FABRIC_SUPPORTED, device));
             if (flag)
                 requested_handle_types |= CU_MEM_HANDLE_TYPE_FABRIC;
         }
@@ -58,9 +60,9 @@ private:
         if (location_type == CU_MEM_LOCATION_TYPE_DEVICE) {
             flag = 0;
 #if CUDART_VERSION >= 13000
-            CUDA_DRIVER_CHECK(lazy_cuDeviceGetAttribute(&flag, CU_DEVICE_ATTRIBUTE_GPU_DIRECT_RDMA_WITH_CUDA_VMM_SUPPORTED, device));
+            CUDA_DRIVER_CHECK(cuda_driver::lazy_cuDeviceGetAttribute(&flag, CU_DEVICE_ATTRIBUTE_GPU_DIRECT_RDMA_WITH_CUDA_VMM_SUPPORTED, device));
 #else
-            CUDA_DRIVER_CHECK(lazy_cuDeviceGetAttribute(&flag, CU_DEVICE_ATTRIBUTE_GPU_DIRECT_RDMA_SUPPORTED, device));
+            CUDA_DRIVER_CHECK(cuda_driver::lazy_cuDeviceGetAttribute(&flag, CU_DEVICE_ATTRIBUTE_GPU_DIRECT_RDMA_SUPPORTED, device));
 #endif
             EP_HOST_ASSERT(flag and "GPUDirect RDMA with CUDA VMM is not supported on this device");
             prop.allocFlags.gpuDirectRDMACapable = 1;
@@ -68,7 +70,7 @@ private:
 
         // Check granularity
         size_t num_granularity_bytes = 0;
-        CUDA_DRIVER_CHECK(lazy_cuMemGetAllocationGranularity(&num_granularity_bytes, &prop, CU_MEM_ALLOC_GRANULARITY_RECOMMENDED));
+        CUDA_DRIVER_CHECK(cuda_driver::lazy_cuMemGetAllocationGranularity(&num_granularity_bytes, &prop, CU_MEM_ALLOC_GRANULARITY_RECOMMENDED));
         EP_HOST_ASSERT((num_granularity_bytes == 0 or kNumAllocationAlignmentBytes % num_granularity_bytes == 0) and
                        "Alignment must be a multiple of CUDA allocation granularity");
         return prop;
@@ -79,16 +81,16 @@ private:
 static void cumem_create_with_fallback(CUmemGenericAllocationHandle* handle,
                                        const int64_t& num_bytes, CUmemAllocationProp* prop) {
     if (prop->requestedHandleTypes & CU_MEM_HANDLE_TYPE_FABRIC) {
-        CUresult err = lazy_cuMemCreate(handle, num_bytes, prop, 0);
+        CUresult err = cuda_driver::lazy_cuMemCreate(handle, num_bytes, prop, 0);
         if (err == CUDA_ERROR_NOT_PERMITTED or err == CUDA_ERROR_NOT_SUPPORTED) {
             prop->requestedHandleTypes = static_cast<CUmemAllocationHandleType>(
                 prop->requestedHandleTypes & ~CU_MEM_HANDLE_TYPE_FABRIC);
-            CUDA_DRIVER_CHECK(lazy_cuMemCreate(handle, num_bytes, prop, 0));
+            CUDA_DRIVER_CHECK(cuda_driver::lazy_cuMemCreate(handle, num_bytes, prop, 0));
         } else {
             CUDA_DRIVER_CHECK(err);
         }
     } else {
-        CUDA_DRIVER_CHECK(lazy_cuMemCreate(handle, num_bytes, prop, 0));
+        CUDA_DRIVER_CHECK(cuda_driver::lazy_cuMemCreate(handle, num_bytes, prop, 0));
     }
 }
 
@@ -105,7 +107,7 @@ static void set_access(const CUdeviceptr& addr, const int64_t& num_bytes,
         desc[1].location.id = numa_idx;
         desc[1].flags = CU_MEM_ACCESS_FLAGS_PROT_READWRITE;
     }
-    CUDA_DRIVER_CHECK(lazy_cuMemSetAccess(addr, num_bytes, desc, with_cpu ? 2 : 1));
+    CUDA_DRIVER_CHECK(cuda_driver::lazy_cuMemSetAccess(addr, num_bytes, desc, with_cpu ? 2 : 1));
 }
 
 class SymmetricMemory {
@@ -157,14 +159,14 @@ public:
 
         // Reserve VA and map segments
         CUdeviceptr addr;
-        CUDA_DRIVER_CHECK(lazy_cuMemAddressReserve(&addr, num_allocated_bytes, kNumAllocationAlignmentBytes, 0, 0));
+        CUDA_DRIVER_CHECK(cuda_driver::lazy_cuMemAddressReserve(&addr, num_allocated_bytes, kNumAllocationAlignmentBytes, 0, 0));
         this->ptr = reinterpret_cast<void*>(static_cast<uintptr_t>(addr));
 
         cumem_create_with_fallback(&gpu_handle, num_sym_bytes, &gpu_prop);
-        CUDA_DRIVER_CHECK(lazy_cuMemMap(addr, num_sym_bytes, 0, gpu_handle, 0));
+        CUDA_DRIVER_CHECK(cuda_driver::lazy_cuMemMap(addr, num_sym_bytes, 0, gpu_handle, 0));
 
         cumem_create_with_fallback(&storage_handle, num_rdma_storage_bytes, &storage_prop);
-        CUDA_DRIVER_CHECK(lazy_cuMemMap(
+        CUDA_DRIVER_CHECK(cuda_driver::lazy_cuMemMap(
             addr + num_sym_bytes, num_rdma_storage_bytes, 0, storage_handle, 0));
 
         if (use_cpu_rdma_storage) {
@@ -180,11 +182,11 @@ public:
 
     ~ElasticSymmetricMemory() override {
         auto addr = static_cast<CUdeviceptr>(reinterpret_cast<uintptr_t>(ptr));
-        CUDA_DRIVER_CHECK(lazy_cuMemUnmap(addr, num_sym_bytes));
-        CUDA_DRIVER_CHECK(lazy_cuMemRelease(gpu_handle));
-        CUDA_DRIVER_CHECK(lazy_cuMemUnmap(addr + num_sym_bytes, num_rdma_storage_bytes));
-        CUDA_DRIVER_CHECK(lazy_cuMemRelease(storage_handle));
-        CUDA_DRIVER_CHECK(lazy_cuMemAddressFree(
+        CUDA_DRIVER_CHECK(cuda_driver::lazy_cuMemUnmap(addr, num_sym_bytes));
+        CUDA_DRIVER_CHECK(cuda_driver::lazy_cuMemRelease(gpu_handle));
+        CUDA_DRIVER_CHECK(cuda_driver::lazy_cuMemUnmap(addr + num_sym_bytes, num_rdma_storage_bytes));
+        CUDA_DRIVER_CHECK(cuda_driver::lazy_cuMemRelease(storage_handle));
+        CUDA_DRIVER_CHECK(cuda_driver::lazy_cuMemAddressFree(
             addr, num_sym_bytes + num_rdma_storage_bytes));
     }
 };
@@ -216,13 +218,13 @@ public:
 
         // Reserve VA
         CUdeviceptr addr;
-        CUDA_DRIVER_CHECK(lazy_cuMemAddressReserve(&addr, num_mapped_bytes, kNumAllocationAlignmentBytes, 0, 0));
+        CUDA_DRIVER_CHECK(cuda_driver::lazy_cuMemAddressReserve(&addr, num_mapped_bytes, kNumAllocationAlignmentBytes, 0, 0));
         ptr = reinterpret_cast<void*>(static_cast<uintptr_t>(addr));
         EP_HOST_ASSERT(reinterpret_cast<uint64_t>(ptr) % kNumAllocationAlignmentBytes == 0);
 
         // Map GPU segment
         cumem_create_with_fallback(&gpu_handle, num_sym_bytes, &gpu_prop);
-        CUDA_DRIVER_CHECK(lazy_cuMemMap(addr, num_sym_bytes, 0, gpu_handle, 0));
+        CUDA_DRIVER_CHECK(cuda_driver::lazy_cuMemMap(addr, num_sym_bytes, 0, gpu_handle, 0));
 
         // Import and map all intra-node storage segments.
         const auto local_pid = getpid();
@@ -238,11 +240,11 @@ public:
             }
 
             const auto offset = num_sym_bytes + i * num_rdma_storage_bytes;
-            CUDA_DRIVER_CHECK(lazy_cuMemImportFromShareableHandle(
+            CUDA_DRIVER_CHECK(cuda_driver::lazy_cuMemImportFromShareableHandle(
                 &storage_handles[i],
                 reinterpret_cast<void*>(static_cast<uintptr_t>(local_fd)),
                 CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR));
-            CUDA_DRIVER_CHECK(lazy_cuMemMap(addr + offset, num_rdma_storage_bytes, 0, storage_handles[i], 0));
+            CUDA_DRIVER_CHECK(cuda_driver::lazy_cuMemMap(addr + offset, num_rdma_storage_bytes, 0, storage_handles[i], 0));
 
             if (pid != local_pid) {
                 close(local_fd);
@@ -264,16 +266,16 @@ public:
     ~HybridElasticSymmetricMemory() override {
         auto addr = static_cast<CUdeviceptr>(reinterpret_cast<uintptr_t>(ptr));
 
-        CUDA_DRIVER_CHECK(lazy_cuMemUnmap(addr, num_sym_bytes));
-        CUDA_DRIVER_CHECK(lazy_cuMemRelease(gpu_handle));
+        CUDA_DRIVER_CHECK(cuda_driver::lazy_cuMemUnmap(addr, num_sym_bytes));
+        CUDA_DRIVER_CHECK(cuda_driver::lazy_cuMemRelease(gpu_handle));
 
         if (local_export_fd >= 0)
             close(local_export_fd);
-        CUDA_DRIVER_CHECK(lazy_cuMemUnmap(addr + num_sym_bytes, num_rdma_storage_bytes * num_scaleup_ranks));
+        CUDA_DRIVER_CHECK(cuda_driver::lazy_cuMemUnmap(addr + num_sym_bytes, num_rdma_storage_bytes * num_scaleup_ranks));
         for (int i = 0; i < num_scaleup_ranks; ++ i)
-            CUDA_DRIVER_CHECK(lazy_cuMemRelease(storage_handles[i]));
+            CUDA_DRIVER_CHECK(cuda_driver::lazy_cuMemRelease(storage_handles[i]));
 
-        CUDA_DRIVER_CHECK(lazy_cuMemAddressFree(addr, num_sym_bytes + num_rdma_storage_bytes * num_scaleup_ranks));
+        CUDA_DRIVER_CHECK(cuda_driver::lazy_cuMemAddressFree(addr, num_sym_bytes + num_rdma_storage_bytes * num_scaleup_ranks));
     }
 
     // Create a CPU/GPU storage segment and export its POSIX FD handle.
@@ -289,11 +291,11 @@ public:
         cumem_create_with_fallback(&handle, num_bytes, &prop);
 
         int fd = -1;
-        CUDA_DRIVER_CHECK(lazy_cuMemExportToShareableHandle(
+        CUDA_DRIVER_CHECK(cuda_driver::lazy_cuMemExportToShareableHandle(
             &fd, handle, CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR, 0));
 
         // Release the allocation handle -- the POSIX FD keeps the physical memory alive
-        CUDA_DRIVER_CHECK(lazy_cuMemRelease(handle));
+        CUDA_DRIVER_CHECK(cuda_driver::lazy_cuMemRelease(handle));
 
         return {getpid(), fd};
     }

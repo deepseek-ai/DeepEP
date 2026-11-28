@@ -14,7 +14,7 @@ template <int kNumRDMARanks, int kNumNVLRanks,
           int kNumMultimemWarps, int kNumMultimemWarpsPerGroup, int kNumIssueWarps, int kNumReduceWarps,
           int kNumSmemBytesPerReduceWarp,
           int kNumQPs,
-          int64_t kNumTimeoutCycles, bool kWithScale, int kContextIdx,
+          int64_t kNumTimeoutCycles, bool kWithScale, int kContextIdx, bool kAccumulate,
           int kNumThreads = (kNumMultimemWarps + kNumIssueWarps + kNumReduceWarps) * 32,
           int kNumMultimemGroups = kNumMultimemWarps / kNumMultimemWarpsPerGroup,
           int kNumMultimemThreadsPerGroup = kNumMultimemWarpsPerGroup * 32>
@@ -23,7 +23,8 @@ hybrid_reduce_scatter(const ncclDevComm_t nccl_dev_comm, const ncclWindow_t wind
                       void* workspace_ptr, void* buffer, void* buffer_multimem,
                       const float scale,
                       const int num_buckets,
-                      const __grid_constant__ comm::BucketList buckets) {
+                      const __grid_constant__ comm::BucketList buckets,
+                      const __grid_constant__ comm::BucketList dst_buckets) {
     // Check slots
     // Chunk indices fit in int for every supported workspace size.
     constexpr int kNumChunkBytes = 32 * 1024;
@@ -199,7 +200,7 @@ hybrid_reduce_scatter(const ncclDevComm_t nccl_dev_comm, const ncclWindow_t wind
                 }
             }
         } else {
-            // Reduce warps: accumulate remote chunks into the local output
+            // Reduce warps: accumulate chunks into the output
             // Only 1 lane is involved
             if (ptx::elect_one_sync()) {
                 constexpr int kNumGlobalReduceWarps = kNumSMs * kNumReduceWarps;
@@ -217,7 +218,10 @@ hybrid_reduce_scatter(const ncclDevComm_t nccl_dev_comm, const ncclWindow_t wind
                     const auto tail_target = iterator.chunk_idx / kNumSlotsPerRank + 1;
                     const auto head_ptr = signals.get_head_ptr<kNumSlotsPerRank>(rdma_rank_idx, slot_idx);
                     const auto dst_ptr = math::advance_ptr<float>(
-                        buffer, iterator.bucket.offset + rank_idx * iterator.bucket.num_bytes + iterator.chunk_offset_in_bucket);
+                        buffer,
+                        (kAccumulate ? dst_buckets[iterator.bucket_idx].offset
+                                     : iterator.bucket.offset + rank_idx * iterator.bucket.num_bytes) +
+                            iterator.chunk_offset_in_bucket);
 
                     #pragma unroll 1
                     for (int i = 0; i < kNumRDMARanks; ++ i) {
@@ -238,16 +242,19 @@ hybrid_reduce_scatter(const ncclDevComm_t nccl_dev_comm, const ncclWindow_t wind
                             return false;
                         });
 
-                        // No local reduction
                         if (i == 0) {
                             // Release the local generation
                             ptx::red_add_rel_gpu(head_ptr, 1);
-                            continue;
+                            // No local reduction
+                            if constexpr (not kAccumulate)
+                                continue;
                         }
 
-                        // Reduce the remote chunk through shared memory into the output
+                        // Reduce the chunk through shared memory into the output
                         // NOTES: TMA atomic add can ensure deterministic if no other SMs involved
-                        const auto recv_buffer_ptr = chunks.get_chunk_ptr(src_rdma_rank_idx, slot_idx);
+                        const auto recv_buffer_ptr = i == 0 ?
+                            math::advance_ptr(buffer, iterator.bucket.offset + rank_idx * iterator.bucket.num_bytes + iterator.chunk_offset_in_bucket) :
+                            chunks.get_chunk_ptr(src_rdma_rank_idx, slot_idx);
                         #pragma unroll 1
                         for (int offset = 0; offset < iterator.num_chunk_bytes; offset += kNumSmemBytesPerReduceWarp) {
                             const int num_bytes = min(kNumSmemBytesPerReduceWarp, iterator.num_chunk_bytes - offset);
@@ -263,7 +270,7 @@ hybrid_reduce_scatter(const ncclDevComm_t nccl_dev_comm, const ncclWindow_t wind
                         }
 
                         // Release the remote ring slot only if a later chunk will reuse it.
-                        if (iterator.chunk_idx < iterator.num_total_chunks - kNumSlotsPerRank) {
+                        if (i != 0 and iterator.chunk_idx < iterator.num_total_chunks - kNumSlotsPerRank) {
                             gin.signal<ncclTeamTagRail>(
                                 src_rdma_rank_idx,
                                 ncclGin_StrongVASignalAdd {

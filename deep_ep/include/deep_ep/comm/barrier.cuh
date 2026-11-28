@@ -24,9 +24,6 @@ static constexpr int kHybridDispatchTag1 = 7;
 static constexpr int kHybridCombineTag0 = 8;
 static constexpr int kHybridCombineTag1 = 9;
 
-// Some reserved count
-static constexpr int kFlushAllAllocatedQPs = -1;
-
 template <int64_t kNumTimeoutCycles, typename func_t>
 __device__ __forceinline__ void timeout_while(const bool& condition, const func_t& func,
                                               int64_t start_clock = 0) {
