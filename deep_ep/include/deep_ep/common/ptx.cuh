@@ -101,7 +101,7 @@ __forceinline__ __device__ void st_bulk(void* smem_ptr) {
 }
 
 __forceinline__ __device__ void tma_store_fence() {
-    asm volatile("fence.proxy.async.shared::cta;");
+    asm volatile("fence.proxy.async.shared::cta;" ::: "memory");
 }
 
 template <int kNumRemainingWaits = 0>
@@ -221,6 +221,20 @@ __forceinline__ __device__ void named_barrier_unaligned(const int& idx) {
 }
 
 /// LD/ST instructions
+__forceinline__ __device__ int2 ldg_with_ge_pred(const int2* ptr, const int& lhs = 1, const int& rhs = 0, const L2CacheHint& cache_hint = L2CacheHint::kEvictFirst) {
+    int2 ret = make_int2(0, 0);
+    asm volatile(
+        "{\n\t"
+        "  .reg .pred p;\n\t"
+        "  setp.ge.s32 p, %3, %4;\n\t"
+        "  @p ld.L1::no_allocate.L2::cache_hint.global.nc.v2.s32 {%0, %1}, [%2], %5;\n\t"
+        "}"
+        : "+r"(ret.x), "+r"(ret.y)
+        : "l"(ptr), "r"(lhs), "r"(rhs), "l"(cache_hint)
+        : "memory");
+    return ret;
+}
+
 __forceinline__ __device__ int4 ldg_with_ge_pred(const int4* ptr, const int& lhs = 1, const int& rhs = 0, const L2CacheHint& cache_hint = L2CacheHint::kEvictFirst) {
     int4 ret = make_int4(0, 0, 0, 0);
     asm volatile(
@@ -316,6 +330,10 @@ __forceinline__ __device__ longlong4_t ldg(const longlong4_t* ptr) {
     return ret;
 }
 #endif
+
+__forceinline__ __device__ int2 ldg(const int2* ptr) {
+    return __ldg(ptr);
+}
 
 __forceinline__ __device__ int4 ldg(const int4* ptr) {
     return __ldg(ptr);
@@ -596,7 +614,9 @@ __device__ __forceinline__ void accumulate(float2& a, nv_bfloat162 b) {
     asm("add.rn.f32.bf16 %0, %1, %0;\n" : "+f"(a.x) : "h"(*reinterpret_cast<uint16_t*>(&b.x)));
     asm("add.rn.f32.bf16 %0, %1, %0;\n" : "+f"(a.y) : "h"(*reinterpret_cast<uint16_t*>(&b.y)));
 #else
-    const auto [x, y] = __bfloat1622float2(b);
+    float x, y;
+    asm("shl.b32 %0, %1, 16;\n" : "=f"(x) : "r"(*reinterpret_cast<uint32_t*>(&b)));
+    asm("and.b32 %0, %1, 0xffff0000;\n" : "=f"(y) : "r"(*reinterpret_cast<uint32_t*>(&b)));
     a.x += x, a.y += y;
 #endif
 }

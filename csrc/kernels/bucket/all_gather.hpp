@@ -26,7 +26,6 @@ static void launch_all_gather(
     const int& num_buckets, const comm::BucketList& buckets,
     const std::optional<comm::BucketList>& src_buckets,
     const int& context_idx,
-    uint64_t& seq_idx,
     const float& nvl_bandwidth, const float& rdma_bandwidth,
     const at::cuda::CUDAStream& stream) {
     EP_HOST_ASSERT(num_buckets > 0 and num_buckets <= comm::kNumMaxBuckets);
@@ -60,26 +59,11 @@ static void __instantiate_kernel() {{
             num_buckets, buckets
         );
     } else if (context.num_rdma_ranks == 1) {
-        // Pure NVLink
-        auto& workspace = *static_cast<layout::BucketWorkspace*>(context.workspace);
-        auto& signals = workspace.signals[context_idx].copy_engine;
-        EP_HOST_ASSERT(context.num_nvl_ranks <= kNumMaxNVLRanks and
-                       "Number of NVLink ranks exceeds the maximum workspace size");
-
-        // Build copy descriptors
+        // Pure NVLink: build copy descriptors
         std::vector<size_t> sizes;
         std::vector<void*> dst_ptrs, src_ptrs;
-        std::vector<uint64_t*> write_signals, wait_signals;
-        write_signals.reserve(context.num_nvl_ranks - 1);
-        wait_signals.reserve(context.num_nvl_ranks - 1);
         for (int rank_offset = 1; rank_offset < context.num_nvl_ranks; ++ rank_offset) {
-            // Wait/write signals are same for prologue and epilogue
             const auto peer_rank_idx = (context.nvl_rank_idx + rank_offset) % context.num_nvl_ranks;
-            write_signals.push_back(
-                static_cast<uint64_t*>(context.get_sym_ptr(signals.base, peer_rank_idx)) + context.nvl_rank_idx);
-            wait_signals.push_back(signals.base + peer_rank_idx);
-
-            // Create copies
             for (int bucket_idx = 0; bucket_idx < num_buckets; ++ bucket_idx) {
                 const auto& [offset, num_bytes] = buckets[bucket_idx];
                 const auto shard_offset = offset + context.nvl_rank_idx * num_bytes;
@@ -103,9 +87,8 @@ static void __instantiate_kernel() {{
         }
 
         // Wait arrival & push & write
-        driver::copy_engine_sync(stream, driver::increase_seq_idx(stream, seq_idx), write_signals, wait_signals);
-        driver::copy_engine_push(stream, dst_ptrs, src_ptrs, sizes);
-        driver::copy_engine_sync(stream, driver::increase_seq_idx(stream, seq_idx), write_signals, wait_signals);
+        auto& workspace = *static_cast<layout::BucketWorkspace*>(context.workspace);
+        driver::copy_engine_push_synced(context, workspace.signals[context_idx].copy_engine, dst_ptrs, src_ptrs, sizes, stream);
     } else if (context.num_rdma_ranks > 1 and context.num_nvl_ranks > 1) {
         // Hybrid: one SM issues RDMA to one peer with `kNumQPsPerChunk` QPs, the CE forwards arrived chunks over NVLink
         constexpr int kNumThreads = 256;

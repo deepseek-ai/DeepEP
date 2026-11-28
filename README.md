@@ -4,6 +4,12 @@ DeepEP (DeepEveryParallel) is a high-performance communication library for machi
 
 ## News
 
+- **V2.6 release**:
+  - Support `EPBuffer.resize`, optional FP32 combine output, and 128-element combine alignment
+  - Add `EPBuffer.lb_get_redundancy_mapping` for redundant-expert planning across scale-out EP groups
+  - Add `BucketBuffer.send_recv`, CP `ring_send_recv`, `reduce_scatter` target accumulation, and CUDA Graph capture for copy-engine collectives
+  - Migrate CUDA driver wrappers to DeepJIT
+
 - **Ascend version release**
   - Same API and full performance on HUAWEI Ascend 950 NPUs
   - Check [DeepEP-Ascend](https://github.com/deepseek-ai/DeepEP-Ascend) for more details
@@ -32,7 +38,7 @@ DeepEP (DeepEveryParallel) is a high-performance communication library for machi
   - Both hybrid & direct modes remain supported
 - **Engram** (experimental, with RDMA)
 - **PP** (experimental, with RDMA)
-- **Bucket collectives** (experimental) for CP and DP (all-gather, reduce-scatter, and all-reduce)
+- **Bucket collectives** (experimental) for CP and DP (all-gather, reduce-scatter, all-reduce, send-recv, and ring send-recv)
 
 ### Notes
 
@@ -90,8 +96,13 @@ bash develop.sh
 python tests/ep/test_ep.py
 python tests/bucket/test_all_gather.py
 python tests/bucket/test_reduce_scatter.py
+python tests/bucket/test_reduce_scatter_accumulate.py
 python tests/bucket/test_all_reduce.py
+python tests/bucket/test_send_recv.py
+python tests/bucket/test_ring_send_recv.py
 python tests/buffer/test_allocation.py
+python tests/buffer/test_resize.py
+python tests/ep/test_lb_get_redundancy_mapping.py
 python tests/ep/test_prefetch_weights.py
 python tests/ep/test_reduce_grads.py
 python tests/engram/test_engram.py
@@ -276,7 +287,7 @@ event = combine_forward(expert_output, handle)
 combined_x, _ = event.current_stream_wait()
 ```
 
-The expanded `recv_topk_weights` is one-dimensional, with one value per expert row. The expert computation applies these router weights before combine; combine sums the supplied expert outputs. Combine inputs must be BF16. `bias` can add the shared-expert output or residual during the combine epilogue.
+The expanded `recv_topk_weights` is one-dimensional, with one value per expert row. The expert computation applies these router weights before combine; combine sums the supplied expert outputs. Combine inputs must be BF16; pass `use_fp32_output=True` for FP32 output. `bias` can add the shared-expert output or residual during the combine epilogue.
 
 Training saves the forward `handle` for `combine_backward` and `dispatch_backward`. The backward helpers above return tensors and an event; wait on that event before using the tensors. Cached dispatch replays the saved expanded layout without another receive-count CPU synchronization. Keep the original `topk_idx` unchanged until all uses of the handle finish.
 
@@ -290,7 +301,7 @@ If independent computation is already queued before the communication call, capt
 
 ### Bucket collectives (experimental)
 
-`BucketBuffer` provides batched `all_gather`, `reduce_scatter`, and `all_reduce` for CP and DP workloads. In normal usage, inputs must reside in the bucket's own storage. Use `BufferAllocator` to plan tensors before creating the buffer. The plan's meta tensors become CUDA views into the buffer when it is constructed.
+`BucketBuffer` provides batched `all_gather`, `reduce_scatter`, `all_reduce`, `send_recv`, and `ring_send_recv` for CP and DP workloads. In normal usage, inputs must reside in the bucket's own storage. Use `BufferAllocator` to plan tensors before creating the buffer. The plan's meta tensors become CUDA views into the buffer when it is constructed.
 
 ```python
 import torch
@@ -313,7 +324,9 @@ x.fill_(1)
 reduced_x = buffer.all_reduce(x).wait()
 ```
 
-All ranks must use the same allocation plan. Each collective also accepts a list of tensors, and `.wait()` returns the corresponding tensor or list of tensors. Results are views into the buffer; all-gather returns flattened views. Reduce-scatter and all-reduce accept FP32 inputs and sum contributions by default; use `scale` to scale the result. Reduce-scatter also supports `comm_precision="bf16"` for lower-precision communication while retaining FP32 input and output tensors.
+All ranks must use the same allocation plan. Each collective also accepts a list of tensors, and `.wait()` returns the corresponding tensor or list of tensors. Results are views into the buffer; all-gather returns flattened views. Reduce-scatter and all-reduce accept FP32 inputs and sum contributions by default; use `scale` to scale the result. Reduce-scatter also supports `comm_precision="bf16"` for lower-precision communication while retaining FP32 input and output tensors, and optional accumulation into target tensors.
+
+`send_recv` performs batched point-to-point transfers outside sessions (`.wait()` returns `None`, and receivers read directly from the destination buffer), and `ring_send_recv` performs ring shifts across the group for CP workloads.
 
 To use tensors allocated outside the bucket, wrap the collective calls in a `buffer.session()`. The session manages temporary bucket storage and the required staging copies:
 
@@ -323,18 +336,19 @@ with buffer.session():
     # Consume or copy reduced_x before reusing the session storage
 ```
 
-The NVLink-only all-gather path also supports an external source with an explicitly supplied in-bucket `dsts`; use a session for general out-of-bucket inputs.
+The NVLink-only all-gather and ring-send-recv paths also support external sources with explicitly supplied in-bucket `dsts`; use a session for general out-of-bucket inputs.
 
-All three collectives support NVLink, RDMA, and hybrid domains. NVLink reductions require NCCL multimem support. All-gather is driven by copy engines (`num_sms=0`); reduce-scatter and all-reduce use GPU SMs. See [the bucket tests](tests/bucket) and [allocation tests](tests/buffer/test_allocation.py) for examples, including registration with multiple communication groups.
+All five primitives support NVLink, RDMA, and hybrid domains. NVLink reductions require NCCL multimem support. For all-gather, ring send-recv, and send-recv, NVLink-only transfers use copy engines (`num_sms=0`), while RDMA and hybrid transfers occupy GPU SMs; reduce-scatter and all-reduce always use GPU SMs. See [the bucket tests](tests/bucket) and [allocation tests](tests/buffer/test_allocation.py) for examples, including registration with multiple communication groups.
 
 ### Expert load balancing
 
 Dynamic expert replication spreads a heavily loaded expert's computation across additional GPUs. [MoonEP](https://github.com/MoonshotAI/MoonEP) explores online planning with dynamic redundant experts, weight prefetching, and gradient reduction. [UltraEP](https://github.com/Dots-Infra/UltraEP) ([paper](https://arxiv.org/abs/2606.04101)) plans replication and token rerouting from the current post-gating load, keeping expert replication within the NVLink domain. These works motivate the redundant-expert communication primitives exposed by `EPBuffer`.
 
+- `lb_get_redundancy_mapping(topk_idx, num_experts, num_redundant_experts_per_rank)` counts routes across the EP group, balances aligned expert loads within each NVLink domain, and returns `(remapped_topk_idx, redundancy_mapping)`.
 - `lb_prefetch_weights(redundant_expert_weights, expert_weights, redundancy_mapping)` pushes original expert weights to the requested redundant slots before expert computation. It accepts one tensor or matching nonempty tensor sequences, so weights and quantization scales can be transferred together without dtype conversion.
 - `lb_reduce_grads(redundant_expert_grads, expert_grads, redundancy_mapping)` reads the redundant experts' FP32 gradients over NVLink and adds them into the original experts' gradients in place. Use the same mapping as the forward pass and initialize `expert_grads` with the local contribution, or zeros, before reduction.
 
-The caller supplies the replication plan, reroutes tokens to the chosen expert instances, and manages the expert GEMMs. Both exchange operations are collective within each NVLink domain: every rank in that domain must call them, including ranks with no assigned redundant slots. They run asynchronously on the communication stream and return an `EventOverlap`; call `.wait()` before consuming their results. `previous_event` can specify when the inputs are ready, and `num_sms=0` selects an analytical SM estimate.
+The replication plan and rerouted indices can be computed with `lb_get_redundancy_mapping` (collective across the EP group on the current stream) or supplied by the caller before running the expert GEMMs. Both exchange operations are collective within each NVLink domain: every rank in that domain must call them, including ranks with no assigned redundant slots. They run asynchronously on the communication stream and return an `EventOverlap`; call `.wait()` before consuming their results. `previous_event` can specify when the inputs are ready, and `num_sms=0` selects an analytical SM estimate.
 
 Reserve redundant weight and gradient storage with `lb_allocation_plan_or_num_bytes`, using a `BufferAllocator` plan or an aligned byte count. This LB region is separate from the EP dispatch/combine buffer. The redundant tensors must reside in it; original expert weights and gradients can use ordinary CUDA allocations. Plans must have the same shapes and allocation order on every rank in the NVLink domain.
 
@@ -377,7 +391,7 @@ grads_ready.wait()
 # expert_grads now includes contributions from all redundant instances
 ```
 
-Keep the mapping and tensor storage valid until the corresponding exchange finishes. If redundant storage is reused across layers or microbatches, restore the required weights before backward computation and finish gradient reduction before reusing its inputs. Reduction does not clear redundant gradients; overwrite or zero them before the next accumulation. See [weight prefetch tests](tests/ep/test_prefetch_weights.py) and [gradient reduction tests](tests/ep/test_reduce_grads.py) for complete allocation and correctness examples.
+Keep the mapping and tensor storage valid until the corresponding exchange finishes. If redundant storage is reused across layers or microbatches, restore the required weights before backward computation and finish gradient reduction before reusing its inputs. Reduction does not clear redundant gradients; overwrite or zero them before the next accumulation. See [redundancy mapping tests](tests/ep/test_lb_get_redundancy_mapping.py), [weight prefetch tests](tests/ep/test_prefetch_weights.py), and [gradient reduction tests](tests/ep/test_reduce_grads.py) for complete allocation and correctness examples.
 
 ### Engram (experimental)
 

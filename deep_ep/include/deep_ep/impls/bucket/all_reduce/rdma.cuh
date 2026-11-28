@@ -80,7 +80,7 @@ rdma_all_reduce(const ncclDevComm_t nccl_dev_comm, const ncclWindow_t window,
 
     // Barrier to make the cleared signals visible and ensure data arrival
     comm::gpu_barrier<true, kNumRanks, 1,
-                      kNumSMs, kNumThreads, comm::kFlushAllAllocatedQPs,
+                      kNumSMs, kNumThreads, kFlushAllAllocatedQPs,
                       kNumTimeoutCycles, comm::kKernelBarrierTag, false, true, true>(
         gin, barrier_signals, rank_idx, 0, sm_idx, thread_idx);
 

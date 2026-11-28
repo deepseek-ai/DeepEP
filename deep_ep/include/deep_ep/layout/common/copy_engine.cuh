@@ -8,7 +8,11 @@
 namespace deep_ep::layout {
 
 struct alignas(kNumRDMAAlignmentBytes) CopyEngineSignals {
-    uint64_t base[kNumMaxNVLRanks];
+    static constexpr uint64_t kArrivedSignal = 1;
+
+    uint64_t arrived;
+    uint64_t prologue[kNumMaxNVLRanks];
+    uint64_t epilogue[kNumMaxNVLRanks];
 };
 EP_STATIC_ASSERT(sizeof(CopyEngineSignals) <= kNumMaxSignalBytes, "Too many signals");
 

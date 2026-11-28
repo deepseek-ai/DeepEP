@@ -63,24 +63,32 @@ def test_dispatch_combine(buffer: deep_ep.EPBuffer, args: argparse.Namespace):
     num_scaleout_ranks, num_scaleup_ranks = buffer.get_logical_domain_size()
     num_max_tokens_per_rank, num_tokens, hidden = args.num_tokens, max(1, args.num_tokens - dist.get_rank()), args.hidden
     num_topk, num_experts = args.num_topk, args.num_experts
+    combine_dtype = torch.float32 if args.use_fp32_output else torch.bfloat16
     num_local_experts = num_experts // buffer.num_ranks
     num_sms = buffer.get_theoretical_num_sms(num_experts, num_topk) if args.num_sms == 0 else args.num_sms
     num_qps = buffer.get_theoretical_num_qps(num_sms) if args.num_qps == 0 else args.num_qps
     dist_print(f'Config:\n'
                f' > Ranks: {num_scaleout_ranks} x {num_scaleup_ranks}\n'
                f' > Experts: {num_topk}/{num_experts}\n'
+               f' > Combine output: {combine_dtype}\n'
                f' > Tokens: {num_tokens} (max: {num_max_tokens_per_rank}), hidden: {hidden}\n'
                f' > #SM: {num_sms}, #QPs: {num_qps}/{buffer.num_allocated_qps}\n',
                once_in_node=True)
 
     # Construct expert selections first (may have an unbalanced ratio here)
-    scores = get_unbalanced_scores(num_tokens, num_experts, buffer.num_ranks, num_topk, args.unbalanced_ratio, args.precise_unbalanced_ratio)
+    scores = get_unbalanced_scores(num_tokens, num_experts, buffer.num_ranks, num_topk,
+                                   args.unbalanced_ratio, args.precise_unbalanced_ratio, args.synthetic_unbalanced_ratio)
     topk_weights, topk_idx = torch.topk(scores, num_topk, dim=-1, largest=True, sorted=False)
     topk_idx = topk_idx.to(deep_ep.topk_idx_t)
     if args.masked_ratio > 0:
         rand_mask = torch.rand_like(topk_idx, dtype=torch.float)
         topk_idx.masked_fill_(rand_mask < args.masked_ratio, -1)
         topk_weights.masked_fill_(topk_idx < 0, 0)
+
+    # Permute top-k positions to avoid positional bias in scores
+    topk_perm = torch.rand_like(topk_weights).argsort(dim=-1)
+    topk_idx = topk_idx.gather(dim=-1, index=topk_perm)
+    topk_weights = topk_weights.gather(dim=-1, index=topk_perm)
 
     if not args.skip_check:
         ref_y = generate_pre_combine_data(
@@ -134,7 +142,7 @@ def test_dispatch_combine(buffer: deep_ep.EPBuffer, args: argparse.Namespace):
                 ref_y, topk_idx,
                 num_scaleout_ranks, num_scaleup_ranks, num_experts,
                 bias,
-                *reduced_combine_recipe
+                *reduced_combine_recipe, use_fp32_output=args.use_fp32_output
             )
             if reduced_combine_recipe == combine_recipe:
                 ref_combined_y = ref_reduced_combined_y
@@ -143,7 +151,7 @@ def test_dispatch_combine(buffer: deep_ep.EPBuffer, args: argparse.Namespace):
                     ref_y, topk_idx,
                     num_scaleout_ranks, num_scaleup_ranks,
                     num_experts, bias,
-                    *combine_recipe
+                    *combine_recipe, use_fp32_output=args.use_fp32_output
                 )  # Reduce within rank, then globally, for non-expand combine mode
             torch.cuda.synchronize()
 
@@ -197,7 +205,7 @@ def test_dispatch_combine(buffer: deep_ep.EPBuffer, args: argparse.Namespace):
                 f'{ref_recv_src_token_idx=}, {sorted_src_token_global_idx=}'
         local_y = generate_pre_combine_data(src_token_global_idx, num_max_tokens_per_rank, num_topk, hidden)  # [num_recv_tokens, topk, hidden]
         local_y[recv_topk_idx[:num_recv_tokens] == -1] = 0
-        local_reduced_y = ordered_accumulate(local_y)
+        local_reduced_y = ordered_accumulate(local_y, torch.bfloat16)
         input_for_combine = torch.empty_like(recv_x_bf16, dtype=torch.bfloat16, device='cuda')
         input_for_combine[:num_recv_tokens] = local_reduced_y
 
@@ -215,7 +223,7 @@ def test_dispatch_combine(buffer: deep_ep.EPBuffer, args: argparse.Namespace):
         # Do combine
         combine_args = dict(
             x=input_for_combine, topk_weights=recv_topk_weights, bias=bias,
-            handle=handle,
+            handle=handle, use_fp32_output=args.use_fp32_output,
             num_sms=num_sms, num_qps=num_qps,
             async_with_compute_stream=async_with_compute_stream,
             allocate_on_comm_stream=allocate_on_comm_stream,
@@ -226,7 +234,7 @@ def test_dispatch_combine(buffer: deep_ep.EPBuffer, args: argparse.Namespace):
         # Reduced combine
         reduced_combine_args = dict(
             x=input_for_expand_combine, bias=bias,
-            handle=expanded_handle,
+            handle=expanded_handle, use_fp32_output=args.use_fp32_output,
             num_sms=num_sms, num_qps=num_qps,
             async_with_compute_stream=async_with_compute_stream,
             allocate_on_comm_stream=allocate_on_comm_stream,
@@ -512,6 +520,7 @@ def test_dispatch_combine(buffer: deep_ep.EPBuffer, args: argparse.Namespace):
                         assert torch.equal(ref_t, t), f'{ref_t=}, {t=}'
 
             # Combined data should also be bitwise-identical
+            assert combined_x.dtype == reduced_combined_x.dtype == combine_dtype
             assert torch.equal(combined_x, ref_combined_y), \
                 f'Diff: {calc_diff(combined_x, ref_combined_y)}'
             assert torch.equal(reduced_combined_x, ref_reduced_combined_y), \
@@ -588,6 +597,7 @@ if __name__ == '__main__':
     parser.add_argument('--hidden', type=int, default=7168, help='Hidden dimension size')
     parser.add_argument('--num-topk', type=int, default=6, help='Number of top-k experts')
     parser.add_argument('--num-experts', type=int, default=256, help='Number of experts')
+    parser.add_argument('--use-fp32-output', action='store_true', help='Return FP32 combine output instead of BF16')
 
     # Scenario settings
     parser.add_argument('--do-cpu-sync', type=int, default=1, help='Whether to do CPU sync')
@@ -605,7 +615,9 @@ if __name__ == '__main__':
     parser.add_argument('--reuse-buffer', action='store_true', help='Whether to reuse the buffer for each test')
     parser.add_argument('--test-first-only', action='store_true', help='Only test the first case')
     parser.add_argument('--unbalanced-ratio', type=float, default=1.0, help='The MoE unbalanced ratio')
-    parser.add_argument('--precise-unbalanced-ratio', action='store_true', help='Generate topk index with precise unbalanced ratio')
+    routing_modes = parser.add_mutually_exclusive_group()
+    routing_modes.add_argument('--precise-unbalanced-ratio', action='store_true', help='Generate topk index with precise unbalanced ratio')
+    routing_modes.add_argument('--synthetic-unbalanced-ratio', action='store_true', help='Generate correlated synthetic topk routing with calibrated rank load')
     parser.add_argument('--masked-ratio', type=float, default=0.0, help='Mask some expert selections')
     parser.add_argument('--dump-profile-traces', type=str, default='', help='Dump profiling trace JSONs')
     parser.add_argument('--ignore-local-traffic', action='store_true', help='Whether to ignore local traffic during bandwidth calculation')

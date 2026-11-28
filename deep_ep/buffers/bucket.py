@@ -36,11 +36,19 @@ class BucketSession:
         for name in self.collective_methods:
             method = partial(self._collective_func, name)
             setattr(self.buffer, name, method)
+        self.buffer.ring_send_recv = self._ring_send_recv
+
+        def send_recv(*args, **kwargs):
+            raise RuntimeError('send_recv is not supported in a session')
+
+        self.buffer.send_recv = send_recv
         return self
 
     def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
         for name in self.collective_methods:
             delattr(self.buffer, name)
+        del self.buffer.ring_send_recv
+        del self.buffer.send_recv
 
     def _call_original(self, name: str, *args, **kwargs):
         return getattr(type(self.buffer), name)(self.buffer, *args, **kwargs)
@@ -48,7 +56,9 @@ class BucketSession:
     def _parse_args(self, name: str, *args, **kwargs) -> dict:
         """Bind call kwargs to the original collective's signature."""
         signature = inspect.signature(getattr(type(self.buffer), name))
-        kwargs = signature.bind(self.buffer, *args, **kwargs).arguments
+        bound = signature.bind(self.buffer, *args, **kwargs)
+        bound.apply_defaults()
+        kwargs = bound.arguments
         kwargs.pop('self')
         return kwargs
 
@@ -82,15 +92,15 @@ class BucketSession:
                           if dst.data_ptr() != dst_buffer.data_ptr()]
             if copy_pairs:
                 torch._foreach_copy_([dst.view(-1) for dst, _ in copy_pairs],
-                                     [dst_buffer.view(dst.dtype) for dst, dst_buffer in copy_pairs])
+                                     [dst_buffer.view(dst.dtype).view(-1) for dst, dst_buffer in copy_pairs])
             return result
         handle.register_hook_after_wait(hook_after_wait)
         return handle
 
     def allocate(self,
-                         shapes: Union[Sequence[int], Sequence[Sequence[int]]],
-                         dtype: torch.dtype = torch.float32,
-                         group: Optional[dist.ProcessGroup] = None) -> Union[torch.Tensor, Tuple[torch.Tensor, ...]]:
+                 shapes: Union[Sequence[int], Sequence[Sequence[int]]],
+                 dtype: torch.dtype = torch.float32,
+                 group: Optional[dist.ProcessGroup] = None) -> Union[torch.Tensor, Tuple[torch.Tensor, ...]]:
         """Allocate tensors in registered buffer."""
         group = self.buffer.groups[self.buffer.get_context_idx(group)]
         self._check_group(group)
@@ -119,6 +129,7 @@ class BucketSession:
         srcs = kwargs.pop('srcs')
         dsts = kwargs.pop('dsts', None)
         dst_exists = dsts is not None
+        accumulate = name == 'reduce_scatter' and dst_exists
         if not dst_exists:
             dsts = srcs
         is_packed, srcs, dsts = BucketBuffer._pack_tensors(srcs, dsts)
@@ -146,19 +157,17 @@ class BucketSession:
                 assert src.is_contiguous(), f'{name} registered source must be contiguous'
                 offset = src.data_ptr() - storage_begin - (rank_idx % num_shards[0]) * src.nbytes
                 buffer = self.buffer.storage.narrow(0, offset, num_buffer_bytes).view(src.dtype)
-            elif is_dst_registered:
+            elif is_dst_registered and not accumulate:
                 offset = dst.data_ptr() - storage_begin - (rank_idx % num_shards[1]) * dst.nbytes
                 buffer = self.buffer.storage.narrow(0, offset, num_buffer_bytes).view(dst.dtype)
             else:
                 buffer = self._allocate(num_buffer_bytes, src.dtype)
 
-            # Calculate src and dst buffer
             src_buffer = buffer.view(num_shards[0], -1)[rank_idx % num_shards[0]].view(src.shape)
-            dst_buffer = buffer.view(num_shards[1], -1)[rank_idx % num_shards[1]]
+            dst_buffer = dst if accumulate else buffer.view(num_shards[1], -1)[rank_idx % num_shards[1]]
             if dst_exists:
                 dst_buffer = dst_buffer.view(dst.shape)
 
-            # Construct copy tasks
             if not is_src_registered and not accept_unregistered_src:
                 copy_tasks.append((src_buffer, src))
 
@@ -174,15 +183,68 @@ class BucketSession:
             torch._foreach_copy_(*zip(*copy_tasks))
 
         # Launch
-        if accept_unregistered_src:
+        if accumulate:
+            handle = self._call_original(name, src_buffers, dsts=dsts, **kwargs)
+        elif accept_unregistered_src:
             handle = self._call_original(name, srcs, dsts=dst_buffers, **kwargs)
         else:
             handle = self._call_original(name, src_buffers, **kwargs)
         return self._wrap_handle(handle, dsts, dsts[0] if is_packed else dsts)
 
+    def _ring_send_recv(self, *args, **kwargs) -> EventOverlap:
+        """Ring send-recv accepting unregistered sources and destinations."""
+        kwargs = self._parse_args('ring_send_recv', *args, **kwargs)
+        group = self.buffer.groups[self.buffer.get_context_idx(kwargs.get('group'))]
+        self._check_group(group)
+        rank_idx, num_ranks = group.rank(), group.size()
+
+        srcs = kwargs.pop('srcs')
+        dsts = kwargs.pop('dsts')
+        dst_exists = dsts is not None
+        has_dst = kwargs['cyclic'] or (0 <= rank_idx + kwargs['shift'] < num_ranks)
+        has_src = kwargs['cyclic'] or (0 <= rank_idx - kwargs['shift'] < num_ranks)
+        is_packed, srcs, dsts = BucketBuffer._pack_tensors(srcs, dsts if dst_exists else srcs)
+        accept_unregistered_src = self.buffer.contexts[self.context_idx].get_physical_domain_size()[0] == 1
+
+        storage_begin = self.buffer.storage.data_ptr()
+        storage_end = storage_begin + self.buffer.num_bytes
+        src_buffers, dst_buffers, copy_tasks = [], [], []
+        for src, dst in zip(srcs, dsts, strict=True):
+            if dst_exists:
+                assert src.dtype == dst.dtype
+                assert dst.is_contiguous(), 'ring_send_recv output must be contiguous'
+                assert dst.nbytes == src.nbytes
+
+            is_src_registered = storage_begin <= src.data_ptr() < storage_end
+            is_dst_registered = dst_exists and (storage_begin <= dst.data_ptr() < storage_end)
+            if is_src_registered:
+                assert src.is_contiguous(), 'ring_send_recv registered source must be contiguous'
+                src_buffer = src
+            elif accept_unregistered_src:
+                src_buffer = src.contiguous()
+            else:
+                src_buffer = self._allocate(src.nbytes, src.dtype).view(src.shape)
+                if has_dst:
+                    copy_tasks.append((src_buffer, src))
+            dst_buffer = dst if is_dst_registered else self._allocate(src.nbytes, src.dtype).view(dst.shape)
+            src_buffers.append(src_buffer)
+            dst_buffers.append(dst_buffer)
+
+        if not dst_exists:
+            dsts = dst_buffers
+        if copy_tasks:
+            torch._foreach_copy_(*zip(*copy_tasks))
+
+        handle = self._call_original('ring_send_recv', src_buffers, dsts=dst_buffers, **kwargs)
+        return self._wrap_handle(handle, dsts if has_src else dst_buffers, dsts[0] if is_packed else dsts)
+
 
 class BucketBuffer(BufferBase):
-    """Own contiguous symmetric storage registered with one or more communication groups."""
+    """Own contiguous symmetric storage registered with one or more communication groups.
+
+    Stream usage:
+        Communication runs on the comm stream; epilogues run on the current stream.
+    """
 
     @staticmethod
     def _pack_tensors(*tensors):
@@ -238,6 +300,15 @@ class BucketBuffer(BufferBase):
         context = self.contexts[context_idx]
         num_rdma_ranks, num_nvl_ranks = context.get_physical_domain_size()
 
+        if op == 'send_recv':
+            if num_rdma_ranks > 1 and num_nvl_ranks > 1:
+                # Send recv has no assumption on the communication domain
+                dst_gbs = max(get_nvlink_gbs(), get_rdma_gbs())
+                num_sms = max(dst_gbs / get_sm_read_gbs(), dst_gbs / get_sm_write_gbs())
+                return align(math.ceil(num_sms), 2)
+            else:
+                return 0
+
         if op == 'reduce_scatter':
             # NVLink
             if num_rdma_ranks == 1 and num_nvl_ranks > 1:
@@ -287,7 +358,7 @@ class BucketBuffer(BufferBase):
 
             raise NotImplementedError
 
-        if op == 'all_gather':
+        if op in ('all_gather', 'ring_send_recv'):
             return 0
 
         raise NotImplementedError
@@ -310,20 +381,55 @@ class BucketBuffer(BufferBase):
         context_idx = self.get_context_idx(group)
         comm.barrier(self, wait_comm_stream, with_cpu_sync, sequential, context_idx)
 
+    def send_recv(self,
+                  send_ops: list[tuple[torch.Tensor, int, int]],
+                  num_sms: Optional[int] = None,
+                  group: Optional[dist.ProcessGroup] = None) -> EventOverlap:
+        """Launch batched send-recv without a transfer plan.
+
+        Arguments:
+            send_ops: (tensor, dst_rank_idx, dst_offset) entries. Rank indices are
+                relative to group; dst_offset is a byte offset into the destination
+                buffer's storage. Tensors must be contiguous views of this buffer.
+                Empty tensors are ignored.
+            num_sms: advised num sms to use. None selects the SM count automatically.
+            group: group to communicate.
+
+        Returns:
+            An async handle; .wait() returns None. Received data is written directly
+            into the destination buffer's storage.
+
+        Note:
+            Each rank in the group must participate even if it has nothing to send or recv.
+        """
+        context_idx = self.get_context_idx(group)
+        num_sms = self.get_theoretical_num_sms('send_recv', self.groups[context_idx]) if num_sms is None else num_sms
+        event, epilogue, num_sms = self.runtime.send_recv(send_ops, context_idx, num_sms)
+
+        # Create handle
+        handle = EventOverlap(event)
+        handle.register_hook_after_wait(epilogue)
+        setattr(handle, 'num_sms', num_sms)
+        return handle
+
     def reduce_scatter(self,
                        srcs: Union[torch.Tensor, Sequence[torch.Tensor]],
                        comm_precision: str = 'fp32',
                        scale: float = 1.0,
                        group: Optional[dist.ProcessGroup] = None,
-                       num_sms: Optional[int] = None) -> EventOverlap:
-        """Launch batched reduce-scatter; ``None`` selects the SM count automatically."""
-        is_packed, srcs = self._pack_tensors(srcs)
+                       num_sms: Optional[int] = None,
+                       *,
+                       dsts: Optional[Union[torch.Tensor, Sequence[torch.Tensor]]] = None) -> EventOverlap:
+        """Launch batched reduce-scatter; ``None`` selects the SM count automatically.
+        Accumulate into ``dsts`` when provided; otherwise overwrite the local shards in-place.
+        """
+        is_packed, srcs, dsts = self._pack_tensors(srcs, dsts)
 
         # Launch
         context_idx = self.get_context_idx(group)
         num_sms = self.get_theoretical_num_sms('reduce_scatter', self.groups[context_idx]) if num_sms is None else num_sms
         dsts, event, num_sms = self.runtime.reduce_scatter(
-            srcs, context_idx, num_sms, comm_precision, scale)
+            srcs, context_idx, num_sms, comm_precision, scale, dsts)
 
         # Create handle
         handle = EventOverlap(event)
@@ -384,6 +490,43 @@ class BucketBuffer(BufferBase):
         context_idx = self.get_context_idx(group)
         num_sms = self.get_theoretical_num_sms('all_gather', self.groups[context_idx]) if num_sms is None else num_sms
         event, epilogue = self.runtime.all_gather(srcs, dsts, context_idx, num_sms)
+
+        # Create handle
+        handle = EventOverlap(event)
+        handle.register_hook_after_wait(lambda: epilogue()[0] if is_packed else epilogue())
+        setattr(handle, 'num_sms', num_sms)
+        return handle
+
+    def ring_send_recv(self,
+                       srcs: Union[torch.Tensor, Sequence[torch.Tensor]],
+                       dsts: Optional[Union[torch.Tensor, Sequence[torch.Tensor]]] = None,
+                       shift: int = 1,
+                       cyclic: bool = False,
+                       group: Optional[dist.ProcessGroup] = None,
+                       num_sms: Optional[int] = None) -> EventOverlap:
+        """Launch batched ring send-recv where each rank sends to ``rank + shift``.
+
+        Arguments:
+            srcs: source tensor(s) to send; all ranks must pass matching shapes and dtypes.
+                Out-of-buffer inputs are only supported by the pure NVLink path.
+            dsts: destination tensor(s) belonging to this ``BucketBuffer``, non-overlapping with ``srcs``,
+                and allocated at symmetric offsets across all ranks in ``group``.
+            shift: rank offset to send to (e.g., ``1`` sends ``rank -> rank + 1``, ``-1`` sends ``rank -> rank - 1``).
+            cyclic: if ``False`` (default), boundary ranks whose destination/source is out of ``[0, group.size())``
+                do not send/receive; if ``True``, wrap around modulo ``group.size()``.
+            group: the communication group to use. Required when this buffer owns multiple groups.
+            num_sms: the number of SMs to use. Must be ``0`` or ``None``.
+
+        Returns:
+            a handle whose ``wait()`` returns the destination tensor(s).
+        """
+        assert dsts is not None, '`dsts` is required when calling `ring_send_recv` outside a session'
+        is_packed, srcs, dsts = self._pack_tensors(srcs, dsts)
+
+        # Launch
+        context_idx = self.get_context_idx(group)
+        num_sms = self.get_theoretical_num_sms('ring_send_recv', self.groups[context_idx]) if num_sms is None else num_sms
+        event, epilogue = self.runtime.ring_send_recv(srcs, dsts, shift, cyclic, context_idx, num_sms)
 
         # Create handle
         handle = EventOverlap(event)

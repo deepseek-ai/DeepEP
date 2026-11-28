@@ -217,7 +217,7 @@ hybrid_combine_impl(nv_bfloat16* x,
                 token_buffer.set_base_ptr(gin.get_sym_ptr<ncclTeamTagLsa>(token_buffer.get_base_ptr(), dst_scaleup_rank_idx));
 
                 // Some checks
-                EP_STATIC_ASSERT(kHidden % (32 * sizeof(int4) / sizeof(nv_bfloat16)) == 0, "Invalid hidden");
+                EP_STATIC_ASSERT(kHidden % (32 * sizeof(int2) / sizeof(nv_bfloat16)) == 0, "Invalid hidden");
 
                 // Read source indices for expand mode
                 int stored_topk_slot_idx = -1;
@@ -259,7 +259,7 @@ hybrid_combine_impl(nv_bfloat16* x,
 
                     // Reduce into shared memory
                     constexpr int kUnrollFactor = get_max_unroll_factor<kHiddenVec, 4>();
-                    combine_reduce<kHiddenVec, kUnrollFactor, math::constexpr_ceil_div(kNumTopk, kNumRanks)>(
+                    combine_reduce<kHiddenVec, kUnrollFactor, math::constexpr_ceil_div(kNumTopk, kNumRanks), false>(
                         lane_idx, topk_slot_idx, static_cast<combine_vec_t*>(tma_buffer.get_base_ptr()),
                         /* Get source base */ [=](const int& slot_idx) {
                             return math::advance_ptr<combine_vec_t>(
@@ -520,7 +520,7 @@ hybrid_combine_impl(nv_bfloat16* x,
 
                 // Do reduce
                 constexpr int kUnrollFactor = get_max_unroll_factor<kHiddenVec, kAdjustRegisters ? 8 : 4>();
-                combine_reduce<kHiddenVec, kUnrollFactor, math::constexpr_ceil_div(kNumTopk, kNumScaleoutRanks)>(
+                combine_reduce<kHiddenVec, kUnrollFactor, math::constexpr_ceil_div(kNumTopk, kNumScaleoutRanks), false>(
                     lane_idx, topk_slot_idx, static_cast<combine_vec_t*>(tma_buffer.get_base_ptr()),
                     /* Get source base */ [=](const int& slot_idx) {
                         return static_cast<combine_vec_t*>(scaleup_buffer.get_token_buffer(slot_idx, true).get_base_ptr());

@@ -21,9 +21,10 @@
 namespace deep_ep::ep {
 
 class EPBuffer: public BufferBase {
-    // Buffer bytes exclude workspace
-    // Memory layout: [Workspace, buffer]
+    // Memory layout: [Workspace, dispatch/combine buffer, LB buffer]
+    // Dispatch/combine buffer bytes
     int64_t num_buffer_bytes;
+    int64_t num_lb_buffer_bytes;
 
     // Host workspace
     void *host_workspace, *mapped_host_workspace;
@@ -60,6 +61,7 @@ public:
              const bool& explicitly_destroy):
         BufferBase(explicitly_destroy),
         num_buffer_bytes(num_buffer_bytes),
+        num_lb_buffer_bytes(num_lb_buffer_bytes),
         allow_hybrid_mode(allow_hybrid_mode),
         allow_multiple_reduction(allow_multiple_reduction),
         prefer_overlap_with_compute(prefer_overlap_with_compute) {
@@ -70,10 +72,13 @@ public:
         const auto num_workspace_bytes = math::align<int64_t>(
             layout::EPWorkspaceLayout::get_num_bytes(), kNumAllocationAlignmentBytes);
 
+        // Reserve one dedicated QP for scale-out LB prepare so it never collides with dispatch/combine on comm stream
+        const auto [num_rdma_ranks, num_nvl_ranks] = comm::get_physical_domain_size(nccl_comm);
+        const int num_context_qps = num_allocated_qps + (num_rdma_ranks > 1 ? 1 : 0);
         context = std::make_shared<comm::Context>(
             nccl_comm, symmetric::shared_comm_t{}, num_ranks, rank_idx,
             num_workspace_bytes, num_buffer_bytes + num_lb_buffer_bytes, 0, true,
-            allow_hybrid_mode, sl_idx, num_allocated_qps,
+            allow_hybrid_mode, sl_idx, num_context_qps,
             0, num_cpu_timeout_secs, num_gpu_timeout_secs);
         main_context = context;
         auto& workspace = *static_cast<layout::EPSignals*>(context->workspace);
@@ -97,6 +102,26 @@ public:
 
     ~EPBuffer() noexcept(false) override {
         destroy_on_destruction("EP");
+    }
+
+    void resize(const int64_t& num_buffer_bytes,
+                const int64_t& num_lb_buffer_bytes) {
+        EP_HOST_ASSERT(not destroyed);
+        EP_HOST_ASSERT(num_buffer_bytes > 0 and num_buffer_bytes % kNumAllocationAlignmentBytes == 0);
+        EP_HOST_ASSERT(num_lb_buffer_bytes >= 0 and num_lb_buffer_bytes % kNumAllocationAlignmentBytes == 0);
+        context->resize(
+            num_buffer_bytes + num_lb_buffer_bytes, 0, allow_hybrid_mode,
+            {this->num_buffer_bytes, this->num_lb_buffer_bytes},
+            {num_buffer_bytes, num_lb_buffer_bytes});
+
+        this->num_buffer_bytes = num_buffer_bytes;
+        this->num_lb_buffer_bytes = num_lb_buffer_bytes;
+        auto& workspace = *static_cast<layout::EPSignals*>(context->workspace);
+        context->set_barrier_signals(&workspace.barrier_signals);
+        lb_storage = torch::from_blob(
+            context->buffer, {num_buffer_bytes + num_lb_buffer_bytes}, [context = context](void*) {},
+            torch::TensorOptions().dtype(torch::kByte).device(torch::kCUDA)
+        ).narrow(0, num_buffer_bytes, num_lb_buffer_bytes);
     }
 
     void destroy() override {
@@ -803,7 +828,8 @@ public:
             const bool& async_with_compute_stream,
             const bool& allocate_on_comm_stream,
             const bool& use_expanded_layout,
-            const bool& defer_epilogue) const {
+            const bool& defer_epilogue,
+            const bool& use_fp32_output) const {
         // Check SM count
         EP_HOST_ASSERT(num_sms > 0 and num_sms <= jit->device.get_num_sms());
         EP_HOST_ASSERT((num_sms > 1 or context->num_scaleout_ranks == 1 or context->num_scaleup_ranks == 1) and
@@ -925,7 +951,8 @@ public:
         auto epilogue = [=, this](const at::cuda::CUDAStream& stream,
                                   const std::optional<std::reference_wrapper<tensor_list_t>>& tensors_to_record_opt) {
             // Allocate output tensors
-            auto combined_x = torch::empty({num_combined_tokens, hidden}, x.options());
+            auto combined_x = torch::empty(
+                {num_combined_tokens, hidden}, x.options().dtype(use_fp32_output ? torch::kFloat : torch::kBFloat16));
             auto combined_topk_weights = std::optional<torch::Tensor>();
             float* combined_topk_weights_ptr = nullptr;
             if (topk_weights.has_value()) {
@@ -953,6 +980,7 @@ public:
                                            jit->device.get_num_sms(),
                                            jit->device.get_num_smem_bytes(),
                                            use_expanded_layout, allow_multiple_reduction,
+                                           use_fp32_output,
                                            stream);
 
             if (tensors_to_record_opt.has_value()) {
@@ -980,6 +1008,33 @@ public:
         return pybind11::make_tuple(result, event, pybind11::none());
     }
 
+    pybind11::tuple lb_get_redundancy_mapping(const torch::Tensor& topk_idx, const int& num_experts,
+                                              const int& num_redundant_experts_per_rank, const int& token_alignment, const int& num_sms) const {
+        // Checks
+        EP_HOST_ASSERT(not destroyed);
+        EP_HOST_ASSERT(topk_idx.is_cuda() and topk_idx.is_contiguous() and topk_idx.dim() == 2);
+        EP_HOST_ASSERT(topk_idx.device() == lb_storage.device());
+        EP_HOST_ASSERT(topk_idx.scalar_type() == c10::CppTypeToScalarType<topk_idx_t>::value);
+        EP_HOST_ASSERT(num_experts > 0 and num_experts <= layout::EPSignals::kNumMaxExperts and num_experts % context->num_ranks == 0);
+        EP_HOST_ASSERT(token_alignment > 0);
+        EP_HOST_ASSERT(num_sms >= 0 and num_sms <= jit->device.get_num_sms());
+        const int num_main_experts_per_rank = num_experts / context->num_ranks;
+        EP_HOST_ASSERT(num_redundant_experts_per_rank >= 0 and num_redundant_experts_per_rank <= num_main_experts_per_rank);
+        EP_HOST_ASSERT(topk_idx.numel() <= layout::LBPrepareSignals::kNumMaxPrepareRoutes);
+        const int num_routes = static_cast<int>(topk_idx.numel());
+        const int num_used_sms = num_sms == 0 ? jit->device.get_num_sms() : num_sms;
+        EP_HOST_ASSERT(static_cast<int64_t>(num_experts) * context->num_ranks <= layout::LBPrepareSignals::kNumMaxPrepareRoutes);
+
+        // Allocate and launch on the current stream
+        const auto stream = at::cuda::getCurrentCUDAStream();
+        const auto options = topk_idx.options().dtype(torch::kInt);
+        const auto redundancy_mapping = torch::empty({context->num_nvl_ranks, num_redundant_experts_per_rank}, options);
+        const auto remapped_topk_idx = torch::empty_like(topk_idx);
+        launch_lb_get_redundancy_mapping(*context, topk_idx, redundancy_mapping, remapped_topk_idx, num_experts, num_routes,
+                                         token_alignment, num_used_sms, num_redundant_experts_per_rank, stream);
+        return pybind11::make_tuple(remapped_topk_idx, redundancy_mapping);
+    }
+
     std::optional<EventHandle>
     lb_prefetch_weights(const std::vector<torch::Tensor>& redundant_expert_weights,
                         const std::vector<torch::Tensor>& expert_weights,
@@ -987,6 +1042,7 @@ public:
                         const int& num_sms,
                         const std::optional<EventHandle>& previous_event) const {
         // Checks
+        EP_HOST_ASSERT(not destroyed);
         EP_HOST_ASSERT(num_sms > 0 and num_sms <= jit->device.get_num_sms());
         EP_HOST_ASSERT(redundant_expert_weights.size() == expert_weights.size());
         EP_HOST_ASSERT(not expert_weights.empty());
@@ -995,9 +1051,11 @@ public:
         EP_HOST_ASSERT(redundancy_mapping.dim() == 2);
         EP_HOST_ASSERT(redundancy_mapping.size(0) == context->num_nvl_ranks);
         EP_HOST_ASSERT(redundancy_mapping.scalar_type() == torch::kInt);
+        EP_HOST_ASSERT(redundancy_mapping.device() == lb_storage.device());
 
-        const int num_redundant_experts = redundancy_mapping.size(1);
+        const int num_redundant_experts_per_rank = redundancy_mapping.size(1);
         const int num_weights = static_cast<int>(expert_weights.size());
+        EP_HOST_ASSERT(expert_weights.front().dim() >= 1);
         const int num_local_experts = expert_weights.front().size(0);
         EP_HOST_ASSERT(num_local_experts > 0);
 
@@ -1009,13 +1067,21 @@ public:
             EP_HOST_ASSERT(expert_weight.is_cuda() and expert_weight.is_contiguous());
             EP_HOST_ASSERT(redundant_expert_weight.dim() >= 1);
             EP_HOST_ASSERT(expert_weight.dim() >= 1);
-            EP_HOST_ASSERT(redundant_expert_weight.size(0) == num_redundant_experts);
+            EP_HOST_ASSERT(redundant_expert_weight.size(0) == num_redundant_experts_per_rank);
             EP_HOST_ASSERT(expert_weight.size(0) == num_local_experts);
             const int64_t num_bytes_per_expert = c10::multiply_integers(redundant_expert_weight.sizes().slice(1)) *
                                                   redundant_expert_weight.element_size();
             EP_HOST_ASSERT(num_bytes_per_expert == c10::multiply_integers(expert_weight.sizes().slice(1)) *
                                                    expert_weight.element_size());
             EP_HOST_ASSERT(num_bytes_per_expert % 16 == 0);
+            EP_HOST_ASSERT(expert_weight.device() == lb_storage.device());
+            EP_HOST_ASSERT(redundant_expert_weight.device() == lb_storage.device());
+            if (redundant_expert_weight.nbytes() > 0) {
+                const auto begin = reinterpret_cast<uintptr_t>(lb_storage.data_ptr());
+                const auto ptr = reinterpret_cast<uintptr_t>(redundant_expert_weight.data_ptr());
+                EP_HOST_ASSERT(ptr >= begin and ptr - begin <= lb_storage.nbytes());
+                EP_HOST_ASSERT(redundant_expert_weight.nbytes() <= lb_storage.nbytes() - (ptr - begin));
+            }
 
             weights[i] = {
                 .redundant_expert_weights = redundant_expert_weight.data_ptr(),
@@ -1030,7 +1096,7 @@ public:
         // Launch
         launch_lb_prefetch_weights(
             *context, num_weights, weights, redundancy_mapping.data_ptr<int>(),
-            num_redundant_experts, num_local_experts,
+            num_redundant_experts_per_rank, num_local_experts,
             num_sms, comm::get_comm_stream());
 
         // Stream epilogue
@@ -1047,6 +1113,7 @@ public:
                     const int& num_sms,
                     const std::optional<EventHandle>& previous_event) const {
         // Checks
+        EP_HOST_ASSERT(not destroyed);
         EP_HOST_ASSERT(num_sms > 0 and num_sms <= jit->device.get_num_sms());
         EP_HOST_ASSERT(redundant_expert_grads.is_cuda() and redundant_expert_grads.is_contiguous());
         EP_HOST_ASSERT(expert_grads.is_cuda() and expert_grads.is_contiguous());
@@ -1057,13 +1124,23 @@ public:
         EP_HOST_ASSERT(redundancy_mapping.size(0) == context->num_nvl_ranks);
         EP_HOST_ASSERT(redundancy_mapping.scalar_type() == torch::kInt);
 
-        const int num_redundant_experts = redundancy_mapping.size(1);
+        const int num_redundant_experts_per_rank = redundancy_mapping.size(1);
         const auto [num_local_experts, hidden] = get_shape<2>(expert_grads);
 
-        EP_HOST_ASSERT(redundant_expert_grads.size(0) == num_redundant_experts);
+        EP_HOST_ASSERT(redundant_expert_grads.size(0) == num_redundant_experts_per_rank);
         EP_HOST_ASSERT(redundant_expert_grads.size(1) == hidden);
         EP_HOST_ASSERT(redundant_expert_grads.scalar_type() == torch::kFloat);
         EP_HOST_ASSERT(expert_grads.scalar_type() == torch::kFloat);
+        EP_HOST_ASSERT(num_local_experts > 0);
+        EP_HOST_ASSERT(expert_grads.device() == lb_storage.device());
+        EP_HOST_ASSERT(redundant_expert_grads.device() == lb_storage.device());
+        EP_HOST_ASSERT(redundancy_mapping.device() == lb_storage.device());
+        if (redundant_expert_grads.nbytes() > 0) {
+            const auto begin = reinterpret_cast<uintptr_t>(lb_storage.data_ptr());
+            const auto ptr = reinterpret_cast<uintptr_t>(redundant_expert_grads.data_ptr());
+            EP_HOST_ASSERT(ptr >= begin and ptr - begin <= lb_storage.nbytes());
+            EP_HOST_ASSERT(redundant_expert_grads.nbytes() <= lb_storage.nbytes() - (ptr - begin));
+        }
 
         // Stream control
         const auto compute_stream = stream_control_prologue(previous_event);
@@ -1071,7 +1148,7 @@ public:
         // Launch: accumulate peers' redundant gradients into the local expert gradients
         launch_lb_reduce_grads(
             *context, redundant_expert_grads.data_ptr<float>(), expert_grads.data_ptr<float>(),
-            redundancy_mapping.data_ptr<int>(), num_redundant_experts, num_local_experts, hidden,
+            redundancy_mapping.data_ptr<int>(), num_redundant_experts_per_rank, num_local_experts, hidden,
             num_sms, comm::get_comm_stream());
 
         // Stream epilogue
@@ -1086,8 +1163,10 @@ static void register_apis(pybind11::module_& m) {
         .def(pybind11::init<int, int, int64_t, int64_t, int64_t, bool, bool, bool, std::optional<int>, int, int, int, bool>())
         .def_readonly("context", &EPBuffer::context)
         .def_readonly("lb_storage", &EPBuffer::lb_storage)
+        .def("resize", &EPBuffer::resize)
         .def("dispatch", &EPBuffer::dispatch)
         .def("combine", &EPBuffer::combine)
+        .def("lb_get_redundancy_mapping", &EPBuffer::lb_get_redundancy_mapping)
         .def("lb_prefetch_weights", &EPBuffer::lb_prefetch_weights)
         .def("lb_reduce_grads", &EPBuffer::lb_reduce_grads);
     m.def("calculate_ep_buffer_size", &EPBuffer::calculate_buffer_size);

@@ -29,7 +29,11 @@ def _accept_legacy_storage_size(init):
 
 
 class EngramBuffer(BufferBase):
-    """GPU fetch buffer with separate CPU or GPU storage shards registered for RDMA."""
+    """GPU fetch buffer with separate CPU or GPU storage shards registered for RDMA.
+
+    Stream usage:
+        All operations run on the current stream.
+    """
 
     # Common communication functions; refer to `deep_ep.comm` for usage.
     barrier = comm.barrier

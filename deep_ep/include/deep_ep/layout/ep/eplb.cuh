@@ -1,8 +1,11 @@
 #pragma once
 
+#include <cstdint>
+
 #include <deep_ep/common/compiled.cuh>
 #include <deep_ep/common/exception.cuh>
 #include <deep_ep/common/math.cuh>
+#include <deep_ep/layout/common/barrier.cuh>
 
 #ifdef __CUDACC__
 #include <cub/block/block_scan.cuh>
@@ -26,7 +29,7 @@ struct alignas(kNumTMAAlignmentBytes) EPLBSharedMemoryLayout {
     EPLBTask tasks[kNumMaxTasks];
 
 #ifdef __CUDACC__
-    template <int kNumRanks, int kNumLocalExperts, int kNumRedundantExperts, int kNumThreads, int kNumWorkspaceBytes>
+    template <int kNumRanks, int kNumLocalExperts, int kNumRedundantExpertsPerRank, int kNumThreads, int kNumWorkspaceBytes>
     __forceinline__ __device__ void build_tasks(const int* redundancy_mapping, const int& rank_idx, const int& thread_idx,
                                                void* smem_workspace_ptr) {
         EP_STATIC_ASSERT(kNumLocalExperts > 0, "Invalid number of local experts");
@@ -38,19 +41,20 @@ struct alignas(kNumTMAAlignmentBytes) EPLBSharedMemoryLayout {
 
         // Compact local expert exchanges in mapping order
         int num_found_tasks = 0;
-        for (int base = 0; base < kNumRanks * kNumRedundantExperts; base += kNumThreads) {
+        for (int base = 0; base < kNumRanks * kNumRedundantExpertsPerRank; base += kNumThreads) {
             const int i = base + thread_idx;
-            const int expert_idx = i < kNumRanks * kNumRedundantExperts ? redundancy_mapping[i] : -1;
+            const int expert_idx = i < kNumRanks * kNumRedundantExpertsPerRank ? redundancy_mapping[i] : -1;
             const int is_local = expert_idx >= 0 and expert_idx / kNumLocalExperts == rank_idx;
-            int task_idx, num_iter_found_tasks;
+            int task_idx;
+            int num_iter_found_tasks;
             BlockScan(smem_workspace).ExclusiveSum(is_local, task_idx, num_iter_found_tasks);
             if (is_local) {
                 task_idx += num_found_tasks;
                 EP_DEVICE_ASSERT(task_idx < kNumMaxTasks);
                 tasks[task_idx] = {
                     .local_expert_idx = expert_idx % kNumLocalExperts,
-                    .dst_nvl_rank_idx = i / kNumRedundantExperts,
-                    .redundant_expert_idx = i % kNumRedundantExperts
+                    .dst_nvl_rank_idx = i / kNumRedundantExpertsPerRank,
+                    .redundant_expert_idx = i % kNumRedundantExpertsPerRank
                 };
             }
             num_found_tasks += num_iter_found_tasks;
@@ -98,7 +102,8 @@ struct EPWeightIterator {
 
     // States, valid after a successful `next()`
     int num_chunk_bytes;
-    void *src_ptr, *dst_ptr;
+    void* src_ptr;
+    void* dst_ptr;
 
     __forceinline__ __device__ EPWeightIterator(const comm::NCCLGin& gin, const EPLBSharedMemoryLayout& smem_layout,
                                                 const EPWeight* weights,
@@ -136,8 +141,25 @@ struct EPWeightIterator {
     }
 
 private:
-    int weight_idx = 0, num_skipped_chunks = 0;
+    int weight_idx = 0;
+    int num_skipped_chunks = 0;
 };
 #endif
+
+struct alignas(kNumRDMAAlignmentBytes) LBPrepareSignals {
+    static constexpr int kNumMaxPrepareRoutes = 262144;
+    static constexpr int kNumMaxExperts = 2048;
+
+    BarrierSignals barrier_signals;
+    uint64_t rdma_arrival_counter[kNumMaxRDMARanks];
+    // Alternate between two halves across calls so a fast rank never overwrites a peer still in `lb_aggregate`
+    int num_tokens_per_rank_expert[2][kNumMaxPrepareRoutes];
+    int num_tokens_per_expert[kNumMaxExperts];
+    int expert_token_offset[kNumMaxExperts];
+    int physical_expert_idx[kNumMaxPrepareRoutes];
+    int psum_num_tokens_per_expert_rank[kNumMaxPrepareRoutes];
+    int block_expert_histogram[kNumMaxPrepareRoutes];
+    int expert_token_ordinal_in_block[kNumMaxPrepareRoutes];
+};
 
 }  // namespace deep_ep::layout
