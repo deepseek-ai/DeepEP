@@ -53,7 +53,7 @@ struct EngramLayout {
 
     __forceinline__ __device__ __host__
     static int64_t get_recv_byte_offset(const int& layer_idx, const int& entry_idx, const int& num_max_tokens) {
-        return (layer_idx * kNumEntriesPerToken * num_max_tokens + entry_idx) * kNumHiddenBytes;
+        return (static_cast<int64_t>(layer_idx) * kNumEntriesPerToken * num_max_tokens + entry_idx) * kNumHiddenBytes;
     }
 
     __forceinline__ __device__ __host__
