@@ -14,6 +14,8 @@ from deep_ep.utils.envs import dist_print, init_dist
 from deep_ep.utils.math import align
 from deep_ep.utils.testing import bench, bench_kineto, parse_num_bytes
 
+all_gather_single = getattr(dist, 'all_gather_single', dist.all_gather_into_tensor)
+
 
 def nccl_ring_send_recv(src: torch.Tensor, dst: torch.Tensor, shift: int, cyclic: bool, group: dist.ProcessGroup) -> None:
     rank, size = group.rank(), group.size()
@@ -153,7 +155,7 @@ def test(local_rank: int, num_local_ranks: int, args: argparse.Namespace) -> Non
             # Follow up with all_gather in the same session to verify num_allocated_bytes stayed in sync across ranks
             ag_src = torch.randn(1024, dtype=torch.float32, device='cuda').add_(rank_idx)
             ag_ref = torch.empty(num_ranks * 1024, dtype=torch.float32, device='cuda')
-            dist.all_gather_single(ag_ref, ag_src, group=group)
+            all_gather_single(ag_ref, ag_src, group=group)
             ag_out = session_buffer.all_gather(ag_src, group=group).wait()
             assert torch.equal(ag_out, ag_ref)
 
@@ -229,7 +231,7 @@ def test(local_rank: int, num_local_ranks: int, args: argparse.Namespace) -> Non
             ring_ref = torch.zeros_like(ext_dst)
             nccl_ring_send_recv(ext_src.contiguous(), ring_ref, shift, cyclic, group)
             ag_ref = torch.empty_like(ag_dst)
-            dist.all_gather_single(ag_ref, ag_src, group=group)
+            all_gather_single(ag_ref, ag_src, group=group)
             session_graph.replay()
             torch.cuda.synchronize()
             if has_src:

@@ -25,6 +25,9 @@ from deep_ep.utils.envs import dist_print, init_dist
 from deep_ep.utils.math import align
 from deep_ep.utils.testing import parse_num_bytes
 
+all_gather_single = getattr(dist, 'all_gather_single', dist.all_gather_into_tensor)
+reduce_scatter_single = getattr(dist, 'reduce_scatter_single', dist.reduce_scatter_tensor)
+
 OPS = ('all_reduce', 'reduce_scatter', 'all_gather')
 NUM_WARMUPS = 5
 NUM_FLUSH_BYTES = 256 << 20
@@ -79,9 +82,9 @@ def nccl_collective(op: str, inputs: List[torch.Tensor], outputs: List[torch.Ten
             if op == 'all_reduce':
                 dist.all_reduce(src, group=group)
             elif op == 'reduce_scatter':
-                dist.reduce_scatter_single(dst, src, group=group)
+                reduce_scatter_single(dst, src, group=group)
             else:
-                dist.all_gather_single(dst, src[:src.numel() // group.size()], group=group)
+                all_gather_single(dst, src[:src.numel() // group.size()], group=group)
 
 
 def get_nccl_sm_budget(profile: str) -> str:

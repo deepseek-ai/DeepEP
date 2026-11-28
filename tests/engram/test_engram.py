@@ -8,6 +8,8 @@ from deep_ep.utils.envs import init_dist, dist_print
 from deep_ep.utils.math import ceil_div, per_token_cast_to_fp8
 from deep_ep.utils.testing import bench_kineto
 
+all_gather_single = getattr(dist, 'all_gather_single', dist.all_gather_into_tensor)
+
 
 # noinspection PyUnboundLocalVariable,PyShadowingNames
 @torch.inference_mode()
@@ -47,7 +49,7 @@ def test(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
             local_storage, local_sf = per_token_cast_to_fp8(local_bf16)
             # Replicate the scaling factors so any rank can fetch any entry's factors locally
             sf = torch.empty((num_ranks * num_entries, local_sf.shape[1]), dtype=local_sf.dtype, device='cuda')
-            dist.all_gather_single(sf, local_sf, group=group)
+            all_gather_single(sf, local_sf, group=group)
             sfs.append(sf)
         else:
             local_storage = local_bf16
@@ -71,7 +73,7 @@ def test(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
         global_storages = []
         for local_storage in local_storages:
             global_storage = torch.empty((num_ranks * local_storage.shape[0], args.hidden), dtype=dtype, device='cuda')
-            dist.all_gather_single(global_storage, local_storage, group=group)
+            all_gather_single(global_storage, local_storage, group=group)
             global_storages.append(global_storage)
 
         # Verify that layers can be waited in both forward and reverse order

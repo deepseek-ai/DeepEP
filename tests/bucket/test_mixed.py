@@ -21,6 +21,9 @@ from deep_ep.utils.envs import dist_print, init_dist
 from deep_ep.utils.math import align
 from deep_ep.utils.testing import parse_num_bytes
 
+all_gather_single = getattr(dist, 'all_gather_single', dist.all_gather_into_tensor)
+reduce_scatter_single = getattr(dist, 'reduce_scatter_single', dist.reduce_scatter_tensor)
+
 OPS = ('all_reduce', 'reduce_scatter', 'all_gather', 'rs_ag')
 
 GUARD_VALUE = 12345
@@ -132,11 +135,11 @@ def nccl_reference(op: str, inputs: List[torch.Tensor], group: dist.ProcessGroup
             dst.mul_(scale)
         elif op == 'reduce_scatter':
             dst = torch.empty(src.numel() // group.size(), dtype=src.dtype, device='cuda')
-            dist.reduce_scatter_single(dst, src.view(-1), group=group)
+            reduce_scatter_single(dst, src.view(-1), group=group)
             dst.mul_(scale)
         else:
             dst = torch.empty(src.numel() * group.size(), dtype=src.dtype, device='cuda')
-            dist.all_gather_single(dst, src.view(-1), group=group)
+            all_gather_single(dst, src.view(-1), group=group)
         outputs.append(dst)
     return outputs
 
